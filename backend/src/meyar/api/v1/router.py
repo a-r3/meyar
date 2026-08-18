@@ -1,8 +1,9 @@
 from fastapi import APIRouter
 
-from meyar.api.v1 import health, jobs, usage
+from meyar.api.v1 import candidates, health, jobs, usage
 
 api_router = APIRouter(prefix="/api/v1")
 api_router.include_router(health.router)
 api_router.include_router(usage.router)
 api_router.include_router(jobs.router)
+api_router.include_router(candidates.router)

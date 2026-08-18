@@ -95,3 +95,62 @@ async def test_tenant_b_cannot_read_tenant_as_job(
         f"/api/v1/jobs/{job_id}/criteria", headers={"Authorization": f"Bearer {plaintext_b}"}
     )
     assert leak_list_resp.status_code == 404
+
+
+async def test_tenant_b_cannot_access_tenant_as_candidate(
+    client: AsyncClient, db_session: AsyncSession, tenant_and_key
+) -> None:
+    from pathlib import Path
+
+    fixtures_dir = Path(__file__).resolve().parent.parent.parent / "fixtures" / "synthetic_cvs"
+    pdf_bytes = (fixtures_dir / "valid_cv.pdf").read_bytes()
+
+    _tenant_a, _key_a, plaintext_a = tenant_and_key
+    tenant_b = await create_tenant(db_session, name="Tenant B")
+    _key_b, plaintext_b = await create_api_key(db_session, tenant_id=tenant_b.id, env="test")
+    await db_session.commit()
+
+    auth_a = {"Authorization": f"Bearer {plaintext_a}"}
+    auth_b = {"Authorization": f"Bearer {plaintext_b}"}
+
+    create_resp = await client.post("/api/v1/candidates", headers=auth_a)
+    assert create_resp.status_code == 201
+    candidate_id = create_resp.json()["id"]
+
+    upload_resp = await client.post(
+        f"/api/v1/candidates/{candidate_id}/documents",
+        headers=auth_a,
+        files={"file": ("valid_cv.pdf", pdf_bytes, "application/pdf")},
+    )
+    assert upload_resp.status_code == 201
+    document_id = upload_resp.json()["id"]
+
+    # tenant B must not be able to read tenant A's candidate
+    read_leak = await client.get(f"/api/v1/candidates/{candidate_id}", headers=auth_b)
+    assert read_leak.status_code == 404
+
+    # nor upload a document to it
+    upload_leak = await client.post(
+        f"/api/v1/candidates/{candidate_id}/documents",
+        headers=auth_b,
+        files={"file": ("valid_cv.pdf", pdf_bytes, "application/pdf")},
+    )
+    assert upload_leak.status_code == 404
+
+    # nor list its documents
+    list_leak = await client.get(f"/api/v1/candidates/{candidate_id}/documents", headers=auth_b)
+    assert list_leak.status_code == 404
+
+    # nor read a specific document's metadata
+    doc_leak = await client.get(
+        f"/api/v1/candidates/{candidate_id}/documents/{document_id}", headers=auth_b
+    )
+    assert doc_leak.status_code == 404
+
+    # nor delete tenant A's candidate
+    delete_leak = await client.delete(f"/api/v1/candidates/{candidate_id}", headers=auth_b)
+    assert delete_leak.status_code == 404
+
+    # tenant A's candidate must still exist, untouched by tenant B's attempt
+    still_there = await client.get(f"/api/v1/candidates/{candidate_id}", headers=auth_a)
+    assert still_there.status_code == 200

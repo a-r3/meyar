@@ -1,0 +1,1 @@
+SYNTHETIC TEST DATA - plain text file, not a supported CV format.

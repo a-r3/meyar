@@ -3,28 +3,6 @@
 Append-only log of concise architectural/product decisions. Format: id, date,
 decision, why, reversibility.
 
-## D-006 — Prohibited-criteria check is a regex denylist, not NLP
-
-**Date:** 2026-08-18
-**Decision:** Backend rejection of sensitive/irrelevant job criteria
-(gender, age, ethnicity, religion, marital status, health, etc. —
-MASTER_SPEC.md §4) is implemented as a case-insensitive regex-pattern
-denylist over each criterion's `label`/`value` text
-(`meyar.schemas.criteria`), not a classifier or NLP model.
-**Why:** Deterministic, dependency-free, fast, and testable — matches the
-project's "no LLM in the trust-sensitive validation path" and "no
-overengineering for MVP" policies. Known limitation: heuristic word-boundary
-matching can false-positive on legitimate terms that contain a denylisted
-word as a substring-with-punctuation (e.g. "Single Sign-On" contains
-"single"); it can also miss creatively-obfuscated attempts. Acceptable for
-MVP since criteria are entered by the tenant's own hiring staff via the
-API, not adversarial candidate input — the higher-stakes prompt-injection
-boundary is CV content (see SECURITY_PRIVACY.md), which is unaffected by
-this list.
-**Reversibility:** Fully reversible/tunable — the pattern list is a single
-module-level constant; false positives can be fixed by narrowing a pattern
-without any schema or migration change.
-
 ## D-001 — Dev/test machine is not Apple Silicon; use small model for dev
 
 **Date:** 2026-08-18
@@ -64,6 +42,15 @@ issued keys against the real API.
 **Reversibility:** Reversible — an admin API can be added later without
 changing the key format or verification path.
 
+## D-004 — Retention periods left as configurable policy
+
+**Date:** 2026-08-18
+**Decision:** No hardcoded legal retention period. Retention is a config
+value (default: keep until explicit deletion), deletion cascades are
+implemented and tested, exact numbers are an open owner decision.
+**Why:** Spec explicitly forbids inventing final legal retention periods.
+**Reversibility:** Reversible — config value.
+
 ## D-005 — Postgres dev container uses host networking on port 55719
 
 **Date:** 2026-08-18
@@ -82,11 +69,63 @@ published port if this machine's networking stabilizes or in a
 non-shared/production environment; no application code depends on the
 networking mode.
 
-## D-004 — Retention periods left as configurable policy
+## D-006 — Prohibited-criteria check is a regex denylist, not NLP
 
 **Date:** 2026-08-18
-**Decision:** No hardcoded legal retention period. Retention is a config
-value (default: keep until explicit deletion), deletion cascades are
-implemented and tested, exact numbers are an open owner decision.
-**Why:** Spec explicitly forbids inventing final legal retention periods.
-**Reversibility:** Reversible — config value.
+**Decision:** Backend rejection of sensitive/irrelevant job criteria
+(gender, age, ethnicity, religion, marital status, health, etc. —
+MASTER_SPEC.md §4) is implemented as a case-insensitive regex-pattern
+denylist over each criterion's `label`/`value` text
+(`meyar.schemas.criteria`), not a classifier or NLP model.
+**Why:** Deterministic, dependency-free, fast, and testable — matches the
+project's "no LLM in the trust-sensitive validation path" and "no
+overengineering for MVP" policies. Known limitation: heuristic word-boundary
+matching can false-positive on legitimate terms that contain a denylisted
+word as a substring-with-punctuation (e.g. "Single Sign-On" contains
+"single"); it can also miss creatively-obfuscated attempts. Acceptable for
+MVP since criteria are entered by the tenant's own hiring staff via the
+API, not adversarial candidate input — the higher-stakes prompt-injection
+boundary is CV content (see SECURITY_PRIVACY.md), which is unaffected by
+this list.
+**Reversibility:** Fully reversible/tunable — the pattern list is a single
+module-level constant; false positives can be fixed by narrowing a pattern
+without any schema or migration change.
+
+## D-007 — Defer Docling; use pypdf + python-docx for MVP parsing
+
+**Date:** 2026-08-18
+**Decision:** `meyar.ingestion` implements `DocumentParser` with a local
+`LocalTextParser` built on `pypdf` (PDF) and `python-docx` (DOCX) — both
+pure-Python/lightweight, no `torch`. Docling is not installed in this
+slice.
+**Why:** Docling's default `[standard]` extra pulls in `torch`,
+`torchvision`, `docling-ibm-models` (layout detection), and `rapidocr` —
+inspected via PyPI metadata before adding anything. This dev machine
+already showed severe resource strain (194MB free RAM, 5.6GB swap in use)
+from ordinary Postgres+pytest load (see D-005); loading ML layout/OCR
+models on top of that is a diagnosed host-resource risk, not a
+hypothetical one. Per MASTER_SPEC.md §9/§11, only digital (non-scanned)
+PDF/DOCX text extraction is required for MVP — no OCR — which pypdf/
+python-docx handle deterministically without any ML runtime.
+**Reversibility:** Fully reversible — `DocumentParser` is a Protocol;
+swapping in `DoclingParser` later (e.g. on the target Apple Silicon Mac,
+or once OCR is genuinely needed) requires no change to callers, storage,
+or the canonical-document schema. OCR fallback remains explicitly
+undesigned/deferred, per instruction, rather than blocking this slice.
+
+## D-008 — Max CV upload size: 10MB, configurable
+
+**Date:** 2026-08-18
+**Decision:** `MEYAR_MAX_UPLOAD_BYTES` defaults to 10MB
+(`Settings.max_upload_bytes`, present since the Slice 1 config scaffold,
+exercised for the first time in Slice 3). Enforced in
+`meyar.ingestion.validation.validate_upload` before any bytes are hashed
+or stored.
+**Why:** 10MB comfortably covers real-world CVs (typically well under
+1MB as text-based PDF/DOCX; even a CV with several embedded images rarely
+exceeds a few MB) while bounding worst-case memory/parse cost per request
+on a resource-constrained host. A parser-level page-count cap (300 pages)
+in `LocalTextParser` provides a second, independent bound against
+pathological small-but-complex files.
+**Reversibility:** Fully reversible — single config value, overridable
+per environment via `MEYAR_MAX_UPLOAD_BYTES`.

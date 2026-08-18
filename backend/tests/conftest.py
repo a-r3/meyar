@@ -1,6 +1,7 @@
 import asyncio
 import uuid
 from collections.abc import AsyncGenerator
+from pathlib import Path
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -11,9 +12,13 @@ from meyar.db import Base, get_db
 from meyar.main import app
 from meyar.services.api_key_repo import create_api_key
 from meyar.services.tenant_repo import create_tenant
+from meyar.storage.dependency import get_document_storage
+from meyar.storage.local import LocalFilesystemStorage
 
 ADMIN_DATABASE_URL = "postgresql+asyncpg://meyar:meyar_dev_password@localhost:55719/meyar"
 TEST_DATABASE_URL = "postgresql+asyncpg://meyar:meyar_dev_password@localhost:55719/meyar_test"
+
+FIXTURES_DIR = Path(__file__).resolve().parent.parent.parent / "fixtures" / "synthetic_cvs"
 
 
 async def _prepare_test_database() -> None:
@@ -55,11 +60,14 @@ async def db_session() -> AsyncGenerator[AsyncSession, None]:
 
 
 @pytest.fixture
-async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
+async def client(db_session: AsyncSession, tmp_path: Path) -> AsyncGenerator[AsyncClient, None]:
     async def _override_get_db() -> AsyncGenerator[AsyncSession, None]:
         yield db_session
 
+    storage = LocalFilesystemStorage(root=str(tmp_path / "storage"))
+
     app.dependency_overrides[get_db] = _override_get_db
+    app.dependency_overrides[get_document_storage] = lambda: storage
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac

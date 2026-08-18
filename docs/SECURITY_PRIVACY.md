@@ -45,6 +45,24 @@ scripts).
 - Errors never reveal whether a resource exists in another tenant (404, not
   403-with-details, for cross-tenant reads).
 
+## Document storage
+
+Raw candidate CV bytes are addressed only by an opaque storage key
+(`{tenant_id}/{uuid4}`), generated server-side — never derived from the
+client-supplied filename, so there is no path-traversal surface. Storage
+sits behind a swappable `DocumentStorage` interface
+(`meyar.storage.base`); the MVP implementation is local filesystem under a
+configurable root (`MEYAR_STORAGE_ROOT`, default `./var/storage`, git-
+ignored). **Encryption-at-rest is not implemented at the application
+layer in MVP** — local storage relies on host/disk-level protection (e.g.
+full-disk encryption). This is a known, explicitly deferred gap: before
+handling real production candidate data, swap in an encrypted/object
+storage backend behind the same interface (see docs/DECISIONS.md D-007
+for the parity reasoning — same swap-friendly boundary as the parser).
+`DELETE /v1/candidates/{id}` deletes the stored bytes for every document
+before removing DB rows, so a successful delete never leaves an orphaned
+file on disk.
+
 ## PII-safe logging
 
 Structured logs use ids/enums/durations only — see MASTER_SPEC.md §16.

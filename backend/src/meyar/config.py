@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     max_upload_bytes: int = 10 * 1024 * 1024
     rate_limit_per_minute: int = 60
     inference_concurrency: int = 1
+    storage_root: str = "./var/storage"
 
     @property
     def api_key_env(self) -> str:

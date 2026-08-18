@@ -17,4 +17,7 @@ real_cvs/
 customer_data/
 prod_data/
 
+# Local document storage (uploaded CV bytes) — never committed.
+backend/var/
+
 .claude/scheduled_tasks.lock
