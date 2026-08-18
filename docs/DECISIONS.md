@@ -3,6 +3,28 @@
 Append-only log of concise architectural/product decisions. Format: id, date,
 decision, why, reversibility.
 
+## D-006 — Prohibited-criteria check is a regex denylist, not NLP
+
+**Date:** 2026-08-18
+**Decision:** Backend rejection of sensitive/irrelevant job criteria
+(gender, age, ethnicity, religion, marital status, health, etc. —
+MASTER_SPEC.md §4) is implemented as a case-insensitive regex-pattern
+denylist over each criterion's `label`/`value` text
+(`meyar.schemas.criteria`), not a classifier or NLP model.
+**Why:** Deterministic, dependency-free, fast, and testable — matches the
+project's "no LLM in the trust-sensitive validation path" and "no
+overengineering for MVP" policies. Known limitation: heuristic word-boundary
+matching can false-positive on legitimate terms that contain a denylisted
+word as a substring-with-punctuation (e.g. "Single Sign-On" contains
+"single"); it can also miss creatively-obfuscated attempts. Acceptable for
+MVP since criteria are entered by the tenant's own hiring staff via the
+API, not adversarial candidate input — the higher-stakes prompt-injection
+boundary is CV content (see SECURITY_PRIVACY.md), which is unaffected by
+this list.
+**Reversibility:** Fully reversible/tunable — the pattern list is a single
+module-level constant; false positives can be fixed by narrowing a pattern
+without any schema or migration change.
+
 ## D-001 — Dev/test machine is not Apple Silicon; use small model for dev
 
 **Date:** 2026-08-18

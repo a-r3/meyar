@@ -36,3 +36,62 @@ async def test_tenant_cannot_use_another_tenants_key_identity(
     resolved = await get_api_key_by_plaintext(db_session, plaintext_a)
     assert resolved is not None
     assert resolved.tenant_id == tenant_a.id
+
+
+async def test_tenant_b_cannot_read_tenant_as_job(
+    client: AsyncClient, db_session: AsyncSession, tenant_and_key
+) -> None:
+    _tenant_a, _key_a, plaintext_a = tenant_and_key
+    tenant_b = await create_tenant(db_session, name="Tenant B")
+    _key_b, plaintext_b = await create_api_key(db_session, tenant_id=tenant_b.id, env="test")
+    await db_session.commit()
+
+    create_resp = await client.post(
+        "/api/v1/jobs",
+        headers={"Authorization": f"Bearer {plaintext_a}"},
+        json={
+            "title": "Tenant A's confidential role",
+            "criteria": [
+                {
+                    "id": "python_exp",
+                    "kind": "SKILL",
+                    "type": "MUST_HAVE",
+                    "label": "Python",
+                    "value": "Python",
+                }
+            ],
+        },
+    )
+    assert create_resp.status_code == 201
+    job_id = create_resp.json()["id"]
+
+    # tenant B must not be able to read tenant A's job — 404, not 403,
+    # so existence is never leaked across tenants.
+    leak_resp = await client.get(
+        f"/api/v1/jobs/{job_id}", headers={"Authorization": f"Bearer {plaintext_b}"}
+    )
+    assert leak_resp.status_code == 404
+
+    # nor add a new criteria version to it
+    leak_write_resp = await client.post(
+        f"/api/v1/jobs/{job_id}/criteria",
+        headers={"Authorization": f"Bearer {plaintext_b}"},
+        json={
+            "criteria": [
+                {
+                    "id": "sql_exp",
+                    "kind": "SKILL",
+                    "type": "MUST_HAVE",
+                    "label": "SQL",
+                    "value": "SQL",
+                }
+            ]
+        },
+    )
+    assert leak_write_resp.status_code == 404
+
+    # nor list/read its criteria history
+    leak_list_resp = await client.get(
+        f"/api/v1/jobs/{job_id}/criteria", headers={"Authorization": f"Bearer {plaintext_b}"}
+    )
+    assert leak_list_resp.status_code == 404
