@@ -1,0 +1,29 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: meyar
+      POSTGRES_PASSWORD: meyar_dev_password
+      POSTGRES_DB: meyar
+    # host networking: this dev machine's docker-proxy userland port
+    # forwarding was observed to stall new connections for 30-60s+ under
+    # memory pressure (see docs/DECISIONS.md). Host networking removes
+    # that hop. Postgres listens directly on 127.0.0.1:55719 on the host.
+    network_mode: host
+    command: ["postgres", "-p", "55719", "-c", "listen_addresses=127.0.0.1"]
+    volumes:
+      - meyar_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U meyar -d meyar -p 55719"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Ollama is not containerized here: this dev machine already runs a
+  # native Ollama daemon on 127.0.0.1:11434 with models pulled. Point
+  # MEYAR_OLLAMA_BASE_URL at it. In a from-scratch environment, run Ollama
+  # bound to 127.0.0.1 only — never publicly reachable. See
+  # docs/SECURITY_PRIVACY.md.
+
+volumes:
+  meyar_pg_data:
