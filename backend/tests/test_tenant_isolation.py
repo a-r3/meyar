@@ -154,3 +154,75 @@ async def test_tenant_b_cannot_access_tenant_as_candidate(
     # tenant A's candidate must still exist, untouched by tenant B's attempt
     still_there = await client.get(f"/api/v1/candidates/{candidate_id}", headers=auth_a)
     assert still_there.status_code == 200
+
+
+async def test_tenant_b_cannot_see_tenant_as_candidate_profile(
+    client: AsyncClient, db_session: AsyncSession, tenant_and_key
+) -> None:
+    import uuid as uuid_mod
+    from pathlib import Path
+
+    from fakes import FakeLLMProvider
+
+    from meyar.extraction.service import extract_candidate_profile
+    from meyar.schemas.candidate_profile import CandidateProfileExtraction, EvidenceRef, SkillItem
+    from meyar.services.candidate_document_repo import get_candidate_document
+    from meyar.services.candidate_profile_repo import get_current_profile_version
+
+    fixtures_dir = Path(__file__).resolve().parent.parent.parent / "fixtures" / "synthetic_cvs"
+    pdf_bytes = (fixtures_dir / "valid_cv.pdf").read_bytes()
+
+    tenant_a, _key_a, plaintext_a = tenant_and_key
+    tenant_b = await create_tenant(db_session, name="Tenant B")
+    await db_session.commit()
+
+    auth_a = {"Authorization": f"Bearer {plaintext_a}"}
+    cand_resp = await client.post("/api/v1/candidates", headers=auth_a)
+    candidate_id = cand_resp.json()["id"]
+    upload_resp = await client.post(
+        f"/api/v1/candidates/{candidate_id}/documents",
+        headers=auth_a,
+        files={"file": ("valid_cv.pdf", pdf_bytes, "application/pdf")},
+    )
+    document_id = upload_resp.json()["id"]
+
+    document = await get_candidate_document(
+        db_session,
+        tenant_id=tenant_a.id,
+        candidate_id=uuid_mod.UUID(candidate_id),
+        document_id=uuid_mod.UUID(document_id),
+    )
+    llm = FakeLLMProvider(
+        extraction=CandidateProfileExtraction(
+            skills=[
+                SkillItem(
+                    name="Python",
+                    evidence=[EvidenceRef(page=1, block_index=0, quote="Python")],
+                )
+            ]
+        )
+    )
+    await extract_candidate_profile(
+        db_session,
+        llm,
+        tenant_id=tenant_a.id,
+        candidate_id=uuid_mod.UUID(candidate_id),
+        candidate_document=document,
+        model_provider_name="fake",
+        max_input_chars=20000,
+    )
+    await db_session.commit()
+
+    # tenant B querying with tenant A's candidate_id must see nothing —
+    # profile lookups are always scoped by tenant_id, never client-trusted.
+    leaked = await get_current_profile_version(
+        db_session, tenant_id=tenant_b.id, candidate_id=uuid_mod.UUID(candidate_id)
+    )
+    assert leaked is None
+
+    # tenant A can see its own profile.
+    own = await get_current_profile_version(
+        db_session, tenant_id=tenant_a.id, candidate_id=uuid_mod.UUID(candidate_id)
+    )
+    assert own is not None
+    assert own.status == "COMPLETED"

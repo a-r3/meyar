@@ -1,60 +1,86 @@
 # MEYAR — Status
 
 ## Current phase
-Slice 3 (Candidate Upload / Secure Document Ingestion) implemented and
-verified. Not yet committed.
+Slice 4 (Local AI Candidate Profile Extraction) implemented and verified.
+Not yet committed.
 
 ## Completed
 - Preflight, fast docs pass, Claude Code harness.
 - Backend scaffold: FastAPI + SQLAlchemy 2.0 async + Alembic + PostgreSQL.
 - Slice 1 (Tenant + API Auth) — committed as `f5b4ec3`.
 - Slice 2 (Job Criteria) — committed as `9ef3273`.
-- Slice 3 (Candidate Upload): `Candidate` (minimal, no PII fields yet),
-  `CandidateDocument` (metadata: original_filename, mime_type, byte_size,
-  sha256_hash, opaque storage_key, document_status, parser_status +
-  error fields), `CanonicalDocument` (parser output: pages/blocks JSON,
-  parser_name/version, language) — separate table so reprocessing never
-  overwrites prior provenance. `DocumentStorage` protocol +
-  `LocalFilesystemStorage` (opaque `{tenant_id}/{uuid4}` keys, atomic
-  writes, no filename ever used as a path). `DocumentParser` protocol +
-  `LocalTextParser` (pypdf + python-docx, no OCR, 300-page cap) — Docling
-  deferred, see D-007. Upload validation cross-checks extension + declared
-  content-type + actual file signature (DOCX validated as real OOXML, not
-  just any zip). Endpoints: `POST/GET /v1/candidates`, `DELETE
-  /v1/candidates/{id}` (hard-delete cascade: files then DB rows, before
-  audit event), `POST/GET /v1/candidates/{id}/documents`, `GET
-  .../documents/{document_id}` — all tenant-scoped (404 on cross-tenant),
-  scoped by `candidates:read`/`candidates:write` (already-present
-  scopes). Audit events: CANDIDATE_CREATED, CANDIDATE_DOCUMENT_UPLOADED,
-  CANDIDATE_DOCUMENT_PARSED, CANDIDATE_DOCUMENT_PARSE_FAILED,
-  CANDIDATE_DELETED. No LLM/Ollama call anywhere in this slice.
+- Slice 3 (Candidate Upload) — committed as `56aca03`.
+- Slice 4 (Profile Extraction): `LLMProvider` protocol + `OllamaLLMProvider`
+  (loopback-only, rejects non-local base URLs at construction), strict
+  `CandidateProfileExtraction` Pydantic schema (skills/employment/
+  education/certifications/languages/projects, `extra="forbid"`, every
+  item requires evidence), `ProfessionalDocumentView` (pre-LLM redaction
+  of email/phone/labeled DOB-gender-marital-religion, employment dates
+  preserved), versioned system prompt
+  (`candidate-profile-extraction-v1`), deterministic evidence verifier
+  (re-checks every page/block/quote against the real CanonicalDocument,
+  never trusts model-supplied references), immutable
+  `CandidateProfileVersion` (mirrors JobCriteriaVersion — re-extraction
+  creates a new version, never mutates). One bounded retry on
+  schema-invalid output. `FakeLLMProvider` for deterministic tests. No
+  public API endpoint added (internal service + CLI `meyar
+  extract-profile`, per "internal service first" — avoids freezing a
+  contract Slice 5's evaluation queue will likely replace).
 
 ## Tests
-38/38 passing (19 prior + 19 new: candidate CRUD, scope enforcement,
-valid PDF/DOCX parse, prompt-injection fixture parsed as inert data,
-unsupported type/signature rejection, malformed PDF → upload succeeds but
-PARSE_FAILED (not a crash), malformed DOCX → rejected at validation,
-extension/content mismatch rejection, oversized rejection, path-traversal
-filename harmlessness, list/get metadata, delete cascade removes both
-files and rows, cross-tenant isolation across all candidate/document
-routes, PII-not-in-logs regression guard). `ruff` and `mypy` clean. Live
-smoke flow verified manually against a running server: create candidate →
-upload synthetic PDF → parsed synchronously → canonical text confirmed
-present and correct → metadata retrieval → unauthenticated/unsupported
-requests correctly rejected → storage layout on disk confirmed opaque
-(`{tenant_id}/{uuid4}`, no original filename).
+65/65 passing (38 prior + 27 new: valid extraction, PII-field exclusion,
+nonexistent evidence page/block rejection, fabricated quote rejection,
+bounded-retry success/exhaustion, provider unavailable/timeout, oversized
+input, missing-canonical-document precondition, re-extraction versioning
+(v1 unchanged, v2 correct), loopback-only enforcement, prompt-injection
+fixture passed through as inert data, PII-not-in-logs regression,
+redaction unit tests (email/phone redacted, employment dates and
+"2019-Present" ranges preserved, labeled DOB/gender/marital/religion
+lines redacted), cross-tenant profile isolation). `ruff` and `mypy`
+clean.
+
+## Live local inference
+**PASS** with `qwen3:0.6b` (see D-009 — Ollama 0.16.2 is too old for
+Qwen3.5; this is the dev-integration substitute, not a production
+choice). Full pipeline verified end-to-end for real: synthetic
+`valid_cv.pdf` → parsed CanonicalDocument → redacted
+ProfessionalDocumentView → real local Ollama call → valid structured
+JSON → Pydantic validation passed → every evidence reference verified
+against the real document → immutable `CandidateProfileVersion` v1,
+status COMPLETED. A known fact ("Python") was extracted with a
+verified-real evidence quote. ~38s end-to-end. Model quality caveat
+(expected at 0.6B): category assignment was confused (some items landed
+in `skills` with category-like names such as "employment_history") —
+every individual evidence reference was still independently verified as
+a real substring of the source document, proving the verifier works
+against genuine (not just fake-provider) model output.
+
+One escalation attempt to `qwen3:1.7b` was made (per the "try once"
+guidance) using the same candidate/document: it hit `MODEL_TIMEOUT` at
+60s under this host's severe memory pressure (194MB-360MB free RAM,
+6+GB swap in use throughout this session). This is a host-resource
+limit, not an architecture defect — it also incidentally verified the
+`MODEL_TIMEOUT` failure path against a real timeout (safely created a
+`FAILED` v2, no crash). Escalation stopped here per policy; `qwen3:0.6b`
+reverted as the working dev default.
+
+**INTEGRATION_VERIFIED — not MODEL_QUALITY_APPROVED.** Final production
+model selection remains a target-Mac benchmark (D-001).
 
 ## In progress
 Nothing in flight.
 
 ## Blockers
-None blocking. Same open items as before: real Apple Silicon Mac not yet
-available (D-001); Auto Mode script still dry-run only. New: encryption-
-at-rest for stored documents is explicitly deferred to host/disk-level
-protection for MVP (see SECURITY_PRIVACY.md "Document storage") — must be
-addressed before real production candidate data is handled.
+None blocking. Same open items: real Apple Silicon Mac not yet available
+(D-001); Auto Mode script still dry-run only; document encryption-at-rest
+still deferred to host/disk protection (Slice 3). New: Ollama binary on
+this dev machine cannot be upgraded without root access this session
+does not have (D-009) — blocks Qwen3.5 on this specific host only, not
+an application constraint.
 
 ## Next slice
-Slice 4 — Local AI Candidate Profile Extraction (consumes the
-CanonicalDocument built here). Slice 3 work is implemented/tested but
-intentionally left uncommitted per current instructions.
+Slice 5 — Evaluation Engine (CandidateProfileVersion + JobCriteriaVersion
+→ criterion-by-criterion evidence evaluation → deterministic policy
+calculation → immutable Evaluation result). Slice 4 work is
+implemented/tested but intentionally left uncommitted per current
+instructions.

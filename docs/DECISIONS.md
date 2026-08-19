@@ -3,6 +3,29 @@
 Append-only log of concise architectural/product decisions. Format: id, date,
 decision, why, reversibility.
 
+## D-009 — Dev integration model: Qwen3 family, not Qwen3.5 (Ollama too old)
+
+**Date:** 2026-08-18
+**Decision:** `MEYAR_OLLAMA_MODEL` defaults to `qwen3:0.6b` for Slice 4
+development/testing on this machine, not Qwen3.5 as the spec suggested.
+**Why:** The installed Ollama daemon (0.16.2) rejects Qwen3.5 manifests
+with "requires a newer version of Ollama"; upgrading the binary requires
+root (`/usr/local/bin/ollama` is root-owned, no passwordless sudo
+available in this session) and was not attempted rather than stall an
+otherwise-unblocked path on an interactive password prompt. Qwen3 is the
+closest available same-family small model compatible with this Ollama
+version, so it was used as the dev-integration substitute — a direct
+continuation of D-001's pattern (dev machine ≠ target hardware, use a
+practical local substitute, document it, never treat it as the
+production decision).
+**Reversibility:** Fully reversible — `MEYAR_OLLAMA_MODEL` is a config
+value behind the `LLMProvider` abstraction. Upgrading Ollama (with root
+access) and pulling a real Qwen3.5 tag requires no application code
+change. **DEV_INTEGRATION_MODEL != FINAL_PRODUCTION_MODEL** — the live
+smoke test in Slice 4 proves the local-inference *architecture* works,
+not that `qwen3:0.6b` (or any specific tag) is approved for production;
+final model selection is a target-Mac benchmark, per D-001.
+
 ## D-001 — Dev/test machine is not Apple Silicon; use small model for dev
 
 **Date:** 2026-08-18

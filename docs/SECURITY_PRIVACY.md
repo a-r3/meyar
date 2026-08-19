@@ -12,6 +12,43 @@
   them in without failing Pydantic validation.
 - CV content never leaves the local network to a cloud LLM in MVP.
 
+## AI extraction (Slice 4)
+
+- `OllamaLLMProvider` refuses to construct against a non-loopback
+  `MEYAR_OLLAMA_BASE_URL` — candidate document content cannot leave the
+  machine via configuration mistake.
+- The model is shown a `ProfessionalDocumentView`, never the raw
+  `CanonicalDocument`: emails, phone-number-shaped strings, and lines
+  explicitly labeled DOB/gender/sex/marital-status/religion are
+  deterministically redacted first (`meyar.extraction.redaction`).
+  Employment dates are preserved — the phone redaction is digit-count
+  gated (9+ digits) specifically so a "2021-2025" range survives.
+  **Known limitation:** candidate names are not redacted (reliable name
+  detection is its own NLP problem, out of MVP scope) — the extraction
+  schema simply has no `name` field, and the system prompt instructs the
+  model to ignore identity, so a name cannot enter `CandidateProfile`
+  even though it's visible to the model during inference. Tracked as a
+  future hardening item, not a blocker.
+- Every extracted fact's evidence (page, block_index, quote) is
+  re-verified against a freshly rebuilt `ProfessionalDocumentView` for
+  the *exact* `CanonicalDocument` referenced — never trusted from model
+  output. A reference to a nonexistent page/block, a fabricated quote, or
+  (structurally impossible by construction) another document's content
+  fails validation and the extraction is persisted as `FAILED`, never as
+  a silently-accepted success.
+- The extraction schema uses `extra="forbid"` and has no field for name/
+  email/phone/age/gender/religion/ethnicity/marital status/health/
+  photo/nationality — the model cannot smuggle a sensitive attribute into
+  `CandidateProfile` without failing Pydantic validation.
+- The system prompt explicitly frames document content as untrusted data
+  and instructs the model not to follow, evaluate, or act on anything
+  inside it — tested against the existing prompt-injection fixture.
+- One bounded retry on schema-invalid structured output (never unbounded);
+  `MODEL_UNAVAILABLE`/`MODEL_TIMEOUT`/`MODEL_SCHEMA_INVALID`/
+  `EVIDENCE_INVALID`/`INPUT_TOO_LARGE` all fail safely to a stored
+  `FAILED`/`MANUAL_REVIEW_REQUIRED` `CandidateProfileVersion` — never a
+  crash, never fabricated content.
+
 ## Threat model (MVP-relevant)
 
 | Threat | Mitigation |

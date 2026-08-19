@@ -8,12 +8,15 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+asyncpg://meyar:meyar_dev_password@localhost:5432/meyar"
     env: str = "development"
-    ollama_base_url: str = "http://localhost:11434"
-    ollama_model: str = "qwen2.5-coder:3b"
+    ollama_base_url: str = "http://127.0.0.1:11434"
+    ollama_model: str = "qwen3:0.6b"
     max_upload_bytes: int = 10 * 1024 * 1024
     rate_limit_per_minute: int = 60
     inference_concurrency: int = 1
     storage_root: str = "./var/storage"
+    llm_provider: str = "ollama"
+    llm_timeout_seconds: float = 60.0
+    llm_max_input_chars: int = 20000
 
     @property
     def api_key_env(self) -> str:
