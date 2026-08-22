@@ -81,6 +81,13 @@ Kubernetes, no microservices. See `docs/MASTER_SPEC.md` §18.
 
 ## Git workflow
 
+Before material editing, verify `git config --get core.hooksPath`. If absent
+or not `.githooks`, run `scripts/setup-git-governance.sh`, re-check, and stop
+if it fails. Query live GitHub PR, issue, milestone, remote-head, and
+prior-merge state before any implementation or documentation edit; never rely
+on memory or `docs/STATUS.md`. If unavailable, stop with
+`## HUMAN ACTION REQUIRED` and state what could not be verified.
+
 After the one-time repository bootstrap, **never implement a feature
 directly on `main`.** Each coherent task/slice gets a task branch
 (`feat/*`, `fix/*`, `chore/*`, `docs/*`, `test/*`) → quality gate → PR
@@ -111,6 +118,10 @@ reply expected. The default is owner **Squash and merge**. After the owner says
 it was merged, verify the PR/remote state, sync local `main` with
 `git pull --ff-only origin main`, and only then continue from a new approved
 task branch. See `.claude/rules/git-workflow.md`.
+
+After syncing, verify linked issue closure and approved milestone
+progress/state; investigate discrepancies before deleting the task branch or
+preparing the next task.
 
 **Traceability:** Associate each material product task/PR with the applicable
 GitHub milestone when one exists. The canonical mapping is in

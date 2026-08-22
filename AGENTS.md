@@ -22,6 +22,12 @@ Before material work, read in order:
 4. Relevant entries in `docs/DECISIONS.md`
 5. `docs/SECURITY_PRIVACY.md` when security, candidate data, or AI is affected
 
+Before material editing, verify `git config --get core.hooksPath`. If absent
+or not `.githooks`, run `scripts/setup-git-governance.sh`, re-check, and stop
+if setup fails. Then query live GitHub PR, issue, milestone, remote-head, and
+prior-merge state; do not infer it from memory or status docs. If GitHub is
+unavailable, stop with `## HUMAN ACTION REQUIRED` and report the gap.
+
 The shared `docs/` authority governs product and technical requirements.
 This file is Codex's entry point; `CLAUDE.md` and `.claude/` provide Claude
 orchestration, while `.githooks/` and `.github/` enforce agent-independent
@@ -52,6 +58,8 @@ governance.
   the short reply expected. Wait for owner confirmation.
 - After the owner reports a merge, verify the PR and remote `main`, then switch
   to `main` and pull with `git pull --ff-only origin main` before continuing.
+  Verify linked issue closure and approved milestone progress/state before
+  deleting the task branch or preparing the next task.
 - Associate every material product task/PR with its applicable GitHub
   milestone when one exists. The canonical mapping is in `docs/MVP_PLAN.md`
   and `docs/STATUS.md`; never invent, rename, close, or reorganize milestones

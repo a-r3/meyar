@@ -5,8 +5,7 @@
 # .claude/rules/git-workflow.md.
 set -euo pipefail
 
-staged_files="$(git diff --cached --name-only --diff-filter=ACM || true)"
-[ -z "$staged_files" ] && exit 0
+git diff --cached --quiet && exit 0
 
 blocked=0
 
@@ -22,7 +21,7 @@ is_allowed_env_file() {
   esac
 }
 
-while IFS= read -r f; do
+while IFS= read -r -d '' f; do
   [ -z "$f" ] && continue
 
   if printf '%s' "$f" | grep -Eiq '(^|/)\.env(\..+)?$'; then
@@ -41,7 +40,7 @@ while IFS= read -r f; do
     report "runtime storage path staged: $f"
   fi
 
-  if printf '%s' "$f" | grep -Eiq '(^|/)[^/]*dump[^/]*\.sql(\.gz)?$|\.sqlite3?$'; then
+  if printf '%s' "$f" | grep -Eiq '(^|/)[^/]*dump[^/]*\.(sql(\.gz)?|dump)$|\.sqlite3?$'; then
     report "database dump/file staged: $f"
   fi
 
@@ -51,13 +50,17 @@ while IFS= read -r f; do
   if printf '%s' "$f" | grep -Eiq '(^|/)models?/.*\.(bin|pt|onnx)$'; then
     report "model weight artifact staged: $f"
   fi
-done <<<"$staged_files"
+done < <(git diff --cached --name-only --diff-filter=ACMR -z)
 
-# Content scan: private-key blocks / AWS-style access keys in staged text.
-if git diff --cached -U0 -- . 2>/dev/null |
-  grep -Eiq -- '-----BEGIN (RSA|EC|OPENSSH|PGP|DSA) PRIVATE KEY-----|AKIA[0-9A-Z]{16}'; then
-  report "private-key block or AWS-style access key found in staged diff content"
-fi
+# Content scan from the staged index, including unchanged rename destinations.
+while IFS= read -r -d '' f; do
+  [ -z "$f" ] && continue
+  if git cat-file -e ":$f" 2>/dev/null &&
+    git show ":$f" 2>/dev/null | grep -Eaq -- \
+      '-----BEGIN (PRIVATE KEY|ENCRYPTED PRIVATE KEY|RSA PRIVATE KEY|EC PRIVATE KEY|DSA PRIVATE KEY|OPENSSH PRIVATE KEY)-----|AKIA[0-9A-Z]{16}'; then
+    report "private-key or access-key content staged: $f (secret material)"
+  fi
+done < <(git diff --cached --name-only --diff-filter=ACMR -z)
 
 if [ "$blocked" = "1" ]; then
   echo "" >&2

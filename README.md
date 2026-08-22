@@ -118,6 +118,14 @@ CLAUDE.md                 Claude project entry point
 - Ollama only when intentionally running live local profile extraction; it is
   not required for the quality gate or ordinary fake-provider tests
 
+After every fresh clone, activate the repository-local safety hooks before
+material work (hooks are not transferred by Git):
+
+```bash
+scripts/setup-git-governance.sh
+git config --get core.hooksPath  # must print .githooks
+```
+
 ## Local backend setup
 
 From the repository root:

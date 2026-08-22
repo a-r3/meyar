@@ -71,7 +71,8 @@ rejected even though it exists, profile belonging to a different
 candidate rejected, criterion-result count matches configured criteria
 exactly (no hidden criteria), repeated identical evaluation
 deterministic, no identity/protected fields reach the policy engine.
-`ruff` and `mypy` clean.
+`uv run ruff check .` and `uv run mypy src` are clean. Whole-repository
+`uv run mypy .` retains known test-only type debt.
 
 ## Live synthetic smoke
 **PASS.** Per Slice 5 spec §25, no live Ollama call required (Slice 4
@@ -138,7 +139,7 @@ no code yet.
 | PDF parsing | DONE | `pypdf`-based `LocalTextParser` (Slice 3) | — | 3 |
 | DOCX parsing | DONE | `python-docx`-based parsing (Slice 3) | — | 3 |
 | Scanned PDF detection / OCR | NOT STARTED | Digital-PDF-only parsing (D-007) | Local OCR fallback | future |
-| Multilingual CV tests | PARTIAL | Synthetic fixtures include AZ/RU/EN cases (SECURITY_PRIVACY.md Test data) | Broader multilingual extraction-quality coverage | ongoing |
+| Multilingual CV tests | NOT STARTED | No tracked Azerbaijani/Cyrillic synthetic CV tests currently prove this requirement | Add genuine AZ/RU/EN synthetic fixtures and extraction tests | future |
 | Structured extraction | DONE | `CandidateProfileExtraction` schema, Slice 4 | Add `CandidateIdentity` fields | 7 |
 | Strict JSON validation | DONE | Pydantic v2, `extra="forbid"`, bounded retry (Slice 4) | — | 4 |
 | Uncertainty handling | DONE | `UNKNOWN` never auto-downgraded (D-010), Slice 5 | — | 5 |
@@ -163,7 +164,9 @@ no code yet.
 | Data-protection / backup description | PARTIAL | Retention/deletion documented (SECURITY_PRIVACY.md); no backup policy written | Document backup approach | 13 |
 | Git branch / PR workflow | PARTIAL | Remote connected (`a-r3/meyar`, private), CI + hooks + PR template on `chore/git-governance` (D-012) | Merge governance PR; migrate to official bank remote when supplied | Git Infrastructure |
 
-**Summary:** 12 DONE, 9 PARTIAL, 8 NOT STARTED (29 items). Highest-priority
+**Summary:** 12 DONE, 8 PARTIAL, 9 NOT STARTED (29 items). Multilingual
+AZ/RU/EN CV fixtures and extraction tests remain future work; no current
+evidence is claimed. Highest-priority
 gaps: local folder indexing (Slice 6, next) and local embeddings/semantic
 search (Slice 7–8), then 0–100 numeric scoring (Slice 10). Git/PR
 infrastructure is PARTIAL (governance PR in review) rather than blocking.

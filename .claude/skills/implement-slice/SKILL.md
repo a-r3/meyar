@@ -7,6 +7,11 @@ Follow `.claude/rules/git-workflow.md`'s startup protocol first (verify
 repo/branch/tree/remote, create/confirm the task branch — never implement
 on `main`). Then:
 
+Before editing, verify `git config --get core.hooksPath`; if missing or not
+`.githooks`, run `scripts/setup-git-governance.sh`, re-check, and stop on
+failure. Query live GitHub PR/issue/milestone/remote-head state before
+choosing work; if unavailable, stop with `## HUMAN ACTION REQUIRED`.
+
 1. Read the target slice's row in `docs/MVP_PLAN.md` and its acceptance
    criteria. Confirm the approved GitHub milestone and use one coherent issue
    when useful; do not create micro-issues. Read only the specific parts of
@@ -35,5 +40,6 @@ on `main`). Then:
    merge**, and request the reply `merged`. STOP — do not merge automatically.
 9. After the owner reports a merge, verify the PR and remote `main`; then
    switch to `main`, run `git pull --ff-only origin main`, verify the expected
-   result, and only then remove the safely merged local branch or prepare the
+   result, verify linked issue closure and milestone progress/state, and only
+   then remove the safely merged local branch or prepare the
    next approved task branch.

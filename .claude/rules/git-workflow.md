@@ -27,6 +27,12 @@ Then determine, in order:
 6. What do `docs/STATUS.md` / `docs/DECISIONS.md` say about current state?
 7. Does this task require a new branch?
 
+Before material editing, verify hooks with `git config --get core.hooksPath`.
+If missing or not `.githooks`, run `scripts/setup-git-governance.sh` and
+re-check; if setup fails, stop. Then query live GitHub PR, issue, milestone,
+remote-head, and prior-merge state. If unavailable, do not guess; stop with
+`## HUMAN ACTION REQUIRED`.
+
 If the task changes code or docs materially and the current branch is
 `main`, **create the correct task branch before editing anything.** The
 only exception is an explicitly owner-authorized repository-bootstrap or
@@ -104,6 +110,10 @@ git fetch origin
 git switch main
 git pull --ff-only origin main
 ```
+
+Then verify linked issue closure and approved milestone progress/state. If
+inconsistent, investigate before branch deletion or next-task preparation;
+never close or reorganize milestones without roadmap authorization.
 
 Verify the expected squash commit/content is present. Delete the local task
 branch only after that verification; a squash-merged branch may require local
