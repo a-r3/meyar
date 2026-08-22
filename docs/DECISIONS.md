@@ -90,6 +90,16 @@ formalized:
     confirmation. After an owner reports a merge, the agent verifies the PR
     and remote `main`, uses `git pull --ff-only origin main`, and only then
     removes the safely merged local branch or starts the next approved branch.
+13. GitHub milestone mapping is canonical in `docs/MVP_PLAN.md` and summarized
+    with current state in `docs/STATUS.md`: M0 foundation/governance; M1 Slice
+    6; M2 Slices 7–9; M3 Slice 10; M4 Slices 11–12; M5 Slice 13 plus target-Mac
+    validation. No due dates are invented before the official timeline exists.
+    Material work uses the applicable milestone and one issue per coherent
+    deliverable when useful—not micro-issues for every edit. PRs reference the
+    issue with `Closes #<issue-number>` when appropriate; owner Squash and
+    merge closes the issue and milestone progress is updated. Milestones are
+    not invented, renamed, closed, or reorganized without an approved roadmap
+    decision.
 **Why:** The owner approved a concrete GitHub remote and asked for the
 task-branch/PR/CI discipline the official task requires (§13 of
 `AI-PROJ-CV-01`) to be encoded durably in the repository itself, not just

@@ -47,6 +47,24 @@ than a separate "external customer" milestone.
 
 ## Roadmap after official-task re-baseline
 
+### Canonical GitHub milestones
+
+No due dates are assigned until the official project timeline is supplied.
+
+| Milestone | Canonical scope |
+|---|---|
+| **M0 — Project Foundation & Governance** | Requirement re-baseline; GitHub/CI governance; Claude/Codex instructions; README, Dependabot, and repository guards |
+| **M1 — CV Ingestion & Candidate Library** | Slice 6 |
+| **M2 — Candidate Search Intelligence** | Slices 7–9: `CandidateIdentity`, local embeddings/pgvector, hybrid search, natural-language `SearchPlan` |
+| **M3 — JD Matching & Ranking** | Slice 10: deterministic 0–100 score, batch ranking, explanations |
+| **M4 — Internal Product Interface & API** | Slices 11–12: Chat UI, CV Library UI, internal REST API, Swagger/README completion |
+| **M5 — Security, Target-Mac Validation & MVP Acceptance** | Slice 13, target Mac Mini model benchmark, external-network/data-exfiltration verification, privacy/security acceptance, official Definition of Done |
+
+Material product work uses the applicable approved milestone and, when useful,
+one issue per coherent deliverable. Avoid micro-issues for tiny tests or edits.
+The normal trace is milestone → issue → task branch → implementation/tests →
+PR/CI → owner Squash and merge → issue close → milestone progress update.
+
 ### R0 — Requirement / Documentation Re-baseline
 
 This pass: audited and updated all product docs and Claude instructions
@@ -71,6 +89,7 @@ ingest new/changed files only (idempotent, safe to re-run), parse/extract
 through the existing Slice 3/4 pipeline, persist indexing state
 (discovered path, hash, scan timestamp, parse/extraction status, current
 candidate/profile linkage). **Not started.**
+GitHub milestone: **M1 — CV Ingestion & Candidate Library**.
 
 ### Slice 7 — Candidate Identity + Local Embeddings / Vector Index
 

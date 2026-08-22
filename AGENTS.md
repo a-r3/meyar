@@ -52,6 +52,10 @@ governance.
   the short reply expected. Wait for owner confirmation.
 - After the owner reports a merge, verify the PR and remote `main`, then switch
   to `main` and pull with `git pull --ff-only origin main` before continuing.
+- Associate every material product task/PR with its applicable GitHub
+  milestone when one exists. The canonical mapping is in `docs/MVP_PLAN.md`
+  and `docs/STATUS.md`; never invent, rename, close, or reorganize milestones
+  without an approved roadmap decision.
 - Without explicit owner authorization, never force-push, use `reset --hard`,
   run a destructive clean, rewrite accepted history, bypass failed CI, or
   delete unmerged work.

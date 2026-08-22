@@ -111,3 +111,8 @@ reply expected. The default is owner **Squash and merge**. After the owner says
 it was merged, verify the PR/remote state, sync local `main` with
 `git pull --ff-only origin main`, and only then continue from a new approved
 task branch. See `.claude/rules/git-workflow.md`.
+
+**Traceability:** Associate each material product task/PR with the applicable
+GitHub milestone when one exists. The canonical mapping is in
+`docs/MVP_PLAN.md` / `docs/STATUS.md`. Never invent, rename, close, or
+reorganize milestones without an approved roadmap decision.

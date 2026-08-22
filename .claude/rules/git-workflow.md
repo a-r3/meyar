@@ -111,6 +111,21 @@ deletion despite not being an ancestor of `main`. The remote branch may be
 deleted automatically by GitHub. Never begin new work from the old task branch;
 create the next approved branch from synchronized `main`.
 
+## Issue and milestone traceability
+
+For material product work, use the approved milestone from
+`docs/MVP_PLAN.md` / `docs/STATUS.md`. One coherent deliverable gets one
+GitHub issue when useful; avoid micro-issues for every test or tiny edit.
+Normal traceability is: approved milestone → issue → task branch →
+implementation → tests → PR → CI → owner Squash and merge → issue closes →
+milestone progress updates. Associate the PR with the milestone and reference
+the issue using `Closes #<issue-number>` when the PR fully delivers it.
+
+Create/manage milestones and issues through authenticated GitHub tooling when
+available. Never invent, rename, close, or reorganize milestones without an
+approved roadmap decision. If tooling or authentication cannot perform a
+required operation, use the mandatory `## HUMAN ACTION REQUIRED` format.
+
 ## Human-action checkpoints
 
 Whenever progress requires owner action, say so explicitly and end the report

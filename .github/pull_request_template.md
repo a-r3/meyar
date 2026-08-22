@@ -2,6 +2,11 @@
 
 <!-- What changed, in 1-3 sentences. Link the slice/decision it belongs to. -->
 
+## Traceability
+
+- Milestone: <!-- canonical GitHub milestone, when applicable -->
+- Issue: <!-- use `Closes #<issue-number>` when this PR fully delivers it -->
+
 ## Verification
 
 - [ ] Ruff passed (`uv run ruff check .`)

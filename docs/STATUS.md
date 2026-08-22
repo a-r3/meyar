@@ -106,10 +106,25 @@ pending, migration keeps full history when it arrives.
    an official Rabitabank-owned remote (history preserved).
 2. **After governance PR merge:** branch `feat/cv-folder-indexing` for
    **Slice 6 — Local CV Library & Folder Indexer** (see
-   `docs/MVP_PLAN.md`). **Not started.**
+   `docs/MVP_PLAN.md`), associated with **M1 — CV Ingestion & Candidate
+   Library**. **Not started.**
 
 The previously planned "Slice 6 — External Async Evaluation API" is
 CANCELLED (superseded by D-011) — it is not what "Slice 6" now refers to.
+
+## GitHub milestone status
+
+The detailed canonical mapping is in `docs/MVP_PLAN.md`. No milestone has a
+due date because the official timeline has not been supplied.
+
+| Milestone | Slice mapping | Current status |
+|---|---|---|
+| M0 — Project Foundation & Governance | R0 + Git Infrastructure | IN REVIEW — issue #2 / PR #1 |
+| M1 — CV Ingestion & Candidate Library | Slice 6 | NOT STARTED — next after M0 merge |
+| M2 — Candidate Search Intelligence | Slices 7–9 | NOT STARTED |
+| M3 — JD Matching & Ranking | Slice 10 | NOT STARTED |
+| M4 — Internal Product Interface & API | Slices 11–12 | NOT STARTED |
+| M5 — Security, Target-Mac Validation & MVP Acceptance | Slice 13 + target-Mac benchmark | NOT STARTED |
 
 ## Official requirement gap matrix
 

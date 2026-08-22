@@ -8,8 +8,10 @@ repo/branch/tree/remote, create/confirm the task branch — never implement
 on `main`). Then:
 
 1. Read the target slice's row in `docs/MVP_PLAN.md` and its acceptance
-   criteria. Read only the specific parts of `docs/MASTER_SPEC.md` relevant
-   to this slice — don't reread the whole doc set every time.
+   criteria. Confirm the approved GitHub milestone and use one coherent issue
+   when useful; do not create micro-issues. Read only the specific parts of
+   `docs/MASTER_SPEC.md` relevant to this slice — don't reread the whole doc
+   set every time.
 2. Implement the smallest change that satisfies the acceptance criteria,
    following `.claude/rules/architecture.md` and
    `.claude/rules/security-privacy.md`.
@@ -24,8 +26,9 @@ on `main`). Then:
    `docs/DECISIONS.md` with what changed, one line per fact — no long
    retrospective prose.
 7. Commit on the task branch, push it, open a PR into `main`
-   (`.claude/rules/git-workflow.md` has the exact commands). Do not
-   merge, force-push, or bypass a failing test/CI.
+   (`.claude/rules/git-workflow.md` has the exact commands). Associate the PR
+   with its milestone and use `Closes #<issue-number>` when appropriate. Do
+   not merge, force-push, or bypass a failing test/CI.
 8. Report to the owner: implemented / tests+result / material issues /
    PR link / git status. PR creation and green CI are not completion. End with
    `## HUMAN ACTION REQUIRED`, instruct the owner to review and **Squash and
