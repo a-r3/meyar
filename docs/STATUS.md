@@ -11,6 +11,13 @@ feature code.
 
 **Slice 6 implementation has NOT started.**
 
+GitHub remote established (`https://github.com/a-r3/meyar.git`, private,
+temporary development remote — see D-012, `docs/DECISIONS.md`). `main`
+bootstrap-pushed at `f8ac183`. Git/CI governance (task-branch/PR
+discipline, local hooks, CI gate, PR template) is in progress on
+`chore/git-governance` — **not yet complete until that PR is reviewed
+and merged.**
+
 ## Completed
 - Preflight, fast docs pass, Claude Code harness.
 - Backend scaffold: FastAPI + SQLAlchemy 2.0 async + Alembic + PostgreSQL.
@@ -86,14 +93,17 @@ awaiting owner review before commit.
 ## Blockers
 None blocking. Same open items as before (D-001 Mac benchmark pending,
 Auto Mode script dry-run only, document encryption-at-rest deferred,
-D-009 Ollama upgrade needs root). New: Git remote/PR infrastructure not
-yet set up — owner/bank-supplied.
+D-009 Ollama upgrade needs root). Git remote is connected but is a
+personal/temporary one (D-012) — official bank-owned remote still
+pending, migration keeps full history when it arrives.
 
 ## Next action
-1. **Git Infrastructure** — set up bank-approved remote repository
-   hosting + task-branch/PR workflow (see `docs/MVP_PLAN.md` § Git
-   Infrastructure). Not started; requires owner/bank environment.
-2. **Slice 6 — Local CV Library & Folder Indexer** (see
+1. **Git Infrastructure** — remote connected (`a-r3/meyar`, private,
+   temporary — D-012); task-branch/PR/CI governance is on
+   `chore/git-governance`, awaiting PR review/merge. May later migrate to
+   an official Rabitabank-owned remote (history preserved).
+2. **After governance PR merge:** branch `feat/cv-folder-indexing` for
+   **Slice 6 — Local CV Library & Folder Indexer** (see
    `docs/MVP_PLAN.md`). **Not started.**
 
 The previously planned "Slice 6 — External Async Evaluation API" is
@@ -134,10 +144,9 @@ no code yet.
 | Scoring consistency | PARTIAL | Policy engine deterministic + unit tested (Slice 5) | Re-verify once numeric score lands | 10, 13 |
 | External-network/exfiltration verification | NOT STARTED | Local-only enforced by construction (`OllamaLLMProvider` loopback check) | Explicit verification pass | 13 |
 | Data-protection / backup description | PARTIAL | Retention/deletion documented (SECURITY_PRIVACY.md); no backup policy written | Document backup approach | 13 |
-| Git branch / PR workflow | NOT STARTED | No remote configured | Set up bank Git provider + PR gate | Git Infrastructure |
+| Git branch / PR workflow | PARTIAL | Remote connected (`a-r3/meyar`, private), CI + hooks + PR template on `chore/git-governance` (D-012) | Merge governance PR; migrate to official bank remote when supplied | Git Infrastructure |
 
-**Summary:** 12 DONE, 8 PARTIAL, 9 NOT STARTED (29 items). Highest-priority
-gaps: local folder indexing (Slice 6, next), local embeddings/semantic
-search (Slice 7–8), 0–100 numeric scoring (Slice 10), and Git/PR
-infrastructure (blocks a clean task-branch workflow for everything
-after).
+**Summary:** 12 DONE, 9 PARTIAL, 8 NOT STARTED (29 items). Highest-priority
+gaps: local folder indexing (Slice 6, next) and local embeddings/semantic
+search (Slice 7–8), then 0–100 numeric scoring (Slice 10). Git/PR
+infrastructure is PARTIAL (governance PR in review) rather than blocking.

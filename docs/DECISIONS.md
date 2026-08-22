@@ -3,6 +3,67 @@
 Append-only log of concise architectural/product decisions. Format: id, date,
 decision, why, reversibility.
 
+## D-012 — GitHub / branch / PR / CI governance
+
+**Date:** 2026-08-23
+**Decision:** MEYAR's development remote and delivery process are
+formalized:
+1. Current development remote is a **private personal repository**,
+   `https://github.com/a-r3/meyar.git` (`a-r3/meyar`). It is temporary
+   development infrastructure, not an official Rabitabank-owned
+   repository — it will be migrated once the bank provides one, with
+   **full Git history preserved** on migration (no history rewrite for a
+   remote-ownership change alone).
+2. `main` is the stable integration branch. After the one-time
+   repository-bootstrap push (`f8ac183`, pushed directly since the
+   remote was created empty), **direct pushes to `main` are prohibited**.
+   Normal changes use a task branch (`feat/*`/`fix/*`/`chore/*`/
+   `docs/*`/`test/*`) → PR → review → merge → `git pull --ff-only`.
+3. CI (`.github/workflows/ci.yml`) runs on PRs into `main`: `ruff check
+   .`, `mypy src`, `pytest -q`, against a Postgres 16 GitHub Actions
+   service container (normal bridge networking — the D-005 `network_mode:
+   host`/port-55719 workaround is a memory-constrained-dev-laptop fix
+   only and is never replicated in CI infrastructure, though CI's service
+   container is still mapped to host port 55719 purely to match the
+   already-hardcoded `tests/conftest.py` connection string without
+   editing test code). No Ollama, no cloud AI key, no production
+   credential is required — extraction/loopback-enforcement tests only
+   construct `OllamaLLMProvider` to check validation, never call a live
+   model.
+4. **The CI mypy gate is intentionally `mypy src`, not `mypy .`.**
+   Production source is clean; there is known, pre-existing test-only
+   mypy debt (30 errors across 5 test files). A future
+   `chore/test-mypy-cleanup` branch will fix that debt and then widen CI
+   to `mypy .`. This scope decision is deliberate, not a hidden gap.
+5. No real candidate data may ever enter GitHub. Enforced by
+   `.gitignore`, the pre-existing `.claude/hooks/guard.sh` (Claude Code
+   tool-use guard), and new repo-local Git hooks (`.githooks/pre-commit`,
+   `.githooks/pre-push`, activated via `scripts/setup-git-governance.sh`
+   → `git config core.hooksPath .githooks`, this-repo-only, no global
+   Git config touched). `pre-commit` blocks obvious secret/credential
+   paths, real-CV/runtime-data paths, DB dumps, and model artifacts.
+   `pre-push` blocks a direct `main` push after bootstrap, with an
+   explicit owner-only bypass (`MEYAR_ALLOW_MAIN_PUSH=1`) that is never
+   set automatically.
+6. Full operational detail lives in `.claude/rules/git-workflow.md`;
+   `AGENTS.md` and `CLAUDE.md` are concise Codex/Claude entry points to the
+   same shared `docs/` authority; `.githooks/` and `.github/` provide
+   agent-independent enforcement.
+7. Server-side branch protection is unavailable on the current private-
+   repository plan (`SERVER_SIDE_BRANCH_PROTECTION_UNAVAILABLE_ON_CURRENT_PLAN`).
+   The repository will not be made public and the plan will not be upgraded
+   for this task. Until official hosting or plan capabilities change, the
+   accepted fallback is task-branch discipline, repo-local Git hooks, pull
+   requests, GitHub Actions CI, and owner review.
+**Why:** The owner approved a concrete GitHub remote and asked for the
+task-branch/PR/CI discipline the official task requires (§13 of
+`AI-PROJ-CV-01`) to be encoded durably in the repository itself, not just
+followed ad hoc in one session.
+**Reversibility:** Fully reversible — the remote can be swapped (history
+preserved), hooks can be disabled per-clone (`git config
+--unset core.hooksPath`), and the CI gate can be widened/narrowed by
+editing `.github/workflows/ci.yml` without any application code change.
+
 ## D-011 — Official task re-baseline / internal Candidate Intelligence Platform
 
 **Date:** 2026-08-23

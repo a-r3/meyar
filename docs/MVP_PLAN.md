@@ -55,10 +55,14 @@ changed.
 
 ### Git Infrastructure
 
-Create remote repository hosting (bank-approved Git provider) and wire up
-`main` ← PR ← task branch (`feat/*`, `fix/*`, `chore/*`, `docs/*`), with
-`ruff` + `mypy` + `pytest` (and frontend checks once a frontend exists)
-as a merge gate. Not started — remote URL/provider is owner/bank-supplied.
+`main` ← PR ← task branch (`feat/*`, `fix/*`, `chore/*`, `docs/*`,
+`test/*`), with `ruff` + `mypy src` + `pytest` as a merge gate (see
+D-012). **In progress:** development remote connected
+(`https://github.com/a-r3/meyar.git`, private, personal — temporary
+until Rabitabank supplies an official repository, full history preserved
+on that migration); CI, local Git hooks, and PR template landing via
+`chore/git-governance`. Frontend checks join the gate once a frontend
+exists (Slice 11).
 
 ### Slice 6 — Local CV Library & Folder Indexer
 

@@ -1,0 +1,135 @@
+# Git workflow rules
+
+Detailed operational authority for how MEYAR is developed in Git. See
+`CLAUDE.md` for the concise summary and the canonical repo/remote
+identity. This file is what governs the actual sequence of commands.
+
+## Startup protocol — run before any material task
+
+```bash
+pwd
+git rev-parse --show-toplevel
+git branch --show-current
+git status --short
+git remote -v
+git log -3 --oneline
+```
+
+Then determine, in order:
+
+1. Is the repo path correct (`/home/oem/Documents/Job/RabitaBank/Meyar`)?
+2. Is the working tree clean? If unexpectedly dirty, inspect and report —
+   never `git reset --hard` / `git clean -fd` / `git checkout -- .` /
+   any destructive restore to force a clean state.
+3. What branch am I on?
+4. Is this work appropriate for the current branch?
+5. What is the latest accepted checkpoint (`git log`)?
+6. What do `docs/STATUS.md` / `docs/DECISIONS.md` say about current state?
+7. Does this task require a new branch?
+
+If the task changes code or docs materially and the current branch is
+`main`, **create the correct task branch before editing anything.** The
+only exception is an explicitly owner-authorized repository-bootstrap or
+urgent operation — not a default.
+
+## Branch scope
+
+One branch = one coherent task/slice. Naming: `feat/*`, `fix/*`,
+`chore/*`, `docs/*`, `test/*`. Examples: `feat/cv-folder-indexing`,
+`feat/local-embeddings`, `fix/pdf-parser-resource-limit`,
+`chore/test-mypy-cleanup`. Don't combine unrelated refactors/features in
+one branch; don't opportunistically rewrite unrelated working code.
+
+## Safe staging
+
+Never assume everything in the working tree belongs in the current
+commit. Before every commit:
+
+```bash
+git status --short
+git diff
+```
+
+Stage intentionally (never a blind `git add .`/`git add -A`), then
+inspect what's actually staged:
+
+```bash
+git diff --cached --stat
+git diff --cached --name-only
+git diff --cached
+```
+
+Verify no secret, `.env`, PII, real CV, database dump, runtime file, or
+model artifact is staged.
+
+## Commit policy
+
+Clear conventional-style messages: `feat: ...`, `fix: ...`, `docs: ...`,
+`chore: ...`, `test: ...`. Commit coherent, tested states — not a noisy
+checkpoint after every tiny edit.
+
+## Task branch → PR → main
+
+```bash
+git push -u origin <branch>
+gh pr create --base main --head <branch> --title "<type>: <summary>" --body-file <file>
+```
+
+PR body states: purpose, scope, material decisions, tests performed,
+security/privacy impact, known gaps/deferred work. Use
+`.github/pull_request_template.md`. **Do not merge the PR in the same
+operation that creates it** — stop and report it for review, unless the
+owner explicitly asks for automatic merge. After merge, sync local `main`:
+
+```bash
+git switch main
+git pull --ff-only
+```
+
+## Forbidden without explicit owner approval
+
+- Force push to `main` (`git push --force` to `main`)
+- `git reset --hard`, destructive `git clean`, history rewrite
+- Deleting an unmerged task branch that contains work
+- Bypassing a failing CI gate or `--no-verify`
+
+## Local Git guards
+
+Hooks live in `.githooks/` and are activated per-repo via
+`scripts/setup-git-governance.sh` (`git config core.hooksPath
+.githooks`) — no global Git config is touched. `pre-commit` blocks
+obvious secrets/private keys/real-CV-shaped paths/runtime storage.
+`pre-push` blocks a direct push of local `main` to remote `main` after
+the initial bootstrap push, unless `MEYAR_ALLOW_MAIN_PUSH=1` is set
+explicitly by the owner for a genuine emergency — never set this
+automatically.
+
+## Sensitive-data rule
+
+GitHub may contain: application source, documentation, migrations,
+synthetic fixtures (`fixtures/synthetic_cvs/`). GitHub must never
+contain: real CVs, candidate PII, real database dumps, `.env`,
+credentials, model blobs/weights, runtime storage (`backend/var/`).
+
+## Repository identity
+
+Canonical local repo: `/home/oem/Documents/Job/RabitaBank/Meyar`.
+Canonical development remote: `https://github.com/a-r3/meyar.git`
+(`a-r3/meyar`, private). This is a personal development remote and may
+later be migrated to an official Rabitabank-owned repository — full Git
+history must be preserved on that migration; never rewrite history
+merely because the remote owner changes.
+
+## Task completion checklist
+
+1. Run focused tests for the change.
+2. Run the project quality gate (`test-gate` skill: `ruff check .`,
+   `mypy src`, `pytest -q`).
+3. Inspect the diff.
+4. Check secrets/PII/real-CV safety.
+5. Update `docs/STATUS.md`/`docs/DECISIONS.md` if material.
+6. Commit on the task branch.
+7. Push the task branch.
+8. Open a PR into `main`.
+9. Verify CI actually ran (and is green, or report the genuine failure).
+10. STOP for review — do not merge.

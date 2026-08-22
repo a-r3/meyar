@@ -135,9 +135,11 @@ implementation decision, not a commercial multi-tenant SaaS model. See
 ## Delivery process
 
 `main` ← Pull Request ← task branch (`feat/*`, `fix/*`, `chore/*`,
-`docs/*`). Quality gate before merge: `ruff`, `mypy`, `pytest` (frontend
-checks once a frontend exists). Repository hosting/remote is bank-owned
-infrastructure, configured separately from this documentation pass.
+`docs/*`, `test/*`). Quality gate before merge: `ruff`, `mypy src`,
+`pytest` (frontend checks once a frontend exists). Development remote:
+`https://github.com/a-r3/meyar.git` (private, personal — temporary until
+Rabitabank supplies an official repository; full history preserved on
+migration). See D-012, `docs/DECISIONS.md`.
 
 ## MVP definition
 
