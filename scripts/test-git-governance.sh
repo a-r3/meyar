@@ -16,6 +16,10 @@ expect_pass() { git -C "$tmp" reset -q; rm -rf "$tmp/work"; (cd "$tmp" && eval "
 expect_block() { git -C "$tmp" reset -q; rm -rf "$tmp/work"; (cd "$tmp" && eval "$1"); git -C "$tmp" add -A -f; if (cd "$tmp" && "$hook") >/dev/null 2>&1; then echo "expected BLOCKED: $2" >&2; exit 1; fi; }
 
 expect_pass "printf 'x\n' > source.py"; expect_pass "printf '# docs\n' > README.md"
+if ! printf 'refs/heads/chore/git-governance abc refs/heads/chore/git-governance def\n' | (cd "$tmp" && "$repo_root/.githooks/pre-push"); then
+  echo 'expected task-branch push to pass' >&2
+  exit 1
+fi
 expect_pass "printf 'SAFE=1\n' > .env.example"
 mkdir -p "$tmp/fixtures/synthetic_cvs"; printf 'synthetic CV\n' > "$tmp/fixtures/synthetic_cvs/example.txt"; git -C "$tmp" add -A -f; (cd "$tmp" && "$hook")
 expect_block "printf 'x\n' > .env" direct-env
