@@ -11,6 +11,9 @@ This is **not** the superseded external B2B/SaaS product.
 
 ## Authority
 
+`README.md` is the primary human onboarding entry point. It summarizes current
+reality but does not replace the canonical detailed authority in `docs/`.
+
 Before material work, read in order:
 
 1. `docs/STATUS.md`
@@ -39,8 +42,16 @@ governance.
   branch: `feat/*`, `fix/*`, `chore/*`, `docs/*`, or `test/*` as appropriate.
 - Run the quality gate, inspect the diff, stage intentionally, commit the task
   branch, push it, open a PR to `main`, and verify CI.
+- Dependabot PRs follow the same gate: CI passes, the owner reviews, then merge.
+  Auto-merge is disabled. Major updates require explicit compatibility and
+  migration review, and backend dependency changes include `backend/uv.lock`.
 - Stop for owner review. Never merge automatically unless explicitly
-  authorized.
+  authorized. The default strategy is **Squash and merge**.
+- PR creation or green CI is not completion. End the operational report with
+  `## HUMAN ACTION REQUIRED`, the exact owner action/URL, what not to do, and
+  the short reply expected. Wait for owner confirmation.
+- After the owner reports a merge, verify the PR and remote `main`, then switch
+  to `main` and pull with `git pull --ff-only origin main` before continuing.
 - Without explicit owner authorization, never force-push, use `reset --hard`,
   run a destructive clean, rewrite accepted history, bypass failed CI, or
   delete unmerged work.

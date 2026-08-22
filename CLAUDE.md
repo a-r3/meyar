@@ -1,7 +1,8 @@
 # MEYAR
 
 Internal AI Candidate Intelligence & CV Search Platform for Rabitabank
-OJSC HR. Read `docs/PROJECT_VISION.md` for product direction,
+OJSC HR. `README.md` is the primary human onboarding entry point. Read
+`docs/PROJECT_VISION.md` for canonical product direction,
 `docs/MASTER_SPEC.md` before non-trivial changes, `docs/STATUS.md` for
 current phase.
 
@@ -98,3 +99,15 @@ DB dumps, `.env`, credentials, or model blobs/weights.
 **Local AI:** CI and GitHub must never require or upload real CVs or
 production Ollama models. Tests use deterministic fake/stub providers —
 no cloud AI fallback without an explicit owner/architecture decision.
+
+**Dependency updates:** Dependabot PRs must pass CI and receive owner review;
+auto-merge is disabled. Major updates require explicit compatibility/migration
+review, and dependency changes must commit the corresponding lockfile update.
+
+**Human checkpoint:** PR creation and successful CI are not completion or
+authorization to merge. Claude stops before merge and ends its operational
+report with `## HUMAN ACTION REQUIRED`, the PR URL, exact owner action, and the
+reply expected. The default is owner **Squash and merge**. After the owner says
+it was merged, verify the PR/remote state, sync local `main` with
+`git pull --ff-only origin main`, and only then continue from a new approved
+task branch. See `.claude/rules/git-workflow.md`.

@@ -16,7 +16,9 @@ temporary development remote — see D-012, `docs/DECISIONS.md`). `main`
 bootstrap-pushed at `f8ac183`. Git/CI governance (task-branch/PR
 discipline, local hooks, CI gate, PR template) is in progress on
 `chore/git-governance` — **not yet complete until that PR is reviewed
-and merged.**
+and merged.** The same PR now also includes the required root onboarding
+README and weekly low-noise Dependabot configuration for backend `uv` and
+GitHub Actions dependencies; dependency auto-merge remains disabled.
 
 ## Completed
 - Preflight, fast docs pass, Claude Code harness.
@@ -87,8 +89,8 @@ Evaluation's persisted `candidate_profile_version_id`/
 `job_criteria_version_id` verified to equal the exact input versions.
 
 ## In progress
-Nothing in flight. Documentation re-baseline (R0) is complete and
-awaiting owner review before commit.
+Git governance PR #1 is open and awaiting owner review/merge. Documentation
+re-baseline (R0) is complete; no product slice is in flight.
 
 ## Blockers
 None blocking. Same open items as before (D-001 Mac benchmark pending,

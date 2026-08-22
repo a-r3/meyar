@@ -27,4 +27,10 @@ on `main`). Then:
    (`.claude/rules/git-workflow.md` has the exact commands). Do not
    merge, force-push, or bypass a failing test/CI.
 8. Report to the owner: implemented / tests+result / material issues /
-   PR link / git status. STOP for review — do not merge automatically.
+   PR link / git status. PR creation and green CI are not completion. End with
+   `## HUMAN ACTION REQUIRED`, instruct the owner to review and **Squash and
+   merge**, and request the reply `merged`. STOP — do not merge automatically.
+9. After the owner reports a merge, verify the PR and remote `main`; then
+   switch to `main`, run `git pull --ff-only origin main`, verify the expected
+   result, and only then remove the safely merged local branch or prepare the
+   next approved task branch.

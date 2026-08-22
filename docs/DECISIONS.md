@@ -55,6 +55,41 @@ formalized:
    for this task. Until official hosting or plan capabilities change, the
    accepted fallback is task-branch discipline, repo-local Git hooks, pull
    requests, GitHub Actions CI, and owner review.
+8. Root `README.md` is a required delivery artifact and the primary human
+   onboarding surface. It summarizes current reality and points to `docs/`;
+   it is not a second product specification. `AGENTS.md` remains the Codex
+   entry point, `CLAUDE.md` remains the Claude entry point, and `docs/` remains
+   the detailed canonical authority.
+9. Dependabot version updates are configured weekly with low PR limits for
+   the supported `uv` ecosystem in `/backend` and GitHub Actions in `/`.
+   Compatible routine minor/patch updates are grouped to reduce noise; major
+   updates remain separate. Dependabot alerts and security-update PRs are
+   enabled where supported by the current repository/account, without buying
+   GitHub Advanced Security or adding private registries/credentials.
+10. Dependabot never auto-merges under the current policy: Dependabot PR → CI
+    → owner review → merge. Major updates require explicit compatibility and
+    migration review, and backend dependency changes must commit the updated
+    `backend/uv.lock`. A future semver-patch-only auto-merge policy requires a
+    separate accepted decision after real CI behavior is observed. Major and
+    minor updates, and all application feature PRs, must never be auto-merged
+    by default.
+11. The standard merge strategy is **Squash and merge**. Normal flow is: task
+    branch → implementation → tests → commit(s) → push → PR → CI → owner
+    review → owner Squash and merge → agent verifies remote merge → agent
+    synchronizes local `main` → next approved task branch. Merge commits and
+    rebase-and-merge are disabled by default so `main` retains one concise,
+    reviewable commit per coherent PR. Repository settings allow squash merges,
+    disallow merge commits/rebase merges, and delete merged branches.
+12. Any workflow point requiring manual owner action is an explicit checkpoint,
+    never a silent stop. The agent ends its report with `## HUMAN ACTION
+    REQUIRED` and states what to do, where, the exact action/value, what not to
+    do, and the reply expected. This applies to PR review/merge, unavailable
+    authentication or repository UI settings, plan/paid-feature choices,
+    destructive Git actions, irreversible production/security decisions,
+    bank or target-Mac access, real-data approval, and business-owner scope
+    confirmation. After an owner reports a merge, the agent verifies the PR
+    and remote `main`, uses `git pull --ff-only origin main`, and only then
+    removes the safely merged local branch or starts the next approved branch.
 **Why:** The owner approved a concrete GitHub remote and asked for the
 task-branch/PR/CI discipline the official task requires (§13 of
 `AI-PROJ-CV-01`) to be encoded durably in the repository itself, not just

@@ -78,13 +78,49 @@ gh pr create --base main --head <branch> --title "<type>: <summary>" --body-file
 PR body states: purpose, scope, material decisions, tests performed,
 security/privacy impact, known gaps/deferred work. Use
 `.github/pull_request_template.md`. **Do not merge the PR in the same
-operation that creates it** — stop and report it for review, unless the
-owner explicitly asks for automatic merge. After merge, sync local `main`:
+operation that creates it.** PR creation and green CI are not completion or
+authorization to merge.
+
+The default strategy for normal feature/fix/chore/docs/test PRs is **Squash
+and merge**. Do not use merge commits or rebase-and-merge by default. After CI
+is green, stop and end the operational report with:
+
+```text
+## HUMAN ACTION REQUIRED
+
+1. Open the PR: <PR URL>
+2. Confirm CI is green and review the diff.
+3. Click "Squash and merge" and confirm the merge.
+4. Do not start the next slice or modify main manually.
+5. Reply: `merged`
+```
+
+After the owner reports the merge, never trust the message alone. Verify the
+PR is actually merged and remote `main` contains the result, then synchronize:
 
 ```bash
+gh pr view <number> --json state,mergedAt,mergeCommit
+git fetch origin
 git switch main
-git pull --ff-only
+git pull --ff-only origin main
 ```
+
+Verify the expected squash commit/content is present. Delete the local task
+branch only after that verification; a squash-merged branch may require local
+deletion despite not being an ancestor of `main`. The remote branch may be
+deleted automatically by GitHub. Never begin new work from the old task branch;
+create the next approved branch from synchronized `main`.
+
+## Human-action checkpoints
+
+Whenever progress requires owner action, say so explicitly and end the report
+with `## HUMAN ACTION REQUIRED`: state what to do, where, the exact button/
+command/value when known, what not to do, and the short reply expected. This is
+mandatory for PR review/merge, authentication the agent cannot complete,
+repository/account UI settings, paid-plan decisions, destructive Git actions,
+irreversible production/security decisions, bank infrastructure/access,
+target Mac Mini access, real-data approval/access, and business-owner
+requirement confirmation. Never silently wait or fabricate completion.
 
 ## Forbidden without explicit owner approval
 
@@ -110,6 +146,16 @@ GitHub may contain: application source, documentation, migrations,
 synthetic fixtures (`fixtures/synthetic_cvs/`). GitHub must never
 contain: real CVs, candidate PII, real database dumps, `.env`,
 credentials, model blobs/weights, runtime storage (`backend/var/`).
+
+## Dependency updates
+
+Dependabot opens weekly PRs for backend `uv` dependencies and GitHub Actions.
+Every dependency PR goes through the normal CI gate and owner review; there is
+no automatic merge. Major updates require explicit compatibility, migration,
+and security/privacy review. Commit `backend/uv.lock` whenever a backend
+dependency change updates resolution. A future semver-patch-only auto-merge
+policy would require a separate accepted decision; never auto-merge major or
+minor dependency updates or application feature PRs by default.
 
 ## Repository identity
 
