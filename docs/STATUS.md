@@ -164,9 +164,9 @@ no code yet.
 | Data-protection / backup description | PARTIAL | Retention/deletion documented (SECURITY_PRIVACY.md); no backup policy written | Document backup approach | 13 |
 | Git branch / PR workflow | PARTIAL | Remote connected (`a-r3/meyar`, private), CI + hooks + PR template on `chore/git-governance` (D-012) | Merge governance PR; migrate to official bank remote when supplied | Git Infrastructure |
 
-**Summary:** 12 DONE, 8 PARTIAL, 9 NOT STARTED (29 items). Multilingual
-AZ/RU/EN CV fixtures and extraction tests remain future work; no current
-evidence is claimed. Highest-priority
+**Official numbered task matrix — 28 items.** Summary: 12 DONE, 5 PARTIAL,
+11 NOT STARTED (28 items). Multilingual AZ/RU/EN CV fixtures and extraction
+tests remain future work; no current evidence is claimed. Highest-priority
 gaps: local folder indexing (Slice 6, next) and local embeddings/semantic
 search (Slice 7–8), then 0–100 numeric scoring (Slice 10). Git/PR
 infrastructure is PARTIAL (governance PR in review) rather than blocking.
