@@ -96,6 +96,7 @@ class CriterionIn(BaseModel):
     label: str = Field(min_length=1, max_length=200)
     value: str | None = Field(default=None, max_length=200)
     min_years: float | None = Field(default=None, ge=0, le=60)
+    required_level: str | None = Field(default=None, max_length=50)
     weight: float = Field(default=1.0, ge=0, le=10)
     evidence_required: bool = True
     manual_review_required: bool = False

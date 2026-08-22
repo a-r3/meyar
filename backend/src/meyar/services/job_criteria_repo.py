@@ -63,6 +63,21 @@ async def get_criteria_version(
     return result.scalar_one_or_none()
 
 
+async def get_criteria_version_by_id(
+    db: AsyncSession, *, tenant_id: uuid.UUID, criteria_version_id: uuid.UUID
+) -> JobCriteriaVersion | None:
+    """Tenant-scoped lookup by the version's own id — the key enforcement
+    point for evaluation input resolution (Slice 5): a criteria_version_id
+    belonging to another tenant simply does not resolve."""
+    result = await db.execute(
+        select(JobCriteriaVersion).where(
+            JobCriteriaVersion.id == criteria_version_id,
+            JobCriteriaVersion.tenant_id == tenant_id,
+        )
+    )
+    return result.scalar_one_or_none()
+
+
 async def list_criteria_versions(
     db: AsyncSession, *, tenant_id: uuid.UUID, job_id: uuid.UUID
 ) -> list[JobCriteriaVersion]:
