@@ -3,6 +3,101 @@
 Append-only log of concise architectural/product decisions. Format: id, date,
 decision, why, reversibility.
 
+## D-011 — Official task re-baseline / internal Candidate Intelligence Platform
+
+**Date:** 2026-08-23
+**Decision:** The official project task **"CV Screening API — Layihə
+Task Bölgüsü"** (`AI-PROJ-CV-01`, v1.0, 18.08.2026) plus owner
+clarifications are now the canonical requirement authority, superseding
+prior product framing wherever they conflict. Binding changes:
+1. MEYAR is an **internal HR system** for Rabitabank OJSC, not an
+   external/commercial B2B SaaS API product. No external customers,
+   billing, or public API surface exist or are planned.
+2. Product surfaces expand to: an internal chat-style natural-language
+   search UI, a CV Library (browse/search/open original CV), and the
+   internal REST API powering both (plus other approved internal
+   systems).
+3. A local-folder CV ingestion/indexing subsystem is required: scan a
+   configured folder, hash-based incremental/idempotent change
+   detection, parse/extract only new-or-changed files.
+4. Local semantic vector search is **required**, not deferred — target
+   direction is PostgreSQL + pgvector, local embedding model only, never
+   an external embedding API.
+5. A 0–100 numeric JD-match score + explanation is a **required**
+   Definition-of-Done item, not deferred. This **supersedes D-010 point
+   4** ("numeric scoring is deferred") — the deterministic fit-band
+   algorithm in D-010 remains the correct foundation the numeric score is
+   layered on top of; the exact formula is a near-term implementation
+   decision (Slice 10), not finalized by this entry.
+6. `CandidateIdentity` (full_name/email/phone, presentation-only) is
+   introduced alongside the existing `CandidateProfile` (professional
+   facts only, the only thing matching/search reads) — see
+   `docs/PROJECT_VISION.md`. Not implemented yet.
+7. The previously planned **"Slice 6 — External Async Evaluation API"**
+   (turning the internal evaluation service into a customer-facing
+   `POST /v1/evaluations` polling product) is **CANCELLED**. The new
+   Slice 6 is **Local CV Library & Folder Indexer** — see
+   `docs/MVP_PLAN.md`. Slice 6 has not started.
+8. Existing Slice 0–5 implementation (tenant/API-key auth, versioned job
+   criteria, secure document ingestion, local AI profile extraction, the
+   deterministic evaluation engine) remains valid foundation. Nothing is
+   rewritten or reverted because of this re-baseline; the existing
+   tenant/organization isolation mechanism is kept as a resource-
+   isolation abstraction whose final mapping to Rabitabank's
+   organizational boundaries is still an open implementation decision.
+**Why:** The owner supplied the official bank task specification and
+product clarifications after Slice 5 was implemented; the product
+direction materially changed (internal platform, not external API
+product) and two requirements previously treated as MVP-deferred
+(semantic search, numeric scoring) are official Definition-of-Done
+items. Recording this as a single decision, rather than silently editing
+every affected doc, keeps the "why the docs changed" traceable.
+**Reversibility:** Documentation/roadmap decision — reversible by a
+further owner-directed scope change. No code was reverted; no
+implementation was started under this decision (documentation-only
+pass).
+
+## D-010 — meyar-policy-v1: binding missing-evidence rule + fit-band algorithm
+
+**Date:** 2026-08-19
+**Decision:** The evaluation policy engine (`meyar.evaluation.policy`,
+version `meyar-policy-v1`) is fully deterministic, no LLM. Binding rules:
+1. **Missing/insufficient evidence is `UNKNOWN`, never `NOT_MATCHED`.**
+   `NOT_MATCHED` is reserved for cases with explicit, reliable evidence
+   that a criterion is *not* satisfied (currently: only
+   `EXPERIENCE_DURATION_INSUFFICIENT`, computed from explicit parseable
+   dates below the required minimum). Absence of a skill/certification/
+   education/language in the profile is `UNKNOWN`.
+2. **Overall fit-band algorithm** (`compute_overall_result`): (a) any
+   criterion `MANUAL_REVIEW_REQUIRED` or `CONFLICTING_EVIDENCE` →
+   overall `MANUAL_REVIEW_REQUIRED`; (b) any `MUST_HAVE` criterion
+   `NOT_MATCHED`, `UNKNOWN`, or `PARTIAL_MATCH` → `INSUFFICIENT_EVIDENCE`
+   (never an autonomous-rejection label); (c) all `MUST_HAVE` criteria
+   `MATCH` and no `PREFERRED` criteria configured → `STRONG_MATCH`; (d)
+   all `MUST_HAVE` `MATCH` and ≥50% of `PREFERRED` criteria `MATCH` →
+   `STRONG_MATCH`, otherwise `POTENTIAL_MATCH`. No `REJECT`/`HIRE`/
+   `AUTO_*` band exists anywhere in the schema.
+3. A criterion's configured `manual_review_required` flag, or a raw
+   `CONFLICTING_EVIDENCE` finding (e.g. overlapping employment date
+   ranges), unconditionally forces that criterion's final status to
+   `MANUAL_REVIEW_REQUIRED` — implemented once in
+   `evaluators._finalize`, not duplicated per evaluator.
+4. Numeric scoring is **deferred** (not implemented) — fit bands +
+   structured per-criterion results with evidence were judged sufficient
+   for MVP, per the instruction to avoid complexity without material
+   value. `Evaluation` has no `numeric_score` column. **SUPERSEDED by
+   D-011**: the official task requires a 0–100 score + explanation as a
+   Definition-of-Done item. Points 1–3 of this decision (missing-evidence
+   rule, fit-band algorithm, manual-review-forcing) remain binding and
+   are the foundation the numeric score is layered on top of.
+**Why:** These are exactly the binding rules the owner's Slice 5 brief
+specified; recording them here (not just in code comments) so future
+slices/reviewers don't have to reverse-engineer intent from code.
+**Reversibility:** Fully reversible/tunable — thresholds (e.g. the 50%
+preferred-match ratio) are named constants; a materially different
+algorithm requires only bumping `POLICY_ENGINE_VERSION` so historic
+evaluations remain correctly attributed to the version that produced them.
+
 ## D-009 — Dev integration model: Qwen3 family, not Qwen3.5 (Ollama too old)
 
 **Date:** 2026-08-18

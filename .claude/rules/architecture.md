@@ -15,3 +15,15 @@
   creation — not added later.
 - OpenAPI (FastAPI-generated) is the canonical API spec. Don't hand-write a
   duplicate spec.
+- MEYAR is an internal platform: primary surfaces are the internal chat/
+  search UI, the CV Library UI, and the internal REST API those UIs (and
+  other approved internal systems) call. Don't design routes/schemas
+  around an external/commercial customer.
+- Local embeddings + pgvector is the approved semantic-search direction
+  (see `docs/PROJECT_VISION.md`) — not a forbidden "vector DB" anymore.
+  Kafka/Kubernetes/microservices remain unjustified for MVP; installing
+  pgvector or any embedding provider still gets its own `DECISIONS.md`
+  entry when actually implemented, same as any other new dependency.
+- The local-folder CV scanner/indexer is a new ingestion source alongside
+  direct upload — it reuses `meyar.ingestion` validation (MIME sniffing,
+  size cap, opaque storage id), it doesn't bypass it.

@@ -2,15 +2,30 @@
 
 ## Privacy model
 
-- `CandidateIdentity` (name/contact/raw doc) is stored separately from
-  `CandidateProfile` (extracted professional facts). Only `CandidateProfile`
-  is readable by the matching engine.
+- `CandidateIdentity` (name/contact) is planned as a model separate from
+  `CandidateProfile` (extracted professional facts) — see
+  `docs/PROJECT_VISION.md` and MASTER_SPEC.md §5. Not implemented yet
+  (Slice 7). Once it exists, `CandidateIdentity` may be displayed to
+  authorized HR users in the UI/API but **must never be read by the
+  matching, evaluation, search, or ranking engine** — those only ever
+  read `CandidateProfile`. Identity data is presentation-only, never a
+  scoring/ranking feature.
 - Sensitive/irrelevant attributes (gender, photo, DOB/age, ethnicity,
   religion, marital status, political opinion, health info) are never
   extracted into `CandidateProfile` and never influence evaluation — the
   extraction schema simply has no fields for them, so the LLM cannot smuggle
   them in without failing Pydantic validation.
-- CV content never leaves the local network to a cloud LLM in MVP.
+- CV content never leaves the bank's internal network to a cloud LLM.
+  This applies equally to the local embedding model once it exists
+  (Slice 7): local-only, never an external embedding API.
+- Files discovered by the local folder scanner/indexer (Slice 6) are
+  untrusted input exactly like a direct upload — same MIME sniffing, size
+  cap, opaque storage id, no filename-derived paths. A local file is not
+  implicitly more trusted than an uploaded one.
+- Any UI/API surface that exposes original CV bytes or `CandidateIdentity`
+  fields requires the same authenticated/authorized access control as the
+  rest of the API — there is no anonymous or public read path anywhere in
+  MEYAR (it is internal HR tooling, not a public product).
 
 ## AI extraction (Slice 4)
 
@@ -60,8 +75,11 @@
 | Unvalidated LLM output reaching authoritative tables | All LLM output passes Pydantic v2 schema validation before persistence; validation failure → `MANUAL_REVIEW_REQUIRED`/`FAILED`, never silently coerced |
 | Local inference endpoint exposure | Ollama bound to localhost/internal Docker network only, in every environment; never a public route |
 | Secret leakage via logs/git | PII-safe structured logging (ids only); `.claude` hooks block obvious secret patterns and real CV files from commits |
-| Retry-induced duplicate work/cost | `Idempotency-Key` on `POST /v1/evaluations` |
+| Retry-induced duplicate work/cost | `Idempotency-Key` on unsafe writes where relevant |
 | Inference overload | Global concurrency semaphore around the `LLMProvider` call; per-tenant rate limit |
+| Candidate content leaving bank infrastructure via embeddings (planned) | Local-only embedding provider abstraction, same boundary pattern as `LLMProvider`; no external embedding API call anywhere in code |
+| Identity data (name/contact) leaking into scoring/ranking as a hidden signal (planned) | `CandidateIdentity` is presentation-only by construction — the matching/search/ranking engine's inputs only ever include `CandidateProfile` fields |
+| Untrusted local files treated as more trustworthy than uploads (planned folder scanner) | Folder-discovered files go through the identical MIME/size/opaque-id validation path as direct upload — no separate, weaker code path |
 
 ## Tenant isolation enforcement
 
@@ -143,5 +161,6 @@ malicious prompt-injection content, malformed file. Never commit real CVs
 
 - Final legal retention periods per jurisdiction — deferred to owner
   (business/legal decision), tracked as an open item in DECISIONS.md.
-- Whether Postgres RLS is added before first external pilot customer —
-  deferred until real multi-tenant load is observed.
+- Whether Postgres RLS is added before broader internal rollout —
+  deferred until real production load is observed. (No external pilot
+  customer exists — MEYAR is internal-only, D-011.)

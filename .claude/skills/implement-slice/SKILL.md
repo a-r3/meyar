@@ -3,6 +3,10 @@ name: implement-slice
 description: Inspect relevant docs, implement the smallest vertical slice, test it, update status. Use when starting or continuing an MVP slice from docs/MVP_PLAN.md.
 ---
 
+0. Once Git remote/PR infrastructure exists (see `docs/MVP_PLAN.md` § Git
+   Infrastructure), work on a task branch (`feat/*`, `fix/*`, `chore/*`,
+   `docs/*`) and open a PR into `main` — don't commit directly to `main`.
+   Until then, continue committing to `main` as before.
 1. Read the target slice's row in `docs/MVP_PLAN.md` and its acceptance
    criteria. Read only the specific parts of `docs/MASTER_SPEC.md` relevant
    to this slice — don't reread the whole doc set every time.

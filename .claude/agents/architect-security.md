@@ -17,7 +17,13 @@ Check for:
 - Prompt-injection surface: CV text always treated as data, never
   instructions; LLM output always schema-validated before persistence.
 - API key handling: no plaintext persistence, no logging of secrets.
-- Unjustified new infrastructure (Kafka, K8s, microservices, vector DB).
+- Unjustified new infrastructure (Kafka, K8s, microservices). pgvector /
+  local embeddings is the approved semantic-search direction (see
+  `docs/PROJECT_VISION.md`) — flag only an external embedding API call or
+  a non-pgvector vector store adopted without a `DECISIONS.md` entry.
+- MEYAR is an internal platform — flag any new design that assumes an
+  external/commercial customer, billing, or a public-facing product
+  surface.
 
 Report findings as: blocking (must fix before slice closes) vs. non-blocking
 (note in DECISIONS.md or STATUS.md, move on). Do not produce a second review

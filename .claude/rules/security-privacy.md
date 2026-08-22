@@ -18,3 +18,15 @@
   max size, generate an opaque storage id, never use the original filename
   as or in a filesystem path.
 - Never commit real candidate CVs, `.env`, credentials, or key material.
+- Files discovered by the local folder scanner/indexer are untrusted input
+  exactly like a direct upload — same MIME sniffing, size cap, opaque
+  storage id, and no filename-derived paths. A local file is not
+  implicitly more trusted than an uploaded one.
+- Embedding generation must go through a local provider abstraction (same
+  boundary pattern as `LLMProvider`) — never send candidate profile text
+  or vectors to an external embedding API.
+- Any UI/API surface that exposes original CV bytes or `CandidateIdentity`
+  fields (name/contact) requires the same authenticated/authorized access
+  control as the rest of the API — no anonymous/public read path.
+  `CandidateIdentity` may be displayed to authorized users but must never
+  be read by the matching/search/ranking engine as a signal.
