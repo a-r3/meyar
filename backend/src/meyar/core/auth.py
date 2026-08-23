@@ -2,12 +2,19 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from fastapi import Depends, HTTPException, Request, status
+from fastapi import Depends, HTTPException, Security, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.db import get_db
 from meyar.models.api_key import ApiKey
 from meyar.services.api_key_repo import get_api_key_by_plaintext, touch_last_used
+
+bearer_scheme = HTTPBearer(
+    scheme_name="ApiKeyBearer",
+    description="MEYAR internal API key, presented as a Bearer token.",
+    auto_error=False,
+)
 
 
 @dataclass(frozen=True)
@@ -50,14 +57,12 @@ async def authenticate_raw_api_key(
 
 
 async def get_current_tenant(
-    request: Request, db: AsyncSession = Depends(get_db)
+    credentials: HTTPAuthorizationCredentials | None = Security(bearer_scheme),
+    db: AsyncSession = Depends(get_db),
 ) -> TenantContext:
-    auth_header = request.headers.get("Authorization", "")
-    if not auth_header.startswith("Bearer "):
+    if credentials is None or not credentials.credentials.strip():
         raise _unauthorized()
-    presented_key = auth_header.removeprefix("Bearer ").strip()
-    if not presented_key:
-        raise _unauthorized()
+    presented_key = credentials.credentials.strip()
 
     api_key = await authenticate_raw_api_key(db, presented_key)
     if api_key is None:

@@ -1,9 +1,17 @@
 import uuid
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.models.candidate import Candidate
+
+
+async def count_candidates_for_tenant(db: AsyncSession, *, tenant_id: uuid.UUID) -> int:
+    """Tenant-scoped total candidate count — no cross-tenant aggregation."""
+    result = await db.execute(
+        select(func.count()).select_from(Candidate).where(Candidate.tenant_id == tenant_id)
+    )
+    return int(result.scalar_one())
 
 
 async def create_candidate(db: AsyncSession, *, tenant_id: uuid.UUID) -> Candidate:
