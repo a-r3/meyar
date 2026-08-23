@@ -1,12 +1,12 @@
 # MEYAR — Status
 
 ## Current phase
-**Slice 7 — Candidate Identity + Local Embeddings / Vector Index.**
+**Slice 8 — Hybrid Candidate Search.**
 Governance PR #1 merged at `16929fd` (**M0 CLOSED**); Slice 6 PR #7
 merged at `55fef2d` (**M1 — CV Ingestion & Candidate Library is
-CLOSED**, issue #6 closed). Slice 7 is implemented on
-`feat/candidate-identity-vector-index` and its PR is open for review —
-**not yet merged.**
+CLOSED**, issue #6 closed); Slice 7 PR #9 merged at `24b1d67` (issue #8
+closed). Slice 8 is implemented on `feat/hybrid-candidate-search` and
+its PR is open for review — **not yet merged.**
 
 GitHub remote established (`https://github.com/a-r3/meyar.git`, private,
 temporary development remote — see D-012, `docs/DECISIONS.md`). `main`
@@ -104,12 +104,64 @@ remains disabled.
   extension and creates both tables. New CLI commands `meyar
   extract-identity` (PII-safe output) and `meyar embed-candidate`
   (reused/idempotent reporting, never prints the vector). See D-014,
-  `docs/DECISIONS.md`, for the exact semantics chosen.
+  `docs/DECISIONS.md`, for the exact semantics chosen. **Merged as
+  PR #9 at `24b1d67`, closes issue #8.**
+- Slice 8 (Hybrid Candidate Search) — on `feat/hybrid-candidate-search`,
+  associated with **M2 — Candidate Search Intelligence**, closes issue
+  #10. New `meyar.search` package: a strict `CandidateSearchRequest`
+  (`STRUCTURED_ONLY`/`SEMANTIC_ONLY`/`HYBRID`, `extra="forbid"`) with
+  required filters (hard eligibility gate) separated from preferred
+  filters (soft ranking signal — `structured_score` = matched/total,
+  0.0 when none configured, never a fabricated advantage). Structured
+  filters (skills/certifications/languages/education/
+  min_total_experience_years) evaluate the candidate's CURRENT
+  `CandidateProfileVersion` only, reusing
+  `meyar.evaluation.normalization`'s skill/text normalization rather
+  than reimplementing matching; an explicit `as_of_date` is required
+  whenever an experience-duration filter is set, so "present/ongoing"
+  employment resolves deterministically instead of drifting with the
+  wall clock. Semantic retrieval requires an explicit
+  `EmbeddingSearchConfig` (provider/model_name/model_revision/
+  serializer_version/embedding_dimensions) — only a candidate's current,
+  exactly-compatible `CandidateEmbeddingVersion` participates (mirrors
+  the Slice 7/D-014 provenance grouping; a stale or incompatible
+  embedding is excluded, never mixed into one similarity ranking); the
+  query text is embedded locally through the same `EmbeddingProvider`
+  instance passed in, with an explicit provider/model/revision match
+  check before use. `STRUCTURED_ONLY` never calls the embedding
+  provider at all (regression-tested with a provider configured to
+  raise if invoked). Hybrid ranking is deterministic (`meyar-search-v1`,
+  see D-015): required filters gate eligibility before any semantic
+  scoring — a failed required filter can never be overridden by high
+  semantic similarity — and the full eligible+compatible set is scored
+  before sort/limit, so a lower-semantic/higher-structured candidate can
+  still outrank a high-semantic candidate under structured-favoring
+  weights even with `limit=1` (both proved by dedicated merge-critical
+  regression tests). Semantic similarity is normalized from pgvector's
+  `cosine_distance` via `(cosine_similarity + 1) / 2`; results sort by
+  relevance descending with candidate UUID ascending as the stable,
+  non-PII tie-break. `CandidateIdentity` is never queried anywhere in
+  `meyar.search` (regression-tested: identical profiles/embeddings with
+  wildly different identity content produce identical rank/relevance).
+  `CANDIDATE_SEARCH_EXECUTED` audit events carry only mode/counts/
+  policy/embedding-config metadata plus a query SHA-256 — never raw
+  query text, identity, CV text, or vector values. No new schema/
+  migration — Slice 8 reads existing Slice 4/7 tables via two new
+  read-only repository queries. New CLI command `meyar
+  search-candidates --tenant-id --request-file <path>` (a JSON
+  `CandidateSearchRequest`, no natural-language input), PII-safe output
+  (candidate_id/rank/scores only). A small, explicitly documented Slice
+  7 hardening: `OllamaEmbeddingProvider.embed` now also rejects an
+  all-zero (zero-norm) vector, since cosine similarity is undefined for
+  one and a genuine embedding of non-empty text is never all-zero. See
+  D-015, `docs/DECISIONS.md`, for the exact ranking policy.
 
 ## Tests
-177/177 passing (127 prior + 50 new, Slice 7 — includes the serializer/
-source-hash provenance-safety regression tests added in the pre-merge
-acceptance-audit fix). Deterministic policy unit tests
+231/231 passing (177 prior + 54 Slice 8 — 17 structured + 17 semantic +
+10 hybrid + 1 zero-norm-vector hardening regression on
+`OllamaEmbeddingProvider` + 9 post-acceptance-audit provenance/source-
+hash-freshness regressions, `test_search_semantic_provenance.py`, see
+D-015's correction note). Deterministic policy unit tests
 (no DB, no LLM — `test_evaluation_policy.py`): skill match/absent-is-
 unknown/case-normalization/Java-never-equals-JavaScript/alias
 normalization, certification match/absent, education match/unsupported,
@@ -176,7 +228,77 @@ text/PII, plus direct
 missing/NaN/non-numeric vector rejected, non-200 and connect-error and
 timeout handled. CLI — `extract-identity` PII-safe happy path and
 not-found case, `embed-candidate` happy-path-then-reused (provider
-called once) and no-profile exit code 2.
+called once) and no-profile exit code 2. Plus one Slice 8 hardening
+regression added to this file: `OllamaEmbeddingProvider` rejects an
+all-zero (zero-norm) embedding vector.
+
+Slice 8 (`test_search_structured.py` 17, `test_search_semantic.py` 17,
+`test_search_hybrid.py` 10 — 44 tests, all against real pgvector, no
+mocked vector distance): structured — no-filter bounded result, required
+skill match/non-match/multiple-required-all-must-match, preferred skill
+score affecting rank, certification/language/education filters,
+experience-threshold filter, `as_of_date`-deterministic "present"
+employment (repeated identical search same result), missing `as_of_date`
+rejected when an experience filter is set, protected/sensitive term
+rejected in both filter values and semantic query, current-profile-only
+search (stale v1 skill no longer matches after v2 supersedes it,
+result correctly references v2), `STRUCTURED_ONLY` never invokes the
+embedding provider (proven with a provider configured to raise if
+called), stable candidate-UUID tie-break, tenant isolation. Semantic —
+cosine-similarity ranking order, score normalization bounded [0,1],
+top-N limit, stale-profile embedding excluded then re-included once a
+compatible v2 embedding exists, incompatible provider/model/model-
+revision/serializer/dimension each independently excluded (never mixed
+into one ranking), candidate with no compatible embedding excluded,
+invalid query-vector dimension rejected, zero-norm query vector
+rejected, provider error propagates safely, tenant isolation, vector
+values never present in the response, raw query text never present in
+the audit event (only a SHA-256), embedding-provider/config mismatch
+rejected. Hybrid — the two merge-critical regressions:
+**hard-constraint gate never bypassed by semantic similarity** (a
+candidate failing a required skill with near-perfect semantic similarity
+is excluded entirely; the passing, lower-similarity candidate is
+returned) and **no premature semantic top-k** (a candidate with a lower
+semantic score but a perfect preferred-structured score correctly
+outranks a candidate with a near-perfect semantic score under
+structured-favoring weights, even with `limit=1`); plus preferred-score-
+affects-rank, weights-must-sum-to-1.0 validation, the exact deterministic
+weighted-sum formula reproduced from returned scores, candidate lacking
+a compatible embedding excluded from hybrid, stable tie-break, repeated-
+identical-search determinism, **`CandidateIdentity` proven not to affect
+rank/relevance** (two candidates with identical profiles/embeddings but
+wildly different identity content produce identical results), and
+explanation components (matched required/preferred filter labels)
+proven to match the actual score calculation.
+
+Post-acceptance-audit correction (`test_search_semantic_provenance.py`,
+9 tests — see D-015's correction note): an independent acceptance audit
+of the initial Slice 8 implementation reproduced two defects before
+merge, both fixed on this same branch/PR. (1) The service validated
+only the `EmbeddingProvider` object's declared static attributes
+against `embedding_config`, never the actual `EmbeddingResult`'s own
+provider/model_name/model_revision — fixed, and regression-tested with
+a provider whose declared attributes match config but whose `.embed()`
+result claims a different provider/model/revision (same dimensions),
+each independently rejected as `EMBEDDING_RESULT_PROVENANCE_MISMATCH`;
+a matching-provenance case is also tested to prove the fix isn't
+over-strict. Two non-finite (NaN/±Inf) query-vector regressions prove
+the search boundary itself validates the vector, not just
+`OllamaEmbeddingProvider`. (2) `search_compatible_embeddings` selected
+among multiple same-profile/same-config embedding rows (differing only
+by `source_sha256`, a state Slice 7 explicitly allows) by arbitrary/
+unordered SQL row-return order rather than by the current canonical
+serialization — independently proven (during the audit) to flip between
+the current and a stale embedding purely by reversing insertion order.
+Fixed by recomputing each eligible candidate's current canonical
+`source_sha256` at search time and requiring an exact
+`(candidate_profile_version_id, source_sha256)` match; regression-tested
+for insertion-order independence (both orders select only the current
+hash, identical scores), the current hash being entirely absent
+(candidate excluded, never falls back to a stale hash), and three
+coexisting historical hashes (only the current one participates, the
+candidate appears exactly once).
+`uv run ruff check .` and `uv run mypy src` are clean (95 source files).
 
 ## Live synthetic smoke
 **PASS.** Per Slice 5 spec §25, no live Ollama call required (Slice 4
@@ -194,10 +316,10 @@ Evaluation's persisted `candidate_profile_version_id`/
 `job_criteria_version_id` verified to equal the exact input versions.
 
 ## In progress
-Slice 7 PR (`feat/candidate-identity-vector-index` → `main`, closes
-issue #8) is open and awaiting owner review/merge. Governance PR #1
-merged (`16929fd`, M0 closed); Slice 6 PR #7 merged (`55fef2d`, M1
-closed).
+Slice 8 PR (`feat/hybrid-candidate-search` → `main`, closes issue #10)
+is open and awaiting owner review/merge. Governance PR #1 merged
+(`16929fd`, M0 closed); Slice 6 PR #7 merged (`55fef2d`, M1 closed);
+Slice 7 PR #9 merged (`24b1d67`, issue #8 closed).
 
 ## Blockers
 None blocking. Same open items as before (D-001 Mac benchmark pending —
@@ -211,12 +333,11 @@ pending, migration keeps full history when it arrives.
 1. **Git Infrastructure** — remote connected (`a-r3/meyar`, private,
    temporary — D-012); governance merged (`16929fd`). May later migrate
    to an official bank-owned remote (history preserved).
-2. **Slice 7 — Candidate Identity + Local Embeddings / Vector Index**
-   (see `docs/MVP_PLAN.md`, D-014), associated with **M2 — Candidate
-   Search Intelligence**: implemented on
-   `feat/candidate-identity-vector-index`, PR open, **awaiting owner
-   review/merge** — not yet started: Slice 8 (hybrid structured +
-   semantic search), Slice 9 (natural-language `SearchPlan`).
+2. **Slice 8 — Hybrid Candidate Search** (see `docs/MVP_PLAN.md`,
+   D-015), associated with **M2 — Candidate Search Intelligence**:
+   implemented on `feat/hybrid-candidate-search`, PR open, **awaiting
+   owner review/merge** — not yet started: Slice 9 (natural-language
+   `SearchPlan` → this slice's `CandidateSearchRequest`).
 
 The previously planned "Slice 6 — External Async Evaluation API" is
 CANCELLED (superseded by D-011) — it is not what "Slice 6" now refers to.
@@ -230,7 +351,7 @@ due date because the official timeline has not been supplied.
 |---|---|---|
 | M0 — Project Foundation & Governance | R0 + Git Infrastructure | CLOSED — merged `16929fd`, issue #2 closed |
 | M1 — CV Ingestion & Candidate Library | Slice 6 | CLOSED — merged `55fef2d` (PR #7), issue #6 closed |
-| M2 — Candidate Search Intelligence | Slices 7–9 | IN REVIEW — issue #8 / PR open on `feat/candidate-identity-vector-index` |
+| M2 — Candidate Search Intelligence | Slices 7–9 | IN REVIEW — Slice 7 merged (PR #9, issue #8 closed); Slice 8 issue #10 / PR open on `feat/hybrid-candidate-search`; Slice 9 not started |
 | M3 — JD Matching & Ranking | Slice 10 | NOT STARTED |
 | M4 — Internal Product Interface & API | Slices 11–12 | NOT STARTED |
 | M5 — Security, Target-Mac Validation & MVP Acceptance | Slice 13 + target-Mac benchmark | NOT STARTED |
@@ -254,14 +375,14 @@ no code yet.
 | Candidate DB | DONE | `Candidate`, `CandidateDocument`, `CandidateProfileVersion`, `CandidateIdentityVersion` (Slice 7, D-014) | — | 3, 4, 7 |
 | Original file reference | DONE | Opaque storage id + `DocumentStorage` abstraction (Slice 3) | Authorized UI access to original CV | 11 |
 | Local CV folder migration/indexing | DONE | Symlink-safe recursive scanner, SHA-256 content-hash incremental/idempotent indexing, existing ingestion pipeline reused, tombstone-not-delete on removal (Slice 6, D-013) | — | 6 |
-| Local embeddings / vector storage | DONE | Local `EmbeddingProvider`/`OllamaEmbeddingProvider` (loopback-enforced), pgvector-backed `CandidateEmbeddingVersion` with version/provenance, idempotent, dimension-agnostic column (Slice 7, D-014) | Slice 8 owns actual retrieval/query | 7 |
+| Local embeddings / vector storage | DONE | Local `EmbeddingProvider`/`OllamaEmbeddingProvider` (loopback-enforced), pgvector-backed `CandidateEmbeddingVersion` with version/provenance, idempotent, dimension-agnostic column (Slice 7, D-014) | — | 7 |
 | Access control | DONE | API-key auth, scopes, tenant isolation (Slice 1) | Extend scopes as new endpoints ship | ongoing |
 | JD matching | DONE | Deterministic per-criterion evaluation (Slice 5) | — | 5 |
 | 0–100 scoring | NOT STARTED | Fit-band algorithm exists (D-010), no numeric score | Numeric formula on top of existing engine | 10 |
 | Batch scoring / ranking | NOT STARTED | Evaluation engine is per-candidate today | Batch-ranking endpoint reusing engine | 10 |
-| Structured search | NOT STARTED | — | Filter-based search over `CandidateProfile` | 8 |
-| Semantic search | NOT STARTED | Storage foundation done (Slice 7) — no retrieval yet | Slice 8 hybrid/semantic retrieval on top of Slice 7 storage | 8 |
-| Explanations | DONE (for evaluation) | Evidence carried through every criterion result (Slice 5) | Extend to search results | 8 |
+| Structured search | DONE | Deterministic required/preferred filters (skills/certifications/languages/education/min experience) over the current `CandidateProfileVersion`, reusing Slice 5 normalization (Slice 8, D-015) | — | 8 |
+| Semantic search | DONE | Local query embedding + pgvector `cosine_distance` retrieval over current, exactly-compatible `CandidateEmbeddingVersion` rows only; stale/incompatible embeddings excluded (Slice 8, D-015) | — | 8 |
+| Explanations | DONE | Evidence carried through every criterion result (Slice 5); Slice 8 search results carry matched-filter labels + relevance/structured/semantic scores (no raw CV text) | — | 5, 8 |
 | REST API | PARTIAL | Jobs/candidates/health routes live; extraction+evaluation are service+CLI only | Add internal HTTP routes as UI needs them | 11, 12 |
 | Swagger / OpenAPI | PARTIAL | FastAPI auto-generates it; not yet reviewed/finalized as a deliverable | Review + README examples | 12 |
 | Auth | DONE | API-key + scopes (Slice 1) | — | 1 |
@@ -272,10 +393,9 @@ no code yet.
 | Data-protection / backup description | PARTIAL | Retention/deletion documented (SECURITY_PRIVACY.md); no backup policy written | Document backup approach | 13 |
 | Git branch / PR workflow | PARTIAL | Remote connected (`a-r3/meyar`, private), CI + hooks + PR template merged (`16929fd`, D-012) | Migrate to official bank remote when supplied | Git Infrastructure |
 
-**Official numbered task matrix — 28 items.** Summary: 14 DONE, 5 PARTIAL,
-9 NOT STARTED (28 items). Multilingual AZ/RU/EN CV fixtures and extraction
+**Official numbered task matrix — 28 items.** Summary: 16 DONE, 5 PARTIAL,
+7 NOT STARTED (28 items). Multilingual AZ/RU/EN CV fixtures and extraction
 tests remain future work; no current evidence is claimed. Highest-priority
-gap: semantic/hybrid search retrieval (Slice 8, storage foundation already
-DONE), then 0–100 numeric scoring (Slice 10). Git/PR infrastructure is
-PARTIAL only because the remote is still a personal/temporary one, not
-blocking.
+gap: 0–100 numeric JD scoring (Slice 10) — structured + semantic + hybrid
+search is now DONE (Slice 8). Git/PR infrastructure is PARTIAL only
+because the remote is still a personal/temporary one, not blocking.

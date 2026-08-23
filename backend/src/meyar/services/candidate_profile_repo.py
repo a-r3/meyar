@@ -99,3 +99,32 @@ async def get_profile_version(
         )
     )
     return result.scalar_one_or_none()
+
+
+async def list_current_profile_versions_for_tenant(
+    db: AsyncSession, *, tenant_id: uuid.UUID
+) -> list[CandidateProfileVersion]:
+    """Returns exactly one row per candidate that has at least one profile
+    version: their CURRENT CandidateProfileVersion (max version_number) —
+    never a superseded/historical version. Used by Slice 8 structured
+    search as the tenant-scoped "searchable professional state" set; a
+    candidate with no profile version at all is simply absent, not an
+    error. See docs/DECISIONS.md (search reads current profiles only)."""
+    latest = (
+        select(
+            CandidateProfileVersion.candidate_id,
+            func.max(CandidateProfileVersion.version_number).label("max_version"),
+        )
+        .where(CandidateProfileVersion.tenant_id == tenant_id)
+        .group_by(CandidateProfileVersion.candidate_id)
+        .subquery()
+    )
+    result = await db.execute(
+        select(CandidateProfileVersion).join(
+            latest,
+            (CandidateProfileVersion.candidate_id == latest.c.candidate_id)
+            & (CandidateProfileVersion.version_number == latest.c.max_version),
+        )
+        .where(CandidateProfileVersion.tenant_id == tenant_id)
+    )
+    return list(result.scalars().all())

@@ -15,6 +15,8 @@ from meyar.extraction.service import ExtractionPreconditionError, extract_candid
 from meyar.ingestion.dependency import get_document_parser
 from meyar.ingestion.folder_scanner import InvalidSourceRootError
 from meyar.llm.dependency import get_llm_provider
+from meyar.search.schemas import CandidateSearchRequest, SearchMode
+from meyar.search.service import SearchRequestError, search_candidates
 from meyar.services.api_key_repo import create_api_key
 from meyar.services.audit_repo import record_event
 from meyar.services.candidate_document_repo import get_candidate_document
@@ -258,6 +260,60 @@ async def _embed_candidate(tenant_id: str, candidate_id: str) -> None:
     print(f"Reused existing embedding: {was_reused}")
 
 
+async def _search_candidates(tenant_id: str, request_file: str) -> None:
+    """CLI demonstration of Slice 8 structured/semantic/hybrid search — no
+    natural-language input (Slice 9). Reads a strict CandidateSearchRequest
+    from a JSON file. PII-safe output only: candidate_id, rank, scores,
+    professional match summary — never identity, vectors, or raw CV text.
+    STRUCTURED_ONLY never constructs a real embedding-provider HTTP client.
+    Exit codes: 0 = ran (possibly zero results), 2 = invalid request/config,
+    3 = embedding provider failure, 4 = other infrastructure failure."""
+    from pydantic import ValidationError
+
+    try:
+        with open(request_file, encoding="utf-8") as fh:
+            raw = fh.read()
+        request = CandidateSearchRequest.model_validate_json(raw)
+    except (OSError, ValidationError) as exc:
+        print(f"Invalid search request: {exc}")
+        raise SystemExit(2) from exc
+
+    embedding_provider = None
+    if request.mode != SearchMode.STRUCTURED_ONLY:
+        embedding_provider = get_embedding_provider()
+
+    factory = get_session_factory()
+    try:
+        async with factory() as db:
+            response = await search_candidates(
+                db,
+                tenant_id=uuid.UUID(tenant_id),
+                request=request,
+                embedding_provider=embedding_provider,
+            )
+            await db.commit()
+    except SearchRequestError as exc:
+        print(f"Search request rejected: {exc.code} — {exc}")
+        raise SystemExit(2) from exc
+    except EmbeddingProviderError as exc:
+        print(f"Embedding provider failed: {exc.code}")
+        raise SystemExit(3) from exc
+
+    print(f"Mode: {response.mode.value}")
+    print(f"Policy version: {response.policy_version}")
+    print(f"Eligible candidates: {response.eligible_profile_count}")
+    if request.mode != SearchMode.STRUCTURED_ONLY:
+        print(f"Compatible embeddings: {response.compatible_embedding_count}")
+        print(f"Excluded (missing embedding): {response.excluded_missing_embedding_count}")
+    print(f"Results ({response.result_count}):")
+    for result in response.results:
+        print(
+            f"  #{result.rank} candidate={result.candidate_id} "
+            f"relevance={result.relevance_score:.4f} "
+            f"structured={result.structured_score} semantic={result.semantic_score}"
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="meyar")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -304,6 +360,18 @@ def main() -> None:
     embed_candidate_parser.add_argument("--tenant-id", required=True)
     embed_candidate_parser.add_argument("--candidate-id", required=True)
 
+    search_candidates_parser = sub.add_parser(
+        "search-candidates",
+        help=(
+            "Structured/semantic/hybrid candidate search (Slice 8) — "
+            "no natural-language input."
+        ),
+    )
+    search_candidates_parser.add_argument("--tenant-id", required=True)
+    search_candidates_parser.add_argument(
+        "--request-file", required=True, help="Path to a JSON CandidateSearchRequest file."
+    )
+
     args = parser.parse_args()
     if args.command == "create-tenant":
         asyncio.run(_create_tenant(args.name))
@@ -317,6 +385,8 @@ def main() -> None:
         asyncio.run(_extract_identity(args.tenant_id, args.candidate_id, args.document_id))
     elif args.command == "embed-candidate":
         asyncio.run(_embed_candidate(args.tenant_id, args.candidate_id))
+    elif args.command == "search-candidates":
+        asyncio.run(_search_candidates(args.tenant_id, args.request_file))
 
 
 if __name__ == "__main__":
