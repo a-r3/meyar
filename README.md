@@ -39,14 +39,21 @@ Implemented and tested:
 - local CV folder scanning/indexing (`meyar index-folder`): symlink-safe
   recursive discovery, SHA-256 content-hash idempotent re-scanning, and
   ingestion through the same secure pipeline as direct upload;
+- `CandidateIdentity` (`meyar extract-identity`): local, evidence-backed
+  extraction of full_name/email/phone into an immutable, versioned table
+  wholly separate from `CandidateProfile` — never read by
+  matching/evaluation/search/embedding;
+- local candidate embeddings + pgvector storage (`meyar embed-candidate`):
+  a local `EmbeddingProvider` abstraction, deterministic professional-only
+  serialization (identity excluded by construction), idempotent
+  version-traceable persistence with correct current/stale semantics —
+  retrieval itself is Slice 8;
 - synthetic-only automated tests and repository governance.
 
 Planned or in progress:
 
-- **Next: Slice 7** — `CandidateIdentity`, local embeddings, and
-  pgvector-backed storage;
-- structured/semantic hybrid search and a validated natural-language search
-  planner;
+- **Next: Slice 8** — structured/semantic hybrid search and a validated
+  natural-language search planner (Slice 9);
 - deterministic 0–100 JD scoring and batch candidate ranking;
 - internal Chat/Search and CV Library user interfaces;
 - finalized internal API/Swagger examples and full security acceptance.
@@ -202,14 +209,17 @@ updated `backend/uv.lock` when applicable.
 
 ## Known current limitations
 
-- No local embeddings, pgvector search, hybrid search, or natural-language
-  search planner exists yet.
+- Local embeddings + pgvector storage exist (Slice 7); actual hybrid/
+  semantic search retrieval and a natural-language search planner do not
+  yet exist (Slice 8–9).
 - No deterministic 0–100 score, batch ranking, Chat UI, or CV Library UI
   exists yet.
 - OCR fallback for scanned PDFs is not implemented.
-- `CandidateIdentity` is not implemented.
-- Profile extraction and evaluation are service/CLI flows, not finalized HTTP
-  endpoints.
+- The configured embedding model is a development/integration default
+  (`DEV_INTEGRATION_MODEL`), not an approved final production model —
+  approval is blocked on the target Mac Mini benchmark.
+- Profile/identity extraction and evaluation are service/CLI flows, not
+  finalized HTTP endpoints.
 - Application-layer encryption at rest is not implemented; real production
   candidate data requires the approved protected storage environment.
 - Server-side branch protection is unavailable on the current private

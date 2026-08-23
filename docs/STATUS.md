@@ -1,18 +1,20 @@
 # MEYAR — Status
 
 ## Current phase
-**Slice 6 — Local CV Library & Folder Indexer.** Governance PR #1
-(`chore/git-governance`) merged into `main` at `16929fd`; milestone
-**M0 — Project Foundation & Governance is CLOSED** (issue #2 closed,
-zero open M0 work). Slice 6 is implemented on `feat/cv-folder-indexing`
-and its PR is open for review — **not yet merged.**
+**Slice 7 — Candidate Identity + Local Embeddings / Vector Index.**
+Governance PR #1 merged at `16929fd` (**M0 CLOSED**); Slice 6 PR #7
+merged at `55fef2d` (**M1 — CV Ingestion & Candidate Library is
+CLOSED**, issue #6 closed). Slice 7 is implemented on
+`feat/candidate-identity-vector-index` and its PR is open for review —
+**not yet merged.**
 
 GitHub remote established (`https://github.com/a-r3/meyar.git`, private,
 temporary development remote — see D-012, `docs/DECISIONS.md`). `main`
-bootstrap-pushed at `f8ac183`, then governance-merged at `16929fd`. The
-same governance PR included the required root onboarding README and
-weekly low-noise Dependabot configuration for backend `uv` and
-GitHub Actions dependencies; dependency auto-merge remains disabled.
+bootstrap-pushed at `f8ac183`, then governance-merged at `16929fd`, then
+Slice-6-merged at `55fef2d`. The governance PR included the required
+root onboarding README and weekly low-noise Dependabot configuration for
+backend `uv` and GitHub Actions dependencies; dependency auto-merge
+remains disabled.
 
 ## Completed
 - Preflight, fast docs pass, Claude Code harness.
@@ -48,31 +50,66 @@ GitHub Actions dependencies; dependency auto-merge remains disabled.
   branding removed from tracked docs; startup-protocol path checks made
   environment-neutral (`git rev-parse --show-toplevel`, no hard-coded
   absolute path). Issue #2 closed, milestone M0 closed.
-- Slice 6 (Local CV Library & Folder Indexer) — on `feat/cv-folder-indexing`,
-  associated with **M1 — CV Ingestion & Candidate Library**, closes
-  issue #6. New `FolderSource`/`FolderIndexedFile` models (Alembic
-  migration `bd1b929cd874`), a symlink-safe recursive scanner
-  (`meyar.ingestion.folder_scanner`), and an orchestration service
-  (`meyar.services.folder_indexer_service.index_folder`) that reuses the
-  existing secure ingestion pipeline unchanged — that pipeline itself was
-  extracted into `meyar.services.candidate_document_service
-  .ingest_candidate_document` so the direct-upload API route and the
-  folder indexer share exactly one code path (no parallel ingestion
-  architecture). SHA-256 content hash (never mtime) drives
-  NEW/CHANGED/UNCHANGED/retry classification; re-scanning an unchanged
-  folder creates zero duplicate Candidate/CandidateDocument/index rows
-  (dedicated regression test); a changed file creates a new immutable
-  CandidateDocument version under the same Candidate identity; a removed
-  file is tombstoned (`MISSING`), never hard-deleted; a malformed file
-  never aborts the rest of a scan; a previously FAILED file is retried on
-  the next scan when unchanged. New CLI command `meyar index-folder
-  --tenant-id --root` (distinct exit codes: 0 clean, 1 completed-with-
-  failures, 2 invalid source, 3 infra/DB failure), PII-safe output
-  (counts/ids only). See D-013, `docs/DECISIONS.md`, for the exact
-  removed/changed/retry/parse-failure semantics chosen.
+- Slice 6 (Local CV Library & Folder Indexer) — merged as `55fef2d`
+  (PR #7), associated with **M1 — CV Ingestion & Candidate Library**
+  (now CLOSED), closed issue #6. New `FolderSource`/`FolderIndexedFile`
+  models (Alembic migration `bd1b929cd874`), a symlink-safe recursive
+  scanner (`meyar.ingestion.folder_scanner`), and an orchestration
+  service (`meyar.services.folder_indexer_service.index_folder`) that
+  reuses the existing secure ingestion pipeline unchanged — that
+  pipeline itself was extracted into `meyar.services
+  .candidate_document_service.ingest_candidate_document` so the
+  direct-upload API route and the folder indexer share exactly one code
+  path (no parallel ingestion architecture). SHA-256 content hash (never
+  mtime) drives NEW/CHANGED/UNCHANGED/retry classification; re-scanning
+  an unchanged folder creates zero duplicate Candidate/CandidateDocument/
+  index rows (dedicated regression test); a changed file creates a new
+  immutable CandidateDocument version under the same Candidate identity;
+  a removed file is tombstoned (`MISSING`), never hard-deleted; a
+  malformed file never aborts the rest of a scan; a previously FAILED
+  file is retried on the next scan when unchanged. New CLI command
+  `meyar index-folder --tenant-id --root` (distinct exit codes: 0 clean,
+  1 completed-with-failures, 2 invalid source, 3 infra/DB failure),
+  PII-safe output (counts/ids only). See D-013, `docs/DECISIONS.md`, for
+  the exact removed/changed/retry/parse-failure semantics chosen.
+- Slice 7 (Candidate Identity + Local Embeddings / Vector Index) — on
+  `feat/candidate-identity-vector-index`, associated with **M2 —
+  Candidate Search Intelligence**, closes issue #8. Two independent new
+  flows: (1) `CandidateIdentityVersion` — an immutable, versioned,
+  evidence-backed local extraction of full_name/email/phone
+  (`meyar.extraction.identity_service`), wholly separate from
+  `CandidateProfile` and read by no matching/evaluation/search/embedding
+  code path; uses a new unredacted `build_identity_document_view`
+  (Slice 4's professional view stays redacted) and its own
+  `extra="forbid"` schema. (2) `CandidateEmbeddingVersion` — a local,
+  pgvector-persisted embedding of deterministic `CandidateProfile`
+  content only (`meyar.embedding.serializer
+  .build_professional_embedding_text`, fixed field order, no evidence
+  quotes, identity structurally unreachable), generated through a new
+  `EmbeddingProvider` abstraction (`meyar.embedding.provider`) with a
+  local-only `OllamaEmbeddingProvider` (loopback-enforced, shared
+  `meyar.llm.loopback.require_loopback_url` helper) and a
+  `DEV_INTEGRATION_MODEL` default (`nomic-embed-text` — not an approved
+  production model). Idempotent by (profile version, provider, model,
+  revision, serializer version, source hash) with a DB unique-constraint
+  backstop — a serializer or source-text change never silently reuses
+  an older vector; "current" is derived
+  from the candidate's current `CandidateProfileVersion`, never a
+  fragile flag, so a superseded profile's embedding is correctly STALE;
+  a changed profile creates a new embedding without destroying prior
+  history; a dimension-agnostic `vector()` column avoids locking in an
+  unapproved production dimension. PostgreSQL switched to
+  `pgvector/pgvector:pg16` (dev container recreated, volume preserved;
+  CI image updated) — Alembic migration `7aae8da26969` enables the
+  extension and creates both tables. New CLI commands `meyar
+  extract-identity` (PII-safe output) and `meyar embed-candidate`
+  (reused/idempotent reporting, never prints the vector). See D-014,
+  `docs/DECISIONS.md`, for the exact semantics chosen.
 
 ## Tests
-127/127 passing (105 prior + 22 new, Slice 6). Deterministic policy unit tests
+177/177 passing (127 prior + 50 new, Slice 7 — includes the serializer/
+source-hash provenance-safety regression tests added in the pre-merge
+acceptance-audit fix). Deterministic policy unit tests
 (no DB, no LLM — `test_evaluation_policy.py`): skill match/absent-is-
 unknown/case-normalization/Java-never-equals-JavaScript/alias
 normalization, certification match/absent, education match/unsupported,
@@ -110,6 +147,37 @@ scanned by two tenants never shares rows), PII-safe audit metadata, and
 CLI happy-path/invalid-root/exit-code-on-failure with no filename in
 output.
 
+Slice 7 (`test_candidate_identity.py`, `test_candidate_embedding.py`,
+`test_identity_embedding_cli.py`, 50 tests): identity — full_name/email/
+phone extraction with real evidence verification, missing field stays
+null, strict extra-field rejection, invalid/mismatched evidence
+rejected, fabricated-quote rejected, bounded retry (fail-then-succeed
+and fail-twice), provider unavailable/timeout handled safely,
+re-extraction creates v2 and leaves v1 immutable, tenant isolation,
+audit metadata and logs contain no PII, identity view proven unredacted
+vs. the professional view proven redacted for the same document.
+Embedding — serializer determinism (same content → same text → same
+SHA-256) and identity exclusion, first-embed creates a record, identical
+rerun is idempotent (provider called exactly once across two calls),
+reuse/uniqueness identity independently proven to require all seven
+provenance fields — a serializer-version bump, a same-hash-different-
+serializer case, and a same-serializer-different-hash case each
+correctly produce a distinct embedding and actually re-invoke the
+provider, never silently reusing a stale vector (the exact scenario an
+acceptance audit reproduced pre-merge — see D-014); DB unique-constraint
+backstop independently proven for both the accept and reject sides, new
+profile version makes the prior embedding provably STALE (absent from
+the current-version lookup) while old history is preserved, different
+model/dimension produces distinct non-mixed provenance, provider error
+persists no row, tenant isolation, audit metadata contains no vector/
+text/PII, plus direct
+`OllamaEmbeddingProvider` HTTP-behavior tests via `httpx.MockTransport`
+(no real Ollama): loopback rejection/acceptance, valid response, empty/
+missing/NaN/non-numeric vector rejected, non-200 and connect-error and
+timeout handled. CLI — `extract-identity` PII-safe happy path and
+not-found case, `embed-candidate` happy-path-then-reused (provider
+called once) and no-profile exit code 2.
+
 ## Live synthetic smoke
 **PASS.** Per Slice 5 spec §25, no live Ollama call required (Slice 4
 already verified that integration) — used a synthetically constructed
@@ -126,26 +194,29 @@ Evaluation's persisted `candidate_profile_version_id`/
 `job_criteria_version_id` verified to equal the exact input versions.
 
 ## In progress
-Slice 6 PR (`feat/cv-folder-indexing` → `main`, closes issue #6) is open
-and awaiting owner review/merge. Governance PR #1 merged (`16929fd`);
-M0 closed.
+Slice 7 PR (`feat/candidate-identity-vector-index` → `main`, closes
+issue #8) is open and awaiting owner review/merge. Governance PR #1
+merged (`16929fd`, M0 closed); Slice 6 PR #7 merged (`55fef2d`, M1
+closed).
 
 ## Blockers
-None blocking. Same open items as before (D-001 Mac benchmark pending,
-Auto Mode script dry-run only, document encryption-at-rest deferred,
-D-009 Ollama upgrade needs root). Git remote is connected but is a
-personal/temporary one (D-012) — official bank-owned remote still
+None blocking. Same open items as before (D-001 Mac benchmark pending —
+now also the blocker for approving a final production embedding model,
+D-014, Auto Mode script dry-run only, document encryption-at-rest
+deferred, D-009 Ollama upgrade needs root). Git remote is connected but
+is a personal/temporary one (D-012) — official bank-owned remote still
 pending, migration keeps full history when it arrives.
 
 ## Next action
 1. **Git Infrastructure** — remote connected (`a-r3/meyar`, private,
    temporary — D-012); governance merged (`16929fd`). May later migrate
    to an official bank-owned remote (history preserved).
-2. **Slice 6 — Local CV Library & Folder Indexer** (see
-   `docs/MVP_PLAN.md`, D-013), associated with **M1 — CV Ingestion &
-   Candidate Library**: implemented on `feat/cv-folder-indexing`, PR
-   open, **awaiting owner review/merge** — not yet started: Slice 7
-   (CandidateIdentity, local embeddings/pgvector).
+2. **Slice 7 — Candidate Identity + Local Embeddings / Vector Index**
+   (see `docs/MVP_PLAN.md`, D-014), associated with **M2 — Candidate
+   Search Intelligence**: implemented on
+   `feat/candidate-identity-vector-index`, PR open, **awaiting owner
+   review/merge** — not yet started: Slice 8 (hybrid structured +
+   semantic search), Slice 9 (natural-language `SearchPlan`).
 
 The previously planned "Slice 6 — External Async Evaluation API" is
 CANCELLED (superseded by D-011) — it is not what "Slice 6" now refers to.
@@ -158,8 +229,8 @@ due date because the official timeline has not been supplied.
 | Milestone | Slice mapping | Current status |
 |---|---|---|
 | M0 — Project Foundation & Governance | R0 + Git Infrastructure | CLOSED — merged `16929fd`, issue #2 closed |
-| M1 — CV Ingestion & Candidate Library | Slice 6 | IN REVIEW — issue #6 / PR open on `feat/cv-folder-indexing` |
-| M2 — Candidate Search Intelligence | Slices 7–9 | NOT STARTED |
+| M1 — CV Ingestion & Candidate Library | Slice 6 | CLOSED — merged `55fef2d` (PR #7), issue #6 closed |
+| M2 — Candidate Search Intelligence | Slices 7–9 | IN REVIEW — issue #8 / PR open on `feat/candidate-identity-vector-index` |
 | M3 — JD Matching & Ranking | Slice 10 | NOT STARTED |
 | M4 — Internal Product Interface & API | Slices 11–12 | NOT STARTED |
 | M5 — Security, Target-Mac Validation & MVP Acceptance | Slice 13 + target-Mac benchmark | NOT STARTED |
@@ -177,19 +248,19 @@ no code yet.
 | DOCX parsing | DONE | `python-docx`-based parsing (Slice 3) | — | 3 |
 | Scanned PDF detection / OCR | NOT STARTED | Digital-PDF-only parsing (D-007) | Local OCR fallback | future |
 | Multilingual CV tests | NOT STARTED | No tracked Azerbaijani/Cyrillic synthetic CV tests currently prove this requirement | Add genuine AZ/RU/EN synthetic fixtures and extraction tests | future |
-| Structured extraction | DONE | `CandidateProfileExtraction` schema, Slice 4 | Add `CandidateIdentity` fields | 7 |
-| Strict JSON validation | DONE | Pydantic v2, `extra="forbid"`, bounded retry (Slice 4) | — | 4 |
+| Structured extraction | DONE | `CandidateProfileExtraction` schema (Slice 4); `CandidateIdentityExtraction` (full_name/email/phone, separate schema, Slice 7) | — | 4, 7 |
+| Strict JSON validation | DONE | Pydantic v2, `extra="forbid"`, bounded retry (Slice 4, and Slice 7 identity) | — | 4, 7 |
 | Uncertainty handling | DONE | `UNKNOWN` never auto-downgraded (D-010), Slice 5 | — | 5 |
-| Candidate DB | DONE | `Candidate`, `CandidateDocument`, `CandidateProfileVersion` | Add `CandidateIdentity` | 7 |
+| Candidate DB | DONE | `Candidate`, `CandidateDocument`, `CandidateProfileVersion`, `CandidateIdentityVersion` (Slice 7, D-014) | — | 3, 4, 7 |
 | Original file reference | DONE | Opaque storage id + `DocumentStorage` abstraction (Slice 3) | Authorized UI access to original CV | 11 |
 | Local CV folder migration/indexing | DONE | Symlink-safe recursive scanner, SHA-256 content-hash incremental/idempotent indexing, existing ingestion pipeline reused, tombstone-not-delete on removal (Slice 6, D-013) | — | 6 |
-| Local embeddings / vector storage | NOT STARTED | — | Local embedding provider + pgvector | 7 |
+| Local embeddings / vector storage | DONE | Local `EmbeddingProvider`/`OllamaEmbeddingProvider` (loopback-enforced), pgvector-backed `CandidateEmbeddingVersion` with version/provenance, idempotent, dimension-agnostic column (Slice 7, D-014) | Slice 8 owns actual retrieval/query | 7 |
 | Access control | DONE | API-key auth, scopes, tenant isolation (Slice 1) | Extend scopes as new endpoints ship | ongoing |
 | JD matching | DONE | Deterministic per-criterion evaluation (Slice 5) | — | 5 |
 | 0–100 scoring | NOT STARTED | Fit-band algorithm exists (D-010), no numeric score | Numeric formula on top of existing engine | 10 |
 | Batch scoring / ranking | NOT STARTED | Evaluation engine is per-candidate today | Batch-ranking endpoint reusing engine | 10 |
 | Structured search | NOT STARTED | — | Filter-based search over `CandidateProfile` | 8 |
-| Semantic search | NOT STARTED | — | Local embeddings + pgvector retrieval | 7, 8 |
+| Semantic search | NOT STARTED | Storage foundation done (Slice 7) — no retrieval yet | Slice 8 hybrid/semantic retrieval on top of Slice 7 storage | 8 |
 | Explanations | DONE (for evaluation) | Evidence carried through every criterion result (Slice 5) | Extend to search results | 8 |
 | REST API | PARTIAL | Jobs/candidates/health routes live; extraction+evaluation are service+CLI only | Add internal HTTP routes as UI needs them | 11, 12 |
 | Swagger / OpenAPI | PARTIAL | FastAPI auto-generates it; not yet reviewed/finalized as a deliverable | Review + README examples | 12 |
@@ -201,9 +272,10 @@ no code yet.
 | Data-protection / backup description | PARTIAL | Retention/deletion documented (SECURITY_PRIVACY.md); no backup policy written | Document backup approach | 13 |
 | Git branch / PR workflow | PARTIAL | Remote connected (`a-r3/meyar`, private), CI + hooks + PR template merged (`16929fd`, D-012) | Migrate to official bank remote when supplied | Git Infrastructure |
 
-**Official numbered task matrix — 28 items.** Summary: 13 DONE, 5 PARTIAL,
-10 NOT STARTED (28 items). Multilingual AZ/RU/EN CV fixtures and extraction
+**Official numbered task matrix — 28 items.** Summary: 14 DONE, 5 PARTIAL,
+9 NOT STARTED (28 items). Multilingual AZ/RU/EN CV fixtures and extraction
 tests remain future work; no current evidence is claimed. Highest-priority
-gap: local embeddings/semantic search (Slice 7–8), then 0–100 numeric
-scoring (Slice 10). Git/PR infrastructure is PARTIAL only because the
-remote is still a personal/temporary one, not blocking.
+gap: semantic/hybrid search retrieval (Slice 8, storage foundation already
+DONE), then 0–100 numeric scoring (Slice 10). Git/PR infrastructure is
+PARTIAL only because the remote is still a personal/temporary one, not
+blocking.

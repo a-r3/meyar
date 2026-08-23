@@ -1,6 +1,7 @@
 import re
 
 from meyar.extraction.view import ProfessionalDocumentView
+from meyar.schemas.candidate_identity import CandidateIdentityExtraction
 from meyar.schemas.candidate_profile import CandidateProfileExtraction, EvidenceRef
 
 
@@ -63,3 +64,17 @@ def verify_extraction_evidence(
         for item in category:
             for ref in item.evidence:
                 verify_evidence(view, ref)
+
+
+def verify_identity_evidence(
+    view: ProfessionalDocumentView, extraction: CandidateIdentityExtraction
+) -> None:
+    """Same re-verification discipline as verify_extraction_evidence, for
+    the identity schema's three optional fields. view here must be the
+    unredacted view from build_identity_document_view — never the
+    redacted professional one, which would fail every real match."""
+    for field in (extraction.full_name, extraction.email, extraction.phone):
+        if field is None:
+            continue
+        for ref in field.evidence:
+            verify_evidence(view, ref)

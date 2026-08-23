@@ -1,15 +1,15 @@
 import json
-from urllib.parse import urlparse
 
 import httpx
 from pydantic import ValidationError
 
+from meyar.extraction.identity_prompts import IDENTITY_SYSTEM_PROMPT
 from meyar.extraction.prompts import SYSTEM_PROMPT, build_user_prompt
 from meyar.extraction.view import ProfessionalDocumentView
+from meyar.llm.loopback import require_loopback_url
 from meyar.llm.provider import ModelSchemaInvalidError, ModelTimeoutError, ModelUnavailableError
+from meyar.schemas.candidate_identity import CandidateIdentityExtraction
 from meyar.schemas.candidate_profile import CandidateProfileExtraction
-
-_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
 class OllamaLLMProvider:
@@ -19,12 +19,7 @@ class OllamaLLMProvider:
     docs/MASTER_SPEC.md §16 and Slice 4 spec §3."""
 
     def __init__(self, *, base_url: str, model: str, timeout_seconds: float) -> None:
-        if urlparse(base_url).hostname not in _LOOPBACK_HOSTS:
-            raise ValueError(
-                f"MEYAR_OLLAMA_BASE_URL ({base_url}) must be a loopback address "
-                "(127.0.0.1/localhost) — candidate content must never leave this "
-                "machine. See docs/MASTER_SPEC.md §16."
-            )
+        require_loopback_url(base_url, setting_name="MEYAR_OLLAMA_BASE_URL")
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._timeout_seconds = timeout_seconds
@@ -46,12 +41,41 @@ class OllamaLLMProvider:
     async def extract_candidate_profile(
         self, view: ProfessionalDocumentView
     ) -> tuple[CandidateProfileExtraction, str]:
-        schema = CandidateProfileExtraction.model_json_schema()
+        content = await self._chat(
+            system_prompt=SYSTEM_PROMPT,
+            user_prompt=build_user_prompt(view),
+            schema=CandidateProfileExtraction.model_json_schema(),
+        )
+        try:
+            extraction = CandidateProfileExtraction.model_validate(json.loads(content))
+        except (json.JSONDecodeError, ValidationError) as exc:
+            raise ModelSchemaInvalidError(
+                f"Model output failed structured-schema validation: {exc}"
+            ) from exc
+        return extraction, self._model
+
+    async def extract_candidate_identity(
+        self, view: ProfessionalDocumentView
+    ) -> tuple[CandidateIdentityExtraction, str]:
+        content = await self._chat(
+            system_prompt=IDENTITY_SYSTEM_PROMPT,
+            user_prompt=build_user_prompt(view),
+            schema=CandidateIdentityExtraction.model_json_schema(),
+        )
+        try:
+            extraction = CandidateIdentityExtraction.model_validate(json.loads(content))
+        except (json.JSONDecodeError, ValidationError) as exc:
+            raise ModelSchemaInvalidError(
+                f"Model output failed structured-schema validation: {exc}"
+            ) from exc
+        return extraction, self._model
+
+    async def _chat(self, *, system_prompt: str, user_prompt: str, schema: dict) -> str:
         payload = {
             "model": self._model,
             "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": build_user_prompt(view)},
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
             ],
             "format": schema,
             "stream": False,
@@ -70,13 +94,4 @@ class OllamaLLMProvider:
         if resp.status_code != 200:
             raise ModelUnavailableError(f"Ollama returned HTTP {resp.status_code}.")
 
-        content = resp.json().get("message", {}).get("content", "")
-        try:
-            data = json.loads(content)
-            extraction = CandidateProfileExtraction.model_validate(data)
-        except (json.JSONDecodeError, ValidationError) as exc:
-            raise ModelSchemaInvalidError(
-                f"Model output failed structured-schema validation: {exc}"
-            ) from exc
-
-        return extraction, self._model
+        return str(resp.json().get("message", {}).get("content", ""))

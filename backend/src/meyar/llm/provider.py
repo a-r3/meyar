@@ -1,6 +1,7 @@
 from typing import Protocol
 
 from meyar.extraction.view import ProfessionalDocumentView
+from meyar.schemas.candidate_identity import CandidateIdentityExtraction
 from meyar.schemas.candidate_profile import CandidateProfileExtraction
 
 
@@ -32,6 +33,15 @@ class LLMProvider(Protocol):
         Raises ModelUnavailableError / ModelTimeoutError /
         ModelSchemaInvalidError on failure — never returns a partially
         valid result."""
+        ...
+
+    async def extract_candidate_identity(
+        self, view: ProfessionalDocumentView
+    ) -> tuple[CandidateIdentityExtraction, str]:
+        """Same contract as extract_candidate_profile, for the separate
+        identity-only schema. view must come from
+        meyar.extraction.view.build_identity_document_view (unredacted),
+        never the redacted professional view."""
         ...
 
     async def health(self) -> dict:
