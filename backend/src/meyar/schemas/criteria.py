@@ -1,9 +1,10 @@
 import re
-import unicodedata
 from collections.abc import Collection
 from enum import StrEnum
 
 from pydantic import BaseModel, Field, model_validator
+
+from meyar.core.text import normalize_azerbaijani_case
 
 # Heuristic denylist enforcing docs/SECURITY_PRIVACY.md / MASTER_SPEC.md §4:
 # irrelevant/sensitive attributes must never become matching criteria.
@@ -110,14 +111,8 @@ _AZ_PROTECTED_TERM_SUFFIXES: tuple[tuple[str, frozenset[str]], ...] = (
     ("əlillik", _AZ_FRONT_CONSONANT_NOUN_SUFFIXES),
     ("sağlamlıq", _AZ_BACK_CONSONANT_NOUN_SUFFIXES),
 )
-_AZ_CASE_TRANSLATION = str.maketrans("İI", "iı")
-
-
 def _normalize_az_token(token: str) -> str:
-    # Python casefold represents capital dotted İ as ``i`` + combining dot.
-    # Translate Azerbaijani I variants first so token equality stays stable.
-    lowered = unicodedata.normalize("NFC", token).translate(_AZ_CASE_TRANSLATION).casefold()
-    words = re.findall(r"[^\W_]+", unicodedata.normalize("NFC", lowered))
+    words = re.findall(r"[^\W_]+", normalize_azerbaijani_case(token))
     return words[0] if len(words) == 1 else ""
 
 
@@ -128,7 +123,7 @@ def matches_term_or_allowed_az_forms(
     normalized_token = _normalize_az_token(token)
     normalized_root = _normalize_az_token(root)
     return bool(normalized_token) and any(
-        normalized_token == normalized_root + suffix.casefold()
+        normalized_token == normalized_root + normalize_azerbaijani_case(suffix)
         for suffix in allowed_suffixes
     )
 

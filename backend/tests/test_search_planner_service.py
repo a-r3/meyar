@@ -24,7 +24,12 @@ from meyar.search.planner_schemas import (
     PlannerReasonCode,
 )
 from meyar.search.planner_service import plan_and_search_candidates, plan_candidate_search
-from meyar.search.schemas import EmbeddingSearchConfig, RequiredFilters, SearchMode
+from meyar.search.schemas import (
+    EmbeddingSearchConfig,
+    PreferredFilters,
+    RequiredFilters,
+    SearchMode,
+)
 from meyar.services.tenant_repo import create_tenant
 
 AS_OF_DATE = date(2026, 8, 23)
@@ -339,8 +344,53 @@ async def test_required_concept_cannot_execute_as_soft_semantic_ranking(
     assert not called
 
 
-async def test_azerbaijani_required_concept_never_reaches_slice8(
+async def test_uppercase_azerbaijani_mandatory_downgrade_never_reaches_slice8(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tenant = await _tenant(db_session)
+    called = False
+
+    async def forbidden_search(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("downgraded mandatory filter must not search")
+
+    monkeypatch.setattr(planner_service, "search_candidates", forbidden_search)
+    llm = FakeLLMProvider(
+        planner_draft=PlannerDraft(
+            preferred_filters=PreferredFilters(skills=["Java"])
+        )
+    )
+    response = await plan_and_search_candidates(
+        db_session,
+        llm,
+        tenant_id=tenant.id,
+        natural_language_request="JAVA MÜTLƏQDİR!",
+        as_of_date=AS_OF_DATE,
+        embedding_config=_config(),
+    )
+    assert response.plan.outcome == PlannerOutcome.VALIDATION_FAILURE
+    assert PlannerReasonCode.MANDATORY_REQUIREMENT_DOWNGRADED in (
+        response.plan.reason_codes
+    )
+    assert not response.plan.executable
+    assert response.search_response is None
+    assert llm.call_count == 1
+    assert not called
+
+
+@pytest.mark.parametrize(
+    ("natural_language_request", "semantic_query"),
+    [
+        ("Bank AML layihə təcrübəsi mütləqdir.", "Bank AML layihə təcrübəsi"),
+        ("BANK AML LAYİHƏ TƏCRÜBƏSİ MÜTLƏQDİR.", "bank aml layihə təcrübəsi"),
+    ],
+)
+async def test_azerbaijani_required_concept_never_reaches_slice8(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    natural_language_request: str,
+    semantic_query: str,
 ) -> None:
     tenant = await _tenant(db_session)
     called = False
@@ -354,10 +404,10 @@ async def test_azerbaijani_required_concept_never_reaches_slice8(
     response = await plan_and_search_candidates(
         db_session,
         FakeLLMProvider(
-            planner_draft=PlannerDraft(semantic_query="Bank AML layihə təcrübəsi")
+            planner_draft=PlannerDraft(semantic_query=semantic_query)
         ),
         tenant_id=tenant.id,
-        natural_language_request="Bank AML layihə təcrübəsi mütləqdir.",
+        natural_language_request=natural_language_request,
         as_of_date=AS_OF_DATE,
         embedding_config=_config(),
     )

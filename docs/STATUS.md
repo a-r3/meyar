@@ -186,8 +186,8 @@ remains disabled.
   YYYY-MM-DD [--execute]`. No migration/dependency was added. See D-016.
 
 ## Tests
-336/336 passing (231 prior + 91 Slice 9 planner/policy/service/CLI tests +
-14 shared protected-policy morphology regressions).
+353/353 passing (231 prior + 102 Slice 9 planner/policy/service/CLI tests +
+20 shared Azerbaijani normalization/protected-policy regressions).
 Slice 9 coverage includes strict draft parsing, deterministic mode and
 draft-to-request conversion, Azerbaijani/English intent, unsupported semantic
 weakening and custom weighting, explicit Azerbaijani mandatory/protected

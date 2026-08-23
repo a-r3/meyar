@@ -1,6 +1,7 @@
 """Slice 9 deterministic planner policy. Synthetic text only, no DB/LLM."""
 
 import json
+import unicodedata
 from datetime import date
 
 import httpx
@@ -178,10 +179,18 @@ def test_azerbaijani_mandatory_forms_preserve_required_skill(text: str) -> None:
     "text",
     [
         "Java mütləqdir.",
+        "JAVA MÜTLƏQDİR!",
+        "Java MÜTLƏQDİR.",
+        "JAVA mütləqdir!",
+        "JaVa MüTlƏqDİr.",
+        unicodedata.normalize("NFD", "Java MÜTLƏQDİR."),
         "Java mütləqdır.",
         "Java mütləqdur.",
         "Java mütləqdür.",
         "Java tələb edilir.",
+        "JAVA TƏLƏB OLUNUR.",
+        "JAVA TƏLƏB EDİLİR.",
+        "JAVA MÜTLƏQ OLMALIDIR.",
     ],
 )
 def test_azerbaijani_mandatory_forms_cannot_be_downgraded(text: str) -> None:
@@ -218,6 +227,7 @@ def test_azerbaijani_explicit_result_count_is_preserved() -> None:
         ),
         ("English B2 required.", PlannerReasonCode.LANGUAGE_PROFICIENCY_UNSUPPORTED),
         ("İngilis dili B2 mütləqdir.", PlannerReasonCode.LANGUAGE_PROFICIENCY_UNSUPPORTED),
+        ("İNGİLİS DİLİ B2 MÜTLƏQDİR.", PlannerReasonCode.LANGUAGE_PROFICIENCY_UNSUPPORTED),
         ("Find candidates named Ali.", PlannerReasonCode.IDENTITY_SEARCH_UNSUPPORTED),
         ("Find Ali", PlannerReasonCode.IDENTITY_SEARCH_UNSUPPORTED),
         (

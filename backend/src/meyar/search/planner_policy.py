@@ -7,10 +7,12 @@ There is no database, provider call, randomness, or wall-clock access here.
 """
 
 import re
+from collections.abc import Callable
 from datetime import date
 
 from pydantic import ValidationError
 
+from meyar.core.text import normalize_azerbaijani_case
 from meyar.schemas.criteria import ProhibitedCriterionError, find_prohibited_term
 from meyar.search.planner_schemas import (
     PlanInterpretationSummary,
@@ -183,6 +185,17 @@ def _canonical(text: str) -> str:
     return " ".join(text.casefold().split())
 
 
+def _canonical_az(text: str) -> str:
+    return " ".join(normalize_azerbaijani_case(text).split())
+
+
+_CANONICALIZERS: tuple[Callable[[str], str], ...] = (_canonical, _canonical_az)
+
+
+def _canonical_variants(text: str) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(canonicalize(text) for canonicalize in _CANONICALIZERS))
+
+
 def _matches_any(text: str, patterns: tuple[re.Pattern[str], ...]) -> bool:
     return any(pattern.search(text) for pattern in patterns)
 
@@ -274,33 +287,43 @@ def _filter_values(draft: PlannerDraft) -> list[tuple[str, str, bool]]:
 
 
 def _value_variants(category: str, value: str) -> tuple[str, ...]:
-    canonical = _canonical(value)
     if category == "languages":
         for english_name, variants in _LANGUAGE_ALIASES.items():
-            if canonical == english_name or canonical in variants:
+            aliases = (english_name, *variants)
+            if set(_canonical_variants(value)).intersection(
+                canonical
+                for alias in aliases
+                for canonical in _canonical_variants(alias)
+            ):
                 return variants
-    return (canonical,)
+    return (value,)
 
 
 def _value_supported_by_request(category: str, value: str, request: str) -> bool:
-    canonical_request = _canonical(request)
     return any(
         re.search(
-            rf"(?<![{_BOUNDARY_WORD}]){re.escape(_canonical(variant))}"
+            rf"(?<![{_BOUNDARY_WORD}]){re.escape(canonicalize(variant))}"
             rf"(?![{_BOUNDARY_WORD}])",
-            canonical_request,
+            canonicalize(request),
         )
+        for canonicalize in _CANONICALIZERS
         for variant in _value_variants(category, value)
     )
 
 
 def _closest_marker_distance(
-    text: str, start: int, end: int, markers: tuple[str, ...]
+    text: str,
+    start: int,
+    end: int,
+    markers: tuple[str, ...],
+    canonicalize: Callable[[str], str],
 ) -> int | None:
     closest: int | None = None
     for marker in markers:
+        canonical_marker = canonicalize(marker)
         pattern = re.compile(
-            rf"(?<![{_BOUNDARY_WORD}]){re.escape(marker)}(?![{_BOUNDARY_WORD}])"
+            rf"(?<![{_BOUNDARY_WORD}]){re.escape(canonical_marker)}"
+            rf"(?![{_BOUNDARY_WORD}])"
         )
         for match in pattern.finditer(text):
             marker_start, marker_end = match.span()
@@ -316,22 +339,25 @@ def _closest_marker_distance(
 def _contains_marker(text: str, markers: tuple[str, ...]) -> bool:
     return any(
         re.search(
-            rf"(?<![{_BOUNDARY_WORD}]){re.escape(marker)}(?![{_BOUNDARY_WORD}])",
-            text,
+            rf"(?<![{_BOUNDARY_WORD}]){re.escape(canonicalize(marker))}"
+            rf"(?![{_BOUNDARY_WORD}])",
+            canonicalize(text),
         )
+        for canonicalize in _CANONICALIZERS
         for marker in markers
     )
 
 
-def _intent_near_spans(
-    request: str, spans: list[tuple[int, int]]
+def _intent_near_normalized_spans(
+    normalized: str,
+    spans: list[tuple[int, int]],
+    canonicalize: Callable[[str], str],
 ) -> tuple[bool, bool]:
-    normalized = _canonical(request)
     required_distances = [
         distance
         for start, end in spans
         if (distance := _closest_marker_distance(
-            normalized, start, end, _REQUIRED_MARKERS
+            normalized, start, end, _REQUIRED_MARKERS, canonicalize
         ))
         is not None
     ]
@@ -339,7 +365,7 @@ def _intent_near_spans(
         distance
         for start, end in spans
         if (distance := _closest_marker_distance(
-            normalized, start, end, _PREFERRED_MARKERS
+            normalized, start, end, _PREFERRED_MARKERS, canonicalize
         ))
         is not None
     ]
@@ -354,32 +380,49 @@ def _intent_near_spans(
     return required, preferred
 
 
-def _value_intent(request: str, category: str, value: str) -> tuple[bool, bool]:
-    normalized = _canonical(request)
+def _term_spans(
+    normalized: str,
+    terms: tuple[str, ...] | list[str],
+    canonicalize: Callable[[str], str],
+) -> list[tuple[int, int]]:
     spans: list[tuple[int, int]] = []
-    for variant in _value_variants(category, value):
-        canonical_variant = _canonical(variant)
+    for term in terms:
+        canonical_term = canonicalize(term)
         spans.extend(
             match.span()
             for match in re.finditer(
-                rf"(?<![{_BOUNDARY_WORD}]){re.escape(canonical_variant)}"
+                rf"(?<![{_BOUNDARY_WORD}]){re.escape(canonical_term)}"
                 rf"(?![{_BOUNDARY_WORD}])",
                 normalized,
             )
         )
-    return _intent_near_spans(request, spans)
+    return spans
+
+
+def _intent_near_terms(
+    request: str, terms: tuple[str, ...] | list[str]
+) -> tuple[bool, bool]:
+    required = False
+    preferred = False
+    for canonicalize in _CANONICALIZERS:
+        normalized = canonicalize(request)
+        current_required, current_preferred = _intent_near_normalized_spans(
+            normalized,
+            _term_spans(normalized, terms, canonicalize),
+            canonicalize,
+        )
+        required = required or current_required
+        preferred = preferred or current_preferred
+    return required, preferred
+
+
+def _value_intent(request: str, category: str, value: str) -> tuple[bool, bool]:
+    return _intent_near_terms(request, _value_variants(category, value))
 
 
 def _experience_intent(request: str, value: float) -> tuple[bool, bool]:
-    normalized = _canonical(request)
     representations = {str(value), str(int(value)) if value.is_integer() else str(value)}
-    spans: list[tuple[int, int]] = []
-    for representation in representations:
-        start = normalized.find(representation)
-        while start != -1:
-            spans.append((start, start + len(representation)))
-            start = normalized.find(representation, start + 1)
-    return _intent_near_spans(request, spans)
+    return _intent_near_terms(request, list(representations))
 
 
 def _has_structured_filters(draft: PlannerDraft) -> bool:
@@ -412,7 +455,7 @@ def derive_search_mode(draft: PlannerDraft) -> SearchMode:
 
 
 def _validate_filter_fidelity(draft: PlannerDraft, request: str) -> None:
-    has_required_marker = _contains_marker(_canonical(request), _REQUIRED_MARKERS)
+    has_required_marker = _contains_marker(request, _REQUIRED_MARKERS)
     required = draft.required_filters
     has_required_filter = any(
         (
@@ -536,22 +579,32 @@ def _validate_semantic_fidelity(draft: PlannerDraft, request: str) -> None:
     """
     if not draft.semantic_query:
         return
-    semantic_tokens = re.findall(r"[^\W_]+", _canonical(draft.semantic_query))
-    request_tokens = set(re.findall(r"[^\W_]+", _canonical(request)))
-    if not semantic_tokens or any(token not in request_tokens for token in semantic_tokens):
+    supported = False
+    required_near = False
+    preferred_near = False
+    for canonicalize in _CANONICALIZERS:
+        normalized_semantic = canonicalize(draft.semantic_query)
+        semantic_tokens = re.findall(r"[^\W_]+", normalized_semantic)
+        normalized_request = canonicalize(request)
+        request_tokens = set(re.findall(r"[^\W_]+", normalized_request))
+        if not semantic_tokens or any(
+            token not in request_tokens for token in semantic_tokens
+        ):
+            continue
+        supported = True
+        current_required, current_preferred = _intent_near_normalized_spans(
+            normalized_request,
+            _term_spans(normalized_request, semantic_tokens, canonicalize),
+            canonicalize,
+        )
+        required_near = required_near or current_required
+        preferred_near = preferred_near or current_preferred
+
+    if not supported:
         raise PlannerPolicyError(
             PlannerOutcome.VALIDATION_FAILURE,
             PlannerReasonCode.SEMANTIC_QUERY_NOT_SUPPORTED_BY_REQUEST,
         )
-
-    normalized_request = _canonical(request)
-    spans: list[tuple[int, int]] = []
-    for token in semantic_tokens:
-        start = normalized_request.find(token)
-        while start != -1:
-            spans.append((start, start + len(token)))
-            start = normalized_request.find(token, start + 1)
-    required_near, preferred_near = _intent_near_spans(request, spans)
     if required_near and not preferred_near:
         raise PlannerPolicyError(
             PlannerOutcome.UNSUPPORTED_SEMANTICS,

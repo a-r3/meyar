@@ -1,6 +1,9 @@
+import unicodedata
+
 import pytest
 from httpx import AsyncClient
 
+from meyar.core.text import normalize_azerbaijani_case
 from meyar.schemas.criteria import find_prohibited_term
 
 
@@ -27,6 +30,25 @@ def _valid_criteria() -> list[dict]:
             "min_years": 3,
         },
     ]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "mütləqdir",
+        "MÜTLƏQDİR",
+        "Mütləqdir",
+        "MÜtləQdİr",
+        unicodedata.normalize("NFD", "MÜTLƏQDİR"),
+    ],
+)
+def test_shared_azerbaijani_case_normalization(text: str) -> None:
+    assert normalize_azerbaijani_case(text) == "mütləqdir"
+
+
+def test_shared_azerbaijani_case_normalization_preserves_i_distinction() -> None:
+    assert normalize_azerbaijani_case("İi") == "ii"
+    assert normalize_azerbaijani_case("Iı") == "ıı"
 
 
 @pytest.mark.parametrize(
