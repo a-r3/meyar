@@ -7,10 +7,11 @@ and evaluate candidates against job requirements with auditable evidence.
 MEYAR is internal HR tooling, not an external B2B/SaaS product or a public
 candidate-facing service.
 
-The repository currently contains a working backend foundation through a
-strict local-LLM natural-language search planner and deterministic hybrid
-candidate search. Numeric scoring, batch ranking, and the internal user
-interface are planned work and must not be treated as implemented.
+The repository currently contains a working backend foundation through
+deterministic JD scoring and batch ranking, alongside the strict local-LLM
+natural-language search planner and deterministic hybrid candidate search.
+The internal user interface and finalized REST API are planned work and must
+not be treated as implemented.
 
 ## Project authority
 
@@ -63,12 +64,19 @@ Implemented and tested:
   candidates. Its explicit Azerbaijani MVP morphology policy preserves common
   mandatory forms and protected-term inflections without broad prefix
   matching; plan-only and thin plan→search service flows are both tested;
+- deterministic JD scoring (`meyar evaluate --as-of-date YYYY-MM-DD`):
+  `meyar-policy-v1` criterion/fit evaluation plus `meyar-score-v1` Decimal
+  0–100 scoring, exact structured explanation, explicit date provenance, and
+  idempotent reuse of the immutable Evaluation for exact repeated inputs;
+- deterministic candidate-library ranking (`meyar rank-job`): exactly one
+  current completed professional profile per active tenant candidate, explicit
+  fit tiers before numeric score, and candidate UUID as the stable non-PII
+  tie-break. It has no semantic-search, embedding, LLM, or identity dependency;
 - synthetic-only automated tests and repository governance.
 
 Planned or in progress:
 
-- **Next: Slice 10** — deterministic 0–100 JD scoring and batch candidate
-  ranking;
+- **Next: Slice 11** — internal Chat/Search and CV Library interfaces;
 - internal Chat/Search and CV Library user interfaces;
 - finalized internal API/Swagger examples and full security acceptance.
 
@@ -177,6 +185,33 @@ cd backend
 uv run alembic upgrade head
 ```
 
+Score one candidate's current profile against a job's current criteria with an
+explicit reproducibility date:
+
+```bash
+cd backend
+uv run meyar evaluate \
+  --tenant-id <TENANT_UUID> \
+  --candidate-id <CANDIDATE_UUID> \
+  --job-id <JOB_UUID> \
+  --as-of-date 2026-01-01
+```
+
+Rank the tenant's active candidate library against one exact criteria version:
+
+```bash
+cd backend
+uv run meyar rank-job \
+  --tenant-id <TENANT_UUID> \
+  --job-criteria-version-id <CRITERIA_VERSION_UUID> \
+  --as-of-date 2026-01-01
+```
+
+Both commands print only non-PII IDs, policy versions, fit/score values, safe
+reason codes, and counts. Exit 2 is invalid/tenant-scoped input, exit 3 is a
+scoring-policy failure (including legacy all-zero weights), and exit 4 is an
+infrastructure/database failure. A valid empty batch exits successfully.
+
 Run the API:
 
 ```bash
@@ -228,8 +263,9 @@ updated `backend/uv.lock` when applicable.
   yet). The planner intentionally rejects unsupported language proficiency,
   skill-specific duration, identity, salary/location, and custom-weight
   requests rather than weakening their meaning.
-- No deterministic 0–100 score, batch ranking, Chat UI, or CV Library UI
-  exists yet.
+- Deterministic 0–100 scoring and batch ranking are service/CLI capabilities;
+  no Chat UI, CV Library UI, or finalized scoring/ranking REST endpoint exists
+  yet.
 - OCR fallback for scanned PDFs is not implemented.
 - The configured embedding model is a development/integration default
   (`DEV_INTEGRATION_MODEL`), not an approved final production model —

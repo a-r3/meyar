@@ -1,23 +1,24 @@
 import re
-from datetime import UTC, datetime
+from datetime import date
 
 _YEAR_RE = re.compile(r"(19|20)\d{2}")
 _PRESENT_RE = re.compile(r"present|current|now|ongoing", re.IGNORECASE)
 
 
-def parse_year(text: str | None, *, is_current: bool = False) -> int | None:
+def parse_year(
+    text: str | None, *, evaluation_as_of_date: date, is_current: bool = False
+) -> int | None:
     """Deterministically extracts a 4-digit year from free-text date
     strings ("2021", "Jan 2020", "2019 - Present"). Returns None when no
     year can be reliably identified — callers must treat that as
-    ambiguous, never guess. "Present"/"current"/"now" resolve to the
-    current UTC year, matching normal real-world experience-duration
-    semantics (naturally grows over time, same as any hiring system)."""
+    ambiguous, never guess. "Present"/"current"/"now" resolve only to
+    the explicitly supplied evaluation date's year, never the wall clock."""
     if is_current:
-        return datetime.now(UTC).year
+        return evaluation_as_of_date.year
     if not text:
         return None
     if _PRESENT_RE.search(text):
-        return datetime.now(UTC).year
+        return evaluation_as_of_date.year
     match = _YEAR_RE.search(text)
     return int(match.group(0)) if match else None
 

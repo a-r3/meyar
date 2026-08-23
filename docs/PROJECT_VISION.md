@@ -106,13 +106,12 @@ The existing deterministic evaluation engine (`meyar.evaluation`, Slice
 5, D-010) is the foundation. It already computes per-criterion status and
 a fit band (`STRONG_MATCH`/`POTENTIAL_MATCH`/`INSUFFICIENT_EVIDENCE`/
 `MANUAL_REVIEW_REQUIRED`) with evidence, fully deterministic, no LLM
-invention. The official task requires an additional **0–100 numeric
-score + explanation** on top of this — the previous "numeric score
-deferred" decision (D-010 point 4) is superseded by D-011. The exact
-scoring formula is a near-term implementation decision, not finalized
-here. Batch ranking (one JD → score every candidate → sorted list with
-reasons) reuses the same engine per-candidate. Not implemented yet
-(Slice 10).
+invention. Slice 10 adds the required **0–100 numeric score + explanation**
+on top of this — the previous "numeric score deferred" decision (D-010 point
+4) is superseded by D-011. `meyar-score-v1` uses exact Decimal weighted
+factors, explicit as-of provenance, and fit-tier-first batch ranking over one
+current profile per active candidate. See D-017. Service and CLI are
+implemented; REST/UI presentation remains later work.
 
 ## Local-only AI
 

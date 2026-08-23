@@ -204,9 +204,9 @@ version id used. The model cannot add criteria beyond what is stored.
    must-have/preferred rules to raw per-criterion statuses → overall fit
    band. Pure Python, unit tested independent of the LLM — implemented,
    Slice 5.
-5. **Planned (Slice 10):** deterministic 0–100 numeric score layered on
-   top of steps 3–4's results — required by the official task,
-   supersedes the earlier "numeric score deferred" stance (D-011).
+5. Deterministic `meyar-score-v1` 0–100 Decimal score and recomputable
+   structured explanation layered on steps 3–4, with explicit
+   `evaluation_as_of_date` provenance — implemented, Slice 10 (D-017).
 
 All LLM output validated with Pydantic v2 before it reaches any table used
 by the policy engine or returned to a user.
@@ -234,12 +234,13 @@ semantic intent, and must/preferred distinctions. The LLM interprets the
 query into this validated structure; it never freely queries or ranks
 the database. Not implemented yet.
 
-## 16. Batch ranking (planned, Slice 10)
+## 16. Batch ranking (implemented, Slice 10)
 
-One `JobCriteriaVersion` → many candidates → score each (fit band + 0–100
-score) → sorted ranked list with reasons/evidence. Reuses the Slice 5
-evaluation engine per-candidate; no new scoring logic beyond the shared
-policy engine.
+One `JobCriteriaVersion` → the tenant's active candidate library → exactly one
+current completed profile per candidate → score each (fit band + 0–100 score)
+→ explicit fit-tier/score/UUID order with safe reasons/evidence references.
+It reuses the same evaluation/scoring path per candidate and has no semantic
+search, embedding, LLM, or CandidateIdentity dependency (D-017).
 
 ## 17. Internal UI (planned, Slice 11)
 
@@ -250,12 +251,15 @@ is out of scope for this document.
 
 ## 18. Auditability
 
-Every `Evaluation` row (or linked `AuditEvent`) fixes: tenant_id,
+Every scored `Evaluation` row (or linked `AuditEvent`) fixes: tenant_id,
 candidate_id, candidate_profile_version, source document hash, job_id,
 job_criteria_version_id, model identifier + config, prompt_version,
-schema_version, policy_engine_version, timestamps, evidence, per-criterion
-results, overall result, failure/retry count. Evaluations are append-only —
-never overwritten; re-evaluation creates a new `Evaluation` row.
+schema_version, policy_engine_version, scoring_policy_version,
+evaluation_as_of_date, timestamps, evidence, per-criterion results, overall
+result, numeric score/explanation, and failure/retry count. Evaluations are
+append-only—never overwritten; exact scored provenance reuses its existing row,
+while a different date/profile/criteria/evaluation-policy/scoring-policy
+provenance creates a new row (D-017).
 
 ## 19. Logging
 

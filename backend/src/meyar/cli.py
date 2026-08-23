@@ -7,7 +7,7 @@ from meyar.config import get_settings
 from meyar.db import get_session_factory
 from meyar.embedding.dependency import get_embedding_provider, get_embedding_search_config
 from meyar.embedding.provider import EmbeddingProviderError
-from meyar.evaluation.service import EvaluationInputError, evaluate_candidate
+from meyar.evaluation.service import EvaluationInputError, evaluate_and_score_candidate
 from meyar.extraction.identity_service import (
     IdentityExtractionPreconditionError,
     extract_candidate_identity,
@@ -16,6 +16,8 @@ from meyar.extraction.service import ExtractionPreconditionError, extract_candid
 from meyar.ingestion.dependency import get_document_parser
 from meyar.ingestion.folder_scanner import InvalidSourceRootError
 from meyar.llm.dependency import get_llm_provider
+from meyar.scoring.batch import BatchRankingError, rank_candidates_for_job
+from meyar.scoring.policy import ScoringPolicyError
 from meyar.search.planner_schemas import PlannerOutcome
 from meyar.search.planner_service import plan_and_search_candidates, plan_candidate_search
 from meyar.search.schemas import CandidateSearchRequest, SearchMode
@@ -97,53 +99,133 @@ async def _extract_profile(tenant_id: str, candidate_id: str, document_id: str) 
         print(f"Error: {version.error_code} — {version.error_message}")
 
 
-async def _evaluate(tenant_id: str, candidate_id: str, job_id: str) -> None:
+async def _evaluate(
+    tenant_id: str, candidate_id: str, job_id: str, as_of_date_text: str
+) -> None:
     """Resolves the latest CandidateProfileVersion and latest
     JobCriteriaVersion ONCE, then evaluates against those exact concrete
     versions — never re-resolves "latest" mid-evaluation."""
-    factory = get_session_factory()
-    async with factory() as db:
-        profile_version = await get_current_profile_version(
-            db, tenant_id=uuid.UUID(tenant_id), candidate_id=uuid.UUID(candidate_id)
-        )
-        if profile_version is None:
-            print("No candidate profile version found — run extract-profile first.")
-            return
+    try:
+        parsed_tenant_id = uuid.UUID(tenant_id)
+        parsed_candidate_id = uuid.UUID(candidate_id)
+        parsed_job_id = uuid.UUID(job_id)
+        evaluation_as_of_date = date.fromisoformat(as_of_date_text)
+    except ValueError as exc:
+        print("Invalid tenant/candidate/job id or as-of date (expected UUID and YYYY-MM-DD).")
+        raise SystemExit(2) from exc
 
-        criteria_version = await get_current_criteria_version(
-            db, tenant_id=uuid.UUID(tenant_id), job_id=uuid.UUID(job_id)
-        )
-        if criteria_version is None:
-            print("No job criteria version found for this job.")
-            return
-
-        try:
-            evaluation = await evaluate_candidate(
-                db,
-                tenant_id=uuid.UUID(tenant_id),
-                candidate_id=uuid.UUID(candidate_id),
-                candidate_profile_version_id=profile_version.id,
-                job_id=uuid.UUID(job_id),
-                job_criteria_version_id=criteria_version.id,
+    try:
+        factory = get_session_factory()
+        async with factory() as db:
+            profile_version = await get_current_profile_version(
+                db, tenant_id=parsed_tenant_id, candidate_id=parsed_candidate_id
             )
-        except EvaluationInputError as exc:
+            if profile_version is None:
+                print("No candidate profile version found — run extract-profile first.")
+                raise SystemExit(2)
+
+            criteria_version = await get_current_criteria_version(
+                db, tenant_id=parsed_tenant_id, job_id=parsed_job_id
+            )
+            if criteria_version is None:
+                print("No job criteria version found for this job.")
+                raise SystemExit(2)
+
+            try:
+                scored = await evaluate_and_score_candidate(
+                    db,
+                    tenant_id=parsed_tenant_id,
+                    candidate_id=parsed_candidate_id,
+                    candidate_profile_version_id=profile_version.id,
+                    job_id=parsed_job_id,
+                    job_criteria_version_id=criteria_version.id,
+                    evaluation_as_of_date=evaluation_as_of_date,
+                )
+            except (EvaluationInputError, ScoringPolicyError):
+                await db.commit()  # preserve the safe failure audit event
+                raise
             await db.commit()
-            print(f"Evaluation could not run: {exc.code} — {exc}")
-            return
+    except EvaluationInputError as exc:
+        print(f"Evaluation could not run: {exc.code} — {exc}")
+        raise SystemExit(2) from exc
+    except ScoringPolicyError as exc:
+        print(f"Scoring policy failed: {exc.code} — {exc}")
+        raise SystemExit(3) from exc
+    except SystemExit:
+        raise
+    except Exception as exc:
+        print(f"Evaluation infrastructure failure: {type(exc).__name__}")
+        raise SystemExit(4) from exc
 
-        await db.commit()
-
-    print(f"Evaluation: {evaluation.id}")
-    print(f"Status: {evaluation.status}")
-    print(f"Overall result: {evaluation.overall_result}")
+    evaluation = scored.evaluation
     if evaluation.status == "FAILED":
-        print(f"Error: {evaluation.error_code} — {evaluation.error_message}")
-    else:
-        for result in evaluation.criterion_results or []:
-            print(
-                f"  [{result['type']}] {result['criterion_id']} ({result['kind']}): "
-                f"{result['status']} — {result['reason_code']}"
+        print(f"Evaluation failed: {evaluation.error_code}")
+        raise SystemExit(2)
+    print(f"Evaluation: {evaluation.id}")
+    print(f"Profile version: {evaluation.candidate_profile_version_id}")
+    print(f"Criteria version: {evaluation.job_criteria_version_id}")
+    print(f"Status: {evaluation.status}")
+    print(f"Score: {evaluation.numeric_score}")
+    print(f"Fit band: {evaluation.overall_result}")
+    print(f"Evaluation policy: {evaluation.policy_engine_version}")
+    print(f"Scoring policy: {evaluation.scoring_policy_version}")
+    print(f"As-of date: {evaluation.evaluation_as_of_date}")
+    print(f"Reused existing evaluation: {scored.reused}")
+    explanation = evaluation.score_explanation or {}
+    for result in explanation.get("criteria", []):
+        print(
+            f"  [{result['criterion_type']}] {result['criterion_id']} "
+            f"({result['criterion_kind']}): {result['status']} "
+            f"weight={result['weight']} factor={result['factor']} "
+            f"points={result['weighted_points']} reason={result['reason_code']}"
+        )
+
+
+async def _rank_job(
+    tenant_id: str, job_criteria_version_id: str, as_of_date_text: str
+) -> None:
+    try:
+        parsed_tenant_id = uuid.UUID(tenant_id)
+        parsed_criteria_id = uuid.UUID(job_criteria_version_id)
+        evaluation_as_of_date = date.fromisoformat(as_of_date_text)
+    except ValueError as exc:
+        print("Invalid tenant/criteria id or as-of date (expected UUID and YYYY-MM-DD).")
+        raise SystemExit(2) from exc
+
+    try:
+        factory = get_session_factory()
+        async with factory() as db:
+            result = await rank_candidates_for_job(
+                db,
+                tenant_id=parsed_tenant_id,
+                job_criteria_version_id=parsed_criteria_id,
+                evaluation_as_of_date=evaluation_as_of_date,
             )
+            await db.commit()
+    except BatchRankingError as exc:
+        print(f"Batch input rejected: {exc.code} — {exc}")
+        raise SystemExit(2) from exc
+    except ScoringPolicyError as exc:
+        print(f"Scoring policy failed: {exc.code} — {exc}")
+        raise SystemExit(3) from exc
+    except Exception as exc:
+        print(f"Batch ranking infrastructure failure: {type(exc).__name__}")
+        raise SystemExit(4) from exc
+
+    print(f"Criteria version: {result.job_criteria_version_id}")
+    print(f"As-of date: {result.evaluation_as_of_date}")
+    print(f"Evaluation policy: {result.evaluation_policy_version}")
+    print(f"Scoring policy: {result.scoring_policy_version}")
+    print(f"Evaluated: {result.evaluated_count}")
+    print(f"Reused: {result.reused_count}")
+    print(f"Skipped: {result.skipped_count}")
+    print(f"Skip reasons: {result.skip_reason_counts}")
+    for item in result.results:
+        print(
+            f"  #{item.rank} candidate={item.candidate_id} "
+            f"profile={item.candidate_profile_version_id} evaluation={item.evaluation_id} "
+            f"fit={item.fit_band} tier={item.fit_tier} score={item.numeric_score}"
+        )
 
 
 async def _index_folder(tenant_id: str, root: str) -> None:
@@ -420,6 +502,18 @@ def main() -> None:
     evaluate_parser.add_argument("--tenant-id", required=True)
     evaluate_parser.add_argument("--candidate-id", required=True)
     evaluate_parser.add_argument("--job-id", required=True)
+    evaluate_parser.add_argument(
+        "--as-of-date", required=True, help="Deterministic evaluation date (YYYY-MM-DD)."
+    )
+
+    rank_job_parser = sub.add_parser(
+        "rank-job", help="Deterministically score and rank the tenant candidate library."
+    )
+    rank_job_parser.add_argument("--tenant-id", required=True)
+    rank_job_parser.add_argument("--job-criteria-version-id", required=True)
+    rank_job_parser.add_argument(
+        "--as-of-date", required=True, help="Deterministic evaluation date (YYYY-MM-DD)."
+    )
 
     index_folder_parser = sub.add_parser(
         "index-folder",
@@ -478,7 +572,11 @@ def main() -> None:
     elif args.command == "extract-profile":
         asyncio.run(_extract_profile(args.tenant_id, args.candidate_id, args.document_id))
     elif args.command == "evaluate":
-        asyncio.run(_evaluate(args.tenant_id, args.candidate_id, args.job_id))
+        asyncio.run(_evaluate(args.tenant_id, args.candidate_id, args.job_id, args.as_of_date))
+    elif args.command == "rank-job":
+        asyncio.run(
+            _rank_job(args.tenant_id, args.job_criteria_version_id, args.as_of_date)
+        )
     elif args.command == "index-folder":
         asyncio.run(_index_folder(args.tenant_id, args.root))
     elif args.command == "extract-identity":

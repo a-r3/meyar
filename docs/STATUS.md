@@ -1,14 +1,15 @@
 # MEYAR — Status
 
 ## Current phase
-**Slice 9 — Natural-Language Search Planner implementation/acceptance.**
+**Slice 10 — JD 0–100 Scoring + Batch Ranking implementation/acceptance.**
 Governance PR #1 merged at `16929fd` (**M0 CLOSED**); Slice 6 PR #7
 merged at `55fef2d` (**M1 — CV Ingestion & Candidate Library is
 CLOSED**, issue #6 closed); Slice 7 PR #9 merged at `24b1d67` (issue #8
 closed); Slice 8 PR #11 Squash-merged at `412d978` (issue #10 closed).
-Slice 9 issue #12 is implemented on
-`feat/natural-language-search-planner` and is pending owner acceptance/
-merge. **M2 remains OPEN until Slice 9 is accepted and merged.**
+Slice 9 PR #13 merged at `1be5d51` (issue #12 closed; **M2 CLOSED**).
+Slice 10 issue #14 is implemented on `feat/jd-scoring-batch-ranking`,
+associated with open **M3 — JD Matching & Ranking**, and is pending owner
+acceptance/merge.
 
 GitHub remote established (`https://github.com/a-r3/meyar.git`, private,
 temporary development remote — see D-012, `docs/DECISIONS.md`). `main`
@@ -184,10 +185,48 @@ remains disabled.
   raw request, semantic query, model output, identity, or CV data. New
   CLI: `meyar plan-search --tenant-id ... --query ... --as-of-date
   YYYY-MM-DD [--execute]`. No migration/dependency was added. See D-016.
+- Slice 10 (JD 0–100 Scoring + Batch Ranking) — on
+  `feat/jd-scoring-batch-ranking`, associated with **M3 — JD Matching &
+  Ranking**, closes issue #14. Slice 5's wall-clock resolution of current
+  employment is replaced by a required, persisted full
+  `evaluation_as_of_date`; `meyar-policy-v1` meaning is retained because the
+  change controls provenance rather than criterion semantics. New
+  `meyar-score-v1` policy uses exhaustive status factors, textual float→
+  Decimal conversion, declared weights only, final-only `ROUND_HALF_UP` to
+  two decimals, and a typed zero-total failure. Immutable Evaluation rows gain
+  nullable date/score/policy/explanation fields; exact scored provenance is
+  reused with a PostgreSQL partial unique-index concurrency backstop, while
+  historical rows remain NULL and unmodified. Structured explanations contain
+  exact decimal strings and location-only evidence references—never identity,
+  quotes, CV text, AI output, vectors, or semantic relevance. Batch ranking
+  reads the tenant library directly, chooses exactly one current completed
+  profile per active candidate, and sorts explicit fit tier → Decimal score →
+  UUID integer; MUST_HAVE gating (including zero-weight MUST_HAVE) therefore
+  dominates score. New CLI commands are the date-required `meyar evaluate` and
+  `meyar rank-job`; no REST/UI surface or Slice 11 code was added. Migration
+  `c0a4f2d8e317` (down revision `7aae8da26969`); see D-017.
 
 ## Tests
-353/353 passing (231 prior + 102 Slice 9 planner/policy/service/CLI tests +
-20 shared Azerbaijani normalization/protected-policy regressions).
+395/395 passing (353 prior + 42 Slice 10 scoring/evaluation/persistence/
+batch/CLI regressions).
+Slice 10 coverage includes the six exhaustive status factors; exact Decimal
+boundaries, unequal weights, textual float conversion, repeating-fraction and
+half-cent `ROUND_HALF_UP`; zero total and mixed zero/positive validation;
+UNKNOWN vs NOT_MATCHED explanation meaning and exact recomputation; persisted
+date/score/policy/explanation; historical NULL rows and partial uniqueness;
+same-input reuse plus date/profile/criteria-version changes; explicit 2026 →
+2027 → repeated-2026 current-employment proof; fit-tier dominance;
+zero-weight MUST_HAVE gating; manual-review tier; current-profile-only batch;
+UUID tie/order stability under reversed repository results; identity
+invariance; tenant isolation; zero/skip candidate sets; PII-safe audits/CLI;
+and static no-AI/vector/search/identity dependency checks. Migration
+`c0a4f2d8e317` was also exercised independently as pre-Slice-10 upgrade →
+legacy-row insert → upgrade → downgrade → re-upgrade, preserving NULL score
+provenance and unchanged criterion JSON throughout.
+
+The prior 353 include 231 pre-Slice-9 tests, 102 Slice 9 planner/policy/
+service/CLI tests, and 20 shared Azerbaijani normalization/protected-policy
+regressions.
 Slice 9 coverage includes strict draft parsing, deterministic mode and
 draft-to-request conversion, Azerbaijani/English intent, unsupported semantic
 weakening and custom weighting, explicit Azerbaijani mandatory/protected
@@ -355,9 +394,9 @@ Evaluation's persisted `candidate_profile_version_id`/
 `job_criteria_version_id` verified to equal the exact input versions.
 
 ## In progress
-Slice 9 (`feat/natural-language-search-planner`, closes issue #12) is
-implemented and pending owner acceptance/merge. Slice 8 PR #11 merged
-(`412d978`, issue #10 closed); M2 intentionally remains open.
+Slice 10 (`feat/jd-scoring-batch-ranking`, closes issue #14) is implemented
+and pending owner acceptance/merge. Slice 9 PR #13 merged (`1be5d51`, issue
+#12 closed); M2 is closed. M3 remains open until Slice 10 is accepted.
 
 ## Blockers
 None blocking. Same open items as before (D-001 Mac benchmark pending —
@@ -371,11 +410,10 @@ pending, migration keeps full history when it arrives.
 1. **Git Infrastructure** — remote connected (`a-r3/meyar`, private,
    temporary — D-012); governance merged (`16929fd`). May later migrate
    to an official bank-owned remote (history preserved).
-2. **Slice 9 — Natural-Language Search Planner** (issue #12, D-016),
-   associated with **M2 — Candidate Search Intelligence**: review the
-   focused implementation/CI, then owner Squash and merge. Do not close
-   M2 or start Slice 10 until the merge is live-verified and local main is
-   synchronized.
+2. **Slice 10 — JD 0–100 Scoring + Batch Ranking** (issue #14, D-017),
+   associated with **M3 — JD Matching & Ranking**: review the focused
+   implementation/CI, then owner Squash and merge. Do not close M3 or start
+   Slice 11 until the merge is live-verified and local main is synchronized.
 
 The previously planned "Slice 6 — External Async Evaluation API" is
 CANCELLED (superseded by D-011) — it is not what "Slice 6" now refers to.
@@ -389,8 +427,8 @@ due date because the official timeline has not been supplied.
 |---|---|---|
 | M0 — Project Foundation & Governance | R0 + Git Infrastructure | CLOSED — merged `16929fd`, issue #2 closed |
 | M1 — CV Ingestion & Candidate Library | Slice 6 | CLOSED — merged `55fef2d` (PR #7), issue #6 closed |
-| M2 — Candidate Search Intelligence | Slices 7–9 | OPEN / IN REVIEW — Slices 7 and 8 merged (PRs #9/#11; issues #8/#10 closed); Slice 9 issue #12 implemented on its task branch, pending acceptance/merge |
-| M3 — JD Matching & Ranking | Slice 10 | NOT STARTED |
+| M2 — Candidate Search Intelligence | Slices 7–9 | CLOSED — PRs #9/#11/#13 merged; issues #8/#10/#12 closed |
+| M3 — JD Matching & Ranking | Slice 10 | OPEN / IN REVIEW — issue #14 implemented on its task branch, pending acceptance/merge |
 | M4 — Internal Product Interface & API | Slices 11–12 | NOT STARTED |
 | M5 — Security, Target-Mac Validation & MVP Acceptance | Slice 13 + target-Mac benchmark | NOT STARTED |
 
@@ -416,24 +454,27 @@ no code yet.
 | Local embeddings / vector storage | DONE | Local `EmbeddingProvider`/`OllamaEmbeddingProvider` (loopback-enforced), pgvector-backed `CandidateEmbeddingVersion` with version/provenance, idempotent, dimension-agnostic column (Slice 7, D-014) | — | 7 |
 | Access control | DONE | API-key auth, scopes, tenant isolation (Slice 1) | Extend scopes as new endpoints ship | ongoing |
 | JD matching | DONE | Deterministic per-criterion evaluation (Slice 5) | — | 5 |
-| 0–100 scoring | NOT STARTED | Fit-band algorithm exists (D-010), no numeric score | Numeric formula on top of existing engine | 10 |
-| Batch scoring / ranking | NOT STARTED | Evaluation engine is per-candidate today | Batch-ranking endpoint reusing engine | 10 |
+| 0–100 scoring | DONE | `meyar-score-v1`: exact Decimal weighted formula, exhaustive factors, final `ROUND_HALF_UP`, persisted score and recomputable explanation (Slice 10, D-017) | — | 10 |
+| Batch scoring / ranking | DONE | Tenant-library batch service, current-profile-only selection, fit-tier-first ordering, Decimal score, UUID tie-break, deterministic skips (Slice 10, D-017) | REST/UI presentation remains Slices 11–12 | 10 |
 | Structured search | DONE | Deterministic required/preferred filters (skills/certifications/languages/education/min experience) over the current `CandidateProfileVersion`, reusing Slice 5 normalization (Slice 8, D-015) | — | 8 |
 | Semantic search | DONE | Local query embedding + pgvector retrieval over current, exactly-compatible embeddings (Slice 8, D-015); strict local natural-language `SearchPlan` conversion delegates to that engine (Slice 9, D-016) | — | 8, 9 |
-| Explanations | DONE | Evidence carried through every criterion result (Slice 5); Slice 8 search results carry safe score/filter components; Slice 9 returns a concise structured interpretation summary/reason codes, never chain-of-thought | — | 5, 8, 9 |
+| Explanations | DONE | Criterion evidence (Slice 5), search components (Slice 8), planner reasons (Slice 9), and exact recomputable score contributions with location-only evidence refs (Slice 10); never chain-of-thought | — | 5, 8, 9, 10 |
 | REST API | PARTIAL | Jobs/candidates/health routes live; extraction+evaluation are service+CLI only | Add internal HTTP routes as UI needs them | 11, 12 |
 | Swagger / OpenAPI | PARTIAL | FastAPI auto-generates it; not yet reviewed/finalized as a deliverable | Review + README examples | 12 |
 | Auth | DONE | API-key + scopes (Slice 1) | — | 1 |
 | README examples | NOT STARTED | — | Usage examples once API surface stabilizes | 12 |
 | Bad-file testing | DONE | Oversized/malformed/MIME-mismatch tests (Slice 3); malformed-PDF/DOCX isolation + path-traversal/symlink tests for the folder indexer (Slice 6) | — | 6, 13 |
-| Scoring consistency | PARTIAL | Policy engine deterministic + unit tested (Slice 5) | Re-verify once numeric score lands | 10, 13 |
+| Scoring consistency | DONE | Exact input reuse, explicit historical date, Decimal boundary/rounding/recomputation, version-change, stable-tie, gate-vs-score, and identity-invariance regressions (Slice 10) | Final target acceptance remains Slice 13 | 10, 13 |
 | External-network/exfiltration verification | NOT STARTED | Local-only enforced by construction (`OllamaLLMProvider` loopback check) | Explicit verification pass | 13 |
 | Data-protection / backup description | PARTIAL | Retention/deletion documented (SECURITY_PRIVACY.md); no backup policy written | Document backup approach | 13 |
 | Git branch / PR workflow | PARTIAL | Remote connected (`a-r3/meyar`, private), CI + hooks + PR template merged (`16929fd`, D-012) | Migrate to official bank remote when supplied | Git Infrastructure |
 
-**Official numbered task matrix — 28 items.** Summary: 16 DONE, 5 PARTIAL,
-7 NOT STARTED (28 items), independently recounted after Slice 9. Planner
-tests cover synthetic Azerbaijani/English HR requests, but this does not
-complete the distinct multilingual CV extraction-fixture row. Highest-
-priority gap: 0–100 numeric JD scoring (Slice 10). Git/PR infrastructure is PARTIAL only
-because the remote is still a personal/temporary one, not blocking.
+**Official numbered task matrix — 28 items.** Summary: **19 DONE, 4 PARTIAL,
+5 NOT STARTED** (28 items), independently recounted after Slice 10 rather than
+carrying forward Slice 9's 16/5/7 totals. Changed-row rationale: 0–100 scoring
+and batch scoring/ranking move from NOT STARTED to DONE; scoring consistency
+moves from PARTIAL to DONE; explanations remain DONE but now include exact
+numeric contribution/recomputation evidence; JD matching remains DONE with its
+current-employment reproducibility defect corrected. No API/UI/security/OCR/
+multilingual-CV or repository-ownership row was promoted. Git/PR infrastructure
+remains PARTIAL because the remote is still personal/temporary.

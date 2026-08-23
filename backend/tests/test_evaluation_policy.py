@@ -2,7 +2,9 @@
 See Slice 5 spec §24: "The Evaluation Engine must be independently
 testable without Ollama." """
 
-from meyar.evaluation.evaluators import evaluate_criterion
+from datetime import date
+
+from meyar.evaluation.evaluators import evaluate_criterion as _evaluate_criterion
 from meyar.evaluation.policy import compute_overall_result
 from meyar.schemas.candidate_profile import (
     CandidateProfileExtraction,
@@ -28,6 +30,11 @@ from meyar.schemas.evaluation import (
 )
 
 _EV = [EvidenceRef(page=1, block_index=0, quote="x")]
+_AS_OF_DATE = date(2026, 1, 1)
+
+
+def evaluate_criterion(criterion, profile):
+    return _evaluate_criterion(criterion, profile, evaluation_as_of_date=_AS_OF_DATE)
 
 
 def _criterion(**overrides) -> CriterionIn:

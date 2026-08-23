@@ -1,3 +1,6 @@
+from collections.abc import Callable
+from datetime import date
+
 from meyar.evaluation.experience import parse_year, ranges_overlap
 from meyar.evaluation.normalization import normalize_skill_name, normalize_text
 from meyar.schemas.candidate_profile import CandidateProfileExtraction, EvidenceRef
@@ -159,7 +162,10 @@ def evaluate_language(
 
 
 def evaluate_experience(
-    criterion: CriterionIn, profile: CandidateProfileExtraction
+    criterion: CriterionIn,
+    profile: CandidateProfileExtraction,
+    *,
+    evaluation_as_of_date: date,
 ) -> CriterionResult:
     if not profile.employment_history:
         return _finalize(
@@ -172,8 +178,12 @@ def evaluate_experience(
     ranges: list[tuple[int, int]] = []
     evidence: list[EvidenceRef] = []
     for entry in profile.employment_history:
-        start_year = parse_year(entry.start_date)
-        end_year = parse_year(entry.end_date, is_current=entry.is_current)
+        start_year = parse_year(entry.start_date, evaluation_as_of_date=evaluation_as_of_date)
+        end_year = parse_year(
+            entry.end_date,
+            evaluation_as_of_date=evaluation_as_of_date,
+            is_current=entry.is_current,
+        )
         if start_year is None or end_year is None:
             return _finalize(
                 criterion,
@@ -221,18 +231,26 @@ def evaluate_experience(
     )
 
 
-_EVALUATORS = {
+_EVALUATORS: dict[
+    CriterionKind, Callable[[CriterionIn, CandidateProfileExtraction], CriterionResult]
+] = {
     CriterionKind.SKILL: evaluate_skill,
     CriterionKind.CERTIFICATION: evaluate_certification,
     CriterionKind.EDUCATION: evaluate_education,
     CriterionKind.LANGUAGE: evaluate_language,
-    CriterionKind.EXPERIENCE: evaluate_experience,
 }
 
 
 def evaluate_criterion(
-    criterion: CriterionIn, profile: CandidateProfileExtraction
+    criterion: CriterionIn,
+    profile: CandidateProfileExtraction,
+    *,
+    evaluation_as_of_date: date,
 ) -> CriterionResult:
+    if criterion.kind == CriterionKind.EXPERIENCE:
+        return evaluate_experience(
+            criterion, profile, evaluation_as_of_date=evaluation_as_of_date
+        )
     evaluator = _EVALUATORS.get(criterion.kind)
     if evaluator is None:
         return _finalize(

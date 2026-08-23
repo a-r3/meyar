@@ -3,6 +3,80 @@
 Append-only log of concise architectural/product decisions. Format: id, date,
 decision, why, reversibility.
 
+## D-017 — meyar-score-v1 deterministic scoring and ranking
+
+**Date:** 2026-08-23
+**Decision:** Slice 10 adds a deterministic numeric score and batch ranking on
+top of the accepted Slice 5 criterion and fit-band policy:
+1. **Evaluation date is explicit provenance.** Every new scored evaluation
+   requires and persists the complete `evaluation_as_of_date` (`YYYY-MM-DD`).
+   Ongoing employment resolves only to `evaluation_as_of_date.year`; the
+   evaluation/scoring policy reads no wall clock. This is a control and
+   reproducibility correction, not a change to criterion meaning, so the
+   evaluation policy remains `meyar-policy-v1` rather than silently relabeling
+   historical semantics.
+2. **Exact status factors:** `MATCH=1.0`, `PARTIAL_MATCH=0.5`, and
+   `NOT_MATCHED`/`UNKNOWN`/`CONFLICTING_EVIDENCE`/
+   `MANUAL_REVIEW_REQUIRED=0.0`. The mapping is exhaustive; a future unknown
+   status raises `UNKNOWN_CRITERION_STATUS` rather than inheriting a default.
+3. **Exact Decimal formula:** each stored float weight becomes
+   `Decimal(str(weight))`; all subsequent arithmetic remains Decimal.
+   `raw_score = 100 * Σ(weight * factor) / Σ(weight)`, with only the final
+   result quantized to `0.01` using `ROUND_HALF_UP`. Persisted/ranked scores
+   remain `NUMERIC(5,2)`/Decimal, never float.
+4. **Zero weights:** individual zero-weight criteria are valid and still run.
+   A zero-weight `MUST_HAVE` still controls the fit/gate result. New criteria
+   versions must contain at least one positive weight. Readable historical
+   all-zero versions fail scoring as `ZERO_TOTAL_CRITERION_WEIGHT`; batch
+   validates this before candidate iteration and never fabricates a score.
+5. **Score and gate are separate.** The score uses declared weights only—no
+   hidden MUST_HAVE multiplier. Existing `meyar-policy-v1` fit bands remain
+   authoritative; the score never clears a gate, converts uncertainty into
+   absence, or produces HIRE/REJECT decisions. Humans decide.
+6. **Ranking policy:** explicit tiers are `STRONG_MATCH=0`,
+   `POTENTIAL_MATCH=1`, `MANUAL_REVIEW_REQUIRED=2`, and
+   `INSUFFICIENT_EVIDENCE=3`. Sort is `(fit_tier ASC, numeric_score DESC,
+   candidate_id.int ASC)`. Enum order, SQL row order, timestamps, and identity
+   never participate.
+7. **Batch candidate set:** batch reads the tenant candidate library directly,
+   with exactly one current `CandidateProfileVersion` (max version number) for
+   each active candidate. It never needs a semantic/vector shortlist and never
+   falls back to a stale profile. Missing/non-completed current profiles are
+   reported by deterministic skip reason counts.
+8. **Immutable idempotent provenance:** exact identity is `(tenant_id,
+   candidate_profile_version_id, job_criteria_version_id,
+   evaluation_as_of_date, policy_engine_version, scoring_policy_version)`.
+   The service reuses an existing immutable Evaluation; a PostgreSQL partial
+   unique index provides the concurrency backstop, and an insert race is
+   handled through a savepoint followed by exact re-fetch.
+9. **Legacy history is not fabricated.** The four additive Evaluation fields
+   (`evaluation_as_of_date`, `numeric_score`, `scoring_policy_version`,
+   `score_explanation`) are nullable. Migration does not backfill them, so old
+   rows retain NULL score provenance and unchanged criterion-result JSON.
+10. **Explanation is deterministic and recomputable.** JSON stores canonical
+    decimal strings for criterion weight/factor/weighted points and aggregate
+    totals, plus status/reason code, location-only evidence references,
+    manual-review state, fit band, policy versions, date, and immutable input/
+    Evaluation IDs. It omits evidence quotes, identity, CV text, embeddings,
+    semantic similarity, LLM output, and hidden reasoning.
+11. **Privacy/AI boundary:** `CandidateIdentity` is absent from scoring and
+    ranking. No scoring/ranking module imports an LLM, Ollama, embedding,
+    pgvector, search planner, or semantic-search service. Tenant-scoped input
+    resolution and tenant-scoped current-profile selection remain mandatory.
+12. **Audit/interface:** `CANDIDATE_SCORE_COMPUTED` records safe provenance,
+    score/fit, and `reused`; `JOB_BATCH_RANKED` records safe policy/count/skip
+    metadata. `meyar evaluate` now requires `--as-of-date`; `meyar rank-job`
+    accepts tenant, exact criteria-version id, and date. Both print UUID/
+    policy/contribution data only. No REST or UI contract is added.
+
+**Why:** The official task requires a reviewable 0–100 compatibility score and
+batch ordering while preserving Slice 5's uncertainty, gate, audit, privacy,
+and human-decision boundaries. Explicit date provenance also closes the
+accepted engine's last policy-time dependency.
+**Reversibility:** Additive, versioned, and non-destructive. A material future
+formula or rank-policy change requires a new scoring-policy version; existing
+rows remain attributable to `meyar-score-v1` and are never rewritten.
+
 ## D-016 — meyar-search-planner-v1: strict local natural-language planning
 
 **Date:** 2026-08-23
