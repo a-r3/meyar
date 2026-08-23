@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -29,6 +30,16 @@ class Settings(BaseSettings):
     embedding_dimensions: int = 768
     embedding_timeout_seconds: float = 60.0
     embedding_max_input_chars: int = 20000
+    # Browser sessions are deliberately bounded and cookies are secure by
+    # default. Local loopback development must opt out explicitly.
+    ui_session_ttl_hours: int = Field(default=8, ge=1, le=24)
+    ui_cookie_secure: bool = True
+
+    @model_validator(mode="after")
+    def _production_ui_cookie_must_be_secure(self) -> "Settings":
+        if self.env == "production" and not self.ui_cookie_secure:
+            raise ValueError("Production UI cookies must be Secure.")
+        return self
 
     @property
     def api_key_env(self) -> str:

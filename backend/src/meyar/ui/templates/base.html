@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="az">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}MEYAR{% endblock %}</title>
+  <link rel="stylesheet" href="/ui/static/styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="/ui">MEYAR</a>
+    {% if authenticated %}
+    <nav aria-label="Əsas naviqasiya">
+      <a href="/ui">Axtarış</a>
+      <a href="/ui/library">CV kitabxanası</a>
+      <a href="/ui/jobs">Vakansiya uyğunluğu</a>
+    </nav>
+    <form method="post" action="/ui/logout" class="logout-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button class="button button-secondary" type="submit">Çıxış</button>
+    </form>
+    {% endif %}
+  </header>
+  <main class="page-shell">
+    {% block content %}{% endblock %}
+  </main>
+  <footer>MEYAR qərar dəstəyi təqdim edir. Yekun qərarı insan verir.</footer>
+</body>
+</html>

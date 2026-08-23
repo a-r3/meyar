@@ -75,12 +75,12 @@ changed.
 
 `main` ← PR ← task branch (`feat/*`, `fix/*`, `chore/*`, `docs/*`,
 `test/*`), with `ruff` + `mypy src` + `pytest` as a merge gate (see
-D-012). **In progress:** development remote connected
+D-012). Development remote connected
 (`https://github.com/a-r3/meyar.git`, private, personal — temporary
 until the bank supplies an official repository, full history preserved
-on that migration); CI, local Git hooks, and PR template landing via
-`chore/git-governance`. Frontend checks join the gate once a frontend
-exists (Slice 11).
+on that migration); CI, local Git hooks, and PR template are active. Slice 11's
+server-rendered frontend uses the same Python quality gate and adds no Node
+toolchain.
 
 ### Slice 6 — Local CV Library & Folder Indexer
 
@@ -88,39 +88,41 @@ Scan a configured local folder for PDF/DOCX, hash-based change detection,
 ingest new/changed files only (idempotent, safe to re-run), parse/extract
 through the existing Slice 3/4 pipeline, persist indexing state
 (discovered path, hash, scan timestamp, parse/extraction status, current
-candidate/profile linkage). **Not started.**
+candidate/profile linkage). **DONE** (Slice 6, D-013).
 GitHub milestone: **M1 — CV Ingestion & Candidate Library**.
 
 ### Slice 7 — Candidate Identity + Local Embeddings / Vector Index
 
 `CandidateIdentity` model (name/contact, presentation-only, never a
 scoring input); local embedding provider abstraction; pgvector-backed
-professional-profile embeddings with version/provenance. Not started.
+professional-profile embeddings with version/provenance. **DONE** (Slice 7,
+D-014).
 
 ### Slice 8 — Hybrid Candidate Search
 
 Structured filters + vector semantic retrieval → deterministic relevance
-combination → ranked results with explanations. Not started.
+combination → ranked results with explanations. **DONE** (Slice 8, D-015).
 
 ### Slice 9 — Natural-Language Search Planner
 
 Chat-style request → LLM-produced, schema-validated `SearchPlan` → search
-execution → requested candidate count when enough matches exist. Not
-started.
+execution → requested candidate count when enough matches exist. **DONE**
+(Slice 9, D-016).
 
 ### Slice 10 — JD 0–100 Scoring + Batch Ranking
 
 Deterministic `meyar-score-v1` Decimal score layered on the existing
 criterion/fit engine, explicit as-of provenance, immutable idempotent
 Evaluation persistence, and one JD → tenant candidate library → fit-tier-first
-ranked list with reasons. Implemented on `feat/jd-scoring-batch-ranking`,
-pending acceptance/merge (D-017, issue #14).
+ranked list with reasons. **DONE and merged** (D-017, issue #14, PR #15).
 
 ### Slice 11 — Internal Chat UI + CV Library UI
 
-Chat/search, candidate results, CV Library, candidate detail/original CV
-access, JD matching results, minimal admin/status visibility. Not
-started.
+Server-rendered chat/search, candidate results, CV Library, candidate detail,
+existing-job JD matching results, and the API-key browser-session bridge.
+Implemented on `feat/internal-chat-cv-library-ui`, pending independent
+acceptance and owner merge (D-018, issue #16). Arbitrary raw-CV delivery and
+final REST/OpenAPI work remain outside this slice.
 
 ### Slice 12 — REST API / Swagger / README Completion
 

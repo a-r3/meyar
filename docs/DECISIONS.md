@@ -3,6 +3,71 @@
 Append-only log of concise architectural/product decisions. Format: id, date,
 decision, why, reversibility.
 
+## D-018 — Internal server-rendered UI and browser session bridge
+
+**Date:** 2026-08-23
+**Decision:** Slice 11 introduces the first browser-facing internal HR surface
+without creating a second product-policy engine:
+1. **Architecture:** the existing FastAPI modular monolith renders HTML with an
+   explicitly auto-escaping Jinja2 environment. Templates and repository-owned
+   CSS are Python package resources. There is no SPA, Node runtime, frontend
+   package manager, remote font/icon/script, analytics, or telemetry dependency.
+2. **API-key exchange:** `/ui/login` accepts an API key only in a POST form body
+   and validates it through the same `authenticate_raw_api_key` authority used
+   by Bearer authentication. A successful exchange issues a fresh opaque
+   `secrets.token_urlsafe(32)` browser token; neither the API key nor the browser
+   token is put in HTML, JavaScript, browser storage, logs, or audit metadata.
+3. **Server-side sessions:** `BrowserSession` stores only the owning `api_key_id`,
+   SHA-256 session-token digest, independent CSRF secret material, creation/
+   expiry timestamps, and revocation timestamp. It stores no tenant/scope copy,
+   identity, request text, or result payload. The fixed MVP lifetime is eight
+   hours with no sliding renewal or remember-me behavior.
+4. **Live authority:** every authenticated browser request hashes the cookie,
+   resolves a non-expired/non-revoked session, then reloads the live `ApiKey`
+   row. Tenant and scopes are derived from that row on every request; key expiry,
+   revocation, or scope changes therefore take effect without re-login. Existing
+   scopes remain authoritative: `candidates:read` authorizes the accepted
+   presentation-only identity view; job/ranking routes additionally use existing
+   `jobs:read` and `evaluations:write` scopes. No new scope is invented.
+5. **Cookie and logout:** the cookie is `HttpOnly`, `SameSite=Lax`, `Path=/ui`,
+   and `Secure=true` by default. Loopback development must explicitly set
+   `MEYAR_UI_COOKIE_SECURE=false`. Logout is authenticated, CSRF-protected,
+   revokes the server row, clears the cookie, and never reactivates a session.
+6. **CSRF and browser policy:** authenticated POSTs require a constant-time
+   checked token derived from the session's server-owned CSRF material and raw
+   session cookie. `/ui` responses receive restrictive same-origin CSP,
+   `nosniff`, `no-referrer`, frame denial, and `Cache-Control: no-store`.
+7. **Privacy boundary:** routes give templates narrow Pydantic presentation
+   models, never unrestricted ORM/domain objects. All candidate, identity, job,
+   query, evidence, and model-derived text remains untrusted display data;
+   Jinja auto-escaping is explicit and no `safe`/`Markup` bypass is used.
+   URLs contain only non-sensitive operational state and UUIDs; no candidate
+   data or credential is placed in localStorage/sessionStorage/IndexedDB.
+8. **Service authority:** natural-language POSTs delegate unchanged to Slice 9
+   `plan_and_search_candidates`; every non-executable planner outcome stays
+   fail-closed. JD forms pin an exact `JobCriteriaVersion` UUID and delegate to
+   Slice 10 `rank_candidates_for_job`. The UI preserves both backend result
+   orders and canonical scores exactly. It contains no planner parsing, search
+   filters, scoring formula, fit-tier order, or ranking logic.
+9. **Identity stays presentation-only:** current `CandidateIdentityVersion`
+   (maximum version number, tenant-scoped) is resolved only after search/rank
+   authority has returned. Changing name/contact cannot affect eligibility,
+   relevance, score, or rank. Email/phone are limited to candidate detail.
+10. **Boundary of completion:** Slice 11 adds HTML routes under `/ui`; it does
+    not finalize the `/api/v1` REST/OpenAPI contract, provide enterprise SSO,
+    deliver arbitrary raw CV bytes, or claim final security/target-Mac
+    acceptance. Those remain governed by later approved slices.
+
+**Why:** HR needs a usable internal browser interface now, while the accepted
+Slice 8–10 services must remain the only authorities for planning, search,
+evaluation, scoring, and ranking. A small server-rendered surface minimizes the
+browser attack/data-persistence boundary and avoids a separate frontend policy
+implementation.
+**Reversibility:** Additive and narrow. The browser-session table can be removed
+by its migration downgrade; a future bank identity provider can replace only
+the login bridge while preserving `/ui` view models and backend service
+authority.
+
 ## D-017 — meyar-score-v1 deterministic scoring and ranking
 
 **Date:** 2026-08-23

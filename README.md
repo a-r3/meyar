@@ -7,11 +7,11 @@ and evaluate candidates against job requirements with auditable evidence.
 MEYAR is internal HR tooling, not an external B2B/SaaS product or a public
 candidate-facing service.
 
-The repository currently contains a working backend foundation through
-deterministic JD scoring and batch ranking, alongside the strict local-LLM
-natural-language search planner and deterministic hybrid candidate search.
-The internal user interface and finalized REST API are planned work and must
-not be treated as implemented.
+The repository contains the working backend foundation through deterministic
+JD scoring and batch ranking, the strict local-LLM natural-language planner,
+deterministic hybrid search, and the first server-rendered internal HR browser
+interface. The finalized REST/OpenAPI surface remains Slice 12 work and must
+not be treated as complete.
 
 ## Project authority
 
@@ -72,13 +72,24 @@ Implemented and tested:
   current completed professional profile per active tenant candidate, explicit
   fit tiers before numeric score, and candidate UUID as the stable non-PII
   tie-break. It has no semantic-search, embedding, LLM, or identity dependency;
+- internal browser UI (`/ui`): Azerbaijani chat/search, fail-closed typed
+  planner outcomes, tenant-scoped CV Library and candidate detail, current
+  presentation-only identity, existing-job deterministic ranking, canonical
+  score/fit/contribution display, and safe internal error states;
+- server-side browser-session bridge: API key is posted once to login and
+  exchanged for a fresh eight-hour opaque session cookie; only its SHA-256
+  digest is persisted, and every request derives tenant/scopes from the live
+  API-key row. Authenticated POSTs are CSRF-protected;
+- repository-packaged Jinja2 templates and local CSS with no Node build,
+  frontend package manager, remote asset, analytics, or telemetry dependency;
 - synthetic-only automated tests and repository governance.
 
 Planned or in progress:
 
-- **Next: Slice 11** — internal Chat/Search and CV Library interfaces;
-- internal Chat/Search and CV Library user interfaces;
-- finalized internal API/Swagger examples and full security acceptance.
+- Slice 11 independent acceptance and owner merge;
+- **Next after acceptance: Slice 12** — finalized internal API/Swagger and
+  README API examples;
+- Slice 13 full security and target-Mac acceptance.
 
 The superseded External Async Evaluation API version of Slice 6 is cancelled.
 
@@ -120,6 +131,7 @@ Mini.
 
 - Python 3.12, managed with `uv`
 - FastAPI, Pydantic v2, Uvicorn
+- Jinja2 server-rendered HTML and repository-local CSS (no Node requirement)
 - SQLAlchemy 2.0 async, Alembic, PostgreSQL 16
 - `pypdf` and `python-docx` for current document parsing
 - Ollama through `meyar.llm.LLMProvider`
@@ -185,6 +197,19 @@ cd backend
 uv run alembic upgrade head
 ```
 
+Slice 11 requires migration `e3b1f7a9c2d4`, which creates only the
+`browser_sessions` table. The browser cookie is Secure by default. For local
+loopback HTTP development, explicitly set the non-production override in the
+git-ignored `backend/.env`:
+
+```bash
+MEYAR_UI_COOKIE_SECURE=false
+```
+
+Never use that override for production HTTPS deployment. Browser sessions have
+a fixed eight-hour lifetime (`MEYAR_UI_SESSION_TTL_HOURS=8` by default), no
+remember-me behavior, and no sliding unlimited renewal.
+
 Score one candidate's current profile against a job's current criteria with an
 explicit reproducibility date:
 
@@ -221,11 +246,15 @@ uv run uvicorn meyar.main:app --reload
 Local endpoints:
 
 - Health: `http://127.0.0.1:8000/api/v1/health`
+- Internal HR UI: `http://127.0.0.1:8000/ui`
 - Swagger UI: `http://127.0.0.1:8000/docs`
 - OpenAPI JSON: `http://127.0.0.1:8000/openapi.json`
 
-Protected routes require a locally issued API key. Do not place keys in this
-README, source files, shell history, logs, or Git.
+Protected API routes require a locally issued API key. The browser login accepts
+that key only in the `/ui/login` POST body, validates it through the same API-key
+authority, then stores only a session cookie in the browser—never the API key,
+identity, query, or result data in JavaScript or browser storage. Do not place
+keys in this README, source files, shell history, logs, URLs, or Git.
 
 ## Quality gate
 
@@ -259,13 +288,13 @@ updated `backend/uv.lock` when applicable.
 ## Known current limitations
 
 - Structured/semantic/hybrid candidate search and strict natural-language
-  planning exist (Slices 7–9, service + CLI only, no REST endpoint or UI
-  yet). The planner intentionally rejects unsupported language proficiency,
+  planning exist (Slices 7–9, service + CLI plus the Slice 11 HTML UI; no
+  finalized REST endpoint yet). The planner intentionally rejects unsupported language proficiency,
   skill-specific duration, identity, salary/location, and custom-weight
   requests rather than weakening their meaning.
-- Deterministic 0–100 scoring and batch ranking are service/CLI capabilities;
-  no Chat UI, CV Library UI, or finalized scoring/ranking REST endpoint exists
-  yet.
+- Deterministic 0–100 scoring and batch ranking are service/CLI capabilities
+  rendered by the Slice 11 HTML UI; no finalized scoring/ranking REST endpoint
+  exists yet.
 - OCR fallback for scanned PDFs is not implemented.
 - The configured embedding model is a development/integration default
   (`DEV_INTEGRATION_MODEL`), not an approved final production model —

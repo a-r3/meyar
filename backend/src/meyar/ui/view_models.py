@@ -1,0 +1,138 @@
+import uuid
+from datetime import date, datetime
+from decimal import Decimal
+
+from pydantic import BaseModel, Field
+
+
+class EvidenceLocationView(BaseModel):
+    page: int
+    block_index: int
+    snippet: str | None = None
+
+
+class ProfileFactView(BaseModel):
+    title: str
+    detail: str | None = None
+    evidence: list[EvidenceLocationView] = Field(default_factory=list)
+
+
+class CandidateLibraryItemView(BaseModel):
+    candidate_id: uuid.UUID
+    created_at: datetime
+    full_name: str | None
+    current_profile_version: int | None
+    current_profile_status: str | None
+    parser_statuses: list[str]
+    folder_index_statuses: list[str]
+
+
+class CandidateLibraryPageView(BaseModel):
+    items: list[CandidateLibraryItemView]
+    page: int
+    page_size: int
+    total: int
+    has_previous: bool
+    has_next: bool
+
+
+class CandidateDocumentView(BaseModel):
+    document_id: uuid.UUID
+    mime_type: str
+    byte_size: int
+    parser_status: str
+    parser_name: str | None
+    parser_version: str | None
+    parse_error_code: str | None
+    created_at: datetime
+
+
+class EvaluationHistoryView(BaseModel):
+    evaluation_id: uuid.UUID
+    job_id: uuid.UUID
+    job_criteria_version_id: uuid.UUID
+    evaluation_as_of_date: date | None
+    numeric_score: Decimal | None
+    fit_band: str | None
+    status: str
+    created_at: datetime
+
+
+class CandidateDetailView(BaseModel):
+    candidate_id: uuid.UUID
+    created_at: datetime
+    full_name: str | None
+    email: str | None
+    phone: str | None
+    identity_status: str | None
+    identity_version: int | None
+    profile_status: str | None
+    profile_version: int | None
+    skills: list[ProfileFactView]
+    experience: list[ProfileFactView]
+    education: list[ProfileFactView]
+    languages: list[ProfileFactView]
+    certifications: list[ProfileFactView]
+    projects: list[ProfileFactView]
+    documents: list[CandidateDocumentView]
+    evaluations: list[EvaluationHistoryView]
+
+
+class CandidateSearchResultView(BaseModel):
+    candidate_id: uuid.UUID
+    full_name: str | None
+    rank: int
+    relevance_score: float
+    structured_score: float | None
+    semantic_score: float | None
+    profile_version_id: uuid.UUID
+    required_matches: list[str]
+    preferred_matches: list[str]
+    professional_summary: str | None
+    evidence: list[EvidenceLocationView]
+
+
+class PlannerOutcomeView(BaseModel):
+    outcome: str
+    title: str
+    message: str
+    executable: bool
+    reason_codes: list[str]
+    mode: str | None = None
+    result_count: int | None = None
+    infrastructure_error: bool = False
+
+
+class JobView(BaseModel):
+    job_id: uuid.UUID
+    title: str
+    created_at: datetime
+    current_criteria_version_id: uuid.UUID | None
+    current_criteria_version: int | None
+    criteria_count: int
+
+
+class ScoreContributionView(BaseModel):
+    criterion_id: str
+    criterion_kind: str
+    criterion_type: str
+    weight: str
+    status: str
+    factor: str
+    weighted_points: str
+    reason_code: str
+    manual_review_required: bool
+    evidence: list[EvidenceLocationView]
+
+
+class RankedCandidateView(BaseModel):
+    candidate_id: uuid.UUID
+    full_name: str | None
+    rank: int
+    numeric_score: Decimal
+    fit_band: str
+    evaluation_id: uuid.UUID
+    evaluation_as_of_date: date
+    evaluation_policy_version: str
+    scoring_policy_version: str
+    contributions: list[ScoreContributionView]

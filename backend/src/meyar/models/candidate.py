@@ -10,10 +10,11 @@ CANDIDATE_STATUS_ACTIVE = "ACTIVE"
 
 
 class Candidate(Base):
-    """Deliberately minimal — this slice stores no name/email/phone.
-    Identity fields belong to a future CandidateIdentity extension; the CV
-    document itself is the source of candidate information. See
-    docs/MASTER_SPEC.md §5 (CandidateIdentity vs CandidateProfile)."""
+    """Deliberately minimal — stores no name/email/phone.
+
+    Identity lives only in the separate immutable CandidateIdentityVersion
+    table and is presentation-only. See docs/MASTER_SPEC.md §5.
+    """
 
     __tablename__ = "candidates"
 

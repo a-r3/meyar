@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Namizəd detalı — MEYAR{% endblock %}
+{% macro fact_section(title, items) %}
+<section class="panel profile-section">
+  <h2>{{ title }}</h2>
+  {% if not items %}<p class="muted">Məlumat yoxdur.</p>{% endif %}
+  {% for item in items %}<article class="fact"><h3>{{ item.title }}</h3>{% if item.detail %}<p>{{ item.detail }}</p>{% endif %}{% if item.evidence %}<details><summary>Sübut</summary><ul class="evidence-list">{% for evidence in item.evidence %}<li>Səhifə {{ evidence.page }}, blok {{ evidence.block_index }}{% if evidence.snippet %}: “{{ evidence.snippet }}”{% endif %}</li>{% endfor %}</ul></details>{% endif %}</article>{% endfor %}
+</section>
+{% endmacro %}
+{% block content %}
+<a class="back-link" href="/ui/library">← CV kitabxanası</a>
+<div class="page-heading"><div><p class="eyebrow">Namizəd profili</p><h1>{{ candidate.full_name or "Ad məlumatı yoxdur" }}</h1><p class="mono">{{ candidate.candidate_id }}</p></div></div>
+<section class="panel identity-panel">
+  <h2>Əlaqə və versiya məlumatı</h2>
+  <dl class="detail-list"><dt>E-poçt</dt><dd>{{ candidate.email or "Məlumat yoxdur" }}</dd><dt>Telefon</dt><dd>{{ candidate.phone or "Məlumat yoxdur" }}</dd><dt>Cari identiklik</dt><dd>{% if candidate.identity_version %}v{{ candidate.identity_version }} · {{ state_label(candidate.identity_status) }}{% else %}Mövcud deyil{% endif %}</dd><dt>Cari peşəkar profil</dt><dd>{% if candidate.profile_version %}v{{ candidate.profile_version }} · {{ state_label(candidate.profile_status) }}{% else %}Mövcud deyil{% endif %}</dd></dl>
+  {% if candidate.profile_status and candidate.profile_status != "COMPLETED" %}<div class="alert alert-warning">Cari profil tamamlanmayıb. Köhnə tamamlanmış profil avtomatik göstərilmir.</div>{% endif %}
+</section>
+<div class="two-column">
+  {{ fact_section("Bacarıqlar", candidate.skills) }}
+  {{ fact_section("İş təcrübəsi", candidate.experience) }}
+  {{ fact_section("Təhsil", candidate.education) }}
+  {{ fact_section("Dillər", candidate.languages) }}
+  {{ fact_section("Sertifikatlar", candidate.certifications) }}
+  {{ fact_section("Layihələr", candidate.projects) }}
+</div>
+<section class="panel"><h2>Sənədlər və parser metadatası</h2>{% if not candidate.documents %}<p>Məlumat yoxdur.</p>{% endif %}<div class="table-wrap"><table><thead><tr><th>Sənəd ID</th><th>Tip</th><th>Ölçü</th><th>Parser</th><th>Vəziyyət</th></tr></thead><tbody>{% for document in candidate.documents %}<tr><td class="mono">{{ document.document_id }}</td><td>{{ document.mime_type }}</td><td>{{ document.byte_size }} bayt</td><td>{{ document.parser_name or "—" }} {{ document.parser_version or "" }}</td><td>{{ state_label(document.parser_status) }}{% if document.parse_error_code %} · {{ document.parse_error_code }}{% endif %}</td></tr>{% endfor %}</tbody></table></div></section>
+<section class="panel"><h2>Son qiymətləndirmələr</h2>{% if not candidate.evaluations %}<p>Məlumat yoxdur.</p>{% endif %}<div class="table-wrap"><table><thead><tr><th>Tarix</th><th>Bal</th><th>Uyğunluq</th><th>Meyar versiyası</th></tr></thead><tbody>{% for evaluation in candidate.evaluations %}<tr><td>{{ evaluation.evaluation_as_of_date or "—" }}</td><td>{{ evaluation.numeric_score if evaluation.numeric_score is not none else "—" }}</td><td>{{ fit_label(evaluation.fit_band) if evaluation.fit_band else state_label(evaluation.status) }}</td><td class="mono">{{ evaluation.job_criteria_version_id }}</td></tr>{% endfor %}</tbody></table></div></section>
+{% endblock %}

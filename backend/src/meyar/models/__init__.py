@@ -1,5 +1,6 @@
 from meyar.models.api_key import ApiKey
 from meyar.models.audit_event import AuditEvent
+from meyar.models.browser_session import BrowserSession
 from meyar.models.candidate import Candidate
 from meyar.models.candidate_document import CandidateDocument
 from meyar.models.candidate_embedding_version import CandidateEmbeddingVersion
@@ -16,6 +17,7 @@ from meyar.models.tenant import Tenant
 __all__ = [
     "ApiKey",
     "AuditEvent",
+    "BrowserSession",
     "Candidate",
     "CandidateDocument",
     "CandidateEmbeddingVersion",

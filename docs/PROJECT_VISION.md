@@ -73,8 +73,9 @@ languages/certifications):
 Sensitive/irrelevant attributes (gender, photo, DOB, ethnicity, religion,
 marital status, political opinion, health) never enter either model and
 never influence matching — unchanged from the original privacy model.
-`CandidateIdentity` is documented here as the target shape; it is **not
-implemented yet** (belongs to Slice 7).
+`CandidateIdentityVersion` is implemented as a separate immutable,
+tenant-scoped presentation model (Slice 7); Slice 11 renders its current
+version only after search/ranking authority has returned.
 
 ## Local CV folder ingestion
 
@@ -82,8 +83,8 @@ MEYAR scans a configured local folder and builds/maintains its own
 persistent indexed candidate database. Processing is incremental and
 idempotent: file → content hash → new/changed/already-indexed detection
 → parse → extract → persist/index. Unchanged files are never
-reprocessed. Not implemented yet — this is Slice 6, the next
-implementation slice.
+reprocessed. This is implemented in Slice 6; D-013 fixes the exact
+changed/missing/retry semantics.
 
 ## Structured + semantic hybrid search
 
@@ -98,7 +99,7 @@ Natural-language user request
 
 The LLM interprets the query into `SearchPlan` JSON; it never searches or
 ranks the database directly. Local embeddings only — no external
-embedding API. Not implemented yet (Slices 7–9).
+embedding API. This is implemented in Slices 7–9 and rendered by Slice 11.
 
 ## JD matching, 0–100 score, batch ranking
 

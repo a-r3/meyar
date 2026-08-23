@@ -51,6 +51,16 @@ async def get_api_key_by_plaintext(db: AsyncSession, plaintext: str) -> ApiKey |
     return result.scalar_one_or_none()
 
 
+async def get_api_key_by_id(db: AsyncSession, api_key_id: uuid.UUID) -> ApiKey | None:
+    """Load the live credential record for browser-session revalidation."""
+    result = await db.execute(
+        select(ApiKey)
+        .where(ApiKey.id == api_key_id)
+        .execution_options(populate_existing=True)
+    )
+    return result.scalar_one_or_none()
+
+
 async def touch_last_used(db: AsyncSession, api_key_id: uuid.UUID) -> None:
     await db.execute(
         update(ApiKey).where(ApiKey.id == api_key_id).values(last_used_at=datetime.now(UTC))

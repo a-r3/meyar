@@ -2,10 +2,9 @@
 
 ## Privacy model
 
-- `CandidateIdentity` (name/contact) is planned as a model separate from
-  `CandidateProfile` (extracted professional facts) — see
-  `docs/PROJECT_VISION.md` and MASTER_SPEC.md §5. Not implemented yet
-  (Slice 7). Once it exists, `CandidateIdentity` may be displayed to
+- `CandidateIdentityVersion` (name/contact) is implemented as a model separate
+  from `CandidateProfile` (extracted professional facts) — see
+  `docs/PROJECT_VISION.md`, MASTER_SPEC.md §5, and D-014. It may be displayed to
   authorized HR users in the UI/API but **must never be read by the
   matching, evaluation, search, or ranking engine** — those only ever
   read `CandidateProfile`. Identity data is presentation-only, never a
@@ -77,9 +76,9 @@
 | Secret leakage via logs/git | PII-safe structured logging (ids only); `.claude` hooks block obvious secret patterns and real CV files from commits |
 | Retry-induced duplicate work/cost | `Idempotency-Key` on unsafe writes where relevant |
 | Inference overload | Global concurrency semaphore around the `LLMProvider` call; per-tenant rate limit |
-| Candidate content leaving bank infrastructure via embeddings (planned) | Local-only embedding provider abstraction, same boundary pattern as `LLMProvider`; no external embedding API call anywhere in code |
-| Identity data (name/contact) leaking into scoring/ranking as a hidden signal (planned) | `CandidateIdentity` is presentation-only by construction — the matching/search/ranking engine's inputs only ever include `CandidateProfile` fields |
-| Untrusted local files treated as more trustworthy than uploads (planned folder scanner) | Folder-discovered files go through the identical MIME/size/opaque-id validation path as direct upload — no separate, weaker code path |
+| Candidate content leaving bank infrastructure via embeddings | Local-only embedding provider abstraction, same boundary pattern as `LLMProvider`; no external embedding API call anywhere in code |
+| Identity data (name/contact) leaking into scoring/ranking as a hidden signal | `CandidateIdentityVersion` is presentation-only by construction — matching/search/ranking inputs include only `CandidateProfile` fields, and Slice 11 resolves identity after backend order is fixed |
+| Untrusted local files treated as more trustworthy than uploads | Folder-discovered files go through the identical MIME/size/opaque-id validation path as direct upload — no separate, weaker code path |
 
 ## Tenant isolation enforcement
 
@@ -99,6 +98,14 @@ scripts).
 - Scopes enforced per-route via a FastAPI dependency.
 - Errors never reveal whether a resource exists in another tenant (404, not
   403-with-details, for cross-tenant reads).
+- Browser UI login posts the API key once to `/ui/login`, exchanges it for a
+  256-bit opaque cookie token, and persists only the token's SHA-256 digest in
+  `BrowserSession`. Every browser request reloads the live API-key row and
+  derives tenant/scopes from it. Sessions expire after eight hours, support
+  revocation/logout, and all authenticated POSTs require per-session CSRF.
+  Cookies are `HttpOnly`, `SameSite=Lax`, `Path=/ui`, and Secure by default;
+  loopback development must opt out explicitly. UI responses are no-store and
+  carry restrictive same-origin browser headers (D-018).
 
 ## Document storage
 
