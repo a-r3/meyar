@@ -896,3 +896,120 @@ in `LocalTextParser` provides a second, independent bound against
 pathological small-but-complex files.
 **Reversibility:** Fully reversible — single config value, overridable
 per environment via `MEYAR_MAX_UPLOAD_BYTES`.
+
+## D-019 — Final internal REST API and OpenAPI contract
+
+**Date:** 2026-08-23
+**Decision:** Slice 12 finalizes the `/api/v1` presentation layer over the
+already-accepted domain/services, without introducing a second business-logic
+implementation:
+1. **Additive surface.** All 13 pre-existing routes (health, usage, jobs,
+   candidates, documents) are unchanged. Five new routes wrap accepted
+   services only: `POST /api/v1/search` (Slice 8), `POST
+   /api/v1/search/natural-language` (Slice 9), `POST /api/v1/jobs/{job_id}
+   /criteria/{version_number}/score` (Slice 5/10), `POST /api/v1/jobs
+   /{job_id}/criteria/{version_number}/rank` (Slice 10), and `GET
+   /api/v1/candidates/{candidate_id}/detail` (Slice 7/11 identity/profile
+   presentation). No route computes a score, rank, or search result itself.
+2. **OpenAPI Bearer security scheme.** `meyar.core.auth.get_current_tenant`
+   previously read the `Authorization` header manually via
+   `request.headers.get(...)`, so the generated OpenAPI had no
+   `securitySchemes` entry — Swagger's Authorize control had nothing to bind
+   to. It now resolves the same key through FastAPI's `HTTPBearer`/
+   `Security()` (`bearer_scheme`, `scheme_name="ApiKeyBearer"`,
+   `auto_error=False`), with byte-identical 401/403 observable behavior —
+   verified by the existing `test_api_key_auth.py`/`test_tenant_isolation.py`
+   suites passing unchanged. No OAuth2/Basic scheme is introduced; `/ui`'s
+   BrowserSession/CSRF cookie mechanism remains fully separate and is never
+   the API's auth boundary.
+3. **Scope reuse, not invention.** All six scopes seeded on every key since
+   Slice 1 (`jobs:read`, `jobs:write`, `candidates:read`, `candidates:write`,
+   `evaluations:read`, `evaluations:write`) are sufficient. `evaluations:read`
+   existed but was enforced nowhere until this slice — the score endpoint
+   now activates it; the rank endpoint reuses `evaluations:write`, matching
+   the scope the Slice 11 UI already required for the same operation.
+4. **External DTO boundary.** New request/response models live in
+   `meyar.schemas.api_search`/`api_evaluation`/`api_candidate`, distinct from
+   internal service schemas, `extra="forbid"` throughout (matching the
+   project-wide convention). `CandidateSearchRequest.embedding_config` and
+   its structured/semantic weights are deliberately absent from the external
+   request DTO — the route injects trusted server-side values
+   (`get_embedding_search_config()`, `DEFAULT_STRUCTURED_WEIGHT`/
+   `DEFAULT_SEMANTIC_WEIGHT`) so a client can never smuggle its own embedding
+   provenance or hybrid weighting into the ranking path.
+5. **Fail-closed NL search preserved over REST.** All seven
+   `PlannerOutcome` values (`EXECUTABLE`, `PROHIBITED_REQUEST`,
+   `UNSUPPORTED_SEMANTICS`, `AMBIGUOUS_REQUEST`, `MALFORMED_MODEL_OUTPUT`,
+   `PLANNER_PROVIDER_FAILURE`, `VALIDATION_FAILURE`) remain distinguishable
+   in the `200` response body — no collapse to a generic error. `503` is
+   reserved for a genuinely unavailable embedding/database dependency (an
+   exception path), never for a normal typed non-executable planner outcome.
+6. **Decimal/date/UUID serialization.** `numeric_score` in both the score and
+   rank responses always uses the already-canonical `ScoreExplanation`
+   `".2f"`-formatted decimal string (e.g. `"75.00"`) — the route reuses
+   `explanation.numeric_score`/`item.score_explanation.numeric_score` rather
+   than reformatting the underlying `Decimal` itself, avoiding the float-like
+   default Pydantic/JSON encoding of `Decimal`. Dates stay ISO 8601;
+   UUIDs stay canonical string form — no change from existing convention.
+7. **No wall-clock default, preserved idempotency/ordering.**
+   `evaluation_as_of_date` is a required field on both the score and rank
+   request DTOs — never defaulted to "today." Score requests replay the
+   underlying service's exact-provenance idempotency (`reused=true` on an
+   identical repeat call, same `evaluation_id`, no duplicate row). Rank
+   responses preserve the batch service's exact backend order
+   (`fit_tier, -numeric_score, candidate_id.int`) — the route never re-sorts.
+8. **Truthful `/usage`.** The previous hardcoded `candidates_count: 0,
+   evaluations_count: 0` placeholder is replaced with real tenant-scoped
+   counts (`count_candidates_for_tenant`, `count_evaluations_for_tenant`) —
+   a fresh tenant genuinely has zero of both; activity changes the count on
+   the next call; no cross-tenant aggregation.
+9. **Offline Swagger UI.** FastAPI's default `/docs` loads
+   `swagger-ui-bundle.js`/`swagger-ui.css` from `cdn.jsdelivr.net` at
+   runtime — a real gap for bank-controlled/offline infrastructure.
+   `docs_url=None` disables the default route; a manual `GET /docs`
+   (`meyar.api.docs`) serves `get_swagger_ui_html()` pointed at
+   locally-mounted assets from the `swagger-ui-bundle` PyPI package (a
+   small, maintained package that vendors Swagger UI's static assets — no
+   Node/npm/package.json introduced), mounted at `/docs-assets`. Verified
+   (`test_openapi_contract.py`) that the rendered `/docs` HTML contains no
+   `cdn.jsdelivr`/`unpkg`/`cdnjs`/external URL, and that the local asset
+   routes return `200`. `/openapi.json` itself already had zero network
+   dependency and is unchanged. Both the docs route and asset mount use
+   `include_in_schema=False`, same as `/ui/*`.
+10. **UI stays excluded.** `/ui/*` (already `include_in_schema=False` since
+    Slice 11) continues to be absent from `/openapi.json` — the OpenAPI
+    schema represents the product REST API only, never BrowserSession/CSRF/
+    login-form internals.
+11. **No CORS, no rate limiting added.** The application has no CORS
+    middleware before or after this slice — the current same-origin `/ui` +
+    internal-API deployment does not need one; a specific internal
+    cross-origin client would require an explicit allowlisted-origin
+    decision later, never a wildcard. Rate limiting remains unimplemented
+    (`Settings.rate_limit_per_minute` exists but is unenforced) and is
+    explicitly deferred to Slice 13 security acceptance, not silently
+    claimed here.
+12. **Raw CV delivery stays out of scope.** No endpoint serves original CV
+    bytes, a storage key, or a filesystem path — candidate detail exposes
+    only extracted structured facts, evidence locations, and parse
+    metadata, matching the pre-existing `docs/STATUS.md` "Original file
+    reference" row (DONE at the storage layer, browser delivery
+    intentionally not added).
+
+**Why:** The official task (`AI-PROJ-CV-01`) requires a usable internal REST
+API with Swagger documentation for approved internal HR clients/systems.
+Slice 11 (D-018) proved the domain services end-to-end through a
+server-rendered UI but left the REST presentation of search/scoring/ranking
+unfinished, and left a functional-but-undocumented auth mechanism (no OpenAPI
+security scheme) and a placeholder `/usage` metric that would mislead a real
+integrator. Fixing all three in one slice — rather than deferring OpenAPI
+correctness or `/usage` truthfulness further — keeps the eventual Slice 13
+security/DoD acceptance pass from having to re-audit a REST surface that
+silently changed shape after "final."
+**Reversibility:** Fully reversible. The five new routes are additive and can
+be removed/changed independently of the underlying services they wrap. The
+`get_current_tenant` refactor is a drop-in replacement with an identical
+authentication contract (test-verified). `swagger-ui-bundle` is a single,
+small, easily-replaceable dependency (`backend/uv.lock`) — switching to a
+different offline-asset strategy later requires no change to any route or
+schema. The `/usage` fix only changes two integer values in an existing
+response shape; no API consumer contract is broken.

@@ -2,10 +2,19 @@ import uuid
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.models.evaluation import EVALUATION_STATUS_COMPLETED, Evaluation
+
+
+async def count_evaluations_for_tenant(db: AsyncSession, *, tenant_id: uuid.UUID) -> int:
+    """Tenant-scoped total evaluation count (all statuses) — no
+    cross-tenant aggregation."""
+    result = await db.execute(
+        select(func.count()).select_from(Evaluation).where(Evaluation.tenant_id == tenant_id)
+    )
+    return int(result.scalar_one())
 
 
 async def create_evaluation(

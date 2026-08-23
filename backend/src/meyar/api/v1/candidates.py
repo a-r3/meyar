@@ -11,6 +11,7 @@ from meyar.ingestion.parser import DocumentParser
 from meyar.ingestion.validation import DocumentTooLargeError, UnsupportedDocumentError
 from meyar.models.candidate_document import PARSER_STATUS_PARSED, CandidateDocument
 from meyar.models.canonical_document import CanonicalDocument
+from meyar.schemas.api_candidate import ApiCandidateDetailResponse
 from meyar.schemas.candidate import (
     CandidateDocumentOut,
     CandidateOut,
@@ -27,6 +28,7 @@ from meyar.services.candidate_repo import create_candidate, get_candidate
 from meyar.services.candidate_service import delete_candidate_cascade
 from meyar.storage.base import DocumentStorage
 from meyar.storage.dependency import get_document_storage
+from meyar.ui.service import get_candidate_detail_view
 
 router = APIRouter(tags=["candidates"])
 
@@ -106,6 +108,20 @@ async def get_candidate_detail(
 ) -> CandidateOut:
     candidate = await _get_candidate_or_404(db, ctx.tenant_id, candidate_id)
     return _candidate_out(candidate)
+
+
+@router.get("/candidates/{candidate_id}/detail", response_model=ApiCandidateDetailResponse)
+async def get_candidate_detail_enriched(
+    candidate_id: uuid.UUID,
+    ctx: TenantContext = Depends(require_scope("candidates:read")),
+    db: AsyncSession = Depends(get_db),
+) -> ApiCandidateDetailResponse:
+    detail = await get_candidate_detail_view(
+        db, tenant_id=ctx.tenant_id, candidate_id=candidate_id
+    )
+    if detail is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Candidate not found.")
+    return detail
 
 
 @router.delete("/candidates/{candidate_id}", status_code=status.HTTP_204_NO_CONTENT)

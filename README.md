@@ -9,9 +9,10 @@ candidate-facing service.
 
 The repository contains the working backend foundation through deterministic
 JD scoring and batch ranking, the strict local-LLM natural-language planner,
-deterministic hybrid search, and the first server-rendered internal HR browser
-interface. The finalized REST/OpenAPI surface remains Slice 12 work and must
-not be treated as complete.
+deterministic hybrid search, the server-rendered internal HR browser
+interface, and a finalized internal `/api/v1` REST surface with offline
+Swagger/OpenAPI documentation (Slice 12). Final security/DoD acceptance
+(Slice 13) remains outstanding and must not be treated as complete.
 
 ## Project authority
 
@@ -35,8 +36,9 @@ Implemented and tested:
 - local-LLM professional-profile extraction behind `LLMProvider`, with
   redaction, schema validation, evidence validation, and safe failure states;
 - deterministic per-criterion evaluation and fit-band policy, exposed through
-  an internal service and CLI rather than a finalized evaluation HTTP API;
-- internal health, job, and candidate API routes;
+  an internal service, CLI, and the REST scoring endpoint below;
+- internal health, usage, job, candidate, search, and evaluation/ranking API
+  routes under `/api/v1`, with offline Swagger UI and OpenAPI security scheme;
 - local CV folder scanning/indexing (`meyar index-folder`): symlink-safe
   recursive discovery, SHA-256 content-hash idempotent re-scanning, and
   ingestion through the same secure pipeline as direct upload;
@@ -53,8 +55,8 @@ Implemented and tested:
   profile, local pgvector semantic retrieval restricted to current and
   exactly provenance-compatible embeddings, and a documented
   `meyar-search-v1` hybrid-ranking formula where a failed required
-  filter can never be overridden by semantic similarity — service + CLI
-  only, no REST endpoint yet;
+  filter can never be overridden by semantic similarity — available via
+  CLI, the `/ui` chat search, and `POST /api/v1/search`;
 - natural-language candidate search planning (`meyar plan-search`): a
   loopback-only local LLM produces a strict `PlannerDraft`; deterministic
   `meyar-search-planner-v1` validation derives the search mode, rejects
@@ -63,12 +65,16 @@ Implemented and tested:
   `CandidateSearchRequest` Slice 8 executes. The planner never reads or ranks
   candidates. Its explicit Azerbaijani MVP morphology policy preserves common
   mandatory forms and protected-term inflections without broad prefix
-  matching; plan-only and thin plan→search service flows are both tested;
-- deterministic JD scoring (`meyar evaluate --as-of-date YYYY-MM-DD`):
+  matching; plan-only and thin plan→search service flows are both tested, and
+  the same fail-closed typed outcome contract is exposed via
+  `POST /api/v1/search/natural-language`;
+- deterministic JD scoring (`meyar evaluate --as-of-date YYYY-MM-DD` or
+  `POST /api/v1/jobs/{job_id}/criteria/{version_number}/score`):
   `meyar-policy-v1` criterion/fit evaluation plus `meyar-score-v1` Decimal
   0–100 scoring, exact structured explanation, explicit date provenance, and
   idempotent reuse of the immutable Evaluation for exact repeated inputs;
-- deterministic candidate-library ranking (`meyar rank-job`): exactly one
+- deterministic candidate-library ranking (`meyar rank-job` or
+  `POST /api/v1/jobs/{job_id}/criteria/{version_number}/rank`): exactly one
   current completed professional profile per active tenant candidate, explicit
   fit tiers before numeric score, and candidate UUID as the stable non-PII
   tie-break. It has no semantic-search, embedding, LLM, or identity dependency;
@@ -86,10 +92,9 @@ Implemented and tested:
 
 Planned or in progress:
 
-- Slice 11 independent acceptance and owner merge;
-- **Next after acceptance: Slice 12** — finalized internal API/Swagger and
-  README API examples;
-- Slice 13 full security and target-Mac acceptance.
+- **Next: Slice 13** — full security and target-Mac acceptance (Definition of
+  Done matrix), including rate-limiting/backup/restore/DoD sign-off. Not yet
+  claimed as complete by Slice 12.
 
 The superseded External Async Evaluation API version of Slice 6 is cancelled.
 
@@ -256,6 +261,154 @@ authority, then stores only a session cookie in the browser—never the API key,
 identity, query, or result data in JavaScript or browser storage. Do not place
 keys in this README, source files, shell history, logs, URLs, or Git.
 
+## Internal REST API
+
+`/api/v1` is the internal REST surface for approved internal HR clients (the
+`/ui` browser interface and other approved internal systems). It is
+Bearer-API-key authenticated and fully independent of the `/ui`
+BrowserSession/CSRF cookie mechanism — never authenticate a REST client with a
+UI session cookie, and never authenticate the UI with an API key header.
+`/ui/*` routes are deliberately excluded from the OpenAPI schema
+(`include_in_schema=False`); the schema below describes the product REST API
+only.
+
+### Creating an API key
+
+API keys are provisioned administratively via the CLI — there is no HTTP
+endpoint that issues keys (an unauthenticated key-issuance endpoint would
+defeat the auth boundary):
+
+```bash
+cd backend
+uv run meyar create-tenant --name "Example HR Team"
+```
+
+This prints the new tenant's UUID and the plaintext API key **exactly once**.
+Store it immediately in a secret manager or local environment variable — it is
+never shown again and is stored server-side only as a salted hash. A new key
+is seeded with all six current scopes (`jobs:read`, `jobs:write`,
+`candidates:read`, `candidates:write`, `evaluations:read`,
+`evaluations:write`).
+
+### Authenticating requests
+
+```bash
+export MEYAR_API_KEY='<paste the key printed above>'
+curl -H "Authorization: Bearer $MEYAR_API_KEY" http://127.0.0.1:8000/api/v1/usage
+```
+
+Missing/invalid/expired/revoked keys return `401`. A valid key missing a
+required scope returns `403`. The tenant is always derived from the key
+server-side — no request may supply its own `tenant_id`.
+
+### Swagger UI / OpenAPI
+
+- `GET /docs` — fully offline Swagger UI (assets are served locally via the
+  vendored `swagger-ui-bundle` package; no CDN/internet dependency at
+  runtime). Click **Authorize** and paste `<your API key>` (the `Bearer `
+  prefix is added for you by the Authorize dialog).
+- `GET /openapi.json` — the canonical, FastAPI-generated API spec; also
+  requires no network access to generate.
+
+### Endpoint summary
+
+| Method | Path | Scope | Purpose |
+|---|---|---|---|
+| GET | `/api/v1/health` | none | Liveness only — does not probe DB/Ollama. |
+| GET | `/api/v1/usage` | any valid key | Tenant-scoped all-time candidate/evaluation counts. |
+| POST | `/api/v1/jobs` | `jobs:write` | Create a job with its first criteria version. |
+| GET | `/api/v1/jobs/{job_id}` | `jobs:read` | Job + current criteria version. |
+| POST | `/api/v1/jobs/{job_id}/criteria` | `jobs:write` | Create a new immutable criteria version. |
+| GET | `/api/v1/jobs/{job_id}/criteria` | `jobs:read` | List all criteria versions. |
+| GET | `/api/v1/jobs/{job_id}/criteria/{version_number}` | `jobs:read` | One exact criteria version. |
+| POST | `/api/v1/candidates` | `candidates:write` | Create a candidate record. |
+| GET | `/api/v1/candidates/{id}` | `candidates:read` | Candidate record only. |
+| GET | `/api/v1/candidates/{id}/detail` | `candidates:read` | Identity + current profile + documents + evaluation history. |
+| DELETE | `/api/v1/candidates/{id}` | `candidates:write` | Cascade-delete a candidate and its documents. |
+| POST | `/api/v1/candidates/{id}/documents` | `candidates:write` | Upload a CV (PDF/DOCX, size/MIME validated). |
+| GET | `/api/v1/candidates/{id}/documents` | `candidates:read` | List uploaded documents + parse status. |
+| GET | `/api/v1/candidates/{id}/documents/{doc_id}` | `candidates:read` | One document + canonical parse metadata. |
+| POST | `/api/v1/search` | `candidates:read` | Structured/semantic/hybrid search (Slice 8). |
+| POST | `/api/v1/search/natural-language` | `candidates:read` | Natural-language search planning + execution (Slice 9), typed fail-closed outcomes. |
+| POST | `/api/v1/jobs/{job_id}/criteria/{version_number}/score` | `evaluations:read` | Deterministic 0–100 score for one candidate against one criteria version. |
+| POST | `/api/v1/jobs/{job_id}/criteria/{version_number}/rank` | `evaluations:write` | Deterministic batch ranking of the active candidate library. |
+
+### curl examples (synthetic data only)
+
+Structured search:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/search \
+  -H "Authorization: Bearer $MEYAR_API_KEY" -H "Content-Type: application/json" \
+  -d '{
+    "mode": "STRUCTURED_ONLY",
+    "required_filters": {"skills": ["Python"]},
+    "limit": 10
+  }'
+```
+
+Natural-language search (Azerbaijani or English query, explicit `as_of_date`
+required for reproducibility):
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/search/natural-language \
+  -H "Authorization: Bearer $MEYAR_API_KEY" -H "Content-Type: application/json" \
+  -d '{"query": "5+ il Python təcrübəsi olan namizədlər", "as_of_date": "2026-01-01"}'
+```
+
+The response's `outcome` field is always one of `EXECUTABLE`,
+`PROHIBITED_REQUEST`, `UNSUPPORTED_SEMANTICS`, `AMBIGUOUS_REQUEST`,
+`MALFORMED_MODEL_OUTPUT`, `PLANNER_PROVIDER_FAILURE`, or
+`VALIDATION_FAILURE` — `search` is populated only when `outcome ==
+"EXECUTABLE"`. A `503` (not a typed outcome) means genuine search/database
+infrastructure is unavailable, distinct from `PLANNER_PROVIDER_FAILURE` (a
+normal `200` outcome meaning the local planner LLM itself failed/timed out).
+
+Score one candidate:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/jobs/<JOB_UUID>/criteria/1/score \
+  -H "Authorization: Bearer $MEYAR_API_KEY" -H "Content-Type: application/json" \
+  -d '{"candidate_id": "<CANDIDATE_UUID>", "evaluation_as_of_date": "2026-01-01"}'
+```
+
+Batch-rank the library against one criteria version:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/jobs/<JOB_UUID>/criteria/1/rank \
+  -H "Authorization: Bearer $MEYAR_API_KEY" -H "Content-Type: application/json" \
+  -d '{"evaluation_as_of_date": "2026-01-01"}'
+```
+
+`evaluation_as_of_date` is always required and is never defaulted to "today" —
+identical inputs (candidate/profile version, criteria version, date) return
+the same immutable `evaluation_id` on repeat calls (`reused: true`) rather
+than creating a duplicate. `numeric_score` is always a canonical two-decimal
+string (e.g. `"75.00"`), never a bare float.
+
+### Local AI dependency map
+
+| Operation | Requires local Ollama? |
+|---|---|
+| Health, usage, jobs, candidates, candidate detail, documents | No |
+| `POST /api/v1/search` (`STRUCTURED_ONLY`) | No |
+| `POST /api/v1/search` (`SEMANTIC_ONLY`/`HYBRID`) | Yes — local embedding model only |
+| `POST /api/v1/search/natural-language` | Yes — local LLM planner, then local embeddings if the plan needs semantic retrieval |
+| Score / batch rank | No — deterministic policy engine only, no LLM call |
+
+No operation ever calls an external/cloud AI, embedding, or telemetry service
+— see [Local AI and privacy](#local-ai-and-privacy).
+
+### Common error semantics
+
+`401` missing/invalid/expired/revoked API key. `403` valid key missing a
+required scope. `404` resource not found *or* belongs to another tenant
+(identical response either way — existence is never leaked cross-tenant).
+`422` malformed/invalid request body or an unsupported domain state (e.g. a
+candidate with no completed profile). `503` local AI/database infrastructure
+genuinely unavailable. Error bodies never include a traceback, SQL text, a
+filesystem path, or API-key/tenant internals.
+
 ## Quality gate
 
 Run from `backend/`:
@@ -287,24 +440,31 @@ updated `backend/uv.lock` when applicable.
 
 ## Known current limitations
 
-- Structured/semantic/hybrid candidate search and strict natural-language
-  planning exist (Slices 7–9, service + CLI plus the Slice 11 HTML UI; no
-  finalized REST endpoint yet). The planner intentionally rejects unsupported language proficiency,
-  skill-specific duration, identity, salary/location, and custom-weight
-  requests rather than weakening their meaning.
-- Deterministic 0–100 scoring and batch ranking are service/CLI capabilities
-  rendered by the Slice 11 HTML UI; no finalized scoring/ranking REST endpoint
-  exists yet.
+- The natural-language planner intentionally rejects unsupported language
+  proficiency, skill-specific duration, identity, salary/location, and
+  custom-weight requests rather than weakening their meaning — this is
+  deliberate fail-closed behavior, not a gap.
+- Raw CV file download/retrieval is not exposed over `/api/v1` or `/ui` —
+  only extracted structured facts and parse metadata.
+- No rate limiting is implemented yet (`MEYAR_RATE_LIMIT_PER_MINUTE` exists in
+  config but is not yet enforced) — a Slice 13 security-acceptance item.
+- No CORS policy is configured; the current same-origin UI + internal API
+  deployment does not require one. A specific internal cross-origin client
+  would need an explicit allowlisted-origin decision, not a wildcard.
 - OCR fallback for scanned PDFs is not implemented.
 - The configured embedding model is a development/integration default
   (`DEV_INTEGRATION_MODEL`), not an approved final production model —
   approval is blocked on the target Mac Mini benchmark.
-- Profile/identity extraction and evaluation are service/CLI flows, not
-  finalized HTTP endpoints.
+- Profile/identity extraction (`extract-profile`, `extract-identity`) and
+  folder indexing remain CLI/service-only by design — not part of the
+  official REST API surface.
 - Application-layer encryption at rest is not implemented; real production
   candidate data requires the approved protected storage environment.
 - Server-side branch protection is unavailable on the current private
   repository plan; hooks, PRs, CI, and owner review are the accepted fallback.
+- Full security/Definition-of-Done acceptance (Slice 13) — including
+  penetration testing, backup/restore validation, and target-Mac
+  benchmarking — has not yet run.
 
 See [`docs/STATUS.md`](docs/STATUS.md) for the complete current gap matrix and
 the latest next action.
