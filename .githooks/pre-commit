@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# MEYAR repo-local governance hook. Blocks obvious secrets, private keys,
+# real-CV/runtime-data paths, DB dumps, and model artifacts from being
+# committed. Deliberately pattern-based, not a full PII classifier — see
+# .claude/rules/git-workflow.md.
+set -euo pipefail
+
+git diff --cached --quiet && exit 0
+
+blocked=0
+
+report() {
+  echo "BLOCKED by MEYAR pre-commit guard: $1" >&2
+  blocked=1
+}
+
+is_allowed_env_file() {
+  case "$(basename "$1")" in
+    .env.example | .env.sample | .env.template) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+while IFS= read -r -d '' f; do
+  [ -z "$f" ] && continue
+
+  if printf '%s' "$f" | grep -Eiq '(^|/)\.env(\..+)?$'; then
+    is_allowed_env_file "$f" || report "secret/env file staged: $f"
+  fi
+
+  if printf '%s' "$f" | grep -Eiq '\.pem$|(^|/)id_rsa$|(^|/)id_ed25519$|(^|/)credentials\.json$|(^|/)\.ssh/'; then
+    report "credential/private-key-shaped path staged: $f"
+  fi
+
+  if printf '%s' "$f" | grep -Eiq '(^|/)(real_cvs?|customer_data|prod_data)(/|$)'; then
+    report "real-candidate-data path staged: $f (use fixtures/synthetic_cvs/)"
+  fi
+
+  if printf '%s' "$f" | grep -Eiq '(^|/)backend/var/'; then
+    report "runtime storage path staged: $f"
+  fi
+
+  if printf '%s' "$f" | grep -Eiq '(^|/)[^/]*dump[^/]*\.(sql(\.gz)?|dump)$|\.sqlite3?$'; then
+    report "database dump/file staged: $f"
+  fi
+
+  if printf '%s' "$f" | grep -Eiq '\.(gguf|safetensors|ggml)$'; then
+    report "model weight artifact staged: $f"
+  fi
+  if printf '%s' "$f" | grep -Eiq '(^|/)models?/.*\.(bin|pt|onnx)$'; then
+    report "model weight artifact staged: $f"
+  fi
+done < <(git diff --cached --name-only --diff-filter=ACMR -z)
+
+# Content scan from the staged index, including unchanged rename destinations.
+while IFS= read -r -d '' f; do
+  [ -z "$f" ] && continue
+  if git cat-file -e ":$f" 2>/dev/null &&
+    git show ":$f" 2>/dev/null | grep -Eaq -- \
+      '-----BEGIN (PRIVATE KEY|ENCRYPTED PRIVATE KEY|RSA PRIVATE KEY|EC PRIVATE KEY|DSA PRIVATE KEY|OPENSSH PRIVATE KEY)-----|AKIA[0-9A-Z]{16}'; then
+    report "private-key or access-key content staged: $f (secret material)"
+  fi
+done < <(git diff --cached --name-only --diff-filter=ACMR -z)
+
+if [ "$blocked" = "1" ]; then
+  echo "" >&2
+  echo "Fix the above and re-stage, or unstage the offending file(s)." >&2
+  exit 1
+fi
+
+exit 0

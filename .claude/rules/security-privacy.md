@@ -8,7 +8,7 @@
 - Any log call must carry only ids/enums/durations. Never pass CV text,
   candidate name/email/phone, or full request/response bodies to a logger.
 - Any LLM output must be parsed through a Pydantic v2 model before it is
-  used for persistence or returned to a customer. A validation failure is a
+  used for persistence or returned to an authorized internal user/system. A validation failure is a
   handled outcome (`MANUAL_REVIEW_REQUIRED`/`FAILED`), never a silent
   coercion.
 - CV text passed into a prompt must be clearly delimited as quoted data; the

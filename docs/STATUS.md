@@ -11,6 +11,15 @@ feature code.
 
 **Slice 6 implementation has NOT started.**
 
+GitHub remote established (`https://github.com/a-r3/meyar.git`, private,
+temporary development remote — see D-012, `docs/DECISIONS.md`). `main`
+bootstrap-pushed at `f8ac183`. Git/CI governance (task-branch/PR
+discipline, local hooks, CI gate, PR template) is in progress on
+`chore/git-governance` — **not yet complete until that PR is reviewed
+and merged.** The same PR now also includes the required root onboarding
+README and weekly low-noise Dependabot configuration for backend `uv` and
+GitHub Actions dependencies; dependency auto-merge remains disabled.
+
 ## Completed
 - Preflight, fast docs pass, Claude Code harness.
 - Backend scaffold: FastAPI + SQLAlchemy 2.0 async + Alembic + PostgreSQL.
@@ -62,7 +71,8 @@ rejected even though it exists, profile belonging to a different
 candidate rejected, criterion-result count matches configured criteria
 exactly (no hidden criteria), repeated identical evaluation
 deterministic, no identity/protected fields reach the policy engine.
-`ruff` and `mypy` clean.
+`uv run ruff check .` and `uv run mypy src` are clean. Whole-repository
+`uv run mypy .` retains known test-only type debt.
 
 ## Live synthetic smoke
 **PASS.** Per Slice 5 spec §25, no live Ollama call required (Slice 4
@@ -80,24 +90,42 @@ Evaluation's persisted `candidate_profile_version_id`/
 `job_criteria_version_id` verified to equal the exact input versions.
 
 ## In progress
-Nothing in flight. Documentation re-baseline (R0) is complete and
-awaiting owner review before commit.
+Git governance PR #1 is open and awaiting owner review/merge. Documentation
+re-baseline (R0) is complete; no product slice is in flight.
 
 ## Blockers
 None blocking. Same open items as before (D-001 Mac benchmark pending,
 Auto Mode script dry-run only, document encryption-at-rest deferred,
-D-009 Ollama upgrade needs root). New: Git remote/PR infrastructure not
-yet set up — owner/bank-supplied.
+D-009 Ollama upgrade needs root). Git remote is connected but is a
+personal/temporary one (D-012) — official bank-owned remote still
+pending, migration keeps full history when it arrives.
 
 ## Next action
-1. **Git Infrastructure** — set up bank-approved remote repository
-   hosting + task-branch/PR workflow (see `docs/MVP_PLAN.md` § Git
-   Infrastructure). Not started; requires owner/bank environment.
-2. **Slice 6 — Local CV Library & Folder Indexer** (see
-   `docs/MVP_PLAN.md`). **Not started.**
+1. **Git Infrastructure** — remote connected (`a-r3/meyar`, private,
+   temporary — D-012); task-branch/PR/CI governance is on
+   `chore/git-governance`, awaiting PR review/merge. May later migrate to
+   an official bank-owned remote (history preserved).
+2. **After governance PR merge:** branch `feat/cv-folder-indexing` for
+   **Slice 6 — Local CV Library & Folder Indexer** (see
+   `docs/MVP_PLAN.md`), associated with **M1 — CV Ingestion & Candidate
+   Library**. **Not started.**
 
 The previously planned "Slice 6 — External Async Evaluation API" is
 CANCELLED (superseded by D-011) — it is not what "Slice 6" now refers to.
+
+## GitHub milestone status
+
+The detailed canonical mapping is in `docs/MVP_PLAN.md`. No milestone has a
+due date because the official timeline has not been supplied.
+
+| Milestone | Slice mapping | Current status |
+|---|---|---|
+| M0 — Project Foundation & Governance | R0 + Git Infrastructure | IN REVIEW — issue #2 / PR #1 |
+| M1 — CV Ingestion & Candidate Library | Slice 6 | NOT STARTED — next after M0 merge |
+| M2 — Candidate Search Intelligence | Slices 7–9 | NOT STARTED |
+| M3 — JD Matching & Ranking | Slice 10 | NOT STARTED |
+| M4 — Internal Product Interface & API | Slices 11–12 | NOT STARTED |
+| M5 — Security, Target-Mac Validation & MVP Acceptance | Slice 13 + target-Mac benchmark | NOT STARTED |
 
 ## Official requirement gap matrix
 
@@ -111,7 +139,7 @@ no code yet.
 | PDF parsing | DONE | `pypdf`-based `LocalTextParser` (Slice 3) | — | 3 |
 | DOCX parsing | DONE | `python-docx`-based parsing (Slice 3) | — | 3 |
 | Scanned PDF detection / OCR | NOT STARTED | Digital-PDF-only parsing (D-007) | Local OCR fallback | future |
-| Multilingual CV tests | PARTIAL | Synthetic fixtures include AZ/RU/EN cases (SECURITY_PRIVACY.md Test data) | Broader multilingual extraction-quality coverage | ongoing |
+| Multilingual CV tests | NOT STARTED | No tracked Azerbaijani/Cyrillic synthetic CV tests currently prove this requirement | Add genuine AZ/RU/EN synthetic fixtures and extraction tests | future |
 | Structured extraction | DONE | `CandidateProfileExtraction` schema, Slice 4 | Add `CandidateIdentity` fields | 7 |
 | Strict JSON validation | DONE | Pydantic v2, `extra="forbid"`, bounded retry (Slice 4) | — | 4 |
 | Uncertainty handling | DONE | `UNKNOWN` never auto-downgraded (D-010), Slice 5 | — | 5 |
@@ -134,10 +162,11 @@ no code yet.
 | Scoring consistency | PARTIAL | Policy engine deterministic + unit tested (Slice 5) | Re-verify once numeric score lands | 10, 13 |
 | External-network/exfiltration verification | NOT STARTED | Local-only enforced by construction (`OllamaLLMProvider` loopback check) | Explicit verification pass | 13 |
 | Data-protection / backup description | PARTIAL | Retention/deletion documented (SECURITY_PRIVACY.md); no backup policy written | Document backup approach | 13 |
-| Git branch / PR workflow | NOT STARTED | No remote configured | Set up bank Git provider + PR gate | Git Infrastructure |
+| Git branch / PR workflow | PARTIAL | Remote connected (`a-r3/meyar`, private), CI + hooks + PR template on `chore/git-governance` (D-012) | Merge governance PR; migrate to official bank remote when supplied | Git Infrastructure |
 
-**Summary:** 12 DONE, 8 PARTIAL, 9 NOT STARTED (29 items). Highest-priority
-gaps: local folder indexing (Slice 6, next), local embeddings/semantic
-search (Slice 7–8), 0–100 numeric scoring (Slice 10), and Git/PR
-infrastructure (blocks a clean task-branch workflow for everything
-after).
+**Official numbered task matrix — 28 items.** Summary: 12 DONE, 5 PARTIAL,
+11 NOT STARTED (28 items). Multilingual AZ/RU/EN CV fixtures and extraction
+tests remain future work; no current evidence is claimed. Highest-priority
+gaps: local folder indexing (Slice 6, next) and local embeddings/semantic
+search (Slice 7–8), then 0–100 numeric scoring (Slice 10). Git/PR
+infrastructure is PARTIAL (governance PR in review) rather than blocking.

@@ -11,7 +11,7 @@ sequencing).
 
 ## Vision
 
-Rabitabank OJSC HR needs to stop manually reading CVs. MEYAR ingests the
+Bank HR needs to stop manually reading CVs. MEYAR ingests the
 bank's existing CV archive plus new candidate documents, extracts
 structured professional information locally (no candidate data ever
 leaves bank infrastructure), and gives HR staff a single place to search,
@@ -26,7 +26,7 @@ framing is superseded (see D-011).
 
 ## Target users
 
-Authorized internal Rabitabank HR/recruiting staff, and approved internal
+Authorized internal bank HR/recruiting staff, and approved internal
 systems that call the REST API on their behalf. No candidate-facing or
 public-facing surface exists or is planned.
 
@@ -128,16 +128,18 @@ Authentication, authorization, and auditing remain mandatory — MEYAR
 handles real candidate PII for an internal HR system, not anonymous
 public traffic. The existing tenant/organization isolation mechanism may
 remain in the codebase as a resource-isolation abstraction; its final
-mapping to Rabitabank's organizational boundaries is an open
+mapping to the bank's organizational boundaries is an open
 implementation decision, not a commercial multi-tenant SaaS model. See
 `docs/SECURITY_PRIVACY.md` for full detail.
 
 ## Delivery process
 
 `main` ← Pull Request ← task branch (`feat/*`, `fix/*`, `chore/*`,
-`docs/*`). Quality gate before merge: `ruff`, `mypy`, `pytest` (frontend
-checks once a frontend exists). Repository hosting/remote is bank-owned
-infrastructure, configured separately from this documentation pass.
+`docs/*`, `test/*`). Quality gate before merge: `ruff`, `mypy src`,
+`pytest` (frontend checks once a frontend exists). Development remote:
+`https://github.com/a-r3/meyar.git` (private, personal — temporary until
+the bank supplies an official repository; full history preserved on
+migration). See D-012, `docs/DECISIONS.md`.
 
 ## MVP definition
 

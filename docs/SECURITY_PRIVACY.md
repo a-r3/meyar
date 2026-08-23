@@ -85,8 +85,8 @@
 
 Enforced in the data-access layer, not the UI/route layer: every repository
 function signature requires `tenant_id` and every query filters on it.
-Postgres Row-Level Security is a documented future hardening step (D-xxx in
-DECISIONS.md) — not required for MVP given the repository-layer enforcement,
+Postgres Row-Level Security is a documented future hardening step — not
+required for MVP given the repository-layer enforcement,
 revisit if the app layer is ever bypassed (e.g. raw SQL tooling, admin
 scripts).
 

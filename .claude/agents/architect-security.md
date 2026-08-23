@@ -24,6 +24,11 @@ Check for:
 - MEYAR is an internal platform — flag any new design that assumes an
   external/commercial customer, billing, or a public-facing product
   surface.
+- DB migrations (Alembic): valid, reversible, no destructive change to a
+  tenant-owned table without a clear reason.
+- Git governance (`.claude/rules/git-workflow.md`): change is on a task
+  branch (not `main`), no direct-main-push or force-push, no unrelated
+  files bundled into the same branch/PR.
 
 Report findings as: blocking (must fix before slice closes) vs. non-blocking
 (note in DECISIONS.md or STATUS.md, move on). Do not produce a second review

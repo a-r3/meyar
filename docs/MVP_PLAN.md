@@ -47,6 +47,24 @@ than a separate "external customer" milestone.
 
 ## Roadmap after official-task re-baseline
 
+### Canonical GitHub milestones
+
+No due dates are assigned until the official project timeline is supplied.
+
+| Milestone | Canonical scope |
+|---|---|
+| **M0 — Project Foundation & Governance** | Requirement re-baseline; GitHub/CI governance; Claude/Codex instructions; README, Dependabot, and repository guards |
+| **M1 — CV Ingestion & Candidate Library** | Slice 6 |
+| **M2 — Candidate Search Intelligence** | Slices 7–9: `CandidateIdentity`, local embeddings/pgvector, hybrid search, natural-language `SearchPlan` |
+| **M3 — JD Matching & Ranking** | Slice 10: deterministic 0–100 score, batch ranking, explanations |
+| **M4 — Internal Product Interface & API** | Slices 11–12: Chat UI, CV Library UI, internal REST API, Swagger/README completion |
+| **M5 — Security, Target-Mac Validation & MVP Acceptance** | Slice 13, target Mac Mini model benchmark, external-network/data-exfiltration verification, privacy/security acceptance, official Definition of Done |
+
+Material product work uses the applicable approved milestone and, when useful,
+one issue per coherent deliverable. Avoid micro-issues for tiny tests or edits.
+The normal trace is milestone → issue → task branch → implementation/tests →
+PR/CI → owner Squash and merge → issue close → milestone progress update.
+
 ### R0 — Requirement / Documentation Re-baseline
 
 This pass: audited and updated all product docs and Claude instructions
@@ -55,10 +73,14 @@ changed.
 
 ### Git Infrastructure
 
-Create remote repository hosting (bank-approved Git provider) and wire up
-`main` ← PR ← task branch (`feat/*`, `fix/*`, `chore/*`, `docs/*`), with
-`ruff` + `mypy` + `pytest` (and frontend checks once a frontend exists)
-as a merge gate. Not started — remote URL/provider is owner/bank-supplied.
+`main` ← PR ← task branch (`feat/*`, `fix/*`, `chore/*`, `docs/*`,
+`test/*`), with `ruff` + `mypy src` + `pytest` as a merge gate (see
+D-012). **In progress:** development remote connected
+(`https://github.com/a-r3/meyar.git`, private, personal — temporary
+until the bank supplies an official repository, full history preserved
+on that migration); CI, local Git hooks, and PR template landing via
+`chore/git-governance`. Frontend checks join the gate once a frontend
+exists (Slice 11).
 
 ### Slice 6 — Local CV Library & Folder Indexer
 
@@ -67,6 +89,7 @@ ingest new/changed files only (idempotent, safe to re-run), parse/extract
 through the existing Slice 3/4 pipeline, persist indexing state
 (discovered path, hash, scan timestamp, parse/extraction status, current
 candidate/profile linkage). **Not started.**
+GitHub milestone: **M1 — CV Ingestion & Candidate Library**.
 
 ### Slice 7 — Candidate Identity + Local Embeddings / Vector Index
 

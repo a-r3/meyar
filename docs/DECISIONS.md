@@ -3,6 +3,112 @@
 Append-only log of concise architectural/product decisions. Format: id, date,
 decision, why, reversibility.
 
+## D-012 — GitHub / branch / PR / CI governance
+
+**Date:** 2026-08-23
+**Decision:** MEYAR's development remote and delivery process are
+formalized:
+1. Current development remote is a **private personal repository**,
+   `https://github.com/a-r3/meyar.git` (`a-r3/meyar`). It is temporary
+   development infrastructure, not an official bank-owned
+   repository — it will be migrated once the bank provides one, with
+   **full Git history preserved** on migration (no history rewrite for a
+   remote-ownership change alone).
+2. `main` is the stable integration branch. After the one-time
+   repository-bootstrap push (`f8ac183`, pushed directly since the
+   remote was created empty), **direct pushes to `main` are prohibited**.
+   Normal changes use a task branch (`feat/*`/`fix/*`/`chore/*`/
+   `docs/*`/`test/*`) → PR → review → merge → `git pull --ff-only`.
+3. CI (`.github/workflows/ci.yml`) runs on PRs into `main`: `ruff check
+   .`, `mypy src`, `pytest -q`, against a Postgres 16 GitHub Actions
+   service container (normal bridge networking — the D-005 `network_mode:
+   host`/port-55719 workaround is a memory-constrained-dev-laptop fix
+   only and is never replicated in CI infrastructure, though CI's service
+   container is still mapped to host port 55719 purely to match the
+   already-hardcoded `tests/conftest.py` connection string without
+   editing test code). No Ollama, no cloud AI key, no production
+   credential is required — extraction/loopback-enforcement tests only
+   construct `OllamaLLMProvider` to check validation, never call a live
+   model.
+4. **The CI mypy gate is intentionally `mypy src`, not `mypy .`.**
+   Production source is clean; there is known, pre-existing test-only
+   mypy debt (30 errors across 5 test files). A future
+   `chore/test-mypy-cleanup` branch will fix that debt and then widen CI
+   to `mypy .`. This scope decision is deliberate, not a hidden gap.
+5. No real candidate data may ever enter GitHub. Enforced by
+   `.gitignore`, the pre-existing `.claude/hooks/guard.sh` (Claude Code
+   tool-use guard), and new repo-local Git hooks (`.githooks/pre-commit`,
+   `.githooks/pre-push`, activated via `scripts/setup-git-governance.sh`
+   → `git config core.hooksPath .githooks`, this-repo-only, no global
+   Git config touched). `pre-commit` blocks obvious secret/credential
+   paths, real-CV/runtime-data paths, DB dumps, and model artifacts.
+   `pre-push` blocks a direct `main` push after bootstrap, with an
+   explicit owner-only bypass (`MEYAR_ALLOW_MAIN_PUSH=1`) that is never
+   set automatically.
+6. Full operational detail lives in `.claude/rules/git-workflow.md`;
+   `AGENTS.md` and `CLAUDE.md` are concise Codex/Claude entry points to the
+   same shared `docs/` authority; `.githooks/` and `.github/` provide
+   agent-independent enforcement.
+7. Server-side branch protection is unavailable on the current private-
+   repository plan (`SERVER_SIDE_BRANCH_PROTECTION_UNAVAILABLE_ON_CURRENT_PLAN`).
+   The repository will not be made public and the plan will not be upgraded
+   for this task. Until official hosting or plan capabilities change, the
+   accepted fallback is task-branch discipline, repo-local Git hooks, pull
+   requests, GitHub Actions CI, and owner review.
+8. Root `README.md` is a required delivery artifact and the primary human
+   onboarding surface. It summarizes current reality and points to `docs/`;
+   it is not a second product specification. `AGENTS.md` remains the Codex
+   entry point, `CLAUDE.md` remains the Claude entry point, and `docs/` remains
+   the detailed canonical authority.
+9. Dependabot version updates are configured weekly with low PR limits for
+   the supported `uv` ecosystem in `/backend` and GitHub Actions in `/`.
+   Compatible routine minor/patch updates are grouped to reduce noise; major
+   updates remain separate. Dependabot alerts and security-update PRs are
+   enabled where supported by the current repository/account, without buying
+   GitHub Advanced Security or adding private registries/credentials.
+10. Dependabot never auto-merges under the current policy: Dependabot PR → CI
+    → owner review → merge. Major updates require explicit compatibility and
+    migration review, and backend dependency changes must commit the updated
+    `backend/uv.lock`. A future semver-patch-only auto-merge policy requires a
+    separate accepted decision after real CI behavior is observed. Major and
+    minor updates, and all application feature PRs, must never be auto-merged
+    by default.
+11. The standard merge strategy is **Squash and merge**. Normal flow is: task
+    branch → implementation → tests → commit(s) → push → PR → CI → owner
+    review → owner Squash and merge → agent verifies remote merge → agent
+    synchronizes local `main` → next approved task branch. Merge commits and
+    rebase-and-merge are disabled by default so `main` retains one concise,
+    reviewable commit per coherent PR. Repository settings allow squash merges,
+    disallow merge commits/rebase merges, and delete merged branches.
+12. Any workflow point requiring manual owner action is an explicit checkpoint,
+    never a silent stop. The agent ends its report with `## HUMAN ACTION
+    REQUIRED` and states what to do, where, the exact action/value, what not to
+    do, and the reply expected. This applies to PR review/merge, unavailable
+    authentication or repository UI settings, plan/paid-feature choices,
+    destructive Git actions, irreversible production/security decisions,
+    bank or target-Mac access, real-data approval, and business-owner scope
+    confirmation. After an owner reports a merge, the agent verifies the PR
+    and remote `main`, uses `git pull --ff-only origin main`, and only then
+    removes the safely merged local branch or starts the next approved branch.
+13. GitHub milestone mapping is canonical in `docs/MVP_PLAN.md` and summarized
+    with current state in `docs/STATUS.md`: M0 foundation/governance; M1 Slice
+    6; M2 Slices 7–9; M3 Slice 10; M4 Slices 11–12; M5 Slice 13 plus target-Mac
+    validation. No due dates are invented before the official timeline exists.
+    Material work uses the applicable milestone and one issue per coherent
+    deliverable when useful—not micro-issues for every edit. PRs reference the
+    issue with `Closes #<issue-number>` when appropriate; owner Squash and
+    merge closes the issue and milestone progress is updated. Milestones are
+    not invented, renamed, closed, or reorganized without an approved roadmap
+    decision.
+**Why:** The owner approved a concrete GitHub remote and asked for the
+task-branch/PR/CI discipline the official task requires (§13 of
+`AI-PROJ-CV-01`) to be encoded durably in the repository itself, not just
+followed ad hoc in one session.
+**Reversibility:** Fully reversible — the remote can be swapped (history
+preserved), hooks can be disabled per-clone (`git config
+--unset core.hooksPath`), and the CI gate can be widened/narrowed by
+editing `.github/workflows/ci.yml` without any application code change.
+
 ## D-011 — Official task re-baseline / internal Candidate Intelligence Platform
 
 **Date:** 2026-08-23
@@ -10,7 +116,7 @@ decision, why, reversibility.
 Task Bölgüsü"** (`AI-PROJ-CV-01`, v1.0, 18.08.2026) plus owner
 clarifications are now the canonical requirement authority, superseding
 prior product framing wherever they conflict. Binding changes:
-1. MEYAR is an **internal HR system** for Rabitabank OJSC, not an
+1. MEYAR is an **internal HR system** for the bank, not an
    external/commercial B2B SaaS API product. No external customers,
    billing, or public API surface exist or are planned.
 2. Product surfaces expand to: an internal chat-style natural-language
@@ -43,7 +149,7 @@ prior product framing wherever they conflict. Binding changes:
    deterministic evaluation engine) remains valid foundation. Nothing is
    rewritten or reverted because of this re-baseline; the existing
    tenant/organization isolation mechanism is kept as a resource-
-   isolation abstraction whose final mapping to Rabitabank's
+   isolation abstraction whose final mapping to the bank's
    organizational boundaries is still an open implementation decision.
 **Why:** The owner supplied the official bank task specification and
 product clarifications after Slice 5 was implemented; the product
