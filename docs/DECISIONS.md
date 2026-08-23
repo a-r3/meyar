@@ -3,6 +3,110 @@
 Append-only log of concise architectural/product decisions. Format: id, date,
 decision, why, reversibility.
 
+## D-016 — meyar-search-planner-v1: strict local natural-language planning
+
+**Date:** 2026-08-23
+**Decision:** Slice 9 introduces `meyar-search-planner-v1`, a strict,
+local-only interpretation layer in front of the accepted Slice 8 search
+engine:
+1. **The LLM interprets; Slice 8 searches and ranks.**
+   `plan_candidate_search` produces a typed `SearchPlanResult` and never
+   imports/queries candidate, profile, identity, or embedding repositories.
+   Its database session is used only for a PII-safe `AuditEvent`.
+   `plan_and_search_candidates` is a thin plan→validate→existing
+   `search_candidates` delegate; it contains no filtering, pgvector,
+   relevance, ranking, or tie-break implementation.
+2. **The model-controlled boundary is `PlannerDraft` with
+   `extra="forbid"`.** It may express only the existing Slice 8
+   required/preferred filters, a bounded professional semantic query, an
+   explicit requested result count, and typed unsupported reason codes.
+   It has no tenant id, `as_of_date`, mode, embedding configuration,
+   weights, policy versions, identity, SQL, database query, score, or
+   candidate-result fields. Unknown/nested fields fail parsing; they are
+   never silently dropped.
+3. **Mode is deterministic:** structured content only →
+   `STRUCTURED_ONLY`; semantic content only → `SEMANTIC_ONLY`; both →
+   `HYBRID`. Natural-language input alone never implies semantic search.
+   The resulting object must pass the existing strict
+   `CandidateSearchRequest` validation.
+4. **Meaning is preserved or rejected, never weakened.** Explicit MVP
+   request-to-draft guards verify supported structured values occur in the
+   request, model-produced total-experience numbers/result counts/semantic
+   content are supported by the request, and clear required/preferred
+   markers are not reversed. The explicit Azerbaijani MVP marker policy
+   recognizes common copular forms such as `mütləqdir` without claiming
+   general morphological understanding. A mandatory conceptual requirement
+   cannot be reduced to soft semantic relevance. Skill-specific duration
+   (for example “5 years of Java”) is not converted to Java + five years
+   total experience. Slice 8 filters
+   language existence only, so B2/C1/etc. proficiency is rejected rather
+   than reduced to a language-name filter. Identity, salary, location,
+   project-duration, custom search-weighting, and prompt/SQL instructions are
+   typed unsupported outcomes. A material unsupported aspect blocks the
+   whole plan; it is never silently dropped before partial execution. This
+   is intentionally a small explicit MVP guard, not a general NLP
+   equivalence engine.
+5. **Protected criteria are deterministic before and after the LLM.** The
+   existing `find_prohibited_term` authority checks the raw request before
+   any model call and all execution strings after parsing. The shared
+   denylist includes Azerbaijani equivalents needed by the internal HR
+   surface and an explicit root-plus-allowed-suffix policy for common MVP
+   inflections. It never uses unrestricted prefix matching (`yaşdan` is an
+   age form; `yaşıl` is not). The LLM cannot rephrase a protected request
+   into a semantic query to evade policy; a rejected plan never invokes
+   Slice 8.
+6. **Trusted runtime owns execution configuration.** The caller supplies
+   tenant id unchanged, an explicit reference date, and the active
+   `EmbeddingSearchConfig`. Deterministic conversion injects `as_of_date`
+   only when experience filtering is present, injects embedding provenance
+   only for semantic/hybrid mode, and uses the accepted `meyar-search-v1`
+   0.5/0.5 weights. None can be emitted or overridden by the model. The
+   natural-language default result limit is the existing Slice 8 default
+   20; explicit counts must match the request and remain within 1–100.
+7. **Local LLM only, with one repair.** The existing `LLMProvider` gains a
+   typed planner operation; `OllamaLLMProvider` remains loopback-enforced,
+   requests strict JSON schema output, and parses directly to
+   `PlannerDraft`. One initial attempt plus one schema-repair attempt is
+   allowed; there is never a third. Provider unavailable/timeout,
+   persistent malformed output, provenance mismatch, and policy rejection
+   remain distinct typed outcomes. No cloud fallback or agent framework
+   exists.
+8. **Provenance is explicit but reproducibility claims are bounded.** The
+   policy/prompt/schema versions are `meyar-search-planner-v1`,
+   `search-planner-prompt-v1`, and `search-plan-schema-v1`.
+   `LLMResultProvenance` records provider, actual response model name, and
+   model revision where available; Ollama currently reports no stable
+   revision, represented explicitly as `""`. Actual call metadata must
+   match configured provider metadata. LLM text generation is not claimed
+   bit-for-bit deterministic; pre/post policy, draft→request conversion,
+   trusted configuration injection, and Slice 8 execution for fixed
+   inputs/state are deterministic.
+9. **User text and raw output stay private.** The prompt JSON-delimits the
+   HR request as untrusted data and never requests chain-of-thought. Audit
+   events `SEARCH_PLAN_CREATED`/`REJECTED`/`FAILED` retain only request
+   SHA-256, executable/outcome, safe reason codes, versions, provider/model
+   metadata, attempt count, final mode, and limit. Raw request, semantic
+   query, raw/repaired model response, prompt, identity, CV data, vectors,
+   and hidden reasoning are never audited/logged. Plans remain ephemeral;
+   no migration/table is added.
+10. **CandidateIdentity remains presentation-only.** It is absent from the
+    draft, deterministic conversion, planner service, Slice 8 request, and
+    ranking. Name/email/phone requests are non-executable professional-
+    search outcomes, never semantic suitability criteria.
+11. **Interface:** `meyar plan-search --tenant-id ... --query ...
+    --as-of-date YYYY-MM-DD` is plan-only by default; `--execute` delegates
+    to Slice 8 and reuses its PII-safe result shape. Exit 2 is rejected/
+    invalid intent, 3 is local planner-provider failure, and 4 is search/
+    infrastructure failure. No REST/UI contract is added.
+
+**Why:** Natural-language input creates a new trust boundary. Keeping model
+authority narrow and converting through explicit, deterministic policy
+preserves Slice 8's hard eligibility, provenance, tenant, and ranking
+invariants while providing the planned internal HR interaction flow.
+**Reversibility:** Application-only and fully versioned. No persistent
+schema or dependency was added; prompt/policy changes require version bumps,
+and Slice 8 remains independently callable with its original strict request.
+
 ## D-015 — meyar-search-v1: Slice 8 hybrid candidate search policy
 
 **Date:** 2026-08-23

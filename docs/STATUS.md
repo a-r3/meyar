@@ -1,12 +1,14 @@
 # MEYAR — Status
 
 ## Current phase
-**Slice 8 — Hybrid Candidate Search.**
+**Slice 9 — Natural-Language Search Planner implementation/acceptance.**
 Governance PR #1 merged at `16929fd` (**M0 CLOSED**); Slice 6 PR #7
 merged at `55fef2d` (**M1 — CV Ingestion & Candidate Library is
 CLOSED**, issue #6 closed); Slice 7 PR #9 merged at `24b1d67` (issue #8
-closed). Slice 8 is implemented on `feat/hybrid-candidate-search` and
-its PR is open for review — **not yet merged.**
+closed); Slice 8 PR #11 Squash-merged at `412d978` (issue #10 closed).
+Slice 9 issue #12 is implemented on
+`feat/natural-language-search-planner` and is pending owner acceptance/
+merge. **M2 remains OPEN until Slice 9 is accepted and merged.**
 
 GitHub remote established (`https://github.com/a-r3/meyar.git`, private,
 temporary development remote — see D-012, `docs/DECISIONS.md`). `main`
@@ -154,10 +156,47 @@ remains disabled.
   7 hardening: `OllamaEmbeddingProvider.embed` now also rejects an
   all-zero (zero-norm) vector, since cosine similarity is undefined for
   one and a genuine embedding of non-empty text is never all-zero. See
-  D-015, `docs/DECISIONS.md`, for the exact ranking policy.
+  D-015, `docs/DECISIONS.md`, for the exact ranking policy. **Merged as
+  PR #11 at `412d978`, closes issue #10.**
+- Slice 9 (Natural-Language Search Planner) — on
+  `feat/natural-language-search-planner`, associated with **M2 —
+  Candidate Search Intelligence**, closes issue #12. New strict
+  `PlannerDraft`/`SearchPlanResult` contracts and deterministic
+  `meyar-search-planner-v1` policy convert untrusted English/Azerbaijani
+  HR text into the existing Slice 8 `CandidateSearchRequest`. Search mode
+  is derived from validated contents; the LLM cannot supply tenant id,
+  reference date, embedding provenance, ranking weights, SQL, identity,
+  or scores. Existing protected-criterion policy runs before and after
+  the LLM; its explicit Azerbaijani root-plus-allowed-suffix handling catches
+  common protected inflections without prefix-matching unrelated words such
+  as `yaşıl`. Explicit MVP fidelity guards preserve common Azerbaijani
+  mandatory forms and reject skill-specific duration, language proficiency,
+  identity, custom search weighting, invented numeric
+  experience/result counts, and invented structured fields rather than
+  weakening or partially executing meaning. Local Ollama remains
+  loopback-only with strict JSON parsing and exactly one bounded repair retry.
+  `plan_candidate_search`
+  reads no candidate/search repository (its DB session is audit-only);
+  `plan_and_search_candidates` is a thin plan→accepted Slice 8 delegate,
+  with the hard-gate invariant proven end-to-end against real pgvector.
+  `SEARCH_PLAN_CREATED`/`REJECTED`/`FAILED` audit events retain only the
+  request SHA-256, safe versions/provenance/counts/reason codes — never
+  raw request, semantic query, model output, identity, or CV data. New
+  CLI: `meyar plan-search --tenant-id ... --query ... --as-of-date
+  YYYY-MM-DD [--execute]`. No migration/dependency was added. See D-016.
 
 ## Tests
-231/231 passing (177 prior + 54 Slice 8 — 17 structured + 17 semantic +
+353/353 passing (231 prior + 102 Slice 9 planner/policy/service/CLI tests +
+20 shared Azerbaijani normalization/protected-policy regressions).
+Slice 9 coverage includes strict draft parsing, deterministic mode and
+draft-to-request conversion, Azerbaijani/English intent, unsupported semantic
+weakening and custom weighting, explicit Azerbaijani mandatory/protected
+morphology without broad prefix matching, protected-criteria pre/post checks,
+bounded repair, provider/result provenance, trusted date/embedding/weight
+injection, audit privacy, CLI exits,
+structured-only no-embedding execution, and a real-pgvector hybrid hard-gate
+integration path. The prior 231 tests include 177 through Slice 7 plus 54
+Slice 8 tests — 17 structured + 17 semantic +
 10 hybrid + 1 zero-norm-vector hardening regression on
 `OllamaEmbeddingProvider` + 9 post-acceptance-audit provenance/source-
 hash-freshness regressions, `test_search_semantic_provenance.py`, see
@@ -316,10 +355,9 @@ Evaluation's persisted `candidate_profile_version_id`/
 `job_criteria_version_id` verified to equal the exact input versions.
 
 ## In progress
-Slice 8 PR (`feat/hybrid-candidate-search` → `main`, closes issue #10)
-is open and awaiting owner review/merge. Governance PR #1 merged
-(`16929fd`, M0 closed); Slice 6 PR #7 merged (`55fef2d`, M1 closed);
-Slice 7 PR #9 merged (`24b1d67`, issue #8 closed).
+Slice 9 (`feat/natural-language-search-planner`, closes issue #12) is
+implemented and pending owner acceptance/merge. Slice 8 PR #11 merged
+(`412d978`, issue #10 closed); M2 intentionally remains open.
 
 ## Blockers
 None blocking. Same open items as before (D-001 Mac benchmark pending —
@@ -333,11 +371,11 @@ pending, migration keeps full history when it arrives.
 1. **Git Infrastructure** — remote connected (`a-r3/meyar`, private,
    temporary — D-012); governance merged (`16929fd`). May later migrate
    to an official bank-owned remote (history preserved).
-2. **Slice 8 — Hybrid Candidate Search** (see `docs/MVP_PLAN.md`,
-   D-015), associated with **M2 — Candidate Search Intelligence**:
-   implemented on `feat/hybrid-candidate-search`, PR open, **awaiting
-   owner review/merge** — not yet started: Slice 9 (natural-language
-   `SearchPlan` → this slice's `CandidateSearchRequest`).
+2. **Slice 9 — Natural-Language Search Planner** (issue #12, D-016),
+   associated with **M2 — Candidate Search Intelligence**: review the
+   focused implementation/CI, then owner Squash and merge. Do not close
+   M2 or start Slice 10 until the merge is live-verified and local main is
+   synchronized.
 
 The previously planned "Slice 6 — External Async Evaluation API" is
 CANCELLED (superseded by D-011) — it is not what "Slice 6" now refers to.
@@ -351,7 +389,7 @@ due date because the official timeline has not been supplied.
 |---|---|---|
 | M0 — Project Foundation & Governance | R0 + Git Infrastructure | CLOSED — merged `16929fd`, issue #2 closed |
 | M1 — CV Ingestion & Candidate Library | Slice 6 | CLOSED — merged `55fef2d` (PR #7), issue #6 closed |
-| M2 — Candidate Search Intelligence | Slices 7–9 | IN REVIEW — Slice 7 merged (PR #9, issue #8 closed); Slice 8 issue #10 / PR open on `feat/hybrid-candidate-search`; Slice 9 not started |
+| M2 — Candidate Search Intelligence | Slices 7–9 | OPEN / IN REVIEW — Slices 7 and 8 merged (PRs #9/#11; issues #8/#10 closed); Slice 9 issue #12 implemented on its task branch, pending acceptance/merge |
 | M3 — JD Matching & Ranking | Slice 10 | NOT STARTED |
 | M4 — Internal Product Interface & API | Slices 11–12 | NOT STARTED |
 | M5 — Security, Target-Mac Validation & MVP Acceptance | Slice 13 + target-Mac benchmark | NOT STARTED |
@@ -370,7 +408,7 @@ no code yet.
 | Scanned PDF detection / OCR | NOT STARTED | Digital-PDF-only parsing (D-007) | Local OCR fallback | future |
 | Multilingual CV tests | NOT STARTED | No tracked Azerbaijani/Cyrillic synthetic CV tests currently prove this requirement | Add genuine AZ/RU/EN synthetic fixtures and extraction tests | future |
 | Structured extraction | DONE | `CandidateProfileExtraction` schema (Slice 4); `CandidateIdentityExtraction` (full_name/email/phone, separate schema, Slice 7) | — | 4, 7 |
-| Strict JSON validation | DONE | Pydantic v2, `extra="forbid"`, bounded retry (Slice 4, and Slice 7 identity) | — | 4, 7 |
+| Strict JSON validation | DONE | Pydantic v2, `extra="forbid"`, bounded retry (Slice 4, Slice 7 identity, Slice 9 planner) | — | 4, 7, 9 |
 | Uncertainty handling | DONE | `UNKNOWN` never auto-downgraded (D-010), Slice 5 | — | 5 |
 | Candidate DB | DONE | `Candidate`, `CandidateDocument`, `CandidateProfileVersion`, `CandidateIdentityVersion` (Slice 7, D-014) | — | 3, 4, 7 |
 | Original file reference | DONE | Opaque storage id + `DocumentStorage` abstraction (Slice 3) | Authorized UI access to original CV | 11 |
@@ -381,8 +419,8 @@ no code yet.
 | 0–100 scoring | NOT STARTED | Fit-band algorithm exists (D-010), no numeric score | Numeric formula on top of existing engine | 10 |
 | Batch scoring / ranking | NOT STARTED | Evaluation engine is per-candidate today | Batch-ranking endpoint reusing engine | 10 |
 | Structured search | DONE | Deterministic required/preferred filters (skills/certifications/languages/education/min experience) over the current `CandidateProfileVersion`, reusing Slice 5 normalization (Slice 8, D-015) | — | 8 |
-| Semantic search | DONE | Local query embedding + pgvector `cosine_distance` retrieval over current, exactly-compatible `CandidateEmbeddingVersion` rows only; stale/incompatible embeddings excluded (Slice 8, D-015) | — | 8 |
-| Explanations | DONE | Evidence carried through every criterion result (Slice 5); Slice 8 search results carry matched-filter labels + relevance/structured/semantic scores (no raw CV text) | — | 5, 8 |
+| Semantic search | DONE | Local query embedding + pgvector retrieval over current, exactly-compatible embeddings (Slice 8, D-015); strict local natural-language `SearchPlan` conversion delegates to that engine (Slice 9, D-016) | — | 8, 9 |
+| Explanations | DONE | Evidence carried through every criterion result (Slice 5); Slice 8 search results carry safe score/filter components; Slice 9 returns a concise structured interpretation summary/reason codes, never chain-of-thought | — | 5, 8, 9 |
 | REST API | PARTIAL | Jobs/candidates/health routes live; extraction+evaluation are service+CLI only | Add internal HTTP routes as UI needs them | 11, 12 |
 | Swagger / OpenAPI | PARTIAL | FastAPI auto-generates it; not yet reviewed/finalized as a deliverable | Review + README examples | 12 |
 | Auth | DONE | API-key + scopes (Slice 1) | — | 1 |
@@ -394,8 +432,8 @@ no code yet.
 | Git branch / PR workflow | PARTIAL | Remote connected (`a-r3/meyar`, private), CI + hooks + PR template merged (`16929fd`, D-012) | Migrate to official bank remote when supplied | Git Infrastructure |
 
 **Official numbered task matrix — 28 items.** Summary: 16 DONE, 5 PARTIAL,
-7 NOT STARTED (28 items). Multilingual AZ/RU/EN CV fixtures and extraction
-tests remain future work; no current evidence is claimed. Highest-priority
-gap: 0–100 numeric JD scoring (Slice 10) — structured + semantic + hybrid
-search is now DONE (Slice 8). Git/PR infrastructure is PARTIAL only
+7 NOT STARTED (28 items), independently recounted after Slice 9. Planner
+tests cover synthetic Azerbaijani/English HR requests, but this does not
+complete the distinct multilingual CV extraction-fixture row. Highest-
+priority gap: 0–100 numeric JD scoring (Slice 10). Git/PR infrastructure is PARTIAL only
 because the remote is still a personal/temporary one, not blocking.

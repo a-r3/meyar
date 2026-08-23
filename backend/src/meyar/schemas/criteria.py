@@ -1,7 +1,10 @@
 import re
+from collections.abc import Collection
 from enum import StrEnum
 
 from pydantic import BaseModel, Field, model_validator
+
+from meyar.core.text import normalize_azerbaijani_case
 
 # Heuristic denylist enforcing docs/SECURITY_PRIVACY.md / MASTER_SPEC.md §4:
 # irrelevant/sensitive attributes must never become matching criteria.
@@ -52,8 +55,77 @@ _SENSITIVE_PATTERNS = [
         r"\bbisexual\b",
         r"\btransgender\b",
         r"\bphoto(graph)?\b",
+        # Azerbaijani equivalents used by the internal HR surface. These
+        # extend the same deterministic authority; Slice 9 does not keep a
+        # competing planner-specific protected-trait list.
+        r"\bcins(iyyət)?\b",
+        r"\bkişi\b",
+        r"\bqadın\b",
+        r"\byaş\b",
+        r"\bdoğum tarix(?:i|ini|inin|inə|ində|indən)\b",
+        r"\bmilliyyət\b",
+        r"\bdin(i|ə)?\b",
+        r"\bmüsəlman\b",
+        r"\bxristian\b",
+        r"\byəhudi\b",
+        r"\bevli\b",
+        r"\bsubay\b",
+        r"\bhamilə\b",
+        r"\bsiyasi\b",
+        r"\bəlillik\b",
+        r"\bsağlamlıq\b",
     ]
 ]
+
+# Explicit Azerbaijani inflections for the protected categories above. These
+# are intentionally enumerated rather than treated as arbitrary prefixes:
+# for example, ``yaşdan`` is an age criterion, while ``yaşıl`` is unrelated.
+_AZ_BACK_CONSONANT_NOUN_SUFFIXES = frozenset(
+    {"", "ı", "ın", "a", "da", "dan", "lar", "ları", "ların", "lara", "larda", "lardan"}
+)
+_AZ_FRONT_CONSONANT_NOUN_SUFFIXES = frozenset(
+    {"", "i", "in", "ə", "də", "dən", "lər", "ləri", "lərin", "lərə", "lərdə", "lərdən"}
+)
+_AZ_FRONT_VOWEL_NOUN_SUFFIXES = frozenset(
+    {"", "ni", "nin", "yə", "də", "dən", "lər", "ləri", "lərin", "lərə", "lərdə", "lərdən"}
+)
+_AZ_PROTECTED_TERM_SUFFIXES: tuple[tuple[str, frozenset[str]], ...] = (
+    ("cins", _AZ_FRONT_CONSONANT_NOUN_SUFFIXES),
+    ("cinsiyyət", _AZ_FRONT_CONSONANT_NOUN_SUFFIXES),
+    ("kişi", _AZ_FRONT_VOWEL_NOUN_SUFFIXES),
+    ("qadın", _AZ_BACK_CONSONANT_NOUN_SUFFIXES),
+    (
+        "yaş",
+        _AZ_BACK_CONSONANT_NOUN_SUFFIXES
+        | {"ını", "ının", "ına", "ında", "ından"},
+    ),
+    ("milliyyət", _AZ_FRONT_CONSONANT_NOUN_SUFFIXES),
+    ("din", _AZ_FRONT_CONSONANT_NOUN_SUFFIXES),
+    ("müsəlman", _AZ_BACK_CONSONANT_NOUN_SUFFIXES),
+    ("xristian", _AZ_BACK_CONSONANT_NOUN_SUFFIXES),
+    ("yəhudi", _AZ_FRONT_VOWEL_NOUN_SUFFIXES),
+    ("evli", _AZ_FRONT_VOWEL_NOUN_SUFFIXES),
+    ("subay", _AZ_BACK_CONSONANT_NOUN_SUFFIXES),
+    ("hamilə", _AZ_FRONT_VOWEL_NOUN_SUFFIXES),
+    ("siyasi", _AZ_FRONT_VOWEL_NOUN_SUFFIXES),
+    ("əlillik", _AZ_FRONT_CONSONANT_NOUN_SUFFIXES),
+    ("sağlamlıq", _AZ_BACK_CONSONANT_NOUN_SUFFIXES),
+)
+def _normalize_az_token(token: str) -> str:
+    words = re.findall(r"[^\W_]+", normalize_azerbaijani_case(token))
+    return words[0] if len(words) == 1 else ""
+
+
+def matches_term_or_allowed_az_forms(
+    token: str, root: str, allowed_suffixes: Collection[str]
+) -> bool:
+    """Match one Azerbaijani token against only explicitly allowed forms."""
+    normalized_token = _normalize_az_token(token)
+    normalized_root = _normalize_az_token(root)
+    return bool(normalized_token) and any(
+        normalized_token == normalized_root + normalize_azerbaijani_case(suffix)
+        for suffix in allowed_suffixes
+    )
 
 
 class ProhibitedCriterionError(ValueError):
@@ -79,6 +151,10 @@ def find_prohibited_term(*texts: str) -> str | None:
             match = pattern.search(text)
             if match:
                 return match.group(0)
+        for token in re.findall(r"[^\W_]+", text, flags=re.UNICODE):
+            for root, suffixes in _AZ_PROTECTED_TERM_SUFFIXES:
+                if matches_term_or_allowed_az_forms(token, root, suffixes):
+                    return token
     return None
 
 

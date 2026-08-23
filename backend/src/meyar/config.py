@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     # docs/DECISIONS.md). Final selection is blocked on the target Mac
     # Mini benchmark and multilingual quality validation (Slice 13).
     ollama_embedding_model: str = "nomic-embed-text"
+    # Trusted runtime provenance for the DEV_INTEGRATION_MODEL. This is
+    # configuration, never LLM-controlled planner output, and remains
+    # replaceable when the target-Mac production model is approved.
+    embedding_dimensions: int = 768
     embedding_timeout_seconds: float = 60.0
     embedding_max_input_chars: int = 20000
 
