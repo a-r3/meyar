@@ -1,4 +1,5 @@
 import uuid
+from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -6,7 +7,8 @@ import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meyar.evaluation.service import EvaluationInputError, evaluate_candidate
+from meyar.evaluation.service import EvaluationInputError
+from meyar.evaluation.service import evaluate_candidate as _evaluate_candidate
 from meyar.schemas.criteria import CriterionIn, CriterionKind, CriterionType
 from meyar.services.candidate_document_repo import (
     get_candidate_document,
@@ -19,6 +21,11 @@ from meyar.services.job_repo import create_job
 from meyar.services.tenant_repo import create_tenant
 
 FIXTURES_DIR = Path(__file__).resolve().parent.parent.parent / "fixtures" / "synthetic_cvs"
+_AS_OF_DATE = date(2026, 1, 1)
+
+
+async def evaluate_candidate(db_session: AsyncSession, **kwargs):
+    return await _evaluate_candidate(db_session, evaluation_as_of_date=_AS_OF_DATE, **kwargs)
 
 
 def _auth(plaintext: str) -> dict:
@@ -372,7 +379,7 @@ async def test_repeated_evaluation_with_identical_inputs_is_deterministic(
 
     assert eval_1.overall_result == eval_2.overall_result
     assert eval_1.criterion_results == eval_2.criterion_results
-    assert eval_1.id != eval_2.id  # still two distinct immutable rows
+    assert eval_1.id == eval_2.id
 
 
 async def test_evaluation_does_not_use_identity_fields(

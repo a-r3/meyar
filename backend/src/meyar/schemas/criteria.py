@@ -222,3 +222,9 @@ class CriteriaListIn(BaseModel):
         if duplicates:
             raise ValueError(f"Duplicate criterion id(s) in one version: {sorted(duplicates)}")
         return self
+
+    @model_validator(mode="after")
+    def _validate_positive_total_weight(self) -> "CriteriaListIn":
+        if not any(criterion.weight > 0 for criterion in self.criteria):
+            raise ValueError("At least one criterion must have weight greater than zero.")
+        return self

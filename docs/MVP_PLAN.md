@@ -110,9 +110,11 @@ started.
 
 ### Slice 10 — JD 0–100 Scoring + Batch Ranking
 
-Deterministic numeric score (formula TBD) layered on the existing
-criterion/policy engine (D-010); one JD → many candidates → sorted
-ranked list with reasons. Not started.
+Deterministic `meyar-score-v1` Decimal score layered on the existing
+criterion/fit engine, explicit as-of provenance, immutable idempotent
+Evaluation persistence, and one JD → tenant candidate library → fit-tier-first
+ranked list with reasons. Implemented on `feat/jd-scoring-batch-ranking`,
+pending acceptance/merge (D-017, issue #14).
 
 ### Slice 11 — Internal Chat UI + CV Library UI
 

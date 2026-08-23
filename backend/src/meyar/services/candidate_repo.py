@@ -22,6 +22,17 @@ async def get_candidate(
     return result.scalar_one_or_none()
 
 
+async def list_candidates_for_tenant(
+    db: AsyncSession, *, tenant_id: uuid.UUID
+) -> list[Candidate]:
+    result = await db.execute(
+        select(Candidate)
+        .where(Candidate.tenant_id == tenant_id)
+        .order_by(Candidate.id.asc())
+    )
+    return list(result.scalars().all())
+
+
 async def delete_candidate_row(
     db: AsyncSession, *, tenant_id: uuid.UUID, candidate_id: uuid.UUID
 ) -> None:

@@ -26,11 +26,9 @@ from meyar.search.schemas import (
     RequiredFilters,
 )
 
-# Deliberately duplicated from meyar.evaluation.experience: that module's
-# parse_year() is wall-clock-based ("present" -> datetime.now().year),
-# which is exactly the non-reproducibility Slice 8 must avoid (see
-# docs/DECISIONS.md). This is a small, intentional divergence — the
-# evaluation engine's own date-parsing behavior is left untouched.
+# Search retains its explicit-as-of parser so its structured-filter policy
+# remains isolated from the evaluation policy even though both now require a
+# caller-supplied date for ongoing employment.
 _YEAR_RE = re.compile(r"(19|20)\d{2}")
 _PRESENT_RE = re.compile(r"present|current|now|ongoing", re.IGNORECASE)
 

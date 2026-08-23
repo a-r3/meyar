@@ -112,6 +112,31 @@ async def test_job_requires_at_least_one_criterion(
     assert resp.status_code == 422
 
 
+async def test_new_criteria_version_rejects_all_zero_weights(
+    client: AsyncClient, tenant_and_key
+) -> None:
+    _tenant, _key, plaintext = tenant_and_key
+    criteria = _valid_criteria()
+    for criterion in criteria:
+        criterion["weight"] = 0
+    resp = await client.post(
+        "/api/v1/jobs", headers=_auth(plaintext), json={"title": "X", "criteria": criteria}
+    )
+    assert resp.status_code == 422
+
+
+async def test_new_criteria_version_allows_mixed_zero_and_positive_weights(
+    client: AsyncClient, tenant_and_key
+) -> None:
+    _tenant, _key, plaintext = tenant_and_key
+    criteria = _valid_criteria()
+    criteria[0]["weight"] = 0
+    resp = await client.post(
+        "/api/v1/jobs", headers=_auth(plaintext), json={"title": "X", "criteria": criteria}
+    )
+    assert resp.status_code == 201
+
+
 async def test_duplicate_criterion_ids_rejected(client: AsyncClient, tenant_and_key) -> None:
     _tenant, _key, plaintext = tenant_and_key
     criteria = _valid_criteria()

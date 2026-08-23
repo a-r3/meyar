@@ -1,0 +1,354 @@
+from datetime import date
+from decimal import Decimal
+
+import pytest
+from search_helpers import seed_candidate_with_profile, seed_next_profile_version
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+import meyar.scoring.batch as batch_module
+from meyar.models.audit_event import AuditEvent
+from meyar.schemas.criteria import CriterionIn, CriterionKind, CriterionType
+from meyar.scoring.batch import rank_candidates_for_job
+from meyar.scoring.policy import ScoringPolicyError
+from meyar.services.candidate_identity_repo import create_identity_version
+from meyar.services.candidate_profile_repo import list_current_profile_versions_for_tenant
+from meyar.services.candidate_repo import create_candidate, list_candidates_for_tenant
+from meyar.services.job_criteria_repo import create_criteria_version
+from meyar.services.job_repo import create_job
+from meyar.services.tenant_repo import create_tenant
+
+AS_OF = date(2026, 1, 1)
+EVIDENCE = [{"page": 1, "block_index": 0, "quote": "Synthetic"}]
+EMPTY = {
+    "skills": [],
+    "employment_history": [],
+    "education": [],
+    "certifications": [],
+    "languages": [],
+    "projects": [],
+}
+
+
+def _skill(
+    criterion_id: str,
+    value: str,
+    *,
+    weight: float,
+    criterion_type: CriterionType,
+    manual_review_required: bool = False,
+) -> CriterionIn:
+    return CriterionIn(
+        id=criterion_id,
+        kind=CriterionKind.SKILL,
+        type=criterion_type,
+        label=value,
+        value=value,
+        weight=weight,
+        manual_review_required=manual_review_required,
+    )
+
+
+def _profile(*skills: str) -> dict:
+    return {
+        **EMPTY,
+        "skills": [{"name": skill, "evidence": EVIDENCE} for skill in skills],
+    }
+
+
+async def _criteria(db: AsyncSession, tenant_id, criteria: list[CriterionIn]):
+    job = await create_job(db, tenant_id=tenant_id, title="Batch Job")
+    version = await create_criteria_version(
+        db,
+        tenant_id=tenant_id,
+        job_id=job.id,
+        criteria=[item.model_dump(mode="json") for item in criteria],
+        created_by_api_key_id=None,
+    )
+    return version
+
+
+async def test_fit_tier_dominates_high_preferred_score(
+    db_session: AsyncSession, tenant_and_key
+) -> None:
+    tenant, _key, _plaintext = tenant_and_key
+    high_score_failed_gate, _ = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=_profile("AWS")
+    )
+    low_score_passed_gate, _ = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=_profile("Python")
+    )
+    criteria = await _criteria(
+        db_session,
+        tenant.id,
+        [
+            _skill("python", "Python", weight=1, criterion_type=CriterionType.MUST_HAVE),
+            _skill("aws", "AWS", weight=9, criterion_type=CriterionType.PREFERRED),
+        ],
+    )
+    result = await rank_candidates_for_job(
+        db_session,
+        tenant_id=tenant.id,
+        job_criteria_version_id=criteria.id,
+        evaluation_as_of_date=AS_OF,
+    )
+    assert [item.candidate_id for item in result.results] == [
+        low_score_passed_gate.id,
+        high_score_failed_gate.id,
+    ]
+    assert result.results[0].numeric_score == Decimal("10.00")
+    assert result.results[1].numeric_score == Decimal("90.00")
+    assert [item.fit_tier for item in result.results] == [1, 3]
+
+
+async def test_zero_weight_must_have_still_gates_batch_order(
+    db_session: AsyncSession, tenant_and_key
+) -> None:
+    tenant, _key, _plaintext = tenant_and_key
+    failed_gate, _ = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=_profile("AWS")
+    )
+    passed_gate, _ = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=_profile("Python")
+    )
+    criteria = await _criteria(
+        db_session,
+        tenant.id,
+        [
+            _skill("python", "Python", weight=0, criterion_type=CriterionType.MUST_HAVE),
+            _skill("aws", "AWS", weight=10, criterion_type=CriterionType.PREFERRED),
+        ],
+    )
+    result = await rank_candidates_for_job(
+        db_session,
+        tenant_id=tenant.id,
+        job_criteria_version_id=criteria.id,
+        evaluation_as_of_date=AS_OF,
+    )
+    assert [item.candidate_id for item in result.results] == [passed_gate.id, failed_gate.id]
+    assert result.results[0].numeric_score == Decimal("0.00")
+    assert result.results[1].numeric_score == Decimal("100.00")
+    assert result.results[0].fit_tier < result.results[1].fit_tier
+
+
+async def test_manual_review_tier_remains_ahead_of_insufficient_evidence(
+    db_session: AsyncSession, tenant_and_key
+) -> None:
+    tenant, _key, _plaintext = tenant_and_key
+    manual_profile = {
+        **EMPTY,
+        "employment_history": [
+            {
+                "title": "Engineer",
+                "start_date": "ambiguous",
+                "end_date": "Present",
+                "is_current": True,
+                "evidence": EVIDENCE,
+            }
+        ],
+    }
+    manual, _ = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=manual_profile
+    )
+    insufficient, _ = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=EMPTY
+    )
+    criteria = await _criteria(
+        db_session,
+        tenant.id,
+        [
+            CriterionIn(
+                id="experience",
+                kind=CriterionKind.EXPERIENCE,
+                type=CriterionType.MUST_HAVE,
+                label="Experience",
+                min_years=1,
+                weight=1,
+            )
+        ],
+    )
+    result = await rank_candidates_for_job(
+        db_session,
+        tenant_id=tenant.id,
+        job_criteria_version_id=criteria.id,
+        evaluation_as_of_date=AS_OF,
+    )
+    assert [item.candidate_id for item in result.results] == [manual.id, insufficient.id]
+    assert [item.fit_tier for item in result.results] == [2, 3]
+
+
+async def test_batch_uses_only_current_profile_version(
+    db_session: AsyncSession, tenant_and_key
+) -> None:
+    tenant, _key, _plaintext = tenant_and_key
+    candidate, profile_v1 = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=_profile("Python")
+    )
+    profile_v2 = await seed_next_profile_version(
+        db_session, tenant_id=tenant.id, candidate=candidate, profile_content=EMPTY
+    )
+    criteria = await _criteria(
+        db_session,
+        tenant.id,
+        [_skill("python", "Python", weight=1, criterion_type=CriterionType.MUST_HAVE)],
+    )
+    result = await rank_candidates_for_job(
+        db_session,
+        tenant_id=tenant.id,
+        job_criteria_version_id=criteria.id,
+        evaluation_as_of_date=AS_OF,
+    )
+    assert len(result.results) == 1
+    assert result.results[0].candidate_profile_version_id == profile_v2.id
+    assert result.results[0].candidate_profile_version_id != profile_v1.id
+    assert result.results[0].numeric_score == Decimal("0.00")
+
+
+async def test_stable_uuid_tie_is_insertion_order_and_identity_invariant(
+    db_session: AsyncSession, tenant_and_key, monkeypatch
+) -> None:
+    tenant, _key, _plaintext = tenant_and_key
+    first, first_profile = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=_profile("Python")
+    )
+    second, second_profile = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=_profile("Python")
+    )
+    for candidate, profile, identity in [
+        (first, first_profile, {"full_name": "Zulu", "email": "z@example.invalid"}),
+        (second, second_profile, {"full_name": "Alpha", "email": "a@example.invalid"}),
+    ]:
+        await create_identity_version(
+            db_session,
+            tenant_id=tenant.id,
+            candidate_id=candidate.id,
+            candidate_document_id=profile.candidate_document_id,
+            canonical_document_id=profile.canonical_document_id,
+            source_sha256=profile.source_sha256,
+            schema_version="candidate-identity-v1",
+            prompt_version="test",
+            model_provider="fake",
+            model_name="fake",
+            status="COMPLETED",
+            identity_content=identity,
+        )
+    criteria = await _criteria(
+        db_session,
+        tenant.id,
+        [_skill("python", "Python", weight=1, criterion_type=CriterionType.MUST_HAVE)],
+    )
+    expected = sorted([first.id, second.id], key=lambda candidate_id: candidate_id.int)
+    normal = await rank_candidates_for_job(
+        db_session,
+        tenant_id=tenant.id,
+        job_criteria_version_id=criteria.id,
+        evaluation_as_of_date=AS_OF,
+    )
+
+    async def reversed_candidates(db, *, tenant_id):
+        return list(reversed(await list_candidates_for_tenant(db, tenant_id=tenant_id)))
+
+    async def reversed_profiles(db, *, tenant_id):
+        return list(
+            reversed(await list_current_profile_versions_for_tenant(db, tenant_id=tenant_id))
+        )
+
+    monkeypatch.setattr(batch_module, "list_candidates_for_tenant", reversed_candidates)
+    monkeypatch.setattr(
+        batch_module, "list_current_profile_versions_for_tenant", reversed_profiles
+    )
+    reversed_result = await rank_candidates_for_job(
+        db_session,
+        tenant_id=tenant.id,
+        job_criteria_version_id=criteria.id,
+        evaluation_as_of_date=AS_OF,
+    )
+    assert [item.candidate_id for item in normal.results] == expected
+    assert [item.candidate_id for item in reversed_result.results] == expected
+    assert reversed_result.reused_count == 2
+
+
+async def test_batch_tenant_isolation_zero_set_and_skip_counts(
+    db_session: AsyncSession, tenant_and_key
+) -> None:
+    tenant_a, _key, _plaintext = tenant_and_key
+    tenant_b = await create_tenant(db_session, name="Tenant B")
+    await seed_candidate_with_profile(
+        db_session, tenant_id=tenant_b.id, profile_content=_profile("Python")
+    )
+    await create_candidate(db_session, tenant_id=tenant_a.id)
+    await seed_candidate_with_profile(
+        db_session, tenant_id=tenant_a.id, profile_content=None, status="FAILED"
+    )
+    criteria = await _criteria(
+        db_session,
+        tenant_a.id,
+        [_skill("python", "Python", weight=1, criterion_type=CriterionType.MUST_HAVE)],
+    )
+    result = await rank_candidates_for_job(
+        db_session,
+        tenant_id=tenant_a.id,
+        job_criteria_version_id=criteria.id,
+        evaluation_as_of_date=AS_OF,
+    )
+    assert result.evaluated_count == 0
+    assert result.skipped_count == 2
+    assert result.skip_reason_counts == {
+        "CURRENT_PROFILE_NOT_COMPLETED": 1,
+        "NO_CURRENT_PROFILE": 1,
+    }
+    assert result.results == []
+
+
+async def test_legacy_zero_weight_batch_fails_before_candidate_iteration(
+    db_session: AsyncSession, tenant_and_key, monkeypatch
+) -> None:
+    tenant, _key, _plaintext = tenant_and_key
+    job = await create_job(db_session, tenant_id=tenant.id, title="Legacy")
+    criteria = await create_criteria_version(
+        db_session,
+        tenant_id=tenant.id,
+        job_id=job.id,
+        criteria=[
+            _skill(
+                "zero", "Python", weight=0, criterion_type=CriterionType.MUST_HAVE
+            ).model_dump(mode="json")
+        ],
+        created_by_api_key_id=None,
+    )
+
+    async def must_not_iterate(*args, **kwargs):
+        raise AssertionError("candidate iteration must not begin")
+
+    monkeypatch.setattr(batch_module, "list_candidates_for_tenant", must_not_iterate)
+    with pytest.raises(ScoringPolicyError) as exc_info:
+        await rank_candidates_for_job(
+            db_session,
+            tenant_id=tenant.id,
+            job_criteria_version_id=criteria.id,
+            evaluation_as_of_date=AS_OF,
+        )
+    assert exc_info.value.code == "ZERO_TOTAL_CRITERION_WEIGHT"
+
+
+async def test_batch_audit_is_safe(db_session: AsyncSession, tenant_and_key) -> None:
+    tenant, _key, _plaintext = tenant_and_key
+    criteria = await _criteria(
+        db_session,
+        tenant.id,
+        [_skill("python", "Python", weight=1, criterion_type=CriterionType.MUST_HAVE)],
+    )
+    await rank_candidates_for_job(
+        db_session,
+        tenant_id=tenant.id,
+        job_criteria_version_id=criteria.id,
+        evaluation_as_of_date=AS_OF,
+    )
+    event = (
+        await db_session.execute(
+            select(AuditEvent).where(AuditEvent.event_type == "JOB_BATCH_RANKED")
+        )
+    ).scalar_one()
+    metadata = str(event.event_metadata).lower()
+    for forbidden in ("name", "email", "phone", "quote", "vector", "semantic", "llm"):
+        assert forbidden not in metadata
