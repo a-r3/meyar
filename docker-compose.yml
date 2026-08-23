@@ -1,6 +1,10 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    # pgvector/pgvector:pg16 — official pgvector project image, built on
+    # postgres:16 (same major version, same data directory format) with
+    # the `vector` extension available for `CREATE EXTENSION vector`
+    # (Slice 7). See docs/DECISIONS.md.
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: meyar
       POSTGRES_PASSWORD: meyar_dev_password

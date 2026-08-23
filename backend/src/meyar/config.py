@@ -17,6 +17,14 @@ class Settings(BaseSettings):
     llm_provider: str = "ollama"
     llm_timeout_seconds: float = 60.0
     llm_max_input_chars: int = 20000
+    embedding_provider: str = "ollama"
+    # DEV_INTEGRATION_MODEL default — not an approved final production
+    # embedding model (see meyar.embedding.ollama_provider,
+    # docs/DECISIONS.md). Final selection is blocked on the target Mac
+    # Mini benchmark and multilingual quality validation (Slice 13).
+    ollama_embedding_model: str = "nomic-embed-text"
+    embedding_timeout_seconds: float = 60.0
+    embedding_max_input_chars: int = 20000
 
     @property
     def api_key_env(self) -> str:

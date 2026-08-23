@@ -20,7 +20,11 @@ jobs:
 
     services:
       postgres:
-        image: postgres:16-alpine
+        # pgvector/pgvector:pg16 — official pgvector image on postgres:16,
+        # required for `CREATE EXTENSION vector` (Slice 7). Same normal
+        # bridge networking as before; D-005 host-network is a local dev
+        # workaround, never replicated in CI.
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_USER: meyar
           POSTGRES_PASSWORD: meyar_dev_password

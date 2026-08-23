@@ -33,6 +33,11 @@ async def _prepare_test_database() -> None:
 
     engine = create_async_engine(TEST_DATABASE_URL)
     async with engine.begin() as conn:
+        # Required before create_all for candidate_embedding_versions'
+        # Vector column (Slice 7) — tests build the schema directly via
+        # metadata.create_all, bypassing the Alembic migration that
+        # normally does this for dev/CI.
+        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
     await engine.dispose()

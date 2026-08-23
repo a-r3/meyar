@@ -3,6 +3,63 @@
 Append-only log of concise architectural/product decisions. Format: id, date,
 decision, why, reversibility.
 
+## D-014 — Slice 7 identity/embedding semantics + pgvector adoption
+
+**Date:** 2026-08-23
+**Decision:** Candidate Identity + Local Embeddings / Vector Index (Slice 7)
+implementation choices:
+1. **`CandidateIdentity` is a wholly separate immutable, versioned table**
+   (`CandidateIdentityVersion`, mirroring `CandidateProfileVersion`) —
+   never columns on `Candidate`/`CandidateProfile`. It is read only for
+   authorized presentation; no code path in extraction, evaluation,
+   embedding generation, or (future) search may query it. Identity
+   extraction reuses the existing `LLMProvider`/evidence-verification
+   machinery but with its own unredacted view
+   (`build_identity_document_view`) and its own schema
+   (`CandidateIdentityExtraction`, `extra="forbid"`, only
+   full_name/email/phone) — the professional extraction's view stays
+   redacted (Slice 4) and its schema still has no identity fields.
+2. **Embedding source is deterministic `CandidateProfile` content only.**
+   `build_professional_embedding_text` reads fixed professional fields in
+   a fixed order (never raw dict iteration, never evidence quotes) so the
+   same `CandidateProfileVersion` always yields the same text and
+   `source_sha256`. `CandidateIdentity` is never imported by the
+   embedding path — structurally impossible to smuggle in, since
+   `CandidateProfileExtraction` has no identity field to begin with.
+3. **`CandidateEmbeddingVersion` rows are immutable and version-bound to
+   an exact `candidate_profile_version_id`.** "Current" is derived
+   relationally (does an embedding row exist for the candidate's current
+   profile version, for the configured provider/model/revision?) —
+   never a boolean flag that can drift stale. An older embedding for a
+   superseded profile version is simply absent from that lookup, not
+   silently returned. A failed embedding attempt persists no row at all
+   (unlike identity/profile versions, which persist a FAILED row for
+   audit) — there is no meaningful "partial vector" to keep.
+4. **The `embedding` column is dimension-agnostic** (`pgvector.sqlalchemy
+   .Vector()`, no fixed length) with `embedding_dimensions` stored
+   explicitly per row — the final production embedding model/dimension
+   is not approved (blocked on the target Mac Mini benchmark, M5/Slice
+   13). A physical ANN/HNSW index is deferred until one is. The
+   configured default model is explicitly labeled
+   `DEV_INTEGRATION_MODEL` (`nomic-embed-text`), never presented as
+   final.
+5. **PostgreSQL image changed to `pgvector/pgvector:pg16`** (from
+   `postgres:16-alpine`) in both `docker-compose.yml` and CI — same
+   PostgreSQL 16 major version and data directory format, just adds the
+   `vector` extension. The local dev container was recreated with this
+   image; its existing named volume (`meyar_pg_data`) was preserved, no
+   data lost. CI keeps normal bridge networking; the D-005 host-network
+   workaround remains a local-dev-only accommodation. `pgvector` (Python)
+   is a new backend dependency (`backend/uv.lock` updated).
+**Why:** Preserves the identity/profile privacy boundary
+(docs/MASTER_SPEC.md §5) as a hard architectural invariant even as the
+codebase grows, and keeps embedding "current"-ness correct by
+construction rather than by convention — both were explicit MVP risks
+this slice was scoped to close before Slice 8 search is built on top of
+it. **Reversibility:** fully reversible; no destructive schema/data
+choices, and the dimension-agnostic column means the final approved
+production embedding model can be adopted later without a migration.
+
 ## D-013 — Slice 6 folder-indexer semantics
 
 **Date:** 2026-08-23
