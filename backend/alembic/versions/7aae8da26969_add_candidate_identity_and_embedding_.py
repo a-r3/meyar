@@ -76,6 +76,7 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint('id'),
         sa.UniqueConstraint(
             'tenant_id', 'candidate_profile_version_id', 'provider', 'model_name', 'model_revision',
+            'serializer_version', 'source_sha256',
             name='uq_candidate_embedding_version',
         ),
     )

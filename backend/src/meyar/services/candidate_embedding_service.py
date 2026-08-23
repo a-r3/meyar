@@ -44,11 +44,15 @@ async def embed_candidate_profile(
     professional facts.
 
     Idempotent: if a CandidateEmbeddingVersion already exists for the
-    exact (profile version, provider, model, revision), that row is
-    returned unchanged and the embedding provider is never called again
-    — see candidate_embedding_repo.get_embedding_version_by_source and
-    the table's unique constraint (the concurrency backstop). Returns
-    (version, was_reused).
+    exact seven-field identity (profile version, provider, model,
+    revision, serializer_version, source_sha256), that row is returned
+    unchanged and the embedding provider is never called again — see
+    candidate_embedding_repo.get_embedding_version_by_source and the
+    table's unique constraint (the concurrency backstop). A serializer
+    revision, or any change to the serialized professional text under
+    an unchanged serializer_version, always produces a distinct
+    embedding — it is never silently masked by an older row (see
+    docs/DECISIONS.md D-014). Returns (version, was_reused).
 
     Raises EmbeddingPreconditionError if there is no completed profile
     version yet, or if the serialized professional text exceeds
@@ -73,6 +77,18 @@ async def embed_candidate_profile(
             f"(status={profile_version.status}).",
         )
 
+    # The canonical text and its hash must be computed BEFORE deciding
+    # whether an existing embedding is reusable — reuse identity depends
+    # on source_sha256/serializer_version, not just the profile version.
+    text = build_professional_embedding_text(profile_content)
+    if len(text) > max_input_chars:
+        raise EmbeddingPreconditionError(
+            "INPUT_TOO_LARGE",
+            f"Professional embedding text ({len(text)} chars) exceeds the configured "
+            f"maximum ({max_input_chars} chars).",
+        )
+    source_sha256 = compute_source_sha256(text)
+
     existing = await get_embedding_version_by_source(
         db,
         tenant_id=tenant_id,
@@ -80,6 +96,8 @@ async def embed_candidate_profile(
         provider=provider.provider_name,
         model_name=provider.model_name,
         model_revision=provider.model_revision,
+        serializer_version=SERIALIZER_VERSION,
+        source_sha256=source_sha256,
     )
     if existing is not None:
         await record_event(
@@ -93,15 +111,6 @@ async def embed_candidate_profile(
             },
         )
         return existing, True
-
-    text = build_professional_embedding_text(profile_content)
-    if len(text) > max_input_chars:
-        raise EmbeddingPreconditionError(
-            "INPUT_TOO_LARGE",
-            f"Professional embedding text ({len(text)} chars) exceeds the configured "
-            f"maximum ({max_input_chars} chars).",
-        )
-    source_sha256 = compute_source_sha256(text)
 
     try:
         result = await provider.embed(text)

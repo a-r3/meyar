@@ -18,12 +18,17 @@ class CandidateEmbeddingVersion(Base):
     attempt is never persisted (see meyar.services.candidate_embedding_service).
     "Current" is NOT simply the newest row: it is the row whose
     candidate_profile_version_id equals the candidate's current
-    CandidateProfileVersion (get_current_profile_version) for the
-    configured provider/model — an older embedding for a superseded
-    profile version is STALE even if no newer embedding exists yet. The
-    unique constraint is the idempotency backstop: re-embedding the exact
-    same (profile version, provider, model, revision) reuses this row
-    rather than creating a duplicate. See docs/DECISIONS.md."""
+    CandidateProfileVersion (get_current_profile_version) AND whose
+    provider/model_name/model_revision/serializer_version/source_sha256
+    exactly match the requested embedding configuration — an older
+    embedding for a superseded profile version, OR for a superseded
+    serializer/source, is STALE even if no newer embedding exists yet.
+    The unique constraint is the idempotency backstop: re-embedding the
+    exact same seven-field identity (profile version, provider, model,
+    revision, serializer_version, source_sha256) reuses this row rather
+    than creating a duplicate — a serializer or source-text change
+    always produces a distinct row, never a silently-reused stale
+    vector. See docs/DECISIONS.md."""
 
     __tablename__ = "candidate_embedding_versions"
     __table_args__ = (
@@ -33,6 +38,8 @@ class CandidateEmbeddingVersion(Base):
             "provider",
             "model_name",
             "model_revision",
+            "serializer_version",
+            "source_sha256",
             name="uq_candidate_embedding_version",
         ),
     )

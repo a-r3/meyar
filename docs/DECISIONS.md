@@ -35,6 +35,19 @@ implementation choices:
    silently returned. A failed embedding attempt persists no row at all
    (unlike identity/profile versions, which persist a FAILED row for
    audit) — there is no meaningful "partial vector" to keep.
+   **Reuse/uniqueness identity is seven fields, not five:**
+   `(tenant_id, candidate_profile_version_id, provider, model_name,
+   model_revision, serializer_version, source_sha256)` — both on the
+   DB `UniqueConstraint` and on the reuse lookup
+   (`get_embedding_version_by_source`). `serializer_version` and
+   `source_sha256` are provenance fields that also gate reuse, not
+   passive metadata: a serializer revision, or any change to the
+   serialized professional text under an unchanged serializer_version,
+   always produces a new, distinct embedding — it is never silently
+   masked by an older row's vector. (An initial version of this slice
+   omitted these two fields from the reuse key; an acceptance audit
+   reproduced the resulting false-reuse defect before merge, and this
+   is the corrected design.)
 4. **The `embedding` column is dimension-agnostic** (`pgvector.sqlalchemy
    .Vector()`, no fixed length) with `embedding_dimensions` stored
    explicitly per row — the final production embedding model/dimension

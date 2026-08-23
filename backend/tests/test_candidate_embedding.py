@@ -15,7 +15,11 @@ from meyar.embedding.provider import (
     EmbeddingTimeoutError,
     EmbeddingUnavailableError,
 )
-from meyar.embedding.serializer import build_professional_embedding_text, compute_source_sha256
+from meyar.embedding.serializer import (
+    SERIALIZER_VERSION,
+    build_professional_embedding_text,
+    compute_source_sha256,
+)
 from meyar.models.audit_event import AuditEvent
 from meyar.models.candidate_embedding_version import CandidateEmbeddingVersion
 from meyar.services.candidate_document_repo import (
@@ -220,12 +224,14 @@ async def test_identical_rerun_is_idempotent_no_duplicate_call(
     assert len(rows) == 1
 
 
-async def test_db_uniqueness_is_the_concurrency_backstop(
+async def test_db_uniqueness_rejects_exact_duplicate(
     db_session: AsyncSession, candidate_with_profile_v1
 ) -> None:
     """Bypasses the service's own pre-check to prove the DB constraint
-    itself rejects a duplicate (tenant, profile_version, provider, model,
-    revision) row — the final backstop for concurrent/repeated writes."""
+    itself rejects a row that is identical across all seven identity
+    fields (tenant, profile_version, provider, model, revision,
+    serializer_version, source_sha256) — the final backstop for
+    concurrent/repeated writes."""
     tenant, candidate, _document, _canonical, profile_v1 = candidate_with_profile_v1
     await create_embedding_version(
         db_session,
@@ -254,11 +260,87 @@ async def test_db_uniqueness_is_the_concurrency_backstop(
             model_name="fake-embedding-model-v1",
             model_revision="",
             serializer_version="candidate-professional-embedding-text-v1",
-            source_sha256="d" * 64,
+            source_sha256="c" * 64,  # identical to the first row — true duplicate
             embedding_dimensions=4,
             embedding=[0.9, 0.9, 0.9, 0.9],
         )
     await db_session.rollback()
+
+
+async def test_db_uniqueness_allows_different_serializer_version(
+    db_session: AsyncSession, candidate_with_profile_v1
+) -> None:
+    """Same profile/provider/model/revision but a different
+    serializer_version must be allowed as a distinct row — the DB
+    constraint must not conflate a serializer revision with a
+    duplicate."""
+    tenant, candidate, _document, _canonical, profile_v1 = candidate_with_profile_v1
+    row_v1 = await create_embedding_version(
+        db_session,
+        tenant_id=tenant.id,
+        candidate_id=candidate.id,
+        candidate_profile_version_id=profile_v1.id,
+        provider="fake-embedding",
+        model_name="fake-embedding-model-v1",
+        model_revision="",
+        serializer_version="candidate-professional-embedding-text-v1",
+        source_sha256="c" * 64,
+        embedding_dimensions=4,
+        embedding=[0.1, 0.2, 0.3, 0.4],
+    )
+    row_v2 = await create_embedding_version(
+        db_session,
+        tenant_id=tenant.id,
+        candidate_id=candidate.id,
+        candidate_profile_version_id=profile_v1.id,
+        provider="fake-embedding",
+        model_name="fake-embedding-model-v1",
+        model_revision="",
+        serializer_version="candidate-professional-embedding-text-v2",  # different
+        source_sha256="c" * 64,  # same hash — serializer_version alone still differs
+        embedding_dimensions=4,
+        embedding=[0.5, 0.5, 0.5, 0.5],
+    )
+    await db_session.commit()
+    assert row_v1.id != row_v2.id
+
+
+async def test_db_uniqueness_allows_different_source_hash(
+    db_session: AsyncSession, candidate_with_profile_v1
+) -> None:
+    """Same profile/provider/model/revision/serializer but a different
+    source_sha256 must be allowed as a distinct row — protects against
+    an accidental serializer behavior change that was not accompanied
+    by a version bump."""
+    tenant, candidate, _document, _canonical, profile_v1 = candidate_with_profile_v1
+    row_h1 = await create_embedding_version(
+        db_session,
+        tenant_id=tenant.id,
+        candidate_id=candidate.id,
+        candidate_profile_version_id=profile_v1.id,
+        provider="fake-embedding",
+        model_name="fake-embedding-model-v1",
+        model_revision="",
+        serializer_version="candidate-professional-embedding-text-v1",
+        source_sha256="c" * 64,
+        embedding_dimensions=4,
+        embedding=[0.1, 0.2, 0.3, 0.4],
+    )
+    row_h2 = await create_embedding_version(
+        db_session,
+        tenant_id=tenant.id,
+        candidate_id=candidate.id,
+        candidate_profile_version_id=profile_v1.id,
+        provider="fake-embedding",
+        model_name="fake-embedding-model-v1",
+        model_revision="",
+        serializer_version="candidate-professional-embedding-text-v1",  # same
+        source_sha256="d" * 64,  # different
+        embedding_dimensions=4,
+        embedding=[0.9, 0.9, 0.9, 0.9],
+    )
+    await db_session.commit()
+    assert row_h1.id != row_h2.id
 
 
 async def test_new_profile_version_makes_prior_embedding_stale(
@@ -277,6 +359,7 @@ async def test_new_profile_version_makes_prior_embedding_stale(
     await db_session.commit()
 
     # profile v1 -> embedding v1 is current for profile v1.
+    hash_v1 = compute_source_sha256(build_professional_embedding_text(_PROFILE_V1_CONTENT))
     current_for_v1 = await get_embedding_version_by_source(
         db_session,
         tenant_id=tenant.id,
@@ -284,6 +367,8 @@ async def test_new_profile_version_makes_prior_embedding_stale(
         provider=provider.provider_name,
         model_name=provider.model_name,
         model_revision=provider.model_revision,
+        serializer_version=SERIALIZER_VERSION,
+        source_sha256=hash_v1,
     )
     assert current_for_v1 is not None
     assert current_for_v1.id == embedding_v1.id
@@ -301,6 +386,7 @@ async def test_new_profile_version_makes_prior_embedding_stale(
     await db_session.commit()
     assert profile_v2.version_number == 2
 
+    hash_v2 = compute_source_sha256(build_professional_embedding_text(_PROFILE_V2_CONTENT))
     stale_check = await get_embedding_version_by_source(
         db_session,
         tenant_id=tenant.id,
@@ -308,6 +394,8 @@ async def test_new_profile_version_makes_prior_embedding_stale(
         provider=provider.provider_name,
         model_name=provider.model_name,
         model_revision=provider.model_revision,
+        serializer_version=SERIALIZER_VERSION,
+        source_sha256=hash_v2,
     )
     assert stale_check is None  # no embedding exists yet for the new version
 
@@ -333,6 +421,199 @@ async def test_new_profile_version_makes_prior_embedding_stale(
     reloaded_v1 = await db_session.get(CandidateEmbeddingVersion, embedding_v1.id)
     assert reloaded_v1 is not None
     assert reloaded_v1.candidate_profile_version_id == profile_v1.id  # untouched
+
+
+# --- Regression: serializer/source-hash provenance safety --------------
+# These reproduce the acceptance-audit BLOCKED finding: a serializer or
+# source-text change for the SAME profile version/provider/model/
+# revision must never be silently masked by an older row's vector.
+
+
+async def test_serializer_change_produces_new_embedding_not_reuse(
+    db_session: AsyncSession, candidate_with_profile_v1, monkeypatch
+) -> None:
+    """Exact reproduction of the acceptance-audit scenario: embed profile
+    P1 under serializer v1 (source hash H1), then simulate a legitimate
+    serializer revision that changes the serialized text (source hash
+    H2) for the SAME profile version/provider/model/revision. The
+    second call must create a genuinely new embedding — not reuse E1 —
+    and must actually invoke the provider again."""
+    import meyar.services.candidate_embedding_service as svc
+
+    tenant, candidate, _document, _canonical, profile_v1 = candidate_with_profile_v1
+    provider = FakeEmbeddingProvider(dimensions=4, vector=[0.1, 0.1, 0.1, 0.1])
+
+    e1, reused1 = await embed_candidate_profile(
+        db_session,
+        provider,
+        tenant_id=tenant.id,
+        candidate_id=candidate.id,
+        max_input_chars=20000,
+    )
+    await db_session.commit()
+    assert reused1 is False
+    assert provider.call_count == 1
+    hash_v1 = e1.source_sha256
+    serializer_v1 = e1.serializer_version
+
+    # Simulate a legitimate serializer revision: same profile, different
+    # deterministic output (and therefore a different source hash).
+    original_serializer = svc.build_professional_embedding_text
+    monkeypatch.setattr(
+        svc,
+        "build_professional_embedding_text",
+        lambda content: original_serializer(content) + "\nEXTRA SERIALIZER V2 FIELD",
+    )
+    monkeypatch.setattr(
+        svc, "SERIALIZER_VERSION", "candidate-professional-embedding-text-v2-test"
+    )
+
+    e2, reused2 = await embed_candidate_profile(
+        db_session,
+        provider,
+        tenant_id=tenant.id,
+        candidate_id=candidate.id,
+        max_input_chars=20000,
+    )
+    await db_session.commit()
+
+    assert reused2 is False  # must NOT be falsely reported as reused
+    assert provider.call_count == 2  # the provider WAS actually called again
+    assert e2.id != e1.id
+    assert e2.serializer_version == "candidate-professional-embedding-text-v2-test"
+    assert e2.serializer_version != serializer_v1
+    assert e2.source_sha256 != hash_v1
+
+    # E1 remains unchanged and both rows remain queryable.
+    reloaded_e1 = await db_session.get(CandidateEmbeddingVersion, e1.id)
+    assert reloaded_e1 is not None
+    assert reloaded_e1.source_sha256 == hash_v1
+    assert reloaded_e1.serializer_version == serializer_v1
+    rows = await list_embedding_versions_for_candidate(
+        db_session, tenant_id=tenant.id, candidate_id=candidate.id
+    )
+    assert {r.id for r in rows} == {e1.id, e2.id}
+
+
+async def test_same_resulting_hash_different_serializer_version_not_reused(
+    db_session: AsyncSession, candidate_with_profile_v1, monkeypatch
+) -> None:
+    """Even if two different serializer code versions happen to produce
+    byte-identical text (same source_sha256), serializer_version itself
+    is part of reuse identity — the older row must not be silently
+    reused for the new serializer."""
+    import meyar.services.candidate_embedding_service as svc
+
+    tenant, candidate, _document, _canonical, _profile_v1 = candidate_with_profile_v1
+    provider = FakeEmbeddingProvider(dimensions=4)
+
+    e1, _ = await embed_candidate_profile(
+        db_session,
+        provider,
+        tenant_id=tenant.id,
+        candidate_id=candidate.id,
+        max_input_chars=20000,
+    )
+    await db_session.commit()
+
+    # Same textual output (same source_sha256) but a bumped serializer
+    # version — e.g. an internal refactor with no behavior change.
+    monkeypatch.setattr(svc, "SERIALIZER_VERSION", "candidate-professional-embedding-text-v2-noop")
+
+    e2, reused = await embed_candidate_profile(
+        db_session,
+        provider,
+        tenant_id=tenant.id,
+        candidate_id=candidate.id,
+        max_input_chars=20000,
+    )
+    await db_session.commit()
+
+    assert reused is False
+    assert e2.id != e1.id
+    assert e2.source_sha256 == e1.source_sha256  # same text
+    assert e2.serializer_version != e1.serializer_version  # different provenance
+
+
+async def test_same_serializer_different_hash_does_not_reuse(
+    db_session: AsyncSession, candidate_with_profile_v1, monkeypatch
+) -> None:
+    """Defensive case: an accidental serializer behavior change that
+    changes the output text WITHOUT a version bump must still not be
+    reused — source_sha256 alone gates reuse even when serializer_version
+    is unchanged."""
+    import meyar.services.candidate_embedding_service as svc
+
+    tenant, candidate, _document, _canonical, _profile_v1 = candidate_with_profile_v1
+    provider = FakeEmbeddingProvider(dimensions=4)
+
+    e1, _ = await embed_candidate_profile(
+        db_session,
+        provider,
+        tenant_id=tenant.id,
+        candidate_id=candidate.id,
+        max_input_chars=20000,
+    )
+    await db_session.commit()
+
+    original_serializer = svc.build_professional_embedding_text
+    monkeypatch.setattr(
+        svc,
+        "build_professional_embedding_text",
+        lambda content: original_serializer(content) + "\nACCIDENTAL CHANGE",
+    )
+    # serializer_version deliberately left unchanged.
+
+    e2, reused = await embed_candidate_profile(
+        db_session,
+        provider,
+        tenant_id=tenant.id,
+        candidate_id=candidate.id,
+        max_input_chars=20000,
+    )
+    await db_session.commit()
+
+    assert reused is False
+    assert e2.id != e1.id
+    assert e2.serializer_version == e1.serializer_version  # unchanged
+    assert e2.source_sha256 != e1.source_sha256  # different — must not be masked
+
+
+async def test_exact_rerun_still_reuses_with_full_seven_field_match(
+    db_session: AsyncSession, candidate_with_profile_v1
+) -> None:
+    """Preserves the original idempotency guarantee: when literally
+    nothing changes (profile, provider, model, revision, serializer,
+    source hash all identical), the provider must not be called again
+    and no duplicate row is created."""
+    tenant, candidate, _document, _canonical, _profile_v1 = candidate_with_profile_v1
+    provider = FakeEmbeddingProvider(dimensions=4)
+
+    e1, reused1 = await embed_candidate_profile(
+        db_session,
+        provider,
+        tenant_id=tenant.id,
+        candidate_id=candidate.id,
+        max_input_chars=20000,
+    )
+    await db_session.commit()
+    e2, reused2 = await embed_candidate_profile(
+        db_session,
+        provider,
+        tenant_id=tenant.id,
+        candidate_id=candidate.id,
+        max_input_chars=20000,
+    )
+    await db_session.commit()
+
+    assert reused1 is False
+    assert reused2 is True
+    assert e1.id == e2.id
+    assert provider.call_count == 1
+    rows = await list_embedding_versions_for_candidate(
+        db_session, tenant_id=tenant.id, candidate_id=candidate.id
+    )
+    assert len(rows) == 1
 
 
 async def test_different_model_creates_distinct_provenance(
@@ -479,6 +760,8 @@ async def test_tenant_isolation_embeddings_never_leak(
         provider=provider.provider_name,
         model_name=provider.model_name,
         model_revision=provider.model_revision,
+        serializer_version=version.serializer_version,
+        source_sha256=version.source_sha256,
     )
     assert leaked is None
 

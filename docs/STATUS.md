@@ -91,7 +91,9 @@ remains disabled.
   `meyar.llm.loopback.require_loopback_url` helper) and a
   `DEV_INTEGRATION_MODEL` default (`nomic-embed-text` — not an approved
   production model). Idempotent by (profile version, provider, model,
-  revision) with a DB unique-constraint backstop; "current" is derived
+  revision, serializer version, source hash) with a DB unique-constraint
+  backstop — a serializer or source-text change never silently reuses
+  an older vector; "current" is derived
   from the candidate's current `CandidateProfileVersion`, never a
   fragile flag, so a superseded profile's embedding is correctly STALE;
   a changed profile creates a new embedding without destroying prior
@@ -105,7 +107,9 @@ remains disabled.
   `docs/DECISIONS.md`, for the exact semantics chosen.
 
 ## Tests
-171/171 passing (127 prior + 44 new, Slice 7). Deterministic policy unit tests
+177/177 passing (127 prior + 50 new, Slice 7 — includes the serializer/
+source-hash provenance-safety regression tests added in the pre-merge
+acceptance-audit fix). Deterministic policy unit tests
 (no DB, no LLM — `test_evaluation_policy.py`): skill match/absent-is-
 unknown/case-normalization/Java-never-equals-JavaScript/alias
 normalization, certification match/absent, education match/unsupported,
@@ -144,7 +148,7 @@ CLI happy-path/invalid-root/exit-code-on-failure with no filename in
 output.
 
 Slice 7 (`test_candidate_identity.py`, `test_candidate_embedding.py`,
-`test_identity_embedding_cli.py`, 44 tests): identity — full_name/email/
+`test_identity_embedding_cli.py`, 50 tests): identity — full_name/email/
 phone extraction with real evidence verification, missing field stays
 null, strict extra-field rejection, invalid/mismatched evidence
 rejected, fabricated-quote rejected, bounded retry (fail-then-succeed
@@ -154,13 +158,19 @@ audit metadata and logs contain no PII, identity view proven unredacted
 vs. the professional view proven redacted for the same document.
 Embedding — serializer determinism (same content → same text → same
 SHA-256) and identity exclusion, first-embed creates a record, identical
-rerun is idempotent (provider called exactly once across two calls), DB
-unique-constraint backstop independently proven (bypassing the
-service's own pre-check), new profile version makes the prior embedding
-provably STALE (absent from the current-version lookup) while old
-history is preserved, different model/dimension produces distinct
-non-mixed provenance, provider error persists no row, tenant isolation,
-audit metadata contains no vector/text/PII, plus direct
+rerun is idempotent (provider called exactly once across two calls),
+reuse/uniqueness identity independently proven to require all seven
+provenance fields — a serializer-version bump, a same-hash-different-
+serializer case, and a same-serializer-different-hash case each
+correctly produce a distinct embedding and actually re-invoke the
+provider, never silently reusing a stale vector (the exact scenario an
+acceptance audit reproduced pre-merge — see D-014); DB unique-constraint
+backstop independently proven for both the accept and reject sides, new
+profile version makes the prior embedding provably STALE (absent from
+the current-version lookup) while old history is preserved, different
+model/dimension produces distinct non-mixed provenance, provider error
+persists no row, tenant isolation, audit metadata contains no vector/
+text/PII, plus direct
 `OllamaEmbeddingProvider` HTTP-behavior tests via `httpx.MockTransport`
 (no real Ollama): loopback rejection/acceptance, valid response, empty/
 missing/NaN/non-numeric vector rejected, non-200 and connect-error and
