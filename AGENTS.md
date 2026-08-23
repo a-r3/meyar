@@ -6,7 +6,7 @@ Canonical repository:
 Canonical development remote:
 `https://github.com/a-r3/meyar.git`
 
-Product: Internal Rabitabank AI Candidate Intelligence & CV Search Platform.
+Product: MEYAR — Internal AI Candidate Intelligence & CV Search Platform.
 This is **not** the superseded external B2B/SaaS product.
 
 ## Authority
@@ -90,5 +90,5 @@ that debt is resolved.
   has not started. The old External Async Evaluation API Slice 6 is cancelled
   and superseded.
 - The GitHub repository is currently a private personal development repository
-  and may later migrate to an official Rabitabank repository. Preserve full
+  and may later migrate to an official bank-owned repository. Preserve full
   Git history during any migration.

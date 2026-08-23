@@ -187,7 +187,7 @@ minor dependency updates or application feature PRs by default.
 Canonical local repo: `/home/oem/Documents/Job/RabitaBank/Meyar`.
 Canonical development remote: `https://github.com/a-r3/meyar.git`
 (`a-r3/meyar`, private). This is a personal development remote and may
-later be migrated to an official Rabitabank-owned repository — full Git
+later be migrated to an official bank-owned repository — full Git
 history must be preserved on that migration; never rewrite history
 merely because the remote owner changes.
 

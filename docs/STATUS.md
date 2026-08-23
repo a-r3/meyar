@@ -104,7 +104,7 @@ pending, migration keeps full history when it arrives.
 1. **Git Infrastructure** — remote connected (`a-r3/meyar`, private,
    temporary — D-012); task-branch/PR/CI governance is on
    `chore/git-governance`, awaiting PR review/merge. May later migrate to
-   an official Rabitabank-owned remote (history preserved).
+   an official bank-owned remote (history preserved).
 2. **After governance PR merge:** branch `feat/cv-folder-indexing` for
    **Slice 6 — Local CV Library & Folder Indexer** (see
    `docs/MVP_PLAN.md`), associated with **M1 — CV Ingestion & Candidate

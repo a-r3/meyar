@@ -1,6 +1,6 @@
 # MEYAR
 
-MEYAR is Rabitabank's internal AI Candidate Intelligence & CV Search
+MEYAR is an internal AI Candidate Intelligence & CV Search
 Platform. It is intended to help authorized HR staff ingest candidate
 documents, extract professional facts locally, search the candidate library,
 and evaluate candidates against job requirements with auditable evidence.

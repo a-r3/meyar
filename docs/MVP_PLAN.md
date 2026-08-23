@@ -77,7 +77,7 @@ changed.
 `test/*`), with `ruff` + `mypy src` + `pytest` as a merge gate (see
 D-012). **In progress:** development remote connected
 (`https://github.com/a-r3/meyar.git`, private, personal — temporary
-until Rabitabank supplies an official repository, full history preserved
+until the bank supplies an official repository, full history preserved
 on that migration); CI, local Git hooks, and PR template landing via
 `chore/git-governance`. Frontend checks join the gate once a frontend
 exists (Slice 11).

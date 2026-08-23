@@ -1,7 +1,7 @@
 # MEYAR — Master Spec
 
-Internal, local-AI Candidate Intelligence & CV Search Platform for
-Rabitabank OJSC HR. Product direction: `docs/PROJECT_VISION.md`.
+Internal, local-AI Candidate Intelligence & CV Search Platform for bank
+HR. Product direction: `docs/PROJECT_VISION.md`.
 Requirement authority: official task `AI-PROJ-CV-01` v1.0 (18.08.2026) +
 `docs/DECISIONS.md` D-011. MEYAR is internal HR tooling — there is no
 external/commercial customer integrating against this API.
@@ -12,13 +12,13 @@ external/commercial customer integrating against this API.
 Local CV folder / direct upload → local doc parsing → local LLM extraction
   → deterministic policy engine → evidence-backed structured result
   → internal chat UI / CV Library UI / internal REST API
-  → authorized Rabitabank HR user
+  → authorized internal HR user
 ```
 
 ## 2. System boundary
 
 ```
-Rabitabank internal network only
+Bank-controlled internal network only
   Internal chat/search UI  ─┐
   CV Library UI             ├─→ MEYAR API (FastAPI, internal, authenticated)
   Other approved systems   ─┘        |
@@ -96,7 +96,7 @@ authoritative table.
 ## 6. Core entities
 
 Implemented: `Tenant` (organizational/resource-isolation boundary —
-final mapping to Rabitabank's org structure is an open decision, not a
+final mapping to the bank's org structure is an open decision, not a
 commercial multi-tenant model), `ApiKey`, `Job`, `JobCriteriaVersion`,
 `Candidate`, `CandidateDocument`, `CanonicalDocument`,
 `CandidateProfileVersion`, `Evaluation`, `AuditEvent`.
@@ -142,7 +142,7 @@ revoked_at. Scopes: `jobs:read/write`, `candidates:read/write`; more are
 added as new capabilities ship (search, evaluation, admin). No
 self-service key issuance UI — keys are minted via an internal CLI
 (`meyar create-tenant`) until an admin surface exists. All access is by
-and for authorized internal Rabitabank users/systems — there is no
+and for authorized internal bank users/systems — there is no
 anonymous or public caller.
 
 ## 9. Internal async processing

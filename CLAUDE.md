@@ -1,10 +1,10 @@
 # MEYAR
 
-Internal AI Candidate Intelligence & CV Search Platform for Rabitabank
-OJSC HR. `README.md` is the primary human onboarding entry point. Read
-`docs/PROJECT_VISION.md` for canonical product direction,
-`docs/MASTER_SPEC.md` before non-trivial changes, `docs/STATUS.md` for
-current phase.
+MEYAR — Internal AI Candidate Intelligence & CV Search Platform, built
+for a bank-controlled HR environment. `README.md` is the primary human
+onboarding entry point. Read `docs/PROJECT_VISION.md` for canonical
+product direction, `docs/MASTER_SPEC.md` before non-trivial changes,
+`docs/STATUS.md` for current phase.
 
 MEYAR is an **internal HR system** — not an external/commercial B2B SaaS
 product. Official task: **"CV Screening API — Layihə Task Bölgüsü"**
@@ -22,13 +22,13 @@ JD matching with a 0–100 score, and batch candidate ranking.
 Canonical local repository: `/home/oem/Documents/Job/RabitaBank/Meyar`.
 Canonical development remote: `https://github.com/a-r3/meyar.git`
 (`a-r3/meyar`, private). This is a personal development remote and may
-later be migrated to an official Rabitabank-owned repository — full Git
+later be migrated to an official bank-owned repository — full Git
 history is preserved on that migration; the remote is never rewritten
 just because its owner changes.
 
 ## Product authority
 
-The official Rabitabank task (`AI-PROJ-CV-01`) + `docs/PROJECT_VISION.md`
+The official task specification (`AI-PROJ-CV-01`) + `docs/PROJECT_VISION.md`
 + `docs/MASTER_SPEC.md` are the product authority (see D-011,
 `docs/DECISIONS.md`). Do not reintroduce the superseded external-B2B/SaaS
 product direction.

@@ -10,7 +10,7 @@ decision, why, reversibility.
 formalized:
 1. Current development remote is a **private personal repository**,
    `https://github.com/a-r3/meyar.git` (`a-r3/meyar`). It is temporary
-   development infrastructure, not an official Rabitabank-owned
+   development infrastructure, not an official bank-owned
    repository — it will be migrated once the bank provides one, with
    **full Git history preserved** on migration (no history rewrite for a
    remote-ownership change alone).
@@ -116,7 +116,7 @@ editing `.github/workflows/ci.yml` without any application code change.
 Task Bölgüsü"** (`AI-PROJ-CV-01`, v1.0, 18.08.2026) plus owner
 clarifications are now the canonical requirement authority, superseding
 prior product framing wherever they conflict. Binding changes:
-1. MEYAR is an **internal HR system** for Rabitabank OJSC, not an
+1. MEYAR is an **internal HR system** for the bank, not an
    external/commercial B2B SaaS API product. No external customers,
    billing, or public API surface exist or are planned.
 2. Product surfaces expand to: an internal chat-style natural-language
@@ -149,7 +149,7 @@ prior product framing wherever they conflict. Binding changes:
    deterministic evaluation engine) remains valid foundation. Nothing is
    rewritten or reverted because of this re-baseline; the existing
    tenant/organization isolation mechanism is kept as a resource-
-   isolation abstraction whose final mapping to Rabitabank's
+   isolation abstraction whose final mapping to the bank's
    organizational boundaries is still an open implementation decision.
 **Why:** The owner supplied the official bank task specification and
 product clarifications after Slice 5 was implemented; the product
