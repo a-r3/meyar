@@ -3,6 +3,146 @@
 Append-only log of concise architectural/product decisions. Format: id, date,
 decision, why, reversibility.
 
+## D-015 — meyar-search-v1: Slice 8 hybrid candidate search policy
+
+**Date:** 2026-08-23
+**Decision:** `meyar.search` (Slice 8) implements a fully deterministic,
+no-LLM candidate search service, policy version `meyar-search-v1`:
+1. **Three modes**: `STRUCTURED_ONLY`, `SEMANTIC_ONLY`, `HYBRID`
+   (`CandidateSearchRequest.mode`). `extra="forbid"` everywhere in the
+   request/result schemas — no dynamic field names, no client-suppliable
+   tenant id (tenant_id is always an explicit `search_candidates(...,
+   tenant_id=...)` parameter, never a request field). This is NOT Slice
+   9's natural-language `SearchPlan` parser — it is the validated
+   structure Slice 9 will eventually produce.
+2. **Required filters are a hard eligibility gate, preferred filters are
+   a soft ranking signal.** A candidate failing ANY configured required
+   filter is excluded entirely before any semantic scoring happens —
+   semantic similarity can never resurrect a candidate who fails a
+   required filter (regression:
+   `test_hard_constraint_gate_never_bypassed_by_semantic_similarity`).
+   Required filters apply uniformly across all three modes, including
+   `SEMANTIC_ONLY` — kept consistent rather than mode-conditional, since
+   the spec's "required filters gate eligibility" language is general,
+   not STRUCTURED/HYBRID-specific.
+3. **Search-gating semantics for required filters are deliberately
+   stricter than the evaluation engine's UNKNOWN policy (D-010).** D-010
+   says missing evidence in a *job evaluation* is `UNKNOWN`, never a
+   silent `NOT_MATCHED` — that rule is unchanged and untouched. But a
+   search REQUIRED filter is a hard eligibility gate by definition: an
+   unproven required filter (skill absent, or an unparseable/ambiguous
+   employment-date range) simply excludes the candidate from THIS
+   search's results, it does not error and does not get a "manual
+   review" status (search has no such concept). This is a new, distinct
+   policy for search gating, not a reinterpretation of D-010.
+4. **Structured preferred score** = (matched preferred filters) / (total
+   configured preferred filters), bounded [0, 1]. If NO preferred
+   filters are configured, every eligible candidate gets a uniform 0.0 —
+   a neutral floor, never a fabricated advantage. `structured_score` is
+   `None` (not 0.0) in `SEMANTIC_ONLY` results, meaning "not evaluated in
+   this mode" — a deliberate distinction from a computed 0.0.
+5. **Semantic retrieval requires an explicit `EmbeddingSearchConfig`**
+   (provider, model_name, model_revision, serializer_version,
+   embedding_dimensions) — never "whatever embedding row is newest."
+   Query text is embedded locally through the exact same
+   `EmbeddingProvider` instance the caller supplies; the service
+   verifies `embedding_provider.provider_name/model_name/model_revision`
+   match the request's `embedding_config` before use, rejecting a
+   mismatch as `EMBEDDING_PROVIDER_CONFIG_MISMATCH`. `STRUCTURED_ONLY`
+   never calls `embedding_provider.embed()` — proven by a regression
+   test using a provider configured to raise if invoked
+   (`test_structured_only_never_calls_embedding_provider`).
+6. **Only current, exactly-compatible embeddings participate.** A
+   compatible embedding is one whose `candidate_profile_version_id`
+   equals the candidate's CURRENT `CandidateProfileVersion` (never a
+   superseded/stale version) AND whose
+   provider/model_name/model_revision/serializer_version/
+   embedding_dimensions all exactly match the active `EmbeddingSearchConfig`
+   — mirrors the Slice 7 (D-014) provenance-grouping rule. The dimension/
+   config filter runs in an inner SQL subquery
+   (`candidate_embedding_repo.search_compatible_embeddings`) so pgvector's
+   `cosine_distance` (`<=>`) operator is only ever evaluated over
+   already-compatible rows, never a mismatched-dimension row from a
+   different configuration group. A candidate lacking a current
+   compatible embedding is excluded from `SEMANTIC_ONLY`/`HYBRID` results
+   (never assigned a fabricated semantic score of 0) — tracked in
+   `excluded_missing_embedding_count`.
+7. **Semantic normalization**: pgvector's cosine_distance returns
+   `1 - cosine_similarity`; `semantic_score = (cosine_similarity + 1) /
+   2`, clamped to [0, 1] for floating-point tolerance
+   (`meyar.search.policy`). This is the only normalization formula used.
+8. **Hybrid formula**: `hybrid_score = (structured_weight *
+   structured_score) + (semantic_weight * semantic_score)`. Weights
+   default to 0.5/0.5, must each be in [0, 1], and (for `HYBRID` only)
+   must sum to 1.0 within a `1e-6` tolerance. This is a SEARCH RELEVANCE
+   score (0-1) — never a hiring score, JD fit score, or 0-100 score
+   (Slice 10 owns official JD scoring).
+9. **No premature semantic top-k.** For `HYBRID`, the full eligible +
+   compatible candidate set is scored before any sort/limit is applied —
+   proven by a regression where a candidate with a lower semantic score
+   but a perfect preferred-structured score outranks a candidate with a
+   near-perfect semantic score under structured-favoring weights, even
+   with `limit=1` (`test_no_premature_semantic_top_k_before_hybrid_score`).
+10. **Deterministic tie-break**: sort by relevance descending, then
+    candidate UUID ascending (string comparison) — never name/email/
+    phone, never insertion order.
+11. **Experience-duration reproducibility**: `min_total_experience_years`
+    filters require an explicit `as_of_date` on the request (validation
+    error otherwise) — an "ongoing"/"present" employment entry resolves
+    to `as_of_date.year`, never `datetime.now().year`, so an identical
+    persisted request always produces an identical result regardless of
+    when it is re-run. This intentionally duplicates two small regexes
+    from `meyar.evaluation.experience` rather than modifying that
+    module's (wall-clock-based) `parse_year` — the evaluation engine's
+    own date-parsing behavior is untouched.
+12. **`CandidateIdentity` is never queried anywhere in `meyar.search`.**
+    Regression test attaches wildly different identity content
+    (name/email/phone) to two otherwise-identical candidates and proves
+    rank/relevance is unchanged (`test_identity_data_does_not_change_rank`).
+13. **Execution strategy**: tenant-scoped current profile versions are
+    fetched via `list_current_profile_versions_for_tenant`, required
+    filters are evaluated in application code (JSONB predicates would be
+    brittle for this content shape), and the resulting eligible profile-
+    version-id set constrains the pgvector semantic query — acceptable
+    for MVP scale per the task brief. Exact (brute-force) pgvector
+    cosine similarity is used; ANN/HNSW is explicitly deferred (same
+    D-014 rationale: final embedding model/dimension isn't approved yet).
+14. **Zero-norm vector hardening (small Slice 7 change)**:
+    `OllamaEmbeddingProvider.embed` now rejects an all-zero vector as
+    `EmbeddingInvalidOutputError` — cosine similarity/distance is
+    undefined for a zero vector, and a genuine embedding of non-empty
+    text is never all-zero. This prevents a zero-norm vector from ever
+    being persisted, which is the smallest safe strategy for Slice 8's
+    pgvector cosine search (no new defensive filtering needed at query
+    time for future data); the *query* vector is still independently
+    checked for zero-norm/dimension/finiteness at search time regardless.
+15. **Auditability**: `CANDIDATE_SEARCH_EXECUTED` audit events carry only
+    mode, counts, limit, policy version, and (for semantic modes) the
+    embedding configuration plus a SHA-256 of the semantic query — never
+    the raw query text, candidate identity, CV text, or vector values.
+16. **No new persistent schema.** No migration was added — Slice 8 reads
+    existing Slice 4/7 tables and adds only application-layer query
+    functions (`list_current_profile_versions_for_tenant`,
+    `search_compatible_embeddings`).
+17. **Interface**: internal service (`meyar.search.service.search_candidates`)
+    + a CLI demonstration (`meyar search-candidates --tenant-id ...
+    --request-file <path>`, a JSON `CandidateSearchRequest` file — no
+    natural-language input). No new REST endpoint (Slice 12 owns API
+    productization).
+**Why:** These are the concrete implementation choices needed to satisfy
+issue #10's acceptance criteria — a fully documented, reviewable ranking
+policy so Slice 9 (natural-language → this request shape) and Slice
+11/12 (presentation/API) can consume it without reverse-engineering
+ranking semantics from code, matching the precedent set by D-010 for the
+evaluation engine.
+**Reversibility:** Fully reversible/tunable — weights, the neutral-floor
+policy for zero preferred filters, and the tie-break field are named
+constants/documented choices; a materially different ranking formula
+requires only bumping `SEARCH_POLICY_VERSION` so results remain
+correctly attributed to the policy that produced them. No data was
+migrated or destroyed; the OllamaEmbeddingProvider zero-vector rejection
+only affects embeddings generated going forward.
+
 ## D-014 — Slice 7 identity/embedding semantics + pgvector adoption
 
 **Date:** 2026-08-23

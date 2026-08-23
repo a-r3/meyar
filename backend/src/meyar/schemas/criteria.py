@@ -66,14 +66,26 @@ class ProhibitedCriterionError(ValueError):
         )
 
 
-def _check_not_sensitive(criterion_id: str, *texts: str) -> None:
+def find_prohibited_term(*texts: str) -> str | None:
+    """Public reuse point for the sensitive/irrelevant-attribute denylist
+    (docs/SECURITY_PRIVACY.md) outside of CriterionIn itself — e.g. Slice
+    8 search-request validation (structured filter values, semantic query
+    text). Returns the first matched term, or None if none of the texts
+    match any pattern."""
     for text in texts:
         if not text:
             continue
         for pattern in _SENSITIVE_PATTERNS:
             match = pattern.search(text)
             if match:
-                raise ProhibitedCriterionError(criterion_id, match.group(0))
+                return match.group(0)
+    return None
+
+
+def _check_not_sensitive(criterion_id: str, *texts: str) -> None:
+    term = find_prohibited_term(*texts)
+    if term:
+        raise ProhibitedCriterionError(criterion_id, term)
 
 
 class CriterionKind(StrEnum):

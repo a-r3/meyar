@@ -68,6 +68,12 @@ class OllamaEmbeddingProvider:
             raise EmbeddingInvalidOutputError(
                 "Embedding vector contains non-numeric or non-finite values."
             )
+        if all(v == 0 for v in raw_vector):
+            # A zero-norm vector makes cosine similarity/distance undefined
+            # (Slice 8 pgvector search uses cosine_distance) and can never
+            # be a genuine embedding of non-empty text — reject at the
+            # provider boundary so no zero vector is ever persisted.
+            raise EmbeddingInvalidOutputError("Embedding vector is zero-norm (all-zero).")
 
         vector = [float(v) for v in raw_vector]
         return EmbeddingResult(

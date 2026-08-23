@@ -1,7 +1,9 @@
 import uuid
+from collections.abc import Sequence
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from meyar.models.candidate_embedding_version import CandidateEmbeddingVersion
 
@@ -103,3 +105,58 @@ async def list_embedding_versions_for_candidate(
         .order_by(CandidateEmbeddingVersion.created_at.asc())
     )
     return list(result.scalars().all())
+
+
+async def search_compatible_embeddings(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    candidate_profile_version_ids: Sequence[uuid.UUID],
+    provider: str,
+    model_name: str,
+    model_revision: str,
+    serializer_version: str,
+    embedding_dimensions: int,
+    query_vector: list[float],
+) -> list[tuple[uuid.UUID, uuid.UUID, uuid.UUID, float]]:
+    """Slice 8 semantic retrieval. Returns (candidate_id,
+    candidate_profile_version_id, embedding_version_id, cosine_distance)
+    for embeddings that are BOTH tied to one of the given (candidate-
+    current) profile version ids AND exactly match the six-field active
+    embedding configuration — never mixes providers/models/revisions/
+    serializer versions/dimensions in one similarity computation (see
+    docs/DECISIONS.md). The tenant/profile-version/config filter is
+    applied in an inner subquery so pgvector's cosine_distance operator
+    (<=>) is only ever evaluated against already-dimension-compatible
+    rows, never against a mismatched-dimension row from a different
+    configuration group. Returns an empty list without querying if no
+    candidate ids are given (e.g. no structurally-eligible candidates)."""
+    if not candidate_profile_version_ids:
+        return []
+
+    filtered = (
+        select(CandidateEmbeddingVersion)
+        .where(
+            CandidateEmbeddingVersion.tenant_id == tenant_id,
+            CandidateEmbeddingVersion.candidate_profile_version_id.in_(
+                candidate_profile_version_ids
+            ),
+            CandidateEmbeddingVersion.provider == provider,
+            CandidateEmbeddingVersion.model_name == model_name,
+            CandidateEmbeddingVersion.model_revision == model_revision,
+            CandidateEmbeddingVersion.serializer_version == serializer_version,
+            CandidateEmbeddingVersion.embedding_dimensions == embedding_dimensions,
+        )
+        .subquery()
+    )
+    row = aliased(CandidateEmbeddingVersion, filtered)
+
+    result = await db.execute(
+        select(
+            row.candidate_id,
+            row.candidate_profile_version_id,
+            row.id,
+            row.embedding.cosine_distance(query_vector).label("distance"),
+        )
+    )
+    return [(r[0], r[1], r[2], r[3]) for r in result.all()]

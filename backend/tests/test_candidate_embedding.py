@@ -896,6 +896,25 @@ async def test_ollama_embedding_provider_rejects_non_numeric_values() -> None:
         await provider.embed("text")
 
 
+async def test_ollama_embedding_provider_rejects_zero_norm_vector() -> None:
+    """Slice 8 hardening: a zero-norm vector makes cosine similarity/
+    distance undefined for pgvector search, and can never be a genuine
+    embedding of non-empty text — reject it at the provider boundary so
+    no zero vector is ever persisted. See docs/DECISIONS.md."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"embedding": [0.0, 0.0, 0.0]})
+
+    provider = OllamaEmbeddingProvider(
+        base_url="http://127.0.0.1:11434",
+        model="nomic-embed-text",
+        timeout_seconds=5.0,
+        transport=_mock_transport(handler),
+    )
+    with pytest.raises(EmbeddingInvalidOutputError):
+        await provider.embed("text")
+
+
 async def test_ollama_embedding_provider_non_200_raises_unavailable() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(500)

@@ -7,10 +7,10 @@ and evaluate candidates against job requirements with auditable evidence.
 MEYAR is internal HR tooling, not an external B2B/SaaS product or a public
 candidate-facing service.
 
-The repository currently contains a working backend foundation through the
-deterministic evaluation engine. Folder indexing, semantic search, numeric
-scoring, batch ranking, and the internal user interface are planned work and
-must not be treated as implemented.
+The repository currently contains a working backend foundation through
+deterministic hybrid candidate search. Numeric scoring, batch ranking, a
+natural-language search planner, and the internal user interface are
+planned work and must not be treated as implemented.
 
 ## Project authority
 
@@ -46,14 +46,20 @@ Implemented and tested:
 - local candidate embeddings + pgvector storage (`meyar embed-candidate`):
   a local `EmbeddingProvider` abstraction, deterministic professional-only
   serialization (identity excluded by construction), idempotent
-  version-traceable persistence with correct current/stale semantics —
-  retrieval itself is Slice 8;
+  version-traceable persistence with correct current/stale semantics;
+- deterministic hybrid candidate search (`meyar search-candidates`):
+  structured required/preferred filters over the current professional
+  profile, local pgvector semantic retrieval restricted to current and
+  exactly provenance-compatible embeddings, and a documented
+  `meyar-search-v1` hybrid-ranking formula where a failed required
+  filter can never be overridden by semantic similarity — service + CLI
+  only, no REST endpoint yet;
 - synthetic-only automated tests and repository governance.
 
 Planned or in progress:
 
-- **Next: Slice 8** — structured/semantic hybrid search and a validated
-  natural-language search planner (Slice 9);
+- **Next: Slice 9** — a validated natural-language search planner that
+  produces the structured `CandidateSearchRequest` Slice 8 consumes;
 - deterministic 0–100 JD scoring and batch candidate ranking;
 - internal Chat/Search and CV Library user interfaces;
 - finalized internal API/Swagger examples and full security acceptance.
@@ -209,9 +215,10 @@ updated `backend/uv.lock` when applicable.
 
 ## Known current limitations
 
-- Local embeddings + pgvector storage exist (Slice 7); actual hybrid/
-  semantic search retrieval and a natural-language search planner do not
-  yet exist (Slice 8–9).
+- Structured/semantic/hybrid candidate search exists (Slice 7–8, service
+  + CLI only, no REST endpoint yet); a natural-language search planner
+  that produces the structured search request does not yet exist
+  (Slice 9).
 - No deterministic 0–100 score, batch ranking, Chat UI, or CV Library UI
   exists yet.
 - OCR fallback for scanned PDFs is not implemented.
