@@ -141,11 +141,13 @@ def test_slice10_migration_roundtrip_preserves_legacy_evaluation(monkeypatch) ->
     try:
         command.upgrade(alembic_config, PRE_SLICE10_REVISION)
         asyncio.run(_insert_legacy_evaluation(database_url))
-        command.upgrade(alembic_config, "head")
+        # Keep this historical migration test pinned to the Slice 10 target;
+        # later slices own their own head round-trip tests.
+        command.upgrade(alembic_config, SLICE10_REVISION)
         asyncio.run(_assert_upgraded_legacy_row(database_url))
         command.downgrade(alembic_config, PRE_SLICE10_REVISION)
         asyncio.run(_assert_downgraded_legacy_row(database_url))
-        command.upgrade(alembic_config, "head")
+        command.upgrade(alembic_config, SLICE10_REVISION)
         asyncio.run(_assert_upgraded_legacy_row(database_url))
     finally:
         get_settings.cache_clear()

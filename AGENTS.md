@@ -87,9 +87,9 @@ that debt is resolved.
   workaround only, not CI or production architecture.
 - `qwen3:0.6b` is integration-verified development infrastructure only. Final
   production model selection must occur on the target Mac Mini.
-- The next product slice is Slice 6 — Local CV Library & Folder Indexer. It
-  has not started. The old External Async Evaluation API Slice 6 is cancelled
-  and superseded.
+- Slice 11 is implemented on its task branch and awaits independent acceptance
+  and owner merge. Slice 12 (REST/OpenAPI completion) has not started. The old
+  External Async Evaluation API Slice 6 remains cancelled and superseded.
 - The GitHub repository is currently a private personal development repository
   and may later migrate to an official bank-owned repository. Preserve full
   Git history during any migration.

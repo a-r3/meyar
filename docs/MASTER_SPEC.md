@@ -80,11 +80,11 @@ authoritative table.
 
 ## 5. Data model — identity/profile split
 
-- `CandidateIdentity`: `full_name`, `email`, `phone`. Presentation-only —
-  may be joined in for authorized UI/API result display. Never read by
-  matching, evaluation, search, or ranking. **Not implemented yet**
-  (Slice 7) — the current `Candidate` model intentionally has no identity
-  fields.
+- `CandidateIdentityVersion`: `full_name`, `email`, `phone`.
+  Presentation-only — joined into the authorized Slice 11 UI only after
+  search/ranking authority returns. Never read by matching, evaluation,
+  search, or ranking. Implemented separately in Slice 7; `Candidate` still
+  intentionally has no identity fields.
 - `CandidateProfile`: extracted professional facts only (`skills`,
   `employment_history`, `education`, `certifications`, `languages`,
   `projects`) — the only thing the matching/search engine reads.
@@ -99,11 +99,10 @@ Implemented: `Tenant` (organizational/resource-isolation boundary —
 final mapping to the bank's org structure is an open decision, not a
 commercial multi-tenant model), `ApiKey`, `Job`, `JobCriteriaVersion`,
 `Candidate`, `CandidateDocument`, `CanonicalDocument`,
-`CandidateProfileVersion`, `Evaluation`, `AuditEvent`.
-
-Planned (see `docs/MVP_PLAN.md`): `CandidateIdentity`, folder-scan
-indexing state, embedding/vector rows (pgvector), `SearchPlan` (request
-schema, not persisted).
+`CandidateProfileVersion`, `CandidateIdentityVersion`,
+`CandidateEmbeddingVersion`, `FolderSource`, `FolderIndexedFile`,
+`BrowserSession`, `Evaluation`, `AuditEvent`. `SearchPlan` remains an
+ephemeral validated request/result contract and is not persisted.
 
 Every tenant-owned row carries `tenant_id`. All queries are scoped by
 tenant_id at the data-access layer (repository functions take tenant_id as a
@@ -211,7 +210,7 @@ version id used. The model cannot add criteria beyond what is stored.
 All LLM output validated with Pydantic v2 before it reaches any table used
 by the policy engine or returned to a user.
 
-## 15. Semantic search & embeddings (planned, Slices 7–9)
+## 15. Semantic search & embeddings (implemented, Slices 7–9)
 
 ```
 CandidateProfile → local embedding model → vector → pgvector
@@ -228,11 +227,11 @@ Natural-language user request → LLM → strict SearchPlan (schema-validated)
   → deterministic/rule-based relevance combination → ranked result
   → explanation
 ```
-`SearchPlan` will capture (at minimum): requested result limit, skills,
+`SearchPlan` captures: requested result limit, skills,
 minimum experience, language, certification, education, industry/domain,
 semantic intent, and must/preferred distinctions. The LLM interprets the
 query into this validated structure; it never freely queries or ranks
-the database. Not implemented yet.
+the database. Slice 11 delegates to this accepted service unchanged.
 
 ## 16. Batch ranking (implemented, Slice 10)
 
@@ -242,12 +241,15 @@ current completed profile per candidate → score each (fit band + 0–100 score
 It reuses the same evaluation/scoring path per candidate and has no semantic
 search, embedding, LLM, or CandidateIdentity dependency (D-017).
 
-## 17. Internal UI (planned, Slice 11)
+## 17. Internal UI (implemented on the Slice 11 task branch)
 
-Minimum areas: Chat/Search, Candidate Results, CV Library, Candidate
-Detail/Profile (with original CV access, authorized-only), JD
-matching/results, minimal status/admin visibility. Detailed screen design
-is out of scope for this document.
+FastAPI/Jinja HTML under `/ui` provides API-key login exchange, chat/search,
+candidate results, CV Library, candidate detail/profile metadata, existing-job
+JD matching/results, and safe typed planner/error states. Server-side browser
+sessions are live-API-key-revalidated, eight-hour, revocable, CSRF-protected,
+and use secure-by-default cookies. Templates consume narrow view models and
+local CSS only. Arbitrary raw-CV delivery and final REST/OpenAPI completion are
+not part of Slice 11 (D-018).
 
 ## 18. Auditability
 
@@ -280,11 +282,10 @@ content is hard-deleted).
 ## 21. Technology
 
 Backend: Python 3.12, FastAPI, Pydantic v2, SQLAlchemy 2.0 (async), Alembic.
-DB: PostgreSQL 16 (pgvector extension planned, Slice 7). Local AI: Ollama +
-`LLMProvider` abstraction; local embedding provider planned with an
-equivalent abstraction. Document processing: `pypdf`/`python-docx`
+DB: PostgreSQL 16 + pgvector. Local AI: Ollama + `LLMProvider` and local
+embedding-provider abstractions. Document processing: `pypdf`/`python-docx`
 (D-007), OCR fallback deferred. Testing: pytest + pytest-asyncio, httpx
 AsyncClient. Quality: Ruff, mypy. Package/env: `uv`. Modular monolith,
 single deployable FastAPI app + one background worker process, both from
-the same codebase. Internal chat/CV-Library frontend is a planned slice
-(11), not yet built.
+the same codebase. The internal chat/CV-Library surface is server-rendered
+by that FastAPI app (Slice 11, D-018).

@@ -6,6 +6,7 @@ from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.db import get_db
+from meyar.models.api_key import ApiKey
 from meyar.services.api_key_repo import get_api_key_by_plaintext, touch_last_used
 
 
@@ -24,6 +25,30 @@ def _unauthorized() -> HTTPException:
     )
 
 
+def api_key_is_active(api_key: ApiKey, *, now: datetime | None = None) -> bool:
+    """One authority for API-key expiry/revocation semantics."""
+    checked_at = now or datetime.now(UTC)
+    return api_key.revoked_at is None and (
+        api_key.expires_at is None or api_key.expires_at > checked_at
+    )
+
+
+async def authenticate_raw_api_key(
+    db: AsyncSession, plaintext: str, *, update_last_used: bool = True
+) -> ApiKey | None:
+    """Validate a presented raw key for both Bearer auth and UI login.
+
+    The plaintext is used only for the one-way lookup and is never returned,
+    persisted, logged, or attached to an exception.
+    """
+    api_key = await get_api_key_by_plaintext(db, plaintext)
+    if api_key is None or not api_key_is_active(api_key):
+        return None
+    if update_last_used:
+        await touch_last_used(db, api_key.id)
+    return api_key
+
+
 async def get_current_tenant(
     request: Request, db: AsyncSession = Depends(get_db)
 ) -> TenantContext:
@@ -34,15 +59,9 @@ async def get_current_tenant(
     if not presented_key:
         raise _unauthorized()
 
-    api_key = await get_api_key_by_plaintext(db, presented_key)
+    api_key = await authenticate_raw_api_key(db, presented_key)
     if api_key is None:
         raise _unauthorized()
-    if api_key.revoked_at is not None:
-        raise _unauthorized()
-    if api_key.expires_at is not None and api_key.expires_at <= datetime.now(UTC):
-        raise _unauthorized()
-
-    await touch_last_used(db, api_key.id)
     await db.commit()
 
     return TenantContext(

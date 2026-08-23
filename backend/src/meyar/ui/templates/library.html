@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}CV kitabxanası — MEYAR{% endblock %}
+{% block content %}
+<div class="page-heading"><div><p class="eyebrow">CV kitabxanası</p><h1>Namizədlər</h1><p class="lede">{{ library.total }} namizəd</p></div></div>
+<section class="panel">
+  <form method="get" action="/ui/library" class="filter-grid">
+    <label>Parser vəziyyəti<select name="parser_status"><option value="">Hamısı</option>{% for value in parser_statuses %}<option value="{{ value }}"{% if parser_status == value %} selected{% endif %}>{{ state_label(value) }}</option>{% endfor %}</select></label>
+    <label>Profil vəziyyəti<select name="profile_status"><option value="">Hamısı</option>{% for value in profile_statuses %}<option value="{{ value }}"{% if profile_status == value %} selected{% endif %}>{{ state_label(value) }}</option>{% endfor %}</select></label>
+    <label>İndeks vəziyyəti<select name="folder_status"><option value="">Hamısı</option>{% for value in folder_statuses %}<option value="{{ value }}"{% if folder_status == value %} selected{% endif %}>{{ state_label(value) }}</option>{% endfor %}</select></label>
+    <label>Səhifə ölçüsü<select name="page_size"><option value="25"{% if library.page_size == 25 %} selected{% endif %}>25</option><option value="50"{% if library.page_size == 50 %} selected{% endif %}>50</option></select></label>
+    <button class="button" type="submit">Filtrlə</button>
+  </form>
+</section>
+{% if not library.items %}<div class="empty-state"><h2>Kitabxana boşdur</h2><p>Bu filtrə uyğun namizəd tapılmadı.</p></div>{% endif %}
+<div class="card-grid">
+  {% for item in library.items %}
+  <article class="candidate-card">
+    <h2>{{ item.full_name or "Ad məlumatı yoxdur" }}</h2>
+    <p class="mono">{{ item.candidate_id }}</p>
+    <dl>
+      <dt>Cari profil</dt><dd>{% if item.current_profile_version %}v{{ item.current_profile_version }} · <span class="status-badge" data-state="{{ item.current_profile_status }}">{{ state_label(item.current_profile_status) }}</span>{% else %}Mövcud deyil{% endif %}</dd>
+      <dt>Parser</dt><dd>{% if item.parser_statuses %}{% for value in item.parser_statuses %}<span class="status-badge" data-state="{{ value }}">{{ state_label(value) }}</span>{% if not loop.last %} {% endif %}{% endfor %}{% else %}Məlumat yoxdur{% endif %}</dd>
+      <dt>Folder indeksi</dt><dd>{% if item.folder_index_statuses %}{% for value in item.folder_index_statuses %}<span class="status-badge" data-state="{{ value }}">{{ state_label(value) }}</span>{% if not loop.last %} {% endif %}{% endfor %}{% else %}Birbaşa əlavə edilib və ya məlumat yoxdur{% endif %}</dd>
+    </dl>
+    <a class="text-link" href="/ui/candidates/{{ item.candidate_id }}">Detalları aç</a>
+  </article>
+  {% endfor %}
+</div>
+<nav class="pagination" aria-label="Səhifələmə">
+  {% if library.has_previous %}<a class="button button-secondary" href="/ui/library?page={{ library.page - 1 }}&amp;page_size={{ library.page_size }}{% if parser_status %}&amp;parser_status={{ parser_status }}{% endif %}{% if profile_status %}&amp;profile_status={{ profile_status }}{% endif %}{% if folder_status %}&amp;folder_status={{ folder_status }}{% endif %}">Əvvəlki</a>{% endif %}
+  <span>Səhifə {{ library.page }}</span>
+  {% if library.has_next %}<a class="button button-secondary" href="/ui/library?page={{ library.page + 1 }}&amp;page_size={{ library.page_size }}{% if parser_status %}&amp;parser_status={{ parser_status }}{% endif %}{% if profile_status %}&amp;profile_status={{ profile_status }}{% endif %}{% if folder_status %}&amp;folder_status={{ folder_status }}{% endif %}">Növbəti</a>{% endif %}
+</nav>
+{% endblock %}

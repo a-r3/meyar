@@ -1,15 +1,16 @@
 # MEYAR — Status
 
 ## Current phase
-**Slice 10 — JD 0–100 Scoring + Batch Ranking implementation/acceptance.**
+**Slice 11 — Internal Chat UI + CV Library UI implementation/acceptance.**
 Governance PR #1 merged at `16929fd` (**M0 CLOSED**); Slice 6 PR #7
 merged at `55fef2d` (**M1 — CV Ingestion & Candidate Library is
 CLOSED**, issue #6 closed); Slice 7 PR #9 merged at `24b1d67` (issue #8
 closed); Slice 8 PR #11 Squash-merged at `412d978` (issue #10 closed).
 Slice 9 PR #13 merged at `1be5d51` (issue #12 closed; **M2 CLOSED**).
-Slice 10 issue #14 is implemented on `feat/jd-scoring-batch-ranking`,
-associated with open **M3 — JD Matching & Ranking**, and is pending owner
-acceptance/merge.
+Slice 10 PR #15 merged at `1c9dbbd` (issue #14 and **M3 — JD Matching &
+Ranking CLOSED**). Slice 11 issue #16 is implemented on
+`feat/internal-chat-cv-library-ui`, associated with open **M4 — Internal
+Product Interface & API**, and is pending independent acceptance/owner merge.
 
 GitHub remote established (`https://github.com/a-r3/meyar.git`, private,
 temporary development remote — see D-012, `docs/DECISIONS.md`). `main`
@@ -205,10 +206,44 @@ remains disabled.
   dominates score. New CLI commands are the date-required `meyar evaluate` and
   `meyar rank-job`; no REST/UI surface or Slice 11 code was added. Migration
   `c0a4f2d8e317` (down revision `7aae8da26969`); see D-017.
+- Slice 11 (Internal Chat UI + CV Library UI) — implemented on
+  `feat/internal-chat-cv-library-ui`, associated with **M4 — Internal Product
+  Interface & API**, closes issue #16 when owner-merged. FastAPI now exposes a
+  separate server-rendered `/ui` router using explicitly auto-escaped Jinja2
+  templates and repository-packaged local CSS (no Node/runtime CDN/analytics).
+  Azerbaijani pages cover API-key login, natural-language candidate search,
+  typed fail-closed planner outcomes, CV Library filters/pagination, tenant-safe
+  candidate detail, presentation-only current identity, existing-job listing,
+  and exact Slice 10 ranking/score/contribution display. Search delegates to
+  `plan_and_search_candidates`; ranking delegates to
+  `rank_candidates_for_job`; templates contain no policy formula or result
+  sorting. New server-side `BrowserSession` stores only API-key id, SHA-256
+  session-token digest, CSRF material, eight-hour expiry, and revocation state;
+  every request refreshes the live API key and derives current tenant/scopes.
+  Authenticated POSTs require constant-time CSRF validation. Cookie defaults are
+  Secure/HttpOnly/SameSite=Lax/Path=/ui; local HTTP requires the explicit
+  `MEYAR_UI_COOKIE_SECURE=false` override. All `/ui` responses carry restrictive
+  CSP/no-sniff/no-referrer/frame-denial/no-store headers. Migration
+  `e3b1f7a9c2d4` (down revision `c0a4f2d8e317`); see D-018. Slice 12 REST/
+  OpenAPI completion and Slice 13 final acceptance were not started.
 
 ## Tests
-395/395 passing (353 prior + 42 Slice 10 scoring/evaluation/persistence/
-batch/CLI regressions).
+430/430 passing (395 prior + 35 Slice 11 browser-session/auth/CSRF/UI/
+library/search/ranking/XSS/header/packaging/migration regressions).
+Slice 11 focused coverage proves valid/generic-invalid login, hashed session
+tokens, secure cookie policies, fixation prevention, session/key expiry and
+revocation, live scope enforcement, CSRF success/failure before domain work,
+actual Azerbaijani POST→Slice 9→Slice 8→escaped HTML, prohibited/unsupported/
+ambiguous/malformed/provider-failure no-search behavior, planner-outage
+independence for library/detail, bounded library pagination and current-profile
+authority with no stale fallback, direct cross-tenant candidate/criteria 404,
+presentation identity and XSS escaping, backend ranking-order preservation,
+UNKNOWN/INSUFFICIENT_EVIDENCE/manual-review language, security headers, local
+asset/resource packaging, and real PostgreSQL migration upgrade→downgrade→
+re-upgrade.
+
+The prior 395 include 353 through Slice 9 plus 42 Slice 10 scoring/evaluation/
+persistence/batch/CLI regressions.
 Slice 10 coverage includes the six exhaustive status factors; exact Decimal
 boundaries, unequal weights, textual float conversion, repeating-fraction and
 half-cent `ROUND_HALF_UP`; zero total and mixed zero/positive validation;
@@ -394,9 +429,9 @@ Evaluation's persisted `candidate_profile_version_id`/
 `job_criteria_version_id` verified to equal the exact input versions.
 
 ## In progress
-Slice 10 (`feat/jd-scoring-batch-ranking`, closes issue #14) is implemented
-and pending owner acceptance/merge. Slice 9 PR #13 merged (`1be5d51`, issue
-#12 closed); M2 is closed. M3 remains open until Slice 10 is accepted.
+Slice 11 (`feat/internal-chat-cv-library-ui`, closes issue #16) is implemented
+and pending independent acceptance/owner merge. M4 remains open because Slice
+12 has not started and this PR must not be merged automatically.
 
 ## Blockers
 None blocking. Same open items as before (D-001 Mac benchmark pending —
@@ -410,10 +445,11 @@ pending, migration keeps full history when it arrives.
 1. **Git Infrastructure** — remote connected (`a-r3/meyar`, private,
    temporary — D-012); governance merged (`16929fd`). May later migrate
    to an official bank-owned remote (history preserved).
-2. **Slice 10 — JD 0–100 Scoring + Batch Ranking** (issue #14, D-017),
-   associated with **M3 — JD Matching & Ranking**: review the focused
-   implementation/CI, then owner Squash and merge. Do not close M3 or start
-   Slice 11 until the merge is live-verified and local main is synchronized.
+2. **Slice 11 — Internal Chat UI + CV Library UI** (issue #16, D-018),
+   associated with **M4 — Internal Product Interface & API**: independently
+   audit the focused implementation/CI, then owner Squash and merge. Do not
+   close M4 or start Slice 12 until the merge is live-verified and local main
+   is synchronized.
 
 The previously planned "Slice 6 — External Async Evaluation API" is
 CANCELLED (superseded by D-011) — it is not what "Slice 6" now refers to.
@@ -428,8 +464,8 @@ due date because the official timeline has not been supplied.
 | M0 — Project Foundation & Governance | R0 + Git Infrastructure | CLOSED — merged `16929fd`, issue #2 closed |
 | M1 — CV Ingestion & Candidate Library | Slice 6 | CLOSED — merged `55fef2d` (PR #7), issue #6 closed |
 | M2 — Candidate Search Intelligence | Slices 7–9 | CLOSED — PRs #9/#11/#13 merged; issues #8/#10/#12 closed |
-| M3 — JD Matching & Ranking | Slice 10 | OPEN / IN REVIEW — issue #14 implemented on its task branch, pending acceptance/merge |
-| M4 — Internal Product Interface & API | Slices 11–12 | NOT STARTED |
+| M3 — JD Matching & Ranking | Slice 10 | CLOSED — PR #15 merged at `1c9dbbd`, issue #14 closed |
+| M4 — Internal Product Interface & API | Slices 11–12 | OPEN / IN REVIEW — Slice 11 implemented, issue #16 open; Slice 12 not started |
 | M5 — Security, Target-Mac Validation & MVP Acceptance | Slice 13 + target-Mac benchmark | NOT STARTED |
 
 ## Official requirement gap matrix
@@ -455,11 +491,11 @@ no code yet.
 | Access control | DONE | API-key auth, scopes, tenant isolation (Slice 1) | Extend scopes as new endpoints ship | ongoing |
 | JD matching | DONE | Deterministic per-criterion evaluation (Slice 5) | — | 5 |
 | 0–100 scoring | DONE | `meyar-score-v1`: exact Decimal weighted formula, exhaustive factors, final `ROUND_HALF_UP`, persisted score and recomputable explanation (Slice 10, D-017) | — | 10 |
-| Batch scoring / ranking | DONE | Tenant-library batch service, current-profile-only selection, fit-tier-first ordering, Decimal score, UUID tie-break, deterministic skips (Slice 10, D-017) | REST/UI presentation remains Slices 11–12 | 10 |
+| Batch scoring / ranking | DONE | Tenant-library batch service, current-profile-only selection, fit-tier-first ordering, Decimal score, UUID tie-break, deterministic skips (Slice 10, D-017) | UI presentation is implemented in Slice 11; REST presentation remains in Slice 12 | 10 |
 | Structured search | DONE | Deterministic required/preferred filters (skills/certifications/languages/education/min experience) over the current `CandidateProfileVersion`, reusing Slice 5 normalization (Slice 8, D-015) | — | 8 |
 | Semantic search | DONE | Local query embedding + pgvector retrieval over current, exactly-compatible embeddings (Slice 8, D-015); strict local natural-language `SearchPlan` conversion delegates to that engine (Slice 9, D-016) | — | 8, 9 |
 | Explanations | DONE | Criterion evidence (Slice 5), search components (Slice 8), planner reasons (Slice 9), and exact recomputable score contributions with location-only evidence refs (Slice 10); never chain-of-thought | — | 5, 8, 9, 10 |
-| REST API | PARTIAL | Jobs/candidates/health routes live; extraction+evaluation are service+CLI only | Add internal HTTP routes as UI needs them | 11, 12 |
+| REST API | PARTIAL | Jobs/candidates/health routes live; Slice 11 HTML routes call accepted services without finalizing JSON contracts | Finalize internal HTTP routes in Slice 12 | 12 |
 | Swagger / OpenAPI | PARTIAL | FastAPI auto-generates it; not yet reviewed/finalized as a deliverable | Review + README examples | 12 |
 | Auth | DONE | API-key + scopes (Slice 1) | — | 1 |
 | README examples | NOT STARTED | — | Usage examples once API surface stabilizes | 12 |
@@ -470,11 +506,12 @@ no code yet.
 | Git branch / PR workflow | PARTIAL | Remote connected (`a-r3/meyar`, private), CI + hooks + PR template merged (`16929fd`, D-012) | Migrate to official bank remote when supplied | Git Infrastructure |
 
 **Official numbered task matrix — 28 items.** Summary: **19 DONE, 4 PARTIAL,
-5 NOT STARTED** (28 items), independently recounted after Slice 10 rather than
-carrying forward Slice 9's 16/5/7 totals. Changed-row rationale: 0–100 scoring
-and batch scoring/ranking move from NOT STARTED to DONE; scoring consistency
-moves from PARTIAL to DONE; explanations remain DONE but now include exact
-numeric contribution/recomputation evidence; JD matching remains DONE with its
-current-employment reproducibility defect corrected. No API/UI/security/OCR/
-multilingual-CV or repository-ownership row was promoted. Git/PR infrastructure
-remains PARTIAL because the remote is still personal/temporary.
+5 NOT STARTED** (28 items), independently recounted after Slice 11. No row
+changed: the official matrix has no separate UI row; REST API and Swagger remain
+PARTIAL pending Slice 12; external-network/security closure remains NOT STARTED
+pending Slice 13; original-file reference remains DONE at the storage layer
+while arbitrary browser delivery is intentionally not added. The four PARTIAL
+rows remain REST API, Swagger/OpenAPI, data-protection/backup description, and
+Git branch/PR workflow. The five NOT STARTED rows remain target-Mac benchmark,
+OCR, multilingual-CV fixtures, README API examples, and external-network/
+exfiltration verification.
