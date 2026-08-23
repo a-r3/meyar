@@ -3,6 +3,46 @@
 Append-only log of concise architectural/product decisions. Format: id, date,
 decision, why, reversibility.
 
+## D-013 — Slice 6 folder-indexer semantics
+
+**Date:** 2026-08-23
+**Decision:** Local CV Library & Folder Indexer (Slice 6) implementation
+choices, all reversible:
+1. **Removed files are tombstoned, never hard-deleted.** A previously
+   indexed path no longer seen on a full scan gets
+   `FolderIndexedFile.index_status = MISSING`; its `candidate_id`/
+   `candidate_document_id` and all underlying `Candidate`/
+   `CandidateDocument`/`CanonicalDocument`/`AuditEvent` rows are left
+   untouched. If the same content reappears later, the row reactivates
+   to `INDEXED` without re-ingesting.
+2. **A changed file (same relative path, new SHA-256) creates a new,
+   immutable `CandidateDocument`/`CanonicalDocument` version** via the
+   existing ingestion pipeline, reusing the *same* `Candidate` identity.
+   The index row's `candidate_document_id` is updated to point at the
+   new version; the prior version is never mutated or deleted — it
+   remains queryable historical evidence.
+3. **A failed re-import never clears a previously successful
+   `candidate_document_id`.** Only `sha256_hash`/`index_status`/failure
+   fields update on a FAILED attempt, so a transient or persistent
+   failure can never destroy the last known-good record.
+4. **Symlinks are never followed** by the folder scanner — neither
+   directory nor file symlinks — as the path-traversal/source-root-escape
+   defense, on top of an explicit `is_relative_to(root)` check.
+5. **A file that fails only at parse time (not at upload validation) is
+   still recorded `INDEXED`**, matching the existing direct-upload
+   API's behavior (`CandidateDocument` created with
+   `parser_status=PARSE_FAILED`). Only files rejected by
+   `validate_upload` itself (`UnsupportedDocumentError`/
+   `DocumentTooLargeError`) are recorded `FAILED` at the folder-index
+   level.
+**Why:** These preserve the existing immutability/evidence guarantees of
+`CandidateDocument`/`CanonicalDocument` (docs/MASTER_SPEC.md §12-13)
+under repeated, idempotent folder scans, and reuse — rather than
+duplicate — the direct-upload pipeline's exact validation/parse-outcome
+semantics. **Reversibility:** fully reversible; no data is destroyed by
+any of these choices, so a future policy change (e.g. hard-deleting
+long-missing files) can be layered on without a migration.
+
 ## D-012 — GitHub / branch / PR / CI governance
 
 **Date:** 2026-08-23
