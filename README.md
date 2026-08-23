@@ -330,7 +330,7 @@ server-side — no request may supply its own `tenant_id`.
 | GET | `/api/v1/candidates/{id}/documents/{doc_id}` | `candidates:read` | One document + canonical parse metadata. |
 | POST | `/api/v1/search` | `candidates:read` | Structured/semantic/hybrid search (Slice 8). |
 | POST | `/api/v1/search/natural-language` | `candidates:read` | Natural-language search planning + execution (Slice 9), typed fail-closed outcomes. |
-| POST | `/api/v1/jobs/{job_id}/criteria/{version_number}/score` | `evaluations:read` | Deterministic 0–100 score for one candidate against one criteria version. |
+| POST | `/api/v1/jobs/{job_id}/criteria/{version_number}/score` | `evaluations:write` | Deterministic 0–100 score for one candidate against one criteria version (may persist a new `Evaluation`). |
 | POST | `/api/v1/jobs/{job_id}/criteria/{version_number}/rank` | `evaluations:write` | Deterministic batch ranking of the active candidate library. |
 
 ### curl examples (synthetic data only)

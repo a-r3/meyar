@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.schemas.criteria import CriterionIn, CriterionKind, CriterionType
 from meyar.services.api_key_repo import create_api_key
+from meyar.services.evaluation_repo import count_evaluations_for_tenant
 from meyar.services.job_criteria_repo import create_criteria_version
 from meyar.services.job_repo import create_job
 from meyar.services.tenant_repo import create_tenant
@@ -107,7 +108,7 @@ async def test_score_idempotency_and_decimal_contract(
     assert body2["numeric_score"] == "100.00"
 
 
-async def test_score_requires_evaluations_read_scope(
+async def test_score_requires_evaluations_write_scope(
     db_session: AsyncSession, client: AsyncClient, tenant_and_key
 ) -> None:
     tenant, _key, _plaintext = tenant_and_key
@@ -130,6 +131,86 @@ async def test_score_requires_evaluations_read_scope(
         headers=_auth(plaintext_no_scope),
     )
     assert resp.status_code == 403
+
+
+async def test_score_with_evaluations_read_only_is_forbidden_and_does_not_mutate(
+    db_session: AsyncSession, client: AsyncClient, tenant_and_key
+) -> None:
+    """A read-only credential must not be able to trigger Evaluation
+    persistence — score is a mutating operation, not a read."""
+    tenant, _key, _plaintext = tenant_and_key
+    candidate, _profile_row = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=_profile("Python")
+    )
+    job, criteria = await _job_with_criteria(
+        db_session,
+        tenant.id,
+        [_skill("python", "Python", weight=2.0, criterion_type=CriterionType.MUST_HAVE)],
+    )
+    _key2, plaintext_read_only = await create_api_key(
+        db_session, tenant_id=tenant.id, env="test", scopes=["evaluations:read"]
+    )
+    await db_session.commit()
+
+    before = await count_evaluations_for_tenant(db_session, tenant_id=tenant.id)
+    assert before == 0
+
+    resp = await client.post(
+        f"/api/v1/jobs/{job.id}/criteria/{criteria.version_number}/score",
+        json={"candidate_id": str(candidate.id), "evaluation_as_of_date": AS_OF},
+        headers=_auth(plaintext_read_only),
+    )
+    assert resp.status_code == 403
+
+    after = await count_evaluations_for_tenant(db_session, tenant_id=tenant.id)
+    assert after == 0
+
+
+async def test_score_with_evaluations_write_scope_succeeds_and_stays_idempotent(
+    db_session: AsyncSession, client: AsyncClient, tenant_and_key
+) -> None:
+    """evaluations:write alone (no other scope) is sufficient for score,
+    and repeat calls stay idempotent under the corrected scope."""
+    tenant, _key, _plaintext = tenant_and_key
+    candidate, _profile_row = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=_profile("Python")
+    )
+    job, criteria = await _job_with_criteria(
+        db_session,
+        tenant.id,
+        [_skill("python", "Python", weight=2.0, criterion_type=CriterionType.MUST_HAVE)],
+    )
+    _key2, plaintext_write_only = await create_api_key(
+        db_session, tenant_id=tenant.id, env="test", scopes=["evaluations:write"]
+    )
+    await db_session.commit()
+
+    payload = {"candidate_id": str(candidate.id), "evaluation_as_of_date": AS_OF}
+    resp1 = await client.post(
+        f"/api/v1/jobs/{job.id}/criteria/{criteria.version_number}/score",
+        json=payload,
+        headers=_auth(plaintext_write_only),
+    )
+    assert resp1.status_code == 200
+    body1 = resp1.json()
+    assert body1["reused"] is False
+
+    after_first = await count_evaluations_for_tenant(db_session, tenant_id=tenant.id)
+    assert after_first == 1
+
+    resp2 = await client.post(
+        f"/api/v1/jobs/{job.id}/criteria/{criteria.version_number}/score",
+        json=payload,
+        headers=_auth(plaintext_write_only),
+    )
+    assert resp2.status_code == 200
+    body2 = resp2.json()
+    assert body2["reused"] is True
+    assert body2["evaluation_id"] == body1["evaluation_id"]
+    assert body2["numeric_score"] == body1["numeric_score"]
+
+    after_second = await count_evaluations_for_tenant(db_session, tenant_id=tenant.id)
+    assert after_second == 1
 
 
 async def test_score_cross_tenant_candidate_is_safe_404(

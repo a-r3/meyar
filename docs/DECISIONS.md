@@ -924,10 +924,17 @@ implementation:
    the API's auth boundary.
 3. **Scope reuse, not invention.** All six scopes seeded on every key since
    Slice 1 (`jobs:read`, `jobs:write`, `candidates:read`, `candidates:write`,
-   `evaluations:read`, `evaluations:write`) are sufficient. `evaluations:read`
-   existed but was enforced nowhere until this slice — the score endpoint
-   now activates it; the rank endpoint reuses `evaluations:write`, matching
-   the scope the Slice 11 UI already required for the same operation.
+   `evaluations:read`, `evaluations:write`) are sufficient. Both mutating
+   evaluation routes require `evaluations:write`: score may persist (or
+   idempotently reuse) an `Evaluation` row via `evaluate_and_score_candidate`,
+   so it requires the same write authority as the rank endpoint, which
+   reuses `evaluations:write` matching the scope the Slice 11 UI already
+   required for the same operation. An initial draft of this slice gated
+   score behind `evaluations:read`; a post-merge authorization audit found a
+   read-only credential could trigger `Evaluation` persistence through it,
+   and the scope was corrected to `evaluations:write` before acceptance.
+   `evaluations:read` remains seeded and reserved for genuinely read-only
+   evaluation retrieval routes if/when one is added — it is not repurposed.
 4. **External DTO boundary.** New request/response models live in
    `meyar.schemas.api_search`/`api_evaluation`/`api_candidate`, distinct from
    internal service schemas, `extra="forbid"` throughout (matching the

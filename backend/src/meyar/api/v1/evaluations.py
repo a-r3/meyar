@@ -46,7 +46,7 @@ async def post_score_candidate(
     job_id: uuid.UUID,
     version_number: int,
     body: ApiScoreCandidateRequest,
-    ctx: TenantContext = Depends(require_scope("evaluations:read")),
+    ctx: TenantContext = Depends(require_scope("evaluations:write")),
     db: AsyncSession = Depends(get_db),
 ) -> ApiScoreCandidateResponse:
     await _get_job_or_404(db, ctx.tenant_id, job_id)
