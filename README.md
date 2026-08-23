@@ -7,10 +7,10 @@ and evaluate candidates against job requirements with auditable evidence.
 MEYAR is internal HR tooling, not an external B2B/SaaS product or a public
 candidate-facing service.
 
-The repository currently contains a working backend foundation through
-deterministic hybrid candidate search. Numeric scoring, batch ranking, a
-natural-language search planner, and the internal user interface are
-planned work and must not be treated as implemented.
+The repository currently contains a working backend foundation through a
+strict local-LLM natural-language search planner and deterministic hybrid
+candidate search. Numeric scoring, batch ranking, and the internal user
+interface are planned work and must not be treated as implemented.
 
 ## Project authority
 
@@ -54,13 +54,19 @@ Implemented and tested:
   `meyar-search-v1` hybrid-ranking formula where a failed required
   filter can never be overridden by semantic similarity — service + CLI
   only, no REST endpoint yet;
+- natural-language candidate search planning (`meyar plan-search`): a
+  loopback-only local LLM produces a strict `PlannerDraft`; deterministic
+  `meyar-search-planner-v1` validation derives the search mode, rejects
+  protected or unsupported meaning instead of weakening it, injects trusted
+  tenant-independent runtime provenance/date/weights, and produces the exact
+  `CandidateSearchRequest` Slice 8 executes. The planner never reads or ranks
+  candidates; plan-only and thin plan→search service flows are both tested;
 - synthetic-only automated tests and repository governance.
 
 Planned or in progress:
 
-- **Next: Slice 9** — a validated natural-language search planner that
-  produces the structured `CandidateSearchRequest` Slice 8 consumes;
-- deterministic 0–100 JD scoring and batch candidate ranking;
+- **Next: Slice 10** — deterministic 0–100 JD scoring and batch candidate
+  ranking;
 - internal Chat/Search and CV Library user interfaces;
 - finalized internal API/Swagger examples and full security acceptance.
 
@@ -108,7 +114,7 @@ Mini.
 - `pypdf` and `python-docx` for current document parsing
 - Ollama through `meyar.llm.LLMProvider`
 - Ruff, mypy, pytest, pytest-asyncio
-- pgvector and a local embedding provider are planned, not installed yet
+- pgvector and local Ollama-backed LLM/embedding provider abstractions
 
 ## Repository structure
 
@@ -215,10 +221,11 @@ updated `backend/uv.lock` when applicable.
 
 ## Known current limitations
 
-- Structured/semantic/hybrid candidate search exists (Slice 7–8, service
-  + CLI only, no REST endpoint yet); a natural-language search planner
-  that produces the structured search request does not yet exist
-  (Slice 9).
+- Structured/semantic/hybrid candidate search and strict natural-language
+  planning exist (Slices 7–9, service + CLI only, no REST endpoint or UI
+  yet). The planner intentionally rejects unsupported language proficiency,
+  skill-specific duration, identity, salary/location, and custom-weight
+  requests rather than weakening their meaning.
 - No deterministic 0–100 score, batch ranking, Chat UI, or CV Library UI
   exists yet.
 - OCR fallback for scanned PDFs is not implemented.

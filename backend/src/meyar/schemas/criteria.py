@@ -52,6 +52,25 @@ _SENSITIVE_PATTERNS = [
         r"\bbisexual\b",
         r"\btransgender\b",
         r"\bphoto(graph)?\b",
+        # Azerbaijani equivalents used by the internal HR surface. These
+        # extend the same deterministic authority; Slice 9 does not keep a
+        # competing planner-specific protected-trait list.
+        r"\bcins(iyyət)?\b",
+        r"\bkişi\b",
+        r"\bqadın\b",
+        r"\byaş\b",
+        r"\bdoğum tarixi\b",
+        r"\bmilliyyət\b",
+        r"\bdin(i|ə)?\b",
+        r"\bmüsəlman\b",
+        r"\bxristian\b",
+        r"\byəhudi\b",
+        r"\bevli\b",
+        r"\bsubay\b",
+        r"\bhamilə\b",
+        r"\bsiyasi\b",
+        r"\bəlillik\b",
+        r"\bsağlamlıq\b",
     ]
 ]
 

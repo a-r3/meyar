@@ -7,9 +7,19 @@ from meyar.extraction.identity_prompts import IDENTITY_SYSTEM_PROMPT
 from meyar.extraction.prompts import SYSTEM_PROMPT, build_user_prompt
 from meyar.extraction.view import ProfessionalDocumentView
 from meyar.llm.loopback import require_loopback_url
-from meyar.llm.provider import ModelSchemaInvalidError, ModelTimeoutError, ModelUnavailableError
+from meyar.llm.provider import (
+    LLMResultProvenance,
+    ModelSchemaInvalidError,
+    ModelTimeoutError,
+    ModelUnavailableError,
+)
 from meyar.schemas.candidate_identity import CandidateIdentityExtraction
 from meyar.schemas.candidate_profile import CandidateProfileExtraction
+from meyar.search.planner_prompts import (
+    SEARCH_PLANNER_SYSTEM_PROMPT,
+    build_search_planner_user_prompt,
+)
+from meyar.search.planner_schemas import PlannerDraft
 
 
 class OllamaLLMProvider:
@@ -18,11 +28,22 @@ class OllamaLLMProvider:
     address; anything else is rejected at construction time. See
     docs/MASTER_SPEC.md §16 and Slice 4 spec §3."""
 
-    def __init__(self, *, base_url: str, model: str, timeout_seconds: float) -> None:
+    provider_name = "ollama"
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        model: str,
+        timeout_seconds: float,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
         require_loopback_url(base_url, setting_name="MEYAR_OLLAMA_BASE_URL")
         self._base_url = base_url.rstrip("/")
-        self._model = model
+        self.model_name = model
+        self.model_revision = ""
         self._timeout_seconds = timeout_seconds
+        self._transport = transport
 
     async def health(self) -> dict:
         try:
@@ -32,16 +53,16 @@ class OllamaLLMProvider:
                 tags = [m.get("name") for m in resp.json().get("models", [])]
                 return {
                     "reachable": True,
-                    "model": self._model,
-                    "model_available": self._model in tags,
+                    "model": self.model_name,
+                    "model_available": self.model_name in tags,
                 }
         except httpx.HTTPError:
-            return {"reachable": False, "model": self._model, "model_available": False}
+            return {"reachable": False, "model": self.model_name, "model_available": False}
 
     async def extract_candidate_profile(
         self, view: ProfessionalDocumentView
     ) -> tuple[CandidateProfileExtraction, str]:
-        content = await self._chat(
+        content, provenance = await self._chat(
             system_prompt=SYSTEM_PROMPT,
             user_prompt=build_user_prompt(view),
             schema=CandidateProfileExtraction.model_json_schema(),
@@ -52,12 +73,12 @@ class OllamaLLMProvider:
             raise ModelSchemaInvalidError(
                 f"Model output failed structured-schema validation: {exc}"
             ) from exc
-        return extraction, self._model
+        return extraction, provenance.model_name
 
     async def extract_candidate_identity(
         self, view: ProfessionalDocumentView
     ) -> tuple[CandidateIdentityExtraction, str]:
-        content = await self._chat(
+        content, provenance = await self._chat(
             system_prompt=IDENTITY_SYSTEM_PROMPT,
             user_prompt=build_user_prompt(view),
             schema=CandidateIdentityExtraction.model_json_schema(),
@@ -68,11 +89,31 @@ class OllamaLLMProvider:
             raise ModelSchemaInvalidError(
                 f"Model output failed structured-schema validation: {exc}"
             ) from exc
-        return extraction, self._model
+        return extraction, provenance.model_name
 
-    async def _chat(self, *, system_prompt: str, user_prompt: str, schema: dict) -> str:
+    async def plan_candidate_search(
+        self, natural_language_request: str, *, repair: bool = False
+    ) -> tuple[PlannerDraft, LLMResultProvenance]:
+        content, provenance = await self._chat(
+            system_prompt=SEARCH_PLANNER_SYSTEM_PROMPT,
+            user_prompt=build_search_planner_user_prompt(
+                natural_language_request, repair=repair
+            ),
+            schema=PlannerDraft.model_json_schema(),
+        )
+        try:
+            draft = PlannerDraft.model_validate(json.loads(content))
+        except (json.JSONDecodeError, ValidationError) as exc:
+            raise ModelSchemaInvalidError(
+                "Model output failed PlannerDraft structured-schema validation."
+            ) from exc
+        return draft, provenance
+
+    async def _chat(
+        self, *, system_prompt: str, user_prompt: str, schema: dict
+    ) -> tuple[str, LLMResultProvenance]:
         payload = {
-            "model": self._model,
+            "model": self.model_name,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -82,7 +123,9 @@ class OllamaLLMProvider:
             "options": {"temperature": 0.0},
         }
         try:
-            async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
+            async with httpx.AsyncClient(
+                timeout=self._timeout_seconds, transport=self._transport
+            ) as client:
                 resp = await client.post(f"{self._base_url}/api/chat", json=payload)
         except httpx.TimeoutException as exc:
             raise ModelTimeoutError(
@@ -94,4 +137,11 @@ class OllamaLLMProvider:
         if resp.status_code != 200:
             raise ModelUnavailableError(f"Ollama returned HTTP {resp.status_code}.")
 
-        return str(resp.json().get("message", {}).get("content", ""))
+        response_payload = resp.json()
+        actual_model = str(response_payload.get("model") or self.model_name)
+        provenance = LLMResultProvenance(
+            provider=self.provider_name,
+            model_name=actual_model,
+            model_revision=self.model_revision,
+        )
+        return str(response_payload.get("message", {}).get("content", "")), provenance

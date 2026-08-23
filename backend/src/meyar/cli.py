@@ -1,10 +1,11 @@
 import argparse
 import asyncio
 import uuid
+from datetime import date
 
 from meyar.config import get_settings
 from meyar.db import get_session_factory
-from meyar.embedding.dependency import get_embedding_provider
+from meyar.embedding.dependency import get_embedding_provider, get_embedding_search_config
 from meyar.embedding.provider import EmbeddingProviderError
 from meyar.evaluation.service import EvaluationInputError, evaluate_candidate
 from meyar.extraction.identity_service import (
@@ -15,6 +16,8 @@ from meyar.extraction.service import ExtractionPreconditionError, extract_candid
 from meyar.ingestion.dependency import get_document_parser
 from meyar.ingestion.folder_scanner import InvalidSourceRootError
 from meyar.llm.dependency import get_llm_provider
+from meyar.search.planner_schemas import PlannerOutcome
+from meyar.search.planner_service import plan_and_search_candidates, plan_candidate_search
 from meyar.search.schemas import CandidateSearchRequest, SearchMode
 from meyar.search.service import SearchRequestError, search_candidates
 from meyar.services.api_key_repo import create_api_key
@@ -314,6 +317,86 @@ async def _search_candidates(tenant_id: str, request_file: str) -> None:
         )
 
 
+async def _plan_search(
+    tenant_id: str, query: str, as_of_date_text: str, *, execute: bool
+) -> None:
+    """PII-safe Slice 9 CLI: plan only by default, optionally execute Slice 8."""
+    try:
+        parsed_tenant_id = uuid.UUID(tenant_id)
+        trusted_as_of_date = date.fromisoformat(as_of_date_text)
+    except ValueError as exc:
+        print("Invalid tenant id or as-of date (expected UUID and YYYY-MM-DD).")
+        raise SystemExit(2) from exc
+
+    llm = get_llm_provider()
+    embedding_config = get_embedding_search_config()
+    factory = get_session_factory()
+    try:
+        async with factory() as db:
+            if execute:
+                planned = await plan_and_search_candidates(
+                    db,
+                    llm,
+                    tenant_id=parsed_tenant_id,
+                    natural_language_request=query,
+                    as_of_date=trusted_as_of_date,
+                    embedding_config=embedding_config,
+                    embedding_provider=get_embedding_provider(),
+                )
+                plan = planned.plan
+            else:
+                planned = None
+                plan = await plan_candidate_search(
+                    db,
+                    llm,
+                    tenant_id=parsed_tenant_id,
+                    natural_language_request=query,
+                    as_of_date=trusted_as_of_date,
+                    embedding_config=embedding_config,
+                )
+            await db.commit()
+    except (SearchRequestError, EmbeddingProviderError) as exc:
+        print(f"Natural-language search execution failed: {exc.code}")
+        raise SystemExit(4) from exc
+    except Exception as exc:
+        print(f"Natural-language search infrastructure failure: {type(exc).__name__}")
+        raise SystemExit(4) from exc
+
+    print(f"Executable: {plan.executable}")
+    print(f"Outcome: {plan.outcome.value}")
+    print(f"Planner policy: {plan.planner_policy_version}")
+    print(f"Prompt version: {plan.prompt_version}")
+    print(f"Schema version: {plan.schema_version}")
+    print(f"Attempts: {plan.attempt_count}")
+    if plan.reason_codes:
+        print(f"Reasons: {','.join(code.value for code in plan.reason_codes)}")
+
+    if not plan.executable:
+        if plan.outcome == PlannerOutcome.PLANNER_PROVIDER_FAILURE:
+            raise SystemExit(3)
+        raise SystemExit(2)
+
+    assert plan.search_request is not None
+    request = plan.search_request
+    print(f"Mode: {request.mode.value}")
+    print(f"Limit: {request.limit}")
+    print(f"Required filters: {request.required_filters.model_dump(mode='json')}")
+    print(f"Preferred filters: {request.preferred_filters.model_dump(mode='json')}")
+    print(f"Semantic intent present: {request.semantic_query is not None}")
+
+    if execute:
+        assert planned is not None and planned.search_response is not None
+        response = planned.search_response
+        print(f"Search policy: {response.policy_version}")
+        print(f"Results ({response.result_count}):")
+        for result in response.results:
+            print(
+                f"  #{result.rank} candidate={result.candidate_id} "
+                f"relevance={result.relevance_score:.4f} "
+                f"structured={result.structured_score} semantic={result.semantic_score}"
+            )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="meyar")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -372,6 +455,23 @@ def main() -> None:
         "--request-file", required=True, help="Path to a JSON CandidateSearchRequest file."
     )
 
+    plan_search_parser = sub.add_parser(
+        "plan-search",
+        help="Plan a natural-language candidate search locally; optionally execute Slice 8.",
+    )
+    plan_search_parser.add_argument("--tenant-id", required=True)
+    plan_search_parser.add_argument("--query", required=True)
+    plan_search_parser.add_argument(
+        "--as-of-date",
+        required=True,
+        help="Trusted deterministic reference date (YYYY-MM-DD).",
+    )
+    plan_search_parser.add_argument(
+        "--execute",
+        action="store_true",
+        help="Execute the validated plan through Slice 8 (default is plan-only).",
+    )
+
     args = parser.parse_args()
     if args.command == "create-tenant":
         asyncio.run(_create_tenant(args.name))
@@ -387,6 +487,15 @@ def main() -> None:
         asyncio.run(_embed_candidate(args.tenant_id, args.candidate_id))
     elif args.command == "search-candidates":
         asyncio.run(_search_candidates(args.tenant_id, args.request_file))
+    elif args.command == "plan-search":
+        asyncio.run(
+            _plan_search(
+                args.tenant_id,
+                args.query,
+                args.as_of_date,
+                execute=args.execute,
+            )
+        )
 
 
 if __name__ == "__main__":
