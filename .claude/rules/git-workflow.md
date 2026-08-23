@@ -8,7 +8,7 @@ identity. This file is what governs the actual sequence of commands.
 
 ```bash
 pwd
-git rev-parse --show-toplevel
+REPO_ROOT="$(git rev-parse --show-toplevel)"
 git branch --show-current
 git status --short
 git remote -v
@@ -17,7 +17,13 @@ git log -3 --oneline
 
 Then determine, in order:
 
-1. Is the repo path correct (`/home/oem/Documents/Job/RabitaBank/Meyar`)?
+1. Does `git rev-parse --show-toplevel` succeed (we are inside a Git
+   working tree, at `$REPO_ROOT`), and does `git remote -v` show the
+   canonical development remote (`origin` →
+   `https://github.com/a-r3/meyar.git`)? Never hard-code or compare
+   against an absolute local filesystem path — the repository may be
+   cloned at any path, on any machine, or migrated to a bank-owned
+   remote later.
 2. Is the working tree clean? If unexpectedly dirty, inspect and report —
    never `git reset --hard` / `git clean -fd` / `git checkout -- .` /
    any destructive restore to force a clean state.
@@ -184,7 +190,9 @@ minor dependency updates or application feature PRs by default.
 
 ## Repository identity
 
-Canonical local repo: `/home/oem/Documents/Job/RabitaBank/Meyar`.
+Canonical local repo root: discovered via `git rev-parse --show-toplevel`
+(never hard-code an absolute local path — the working copy may live at
+any path, on any machine).
 Canonical development remote: `https://github.com/a-r3/meyar.git`
 (`a-r3/meyar`, private). This is a personal development remote and may
 later be migrated to an official bank-owned repository — full Git

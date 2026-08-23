@@ -19,7 +19,9 @@ JD matching with a 0–100 score, and batch candidate ranking.
 
 ## Repository
 
-Canonical local repository: `/home/oem/Documents/Job/RabitaBank/Meyar`.
+Canonical local repository root: discovered via `git rev-parse
+--show-toplevel` (never hard-code an absolute local path — the working
+copy may live at any path, on any machine).
 Canonical development remote: `https://github.com/a-r3/meyar.git`
 (`a-r3/meyar`, private). This is a personal development remote and may
 later be migrated to an official bank-owned repository — full Git

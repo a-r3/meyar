@@ -1,7 +1,8 @@
 # MEYAR
 
-Canonical repository:
-`/home/oem/Documents/Job/RabitaBank/Meyar`
+Canonical repository root: discovered via `git rev-parse --show-toplevel`
+(never hard-code an absolute local path — the working copy may live at
+any path, on any machine).
 
 Canonical development remote:
 `https://github.com/a-r3/meyar.git`
