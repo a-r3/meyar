@@ -112,7 +112,7 @@ on top of this — the previous "numeric score deferred" decision (D-010 point
 4) is superseded by D-011. `meyar-score-v1` uses exact Decimal weighted
 factors, explicit as-of provenance, and fit-tier-first batch ranking over one
 current profile per active candidate. See D-017. Service and CLI are
-implemented; REST/UI presentation remains later work.
+implemented; UI presentation is implemented in Slice 11, while REST presentation remains later work in Slice 12.
 
 ## Local-only AI
 
