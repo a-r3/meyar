@@ -60,7 +60,9 @@ Implemented and tested:
   protected or unsupported meaning instead of weakening it, injects trusted
   tenant-independent runtime provenance/date/weights, and produces the exact
   `CandidateSearchRequest` Slice 8 executes. The planner never reads or ranks
-  candidates; plan-only and thin plan→search service flows are both tested;
+  candidates. Its explicit Azerbaijani MVP morphology policy preserves common
+  mandatory forms and protected-term inflections without broad prefix
+  matching; plan-only and thin plan→search service flows are both tested;
 - synthetic-only automated tests and repository governance.
 
 Planned or in progress:

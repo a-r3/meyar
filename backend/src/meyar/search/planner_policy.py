@@ -44,8 +44,15 @@ _REQUIRED_MARKERS = (
     "minimum",
     "at least",
     "mütləq",
+    "mütləqdir",
+    "mütləqdır",
+    "mütləqdur",
+    "mütləqdür",
+    "mütləq olmalı",
+    "mütləq olmalıdır",
     "ən azı",
     "tələb olunur",
+    "tələb edilir",
 )
 _PREFERRED_MARKERS = (
     "preferably",
@@ -112,9 +119,25 @@ _IDENTITY_PATTERNS = (
         rf"(?i)^\s*(?:find|show|search\s+for)\s+(?:a\s+)?[{_WORD}'-]{{2,40}}\s*[.!?]*$"
     ),
 )
-_CUSTOM_WEIGHT_PATTERNS = (
-    re.compile(r"(?i)\b(?:prioriti[sz]e|focus\s+mostly|over\s+everything|weight)\b"),
-    re.compile(r"(?i)\b(?:hər\s+şeydən\s+üstün|daha\s+çox\s+önəm|çəki\s+ver)\b"),
+_EXPLICIT_CUSTOM_WEIGHT_PATTERNS = (
+    re.compile(r"(?i)\bprioriti[sz]e\b.{0,80}\bover\s+everything\b"),
+    re.compile(r"(?i)\bfocus\s+mostly\b"),
+    re.compile(r"(?i)\bhər\s+şeydən\s+üstün\b"),
+)
+_SEARCH_WEIGHT_COMPONENT_PATTERNS = (
+    re.compile(r"(?i)\bsemantics?\b|\bsemantic(?:\s+(?:search|score|relevance|results?))?\b"),
+    re.compile(r"(?i)\bstructured(?:\s+(?:search|score|relevance|results?))?\b"),
+    re.compile(r"(?i)\bsemantik\b|\bstruktur(?:laşdırılmış)?\b"),
+)
+_SEARCH_WEIGHT_CONTROL_PATTERNS = (
+    re.compile(
+        r"(?i)(?:\bweights?\b|\bweighting\b|\bpercent(?:age)?\b|%|"
+        r"\bmore\s+important\b|\bprioriti[sz]e\b)"
+    ),
+    re.compile(
+        r"(?i)(?:\bçəki\b|\bfaiz\b|%|\bprioritet\b|\bdaha\s+çox(?:\s+çəki)?\b|"
+        r"\büstün\s+tut\b)"
+    ),
 )
 _SALARY_PATTERNS = (re.compile(r"(?i)\b(?:salary|compensation|maaş|əmək\s+haqqı)\b"),)
 _LOCATION_PATTERNS = (
@@ -162,6 +185,14 @@ def _canonical(text: str) -> str:
 
 def _matches_any(text: str, patterns: tuple[re.Pattern[str], ...]) -> bool:
     return any(pattern.search(text) for pattern in patterns)
+
+
+def _has_custom_search_weighting(text: str) -> bool:
+    if _matches_any(text, _EXPLICIT_CUSTOM_WEIGHT_PATTERNS):
+        return True
+    return _matches_any(text, _SEARCH_WEIGHT_COMPONENT_PATTERNS) and _matches_any(
+        text, _SEARCH_WEIGHT_CONTROL_PATTERNS
+    )
 
 
 def _skill_duration_is_unsupported(text: str) -> bool:
@@ -213,7 +244,7 @@ def precheck_natural_language_request(text: str) -> None:
         reasons.append(PlannerReasonCode.LANGUAGE_PROFICIENCY_UNSUPPORTED)
     if _matches_any(text, _IDENTITY_PATTERNS):
         reasons.append(PlannerReasonCode.IDENTITY_SEARCH_UNSUPPORTED)
-    if _matches_any(text, _CUSTOM_WEIGHT_PATTERNS):
+    if _has_custom_search_weighting(text):
         reasons.append(PlannerReasonCode.CUSTOM_WEIGHTING_UNSUPPORTED)
     if _matches_any(text, _SALARY_PATTERNS):
         reasons.append(PlannerReasonCode.SALARY_FILTER_UNSUPPORTED)
@@ -486,6 +517,11 @@ def _postcheck_protected_and_unsupported(draft: PlannerDraft) -> None:
     ):
         raise PlannerPolicyError(
             PlannerOutcome.UNSUPPORTED_SEMANTICS, PlannerReasonCode.SEMANTIC_QUERY_UNSAFE
+        )
+    if draft.semantic_query and _has_custom_search_weighting(draft.semantic_query):
+        raise PlannerPolicyError(
+            PlannerOutcome.UNSUPPORTED_SEMANTICS,
+            PlannerReasonCode.CUSTOM_WEIGHTING_UNSUPPORTED,
         )
 
 

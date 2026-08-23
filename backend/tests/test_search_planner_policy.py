@@ -157,6 +157,44 @@ def test_azerbaijani_required_plus_semantic_preference_is_hybrid() -> None:
     assert request.required_filters.skills == ["Java"]
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Java mütləqdir.",
+        "Java tələb olunur.",
+        "Java mütləq olmalıdır.",
+        "JAVA MÜTLƏQDİR!",
+    ],
+)
+def test_azerbaijani_mandatory_forms_preserve_required_skill(text: str) -> None:
+    request = _convert(
+        text,
+        PlannerDraft(required_filters=RequiredFilters(skills=["Java"])),
+    )
+    assert request.required_filters.skills == ["Java"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Java mütləqdir.",
+        "Java mütləqdır.",
+        "Java mütləqdur.",
+        "Java mütləqdür.",
+        "Java tələb edilir.",
+    ],
+)
+def test_azerbaijani_mandatory_forms_cannot_be_downgraded(text: str) -> None:
+    with pytest.raises(PlannerPolicyError) as exc_info:
+        _convert(
+            text,
+            PlannerDraft(preferred_filters=PreferredFilters(skills=["Java"])),
+        )
+    assert PlannerReasonCode.MANDATORY_REQUIREMENT_DOWNGRADED in (
+        exc_info.value.reason_codes
+    )
+
+
 def test_azerbaijani_explicit_result_count_is_preserved() -> None:
     request = _convert(
         "Mənə Java bilən 7 namizəd göstər.",
@@ -184,6 +222,14 @@ def test_azerbaijani_explicit_result_count_is_preserved() -> None:
         ("Find Ali", PlannerReasonCode.IDENTITY_SEARCH_UNSUPPORTED),
         (
             "Prioritize banking over everything else.",
+            PlannerReasonCode.CUSTOM_WEIGHTING_UNSUPPORTED,
+        ),
+        (
+            "Java required; banking experience preferred; make semantics 90% more important.",
+            PlannerReasonCode.CUSTOM_WEIGHTING_UNSUPPORTED,
+        ),
+        (
+            "Java mütləqdir, bank təcrübəsi üstünlükdür, semantik uyğunluğa 90% çəki ver.",
             PlannerReasonCode.CUSTOM_WEIGHTING_UNSUPPORTED,
         ),
         (
@@ -283,6 +329,26 @@ def test_required_concept_cannot_be_weakened_into_semantic_ranking() -> None:
     assert PlannerReasonCode.MANDATORY_REQUIREMENT_DOWNGRADED in (
         exc_info.value.reason_codes
     )
+
+
+def test_azerbaijani_required_concept_cannot_be_soft_semantic_ranking() -> None:
+    with pytest.raises(PlannerPolicyError) as exc_info:
+        _convert(
+            "Bank AML layihə təcrübəsi mütləqdir.",
+            PlannerDraft(semantic_query="Bank AML layihə təcrübəsi"),
+        )
+    assert exc_info.value.outcome == PlannerOutcome.UNSUPPORTED_SEMANTICS
+    assert PlannerReasonCode.MANDATORY_REQUIREMENT_DOWNGRADED in (
+        exc_info.value.reason_codes
+    )
+
+
+def test_yasil_professional_concept_is_not_misclassified_as_age() -> None:
+    request = _convert(
+        "Yaşıl texnologiyalar üzrə təcrübə.",
+        PlannerDraft(semantic_query="yaşıl texnologiyalar üzrə təcrübə"),
+    )
+    assert request.mode == SearchMode.SEMANTIC_ONLY
 
 
 def test_nearby_required_and_preferred_markers_do_not_cross_contaminate() -> None:

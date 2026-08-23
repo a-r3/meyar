@@ -33,20 +33,28 @@ engine:
    request-to-draft guards verify supported structured values occur in the
    request, model-produced total-experience numbers/result counts/semantic
    content are supported by the request, and clear required/preferred
-   markers are not reversed. A mandatory conceptual requirement cannot be
-   reduced to soft semantic relevance. Skill-specific duration (for example “5 years of Java”) is
-   not converted to Java + five years total experience. Slice 8 filters
+   markers are not reversed. The explicit Azerbaijani MVP marker policy
+   recognizes common copular forms such as `mütləqdir` without claiming
+   general morphological understanding. A mandatory conceptual requirement
+   cannot be reduced to soft semantic relevance. Skill-specific duration
+   (for example “5 years of Java”) is not converted to Java + five years
+   total experience. Slice 8 filters
    language existence only, so B2/C1/etc. proficiency is rejected rather
    than reduced to a language-name filter. Identity, salary, location,
-   project-duration, custom-weighting, and prompt/SQL instructions are
-   typed unsupported outcomes. This is intentionally a small explicit MVP
-   guard, not a general NLP equivalence engine.
+   project-duration, custom search-weighting, and prompt/SQL instructions are
+   typed unsupported outcomes. A material unsupported aspect blocks the
+   whole plan; it is never silently dropped before partial execution. This
+   is intentionally a small explicit MVP guard, not a general NLP
+   equivalence engine.
 5. **Protected criteria are deterministic before and after the LLM.** The
    existing `find_prohibited_term` authority checks the raw request before
    any model call and all execution strings after parsing. The shared
-   denylist now includes Azerbaijani equivalents needed by the internal HR
-   surface. The LLM cannot rephrase a protected request into a semantic
-   query to evade policy; a rejected plan never invokes Slice 8.
+   denylist includes Azerbaijani equivalents needed by the internal HR
+   surface and an explicit root-plus-allowed-suffix policy for common MVP
+   inflections. It never uses unrestricted prefix matching (`yaşdan` is an
+   age form; `yaşıl` is not). The LLM cannot rephrase a protected request
+   into a semantic query to evade policy; a rejected plan never invokes
+   Slice 8.
 6. **Trusted runtime owns execution configuration.** The caller supplies
    tenant id unchanged, an explicit reference date, and the active
    `EmbeddingSearchConfig`. Deterministic conversion injects `as_of_date`

@@ -1,4 +1,7 @@
+import pytest
 from httpx import AsyncClient
+
+from meyar.schemas.criteria import find_prohibited_term
 
 
 def _auth(plaintext: str) -> dict:
@@ -24,6 +27,36 @@ def _valid_criteria() -> list[dict]:
             "min_years": 3,
         },
     ]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "müsəlman",
+        "müsəlmanı",
+        "müsəlmanları",
+        "müsəlmanlardan",
+        "MÜSƏLMANLARI!",
+        "yaş",
+        "yaşı",
+        "yaşdan",
+        "yaşları",
+        "yaşına",
+        "YAŞDAN!",
+    ],
+)
+def test_shared_protected_policy_matches_explicit_azerbaijani_forms(
+    text: str,
+) -> None:
+    assert find_prohibited_term(f"Yalnız {text} göstər") is not None
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["yaşıl", "YAŞIL!", "yaşıl texnologiyalar üzrə təcrübə"],
+)
+def test_shared_protected_policy_does_not_prefix_match_yasil(text: str) -> None:
+    assert find_prohibited_term(text) is None
 
 
 async def test_create_job_with_criteria_v1(client: AsyncClient, tenant_and_key) -> None:

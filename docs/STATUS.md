@@ -167,11 +167,15 @@ remains disabled.
   is derived from validated contents; the LLM cannot supply tenant id,
   reference date, embedding provenance, ranking weights, SQL, identity,
   or scores. Existing protected-criterion policy runs before and after
-  the LLM; explicit MVP fidelity guards reject skill-specific duration,
-  language proficiency, identity, custom weighting, invented numeric
+  the LLM; its explicit Azerbaijani root-plus-allowed-suffix handling catches
+  common protected inflections without prefix-matching unrelated words such
+  as `yaşıl`. Explicit MVP fidelity guards preserve common Azerbaijani
+  mandatory forms and reject skill-specific duration, language proficiency,
+  identity, custom search weighting, invented numeric
   experience/result counts, and invented structured fields rather than
-  weakening meaning. Local Ollama remains loopback-only with strict JSON
-  parsing and exactly one bounded repair retry. `plan_candidate_search`
+  weakening or partially executing meaning. Local Ollama remains
+  loopback-only with strict JSON parsing and exactly one bounded repair retry.
+  `plan_candidate_search`
   reads no candidate/search repository (its DB session is audit-only);
   `plan_and_search_candidates` is a thin plan→accepted Slice 8 delegate,
   with the hard-gate invariant proven end-to-end against real pgvector.
@@ -182,11 +186,14 @@ remains disabled.
   YYYY-MM-DD [--execute]`. No migration/dependency was added. See D-016.
 
 ## Tests
-300/300 passing (231 prior + 69 Slice 9 planner/policy/service/CLI tests).
+336/336 passing (231 prior + 91 Slice 9 planner/policy/service/CLI tests +
+14 shared protected-policy morphology regressions).
 Slice 9 coverage includes strict draft parsing, deterministic mode and
 draft-to-request conversion, Azerbaijani/English intent, unsupported semantic
-weakening, protected-criteria pre/post checks, bounded repair, provider/result
-provenance, trusted date/embedding/weight injection, audit privacy, CLI exits,
+weakening and custom weighting, explicit Azerbaijani mandatory/protected
+morphology without broad prefix matching, protected-criteria pre/post checks,
+bounded repair, provider/result provenance, trusted date/embedding/weight
+injection, audit privacy, CLI exits,
 structured-only no-embedding execution, and a real-pgvector hybrid hard-gate
 integration path. The prior 231 tests include 177 through Slice 7 plus 54
 Slice 8 tests — 17 structured + 17 semantic +
