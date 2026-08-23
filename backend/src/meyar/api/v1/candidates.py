@@ -1,6 +1,4 @@
-import hashlib
 import uuid
-from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,17 +7,9 @@ from meyar.config import Settings, get_settings
 from meyar.core.auth import TenantContext, require_scope
 from meyar.db import get_db
 from meyar.ingestion.dependency import get_document_parser
-from meyar.ingestion.parser import DocumentParser, ParseError
-from meyar.ingestion.validation import (
-    DocumentTooLargeError,
-    UnsupportedDocumentError,
-    validate_upload,
-)
-from meyar.models.candidate_document import (
-    PARSER_STATUS_PARSE_FAILED,
-    PARSER_STATUS_PARSED,
-    CandidateDocument,
-)
+from meyar.ingestion.parser import DocumentParser
+from meyar.ingestion.validation import DocumentTooLargeError, UnsupportedDocumentError
+from meyar.models.candidate_document import PARSER_STATUS_PARSED, CandidateDocument
 from meyar.models.canonical_document import CanonicalDocument
 from meyar.schemas.candidate import (
     CandidateDocumentOut,
@@ -28,12 +18,11 @@ from meyar.schemas.candidate import (
 )
 from meyar.services.audit_repo import record_event
 from meyar.services.candidate_document_repo import (
-    create_candidate_document,
-    create_canonical_document,
     get_candidate_document,
     get_latest_canonical_document,
     list_candidate_documents,
 )
+from meyar.services.candidate_document_service import ingest_candidate_document
 from meyar.services.candidate_repo import create_candidate, get_candidate
 from meyar.services.candidate_service import delete_candidate_cascade
 from meyar.storage.base import DocumentStorage
@@ -158,7 +147,12 @@ async def post_candidate_document(
 
     data = await file.read()
     try:
-        detected = validate_upload(
+        document = await ingest_candidate_document(
+            db,
+            storage,
+            parser,
+            tenant_id=ctx.tenant_id,
+            candidate_id=candidate_id,
             filename=file.filename or "",
             content_type=file.content_type or "",
             data=data,
@@ -172,78 +166,6 @@ async def post_candidate_document(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc
-
-    sha256_hash = hashlib.sha256(data).hexdigest()
-    storage_key = await storage.save(tenant_id=ctx.tenant_id, content=data)
-
-    # original_filename is retained for display only — truncated, never
-    # used to build a path or influence storage/parsing behavior.
-    safe_original_filename = (file.filename or "upload")[:255]
-
-    document = await create_candidate_document(
-        db,
-        tenant_id=ctx.tenant_id,
-        candidate_id=candidate_id,
-        original_filename=safe_original_filename,
-        mime_type=detected.mime_type,
-        byte_size=len(data),
-        sha256_hash=sha256_hash,
-        storage_key=storage_key,
-    )
-    await record_event(
-        db,
-        tenant_id=ctx.tenant_id,
-        event_type="CANDIDATE_DOCUMENT_UPLOADED",
-        metadata={
-            "candidate_id": str(candidate_id),
-            "document_id": str(document.id),
-            "byte_size": len(data),
-            "mime_type": detected.mime_type,
-        },
-    )
-
-    try:
-        result = await parser.parse(data=data, document_type=detected.document_type)
-    except ParseError as exc:
-        document.parser_status = PARSER_STATUS_PARSE_FAILED
-        document.parse_error_code = "PARSE_FAILED"
-        document.parse_error_message = str(exc)[:500]
-        await record_event(
-            db,
-            tenant_id=ctx.tenant_id,
-            event_type="CANDIDATE_DOCUMENT_PARSE_FAILED",
-            metadata={
-                "candidate_id": str(candidate_id),
-                "document_id": str(document.id),
-                "error_code": "PARSE_FAILED",
-            },
-        )
-    else:
-        document.parser_status = PARSER_STATUS_PARSED
-        document.parser_name = result.parser_name
-        document.parser_version = result.parser_version
-        document.parsed_at = datetime.now(UTC)
-        await create_canonical_document(
-            db,
-            tenant_id=ctx.tenant_id,
-            candidate_document_id=document.id,
-            parser_name=result.parser_name,
-            parser_version=result.parser_version,
-            language=result.content.language,
-            content=result.content.model_dump(mode="json"),
-        )
-        await record_event(
-            db,
-            tenant_id=ctx.tenant_id,
-            event_type="CANDIDATE_DOCUMENT_PARSED",
-            metadata={
-                "candidate_id": str(candidate_id),
-                "document_id": str(document.id),
-                "parser_name": result.parser_name,
-                "parser_version": result.parser_version,
-                "page_count": len(result.content.pages),
-            },
-        )
 
     await db.commit()
     return await _document_out(db, document, tenant_id=ctx.tenant_id)

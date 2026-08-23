@@ -9,6 +9,8 @@ DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.docu
 _ALLOWED_CONTENT_TYPES = {PDF_MIME, DOCX_MIME, "application/octet-stream", ""}
 _EXTENSION_TO_TYPE = {".pdf": "PDF", ".docx": "DOCX"}
 
+SUPPORTED_EXTENSIONS = frozenset(_EXTENSION_TO_TYPE)
+
 
 class UnsupportedDocumentError(ValueError):
     """Raised for any validation failure: unsupported type, mismatched

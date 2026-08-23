@@ -6,13 +6,17 @@ from meyar.config import get_settings
 from meyar.db import get_session_factory
 from meyar.evaluation.service import EvaluationInputError, evaluate_candidate
 from meyar.extraction.service import ExtractionPreconditionError, extract_candidate_profile
+from meyar.ingestion.dependency import get_document_parser
+from meyar.ingestion.folder_scanner import InvalidSourceRootError
 from meyar.llm.dependency import get_llm_provider
 from meyar.services.api_key_repo import create_api_key
 from meyar.services.audit_repo import record_event
 from meyar.services.candidate_document_repo import get_candidate_document
 from meyar.services.candidate_profile_repo import get_current_profile_version
+from meyar.services.folder_indexer_service import index_folder
 from meyar.services.job_criteria_repo import get_current_criteria_version
 from meyar.services.tenant_repo import create_tenant
+from meyar.storage.dependency import get_document_storage
 
 
 async def _create_tenant(name: str) -> None:
@@ -127,6 +131,47 @@ async def _evaluate(tenant_id: str, candidate_id: str, job_id: str) -> None:
             )
 
 
+async def _index_folder(tenant_id: str, root: str) -> None:
+    """CLI entry point for Slice 6 — never prints CV text, filenames, or
+    any candidate PII; only ids and counts. Exit codes: 0 = clean scan,
+    1 = scan completed but at least one file failed ingestion, 2 =
+    invalid source folder, 3 = infrastructure/database failure."""
+    settings = get_settings()
+    factory = get_session_factory()
+    storage = get_document_storage()
+    parser = get_document_parser()
+
+    try:
+        async with factory() as db:
+            summary = await index_folder(
+                db,
+                storage,
+                parser,
+                tenant_id=uuid.UUID(tenant_id),
+                root_path=root,
+                max_bytes=settings.max_upload_bytes,
+            )
+            await db.commit()
+    except InvalidSourceRootError as exc:
+        print(f"Invalid source folder: {exc}")
+        raise SystemExit(2) from exc
+    except Exception as exc:  # infrastructure/database failure
+        print(f"Folder indexing failed: {type(exc).__name__}")
+        raise SystemExit(3) from exc
+
+    print(f"Source: {summary.folder_source_id}")
+    print(f"Discovered: {summary.discovered}")
+    print(f"New: {summary.new}")
+    print(f"Changed: {summary.changed}")
+    print(f"Retried: {summary.retried}")
+    print(f"Unchanged: {summary.unchanged}")
+    print(f"Successful: {summary.successful}")
+    print(f"Failed: {summary.failed}")
+    print(f"Missing: {summary.missing}")
+    if summary.failed > 0:
+        raise SystemExit(1)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="meyar")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -151,6 +196,13 @@ def main() -> None:
     evaluate_parser.add_argument("--candidate-id", required=True)
     evaluate_parser.add_argument("--job-id", required=True)
 
+    index_folder_parser = sub.add_parser(
+        "index-folder",
+        help="Scan a local folder for PDF/DOCX CVs and ingest new/changed files.",
+    )
+    index_folder_parser.add_argument("--tenant-id", required=True)
+    index_folder_parser.add_argument("--root", required=True, help="Local folder path to scan.")
+
     args = parser.parse_args()
     if args.command == "create-tenant":
         asyncio.run(_create_tenant(args.name))
@@ -158,6 +210,8 @@ def main() -> None:
         asyncio.run(_extract_profile(args.tenant_id, args.candidate_id, args.document_id))
     elif args.command == "evaluate":
         asyncio.run(_evaluate(args.tenant_id, args.candidate_id, args.job_id))
+    elif args.command == "index-folder":
+        asyncio.run(_index_folder(args.tenant_id, args.root))
 
 
 if __name__ == "__main__":

@@ -36,13 +36,15 @@ Implemented and tested:
 - deterministic per-criterion evaluation and fit-band policy, exposed through
   an internal service and CLI rather than a finalized evaluation HTTP API;
 - internal health, job, and candidate API routes;
+- local CV folder scanning/indexing (`meyar index-folder`): symlink-safe
+  recursive discovery, SHA-256 content-hash idempotent re-scanning, and
+  ingestion through the same secure pipeline as direct upload;
 - synthetic-only automated tests and repository governance.
 
 Planned or in progress:
 
-- **Next: Slice 6 — Local CV Library & Folder Indexer** (not started):
-  incremental hash-based scanning and indexing of a configured local folder;
-- `CandidateIdentity`, local embeddings, and pgvector-backed storage;
+- **Next: Slice 7** — `CandidateIdentity`, local embeddings, and
+  pgvector-backed storage;
 - structured/semantic hybrid search and a validated natural-language search
   planner;
 - deterministic 0–100 JD scoring and batch candidate ranking;
@@ -200,7 +202,6 @@ updated `backend/uv.lock` when applicable.
 
 ## Known current limitations
 
-- Slice 6 folder indexing has not started.
 - No local embeddings, pgvector search, hybrid search, or natural-language
   search planner exists yet.
 - No deterministic 0–100 score, batch ranking, Chat UI, or CV Library UI
