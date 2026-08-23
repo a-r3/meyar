@@ -59,6 +59,7 @@ async def test_semantic_ranking_orders_by_cosine_similarity(db_session: AsyncSes
         candidate_id=close.id,
         profile_version_id=close_pv.id,
         vector=[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        profile_content=_profile(),
     )
     await seed_embedding(
         db_session,
@@ -66,6 +67,7 @@ async def test_semantic_ranking_orders_by_cosine_similarity(db_session: AsyncSes
         candidate_id=far.id,
         profile_version_id=far_pv.id,
         vector=[0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        profile_content=_profile(),
     )
     await db_session.commit()
 
@@ -95,6 +97,7 @@ async def test_score_normalization_bounded(db_session: AsyncSession) -> None:
         candidate_id=candidate.id,
         profile_version_id=pv.id,
         vector=[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        profile_content=_profile(),
     )
     await db_session.commit()
 
@@ -121,6 +124,7 @@ async def test_top_n_limit(db_session: AsyncSession) -> None:
             candidate_id=candidate.id,
             profile_version_id=pv.id,
             vector=[1.0 - i * 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            profile_content=_profile(),
         )
     await db_session.commit()
 
@@ -150,6 +154,7 @@ async def test_stale_profile_embedding_excluded_then_reincluded(db_session: Asyn
         candidate_id=candidate.id,
         profile_version_id=pv1.id,
         vector=[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        profile_content=_profile(),
     )
     await db_session.commit()
 
@@ -174,6 +179,7 @@ async def test_stale_profile_embedding_excluded_then_reincluded(db_session: Asyn
         candidate_id=candidate.id,
         profile_version_id=pv2.id,
         vector=[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        profile_content=_profile("Rust"),
     )
     await db_session.commit()
 
@@ -197,6 +203,7 @@ async def test_incompatible_provider_excluded(db_session: AsyncSession) -> None:
         profile_version_id=pv.id,
         vector=[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         provider="other-provider",
+        profile_content=_profile(),
     )
     await db_session.commit()
 
@@ -222,6 +229,7 @@ async def test_incompatible_model_excluded(db_session: AsyncSession) -> None:
         profile_version_id=pv.id,
         vector=[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         model_name="other-model",
+        profile_content=_profile(),
     )
     await db_session.commit()
 
@@ -247,6 +255,7 @@ async def test_incompatible_model_revision_excluded(db_session: AsyncSession) ->
         profile_version_id=pv.id,
         vector=[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         model_revision="sha256:abcd",
+        profile_content=_profile(),
     )
     await db_session.commit()
 
@@ -274,6 +283,7 @@ async def test_incompatible_serializer_excluded(db_session: AsyncSession) -> Non
         profile_version_id=pv.id,
         vector=[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         serializer_version="candidate-professional-embedding-text-v2",
+        profile_content=_profile(),
     )
     await db_session.commit()
 
@@ -301,6 +311,7 @@ async def test_incompatible_dimension_excluded(db_session: AsyncSession) -> None
         candidate_id=candidate_8.id,
         profile_version_id=pv_8.id,
         vector=[1.0] * 8,
+        profile_content=_profile(),
     )
     await seed_embedding(
         db_session,
@@ -308,6 +319,7 @@ async def test_incompatible_dimension_excluded(db_session: AsyncSession) -> None
         candidate_id=candidate_4.id,
         profile_version_id=pv_4.id,
         vector=[1.0] * 4,
+        profile_content=_profile(),
     )
     await db_session.commit()
 
@@ -400,6 +412,7 @@ async def test_tenant_isolation_semantic_search(db_session: AsyncSession) -> Non
         candidate_id=cand_a.id,
         profile_version_id=pv_a.id,
         vector=[1.0] * 8,
+        profile_content=_profile(),
     )
     await seed_embedding(
         db_session,
@@ -407,6 +420,7 @@ async def test_tenant_isolation_semantic_search(db_session: AsyncSession) -> Non
         candidate_id=cand_b.id,
         profile_version_id=pv_b.id,
         vector=[1.0] * 8,
+        profile_content=_profile(),
     )
     await db_session.commit()
 
@@ -435,6 +449,7 @@ async def test_vector_values_never_returned(db_session: AsyncSession) -> None:
         candidate_id=candidate.id,
         profile_version_id=pv.id,
         vector=[1.0] * 8,
+        profile_content=_profile(),
     )
     await db_session.commit()
 

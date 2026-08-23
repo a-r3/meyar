@@ -7,7 +7,11 @@ from datetime import date
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meyar.embedding.serializer import SERIALIZER_VERSION
+from meyar.embedding.serializer import (
+    SERIALIZER_VERSION,
+    build_professional_embedding_text,
+    compute_source_sha256,
+)
 from meyar.services.candidate_document_repo import (
     create_candidate_document,
     create_canonical_document,
@@ -17,6 +21,15 @@ from meyar.services.candidate_profile_repo import create_profile_version
 from meyar.services.candidate_repo import create_candidate
 
 DEFAULT_AS_OF_DATE = date(2026, 1, 1)
+
+
+def current_source_sha256(profile_content: dict) -> str:
+    """The exact hash meyar.search now requires an embedding to carry to
+    be treated as current — the same computation
+    embed_candidate_profile (Slice 7) and meyar.search.service (Slice 8
+    fix) both perform: build_professional_embedding_text +
+    compute_source_sha256 over the candidate's CURRENT profile_content."""
+    return compute_source_sha256(build_professional_embedding_text(profile_content))
 
 
 async def seed_candidate_with_profile(
@@ -123,8 +136,22 @@ async def seed_embedding(
     model_name: str = "fake-embedding-model-v1",
     model_revision: str = "",
     serializer_version: str = SERIALIZER_VERSION,
+    profile_content: dict | None = None,
     source_sha256: str | None = None,
 ):
+    """`profile_content` should be the SAME content the candidate's
+    current CandidateProfileVersion was seeded with — when given (and
+    `source_sha256` is not explicitly overridden), the embedding is
+    stamped with the exact current canonical source_sha256, so it is
+    treated as fresh/current by meyar.search (see docs/DECISIONS.md
+    D-015). Pass an explicit, deliberately WRONG `source_sha256` to
+    construct a stale-hash regression fixture instead."""
+    if source_sha256 is None:
+        source_sha256 = (
+            current_source_sha256(profile_content)
+            if profile_content is not None
+            else uuid.uuid4().hex + "0" * 24
+        )
     return await create_embedding_version(
         db_session,
         tenant_id=tenant_id,
@@ -134,7 +161,7 @@ async def seed_embedding(
         model_name=model_name,
         model_revision=model_revision,
         serializer_version=serializer_version,
-        source_sha256=source_sha256 or uuid.uuid4().hex + "0" * 24,
+        source_sha256=source_sha256,
         embedding_dimensions=len(vector),
         embedding=vector,
     )

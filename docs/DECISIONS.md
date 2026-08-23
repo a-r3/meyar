@@ -45,27 +45,60 @@ no-LLM candidate search service, policy version `meyar-search-v1`:
    (provider, model_name, model_revision, serializer_version,
    embedding_dimensions) — never "whatever embedding row is newest."
    Query text is embedded locally through the exact same
-   `EmbeddingProvider` instance the caller supplies; the service
-   verifies `embedding_provider.provider_name/model_name/model_revision`
-   match the request's `embedding_config` before use, rejecting a
-   mismatch as `EMBEDDING_PROVIDER_CONFIG_MISMATCH`. `STRUCTURED_ONLY`
-   never calls `embedding_provider.embed()` — proven by a regression
-   test using a provider configured to raise if invoked
+   `EmbeddingProvider` instance the caller supplies. Two independent
+   checks gate this, both required: (a) before calling `.embed()`, the
+   service verifies `embedding_provider.provider_name/model_name/
+   model_revision` (the provider object's own declared attributes)
+   match `embedding_config`, rejecting a mismatch as
+   `EMBEDDING_PROVIDER_CONFIG_MISMATCH`; (b) **after** calling
+   `.embed()`, the service also verifies the ACTUAL returned
+   `EmbeddingResult.provider/model_name/model_revision` — not just the
+   provider object's static attributes — match `embedding_config`,
+   rejecting a mismatch as `EMBEDDING_RESULT_PROVENANCE_MISMATCH`. Check
+   (b) exists because a provider whose declared attributes match config
+   could still, due to a bug or a multi-model routing implementation,
+   perform the actual inference call against a different model — same
+   vector dimensions do not prove model compatibility. `""`
+   (`MODEL_REVISION_UNKNOWN`) matches only an explicit `""` on both
+   checks. The query vector itself is independently validated
+   (non-empty, every value finite — no NaN/±Inf — via
+   `meyar.search.policy.is_valid_query_vector`, exact expected
+   dimension, non-zero norm) regardless of which `EmbeddingProvider`
+   implementation is in use, not only `OllamaEmbeddingProvider`.
+   `STRUCTURED_ONLY` never calls `embedding_provider.embed()` — proven
+   by a regression test using a provider configured to raise if invoked
    (`test_structured_only_never_calls_embedding_provider`).
-6. **Only current, exactly-compatible embeddings participate.** A
-   compatible embedding is one whose `candidate_profile_version_id`
-   equals the candidate's CURRENT `CandidateProfileVersion` (never a
-   superseded/stale version) AND whose
-   provider/model_name/model_revision/serializer_version/
-   embedding_dimensions all exactly match the active `EmbeddingSearchConfig`
-   — mirrors the Slice 7 (D-014) provenance-grouping rule. The dimension/
-   config filter runs in an inner SQL subquery
-   (`candidate_embedding_repo.search_compatible_embeddings`) so pgvector's
-   `cosine_distance` (`<=>`) operator is only ever evaluated over
-   already-compatible rows, never a mismatched-dimension row from a
-   different configuration group. A candidate lacking a current
-   compatible embedding is excluded from `SEMANTIC_ONLY`/`HYBRID` results
-   (never assigned a fabricated semantic score of 0) — tracked in
+6. **Only current, exactly-compatible embeddings participate — including
+   current CANONICAL SOURCE-HASH freshness, not just profile-version
+   freshness.** A compatible embedding is one whose
+   `candidate_profile_version_id` equals the candidate's CURRENT
+   `CandidateProfileVersion` (never a superseded/stale version) AND
+   whose provider/model_name/model_revision/serializer_version/
+   embedding_dimensions all exactly match the active
+   `EmbeddingSearchConfig` AND whose `source_sha256` equals the exact
+   hash the CURRENT canonical professional serializer
+   (`build_professional_embedding_text` + `compute_source_sha256`,
+   recomputed from the candidate's current `profile_content` at search
+   time) produces right now. Slice 7's seven-field embedding-row
+   uniqueness intentionally allows multiple historical rows for the
+   same (tenant, profile version, provider, model, revision, serializer
+   version) differing only by `source_sha256` — e.g. a source-text
+   change under an unchanged `serializer_version`. Selecting among
+   those by profile-version match alone is insufficient and was an
+   acceptance-audit-caught defect (see the correction note below):
+   `candidate_embedding_repo.search_compatible_embeddings` now takes a
+   `{profile_version_id: expected_source_sha256}` mapping and filters
+   with a `(candidate_profile_version_id, source_sha256)` SQL tuple
+   match — never `ORDER BY created_at`, `MAX(id)`, or "latest row" as a
+   freshness substitute (freshness is provenance-based, not
+   chronology-based). Combined with the DB's own seven-field unique
+   constraint, this guarantees at most one row can match per candidate,
+   independent of SQL row-return order. The dimension/config/hash
+   filter runs in an inner SQL subquery so pgvector's `cosine_distance`
+   (`<=>`) operator is only ever evaluated over already-compatible rows.
+   A candidate lacking a current, hash-fresh, compatible embedding is
+   excluded from `SEMANTIC_ONLY`/`HYBRID` results (never assigned a
+   fabricated semantic score of 0) — tracked in
    `excluded_missing_embedding_count`.
 7. **Semantic normalization**: pgvector's cosine_distance returns
    `1 - cosine_similarity`; `semantic_score = (cosine_similarity + 1) /
@@ -129,6 +162,23 @@ no-LLM candidate search service, policy version `meyar-search-v1`:
     --request-file <path>`, a JSON `CandidateSearchRequest` file — no
     natural-language input). No new REST endpoint (Slice 12 owns API
     productization).
+
+**Post-acceptance-audit correction (same date, before merge):** An
+independent acceptance audit of the initial implementation reproduced
+two defects, both fixed on the same PR/branch before merge, addressed
+by points 5 and 6 above: (a) the service validated only the
+`EmbeddingProvider` object's declared static attributes against
+`embedding_config`, never the actual `EmbeddingResult`'s own
+provider/model_name/model_revision — fixed by the second check in point
+5; (b) `search_compatible_embeddings` filtered only by profile-version
+id and the six-field config, so when a candidate had multiple embedding
+rows differing only by `source_sha256` (a state Slice 7 explicitly
+allows), the "current" one was selected by arbitrary/unordered SQL
+row-return order rather than by provenance — independently proven to
+flip between the current and a stale embedding purely by reversing
+insertion order — fixed by point 6's `(profile_version_id,
+source_sha256)` tuple match. Both are covered by dedicated regression
+tests (`test_search_semantic_provenance.py`).
 **Why:** These are the concrete implementation choices needed to satisfy
 issue #10's acceptance criteria — a fully documented, reviewable ranking
 policy so Slice 9 (natural-language → this request shape) and Slice

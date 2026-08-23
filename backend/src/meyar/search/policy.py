@@ -3,6 +3,8 @@ policy. Every constant/formula a search result depends on lives here, not
 scattered across the service, so Slice 9/11/12 can consume it without
 reverse-engineering ranking semantics. See docs/DECISIONS.md."""
 
+import math
+
 SEARCH_POLICY_VERSION = "meyar-search-v1"
 
 DEFAULT_STRUCTURED_WEIGHT = 0.5
@@ -14,6 +16,17 @@ WEIGHT_SUM_TOLERANCE = 1e-6
 MIN_SEARCH_LIMIT = 1
 MAX_SEARCH_LIMIT = 100
 MAX_SEMANTIC_QUERY_LENGTH = 2000
+
+
+def is_valid_query_vector(vector: list[float]) -> bool:
+    """Defense-in-depth boundary validation for a query embedding vector,
+    independent of any specific EmbeddingProvider implementation
+    (OllamaEmbeddingProvider already validates this for its own HTTP
+    response, but the search boundary must not blindly trust every
+    current/future provider to do the same). Non-empty, every value a
+    finite real number (no NaN/+-Inf) — zero-norm is checked separately
+    by the caller since it is only invalid for a cosine-distance search."""
+    return bool(vector) and all(isinstance(v, int | float) and math.isfinite(v) for v in vector)
 
 
 def cosine_distance_to_similarity(distance: float) -> float:

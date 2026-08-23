@@ -157,9 +157,11 @@ remains disabled.
   D-015, `docs/DECISIONS.md`, for the exact ranking policy.
 
 ## Tests
-222/222 passing (177 prior + 45 new, Slice 8 — 17 structured + 17
-semantic + 10 hybrid + 1 zero-norm-vector hardening regression on
-`OllamaEmbeddingProvider`). Deterministic policy unit tests
+231/231 passing (177 prior + 54 Slice 8 — 17 structured + 17 semantic +
+10 hybrid + 1 zero-norm-vector hardening regression on
+`OllamaEmbeddingProvider` + 9 post-acceptance-audit provenance/source-
+hash-freshness regressions, `test_search_semantic_provenance.py`, see
+D-015's correction note). Deterministic policy unit tests
 (no DB, no LLM — `test_evaluation_policy.py`): skill match/absent-is-
 unknown/case-normalization/Java-never-equals-JavaScript/alias
 normalization, certification match/absent, education match/unsupported,
@@ -268,6 +270,34 @@ rank/relevance** (two candidates with identical profiles/embeddings but
 wildly different identity content produce identical results), and
 explanation components (matched required/preferred filter labels)
 proven to match the actual score calculation.
+
+Post-acceptance-audit correction (`test_search_semantic_provenance.py`,
+9 tests — see D-015's correction note): an independent acceptance audit
+of the initial Slice 8 implementation reproduced two defects before
+merge, both fixed on this same branch/PR. (1) The service validated
+only the `EmbeddingProvider` object's declared static attributes
+against `embedding_config`, never the actual `EmbeddingResult`'s own
+provider/model_name/model_revision — fixed, and regression-tested with
+a provider whose declared attributes match config but whose `.embed()`
+result claims a different provider/model/revision (same dimensions),
+each independently rejected as `EMBEDDING_RESULT_PROVENANCE_MISMATCH`;
+a matching-provenance case is also tested to prove the fix isn't
+over-strict. Two non-finite (NaN/±Inf) query-vector regressions prove
+the search boundary itself validates the vector, not just
+`OllamaEmbeddingProvider`. (2) `search_compatible_embeddings` selected
+among multiple same-profile/same-config embedding rows (differing only
+by `source_sha256`, a state Slice 7 explicitly allows) by arbitrary/
+unordered SQL row-return order rather than by the current canonical
+serialization — independently proven (during the audit) to flip between
+the current and a stale embedding purely by reversing insertion order.
+Fixed by recomputing each eligible candidate's current canonical
+`source_sha256` at search time and requiring an exact
+`(candidate_profile_version_id, source_sha256)` match; regression-tested
+for insertion-order independence (both orders select only the current
+hash, identical scores), the current hash being entirely absent
+(candidate excluded, never falls back to a stale hash), and three
+coexisting historical hashes (only the current one participates, the
+candidate appears exactly once).
 `uv run ruff check .` and `uv run mypy src` are clean (95 source files).
 
 ## Live synthetic smoke

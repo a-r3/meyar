@@ -13,12 +13,14 @@ import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.embedding.provider import EmbeddingProvider
+from meyar.embedding.serializer import build_professional_embedding_text, compute_source_sha256
 from meyar.models.candidate_profile_version import PROFILE_STATUS_COMPLETED
 from meyar.schemas.candidate_profile import CandidateProfileExtraction
 from meyar.search.policy import (
     SEARCH_POLICY_VERSION,
     compute_hybrid_score,
     cosine_distance_to_similarity,
+    is_valid_query_vector,
     normalize_semantic_score,
 )
 from meyar.search.schemas import (
@@ -63,8 +65,8 @@ async def search_candidates(
 
     profile_versions = await list_current_profile_versions_for_tenant(db, tenant_id=tenant_id)
 
-    # (candidate_id, profile_version_id, profile, required_matches)
-    eligible: list[tuple[uuid.UUID, uuid.UUID, CandidateProfileExtraction, list]] = []
+    # (candidate_id, profile_version_id, profile, profile_content, required_matches)
+    eligible: list[tuple[uuid.UUID, uuid.UUID, CandidateProfileExtraction, dict, list]] = []
     for version in profile_versions:
         if version.status != PROFILE_STATUS_COMPLETED or version.profile_content is None:
             continue
@@ -77,7 +79,15 @@ async def search_candidates(
         )
         if not required_result.satisfied:
             continue
-        eligible.append((version.candidate_id, version.id, profile, required_result.matches))
+        eligible.append(
+            (
+                version.candidate_id,
+                version.id,
+                profile,
+                version.profile_content,
+                required_result.matches,
+            )
+        )
 
     eligible_profile_count = len(eligible)
 
@@ -85,13 +95,13 @@ async def search_candidates(
     # SEMANTIC_ONLY leaves it as None ("not evaluated in this mode").
     structured_scores: dict[uuid.UUID, tuple[float | None, list]] = {}
     if request.mode in (SearchMode.STRUCTURED_ONLY, SearchMode.HYBRID):
-        for candidate_id, _pv_id, profile, _req_matches in eligible:
+        for candidate_id, _pv_id, profile, _content, _req_matches in eligible:
             preferred_result = evaluate_preferred_filters(
                 profile, request.preferred_filters, as_of_year=as_of_year
             )
             structured_scores[candidate_id] = (preferred_result.score, preferred_result.matches)
     else:
-        for candidate_id, _pv_id, _profile, _req_matches in eligible:
+        for candidate_id, _pv_id, _profile, _content, _req_matches in eligible:
             structured_scores[candidate_id] = (None, [])
 
     semantic_scores: dict[uuid.UUID, tuple[float, uuid.UUID]] = {}
@@ -121,23 +131,60 @@ async def search_candidates(
         query_text = request.semantic_query.strip()
         embed_result = await embedding_provider.embed(query_text)
 
-        if embed_result.dimensions != config.embedding_dimensions:
+        # Defect fix (post-acceptance-audit): validate the ACTUAL
+        # EmbeddingResult's own provenance fields, not just the provider
+        # OBJECT's declared static attributes checked above. A provider
+        # whose static attributes match config but whose embed() call
+        # itself used/reports a different provider/model/revision must
+        # be rejected — dimension equality is never proof of model
+        # compatibility. "" (MODEL_REVISION_UNKNOWN) matches only "".
+        if (
+            embed_result.provider != config.provider
+            or embed_result.model_name != config.model_name
+            or embed_result.model_revision != config.model_revision
+        ):
+            raise SearchRequestError(
+                "EMBEDDING_RESULT_PROVENANCE_MISMATCH",
+                "The embedding result's own provider/model_name/model_revision does "
+                "not match the request's embedding_config — the embedding call itself "
+                "may have used a different model than declared.",
+            )
+        if not is_valid_query_vector(embed_result.vector):
+            raise SearchRequestError(
+                "QUERY_VECTOR_INVALID",
+                "Query embedding vector must be non-empty and contain only finite "
+                "numeric values.",
+            )
+        if (
+            embed_result.dimensions != config.embedding_dimensions
+            or len(embed_result.vector) != config.embedding_dimensions
+        ):
             raise SearchRequestError(
                 "QUERY_VECTOR_DIMENSION_MISMATCH",
-                f"Query embedding produced {embed_result.dimensions} dimensions, expected "
-                f"{config.embedding_dimensions}.",
+                f"Query embedding produced {len(embed_result.vector)} dimensions, "
+                f"expected {config.embedding_dimensions}.",
             )
-        if not embed_result.vector or _is_zero_vector(embed_result.vector):
+        if _is_zero_vector(embed_result.vector):
             raise SearchRequestError(
                 "QUERY_VECTOR_ZERO_NORM",
                 "Query embedding is a zero-norm vector; cosine similarity is undefined.",
             )
 
-        eligible_profile_version_ids = [pv_id for _cid, pv_id, _p, _m in eligible]
+        # Defect fix (post-acceptance-audit): a candidate embedding is
+        # compatible only if its source_sha256 equals the hash the
+        # CURRENT canonical professional serializer produces from this
+        # candidate's CURRENT profile_content — never merely a
+        # profile-version + six-field-config match. This is provenance-
+        # based freshness, not chronology-based (no ORDER BY / MAX(id)
+        # substitute) — see docs/DECISIONS.md D-015.
+        profile_version_source_hashes = {
+            pv_id: compute_source_sha256(build_professional_embedding_text(profile_content))
+            for _cid, pv_id, _profile, profile_content, _matches in eligible
+        }
         rows = await search_compatible_embeddings(
             db,
             tenant_id=tenant_id,
-            candidate_profile_version_ids=eligible_profile_version_ids,
+            profile_version_source_hashes=profile_version_source_hashes,
             provider=config.provider,
             model_name=config.model_name,
             model_revision=config.model_revision,
@@ -156,7 +203,7 @@ async def search_candidates(
         excluded_missing_embedding_count = eligible_profile_count - compatible_embedding_count
 
     ranked: list[CandidateSearchResult] = []
-    for candidate_id, pv_id, _profile, required_matches in eligible:
+    for candidate_id, pv_id, _profile, _content, required_matches in eligible:
         structured_score, preferred_matches = structured_scores.get(candidate_id, (None, []))
         semantic_entry = semantic_scores.get(candidate_id)
 

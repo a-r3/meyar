@@ -78,6 +78,7 @@ async def test_hard_constraint_gate_never_bypassed_by_semantic_similarity(
         candidate_id=candidate_a.id,
         profile_version_id=pv_a.id,
         vector=[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        profile_content=_profile(["Rust"]),
     )
     # B: much lower semantic similarity.
     await seed_embedding(
@@ -86,6 +87,7 @@ async def test_hard_constraint_gate_never_bypassed_by_semantic_similarity(
         candidate_id=candidate_b.id,
         profile_version_id=pv_b.id,
         vector=[0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        profile_content=_profile(["Python"]),
     )
     await db_session.commit()
 
@@ -127,6 +129,7 @@ async def test_no_premature_semantic_top_k_before_hybrid_score(db_session: Async
         candidate_id=candidate_a.id,
         profile_version_id=pv_a.id,
         vector=[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],  # near-perfect similarity
+        profile_content=_profile(["Python"]),
     )
     await seed_embedding(
         db_session,
@@ -134,6 +137,7 @@ async def test_no_premature_semantic_top_k_before_hybrid_score(db_session: Async
         candidate_id=candidate_b.id,
         profile_version_id=pv_b.id,
         vector=[0.7, 0.3, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],  # lower similarity
+        profile_content=_profile(["Python", "AWS"]),
     )
     await db_session.commit()
 
@@ -169,11 +173,11 @@ async def test_preferred_structured_score_affects_final_rank(db_session: AsyncSe
     same_vector = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     await seed_embedding(
         db_session, tenant_id=tenant.id, candidate_id=strong.id, profile_version_id=pv_strong.id,
-        vector=same_vector,
+        vector=same_vector, profile_content=_profile(["Python", "AWS"]),
     )
     await seed_embedding(
         db_session, tenant_id=tenant.id, candidate_id=weak.id, profile_version_id=pv_weak.id,
-        vector=same_vector,
+        vector=same_vector, profile_content=_profile(["Python"]),
     )
     await db_session.commit()
 
@@ -210,7 +214,7 @@ async def test_deterministic_configured_weight_formula(db_session: AsyncSession)
     vector = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     await seed_embedding(
         db_session, tenant_id=tenant.id, candidate_id=candidate.id, profile_version_id=pv.id,
-        vector=vector,
+        vector=vector, profile_content=_profile(["Python", "AWS"]),
     )
     await db_session.commit()
 
@@ -264,11 +268,11 @@ async def test_stable_tie_break_in_hybrid(db_session: AsyncSession) -> None:
     )
     await seed_embedding(
         db_session, tenant_id=tenant.id, candidate_id=candidate_a.id, profile_version_id=pv_a.id,
-        vector=vector,
+        vector=vector, profile_content=_profile(["Python"]),
     )
     await seed_embedding(
         db_session, tenant_id=tenant.id, candidate_id=candidate_b.id, profile_version_id=pv_b.id,
-        vector=vector,
+        vector=vector, profile_content=_profile(["Python"]),
     )
     await db_session.commit()
 
@@ -291,7 +295,7 @@ async def test_repeated_identical_hybrid_search_is_deterministic(db_session: Asy
     vector = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     await seed_embedding(
         db_session, tenant_id=tenant.id, candidate_id=candidate.id, profile_version_id=pv.id,
-        vector=vector,
+        vector=vector, profile_content=_profile(["Python", "AWS"]),
     )
     await db_session.commit()
 
@@ -325,11 +329,11 @@ async def test_identity_data_does_not_change_rank(db_session: AsyncSession) -> N
     )
     await seed_embedding(
         db_session, tenant_id=tenant.id, candidate_id=candidate_a.id, profile_version_id=pv_a.id,
-        vector=vector,
+        vector=vector, profile_content=_profile(["Python"]),
     )
     await seed_embedding(
         db_session, tenant_id=tenant.id, candidate_id=candidate_b.id, profile_version_id=pv_b.id,
-        vector=vector,
+        vector=vector, profile_content=_profile(["Python"]),
     )
     await db_session.commit()
 
@@ -396,7 +400,7 @@ async def test_explanation_components_match_score_calculation(db_session: AsyncS
     vector = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     await seed_embedding(
         db_session, tenant_id=tenant.id, candidate_id=candidate.id, profile_version_id=pv.id,
-        vector=vector,
+        vector=vector, profile_content=_profile(["Python", "AWS"]),
     )
     await db_session.commit()
 
