@@ -10,7 +10,7 @@
   <p class="untrusted-text">{{ query }}</p>
   <p class="meta">Qiymətləndirmə tarixi: {{ as_of_date }}</p>
 </section>
-<section class="alert {% if outcome.executable %}alert-success{% else %}alert-warning{% endif %}" role="status">
+<section class="alert outcome-alert" data-outcome="{{ outcome.outcome }}" role="status">
   <h2>{{ outcome.title }}</h2>
   <p>{{ outcome.message }}</p>
   {% if outcome.mode %}<p class="meta">Rejim: {{ outcome.mode }}</p>{% endif %}
