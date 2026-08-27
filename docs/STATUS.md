@@ -534,7 +534,7 @@ no code yet.
 | Strict JSON validation | DONE | Pydantic v2, `extra="forbid"`, bounded retry (Slice 4, Slice 7 identity, Slice 9 planner) | — | 4, 7, 9 |
 | Uncertainty handling | DONE | `UNKNOWN` never auto-downgraded (D-010), Slice 5 | — | 5 |
 | Candidate DB | DONE | `Candidate`, `CandidateDocument`, `CandidateProfileVersion`, `CandidateIdentityVersion` (Slice 7, D-014) | — | 3, 4, 7 |
-| Original file reference | DONE | Opaque storage id + `DocumentStorage` abstraction (Slice 3) | Authorized UI access to original CV | 11 |
+| Original file reference | DONE | Opaque storage id + `DocumentStorage` abstraction (Slice 3) | Opaque reference is DONE; the separate mandatory "open original CV" product capability (`docs/PROJECT_VISION.md`) is not implemented — carried into Slice 13 / M5 final MVP acceptance, not Slice 11 | 13 |
 | Local CV folder migration/indexing | DONE | Symlink-safe recursive scanner, SHA-256 content-hash incremental/idempotent indexing, existing ingestion pipeline reused, tombstone-not-delete on removal (Slice 6, D-013) | — | 6 |
 | Local embeddings / vector storage | DONE | Local `EmbeddingProvider`/`OllamaEmbeddingProvider` (loopback-enforced), pgvector-backed `CandidateEmbeddingVersion` with version/provenance, idempotent, dimension-agnostic column (Slice 7, D-014) | — | 7 |
 | Access control | DONE | API-key auth, scopes, tenant isolation (Slice 1) | Extend scopes as new endpoints ship | ongoing |
@@ -558,10 +558,13 @@ no code yet.
 4 NOT STARTED** (28 items), independently recounted after Slice 12. Three rows
 moved from the Slice-11 baseline: REST API, Swagger/OpenAPI, and README
 examples all moved PARTIAL/NOT STARTED → DONE (Slice 12, D-019). Original-file
-reference remains DONE at the storage layer while arbitrary browser delivery
-is intentionally still not added (out of Slice 12 scope, per issue #18). The
-two remaining PARTIAL rows are data-protection/backup description and Git
-branch/PR workflow. The four remaining NOT STARTED rows are target-Mac
-benchmark, OCR, multilingual-CV fixtures, and external-network/exfiltration
-verification — all explicitly Slice 13 (Security + Official
-Definition-of-Done Acceptance), not started, not claimed by Slice 12.
+reference remains DONE at the storage layer, but the separate mandatory
+"open original CV" product capability (`docs/PROJECT_VISION.md`) is not
+implemented and is now explicitly carried into Slice 13 / M5 as a mandatory
+acceptance item (see issue #20) — it does not add a 29th matrix row or change
+this row's DONE status. The two remaining PARTIAL rows are
+data-protection/backup description and Git branch/PR workflow. The four
+remaining NOT STARTED rows are target-Mac benchmark, OCR, multilingual-CV
+fixtures, and external-network/exfiltration verification — all explicitly
+Slice 13 (Security + Official Definition-of-Done Acceptance), not started,
+not claimed by Slice 12.
