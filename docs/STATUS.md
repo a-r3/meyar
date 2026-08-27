@@ -1,7 +1,7 @@
 # MEYAR — Status
 
 ## Current phase
-**Slice 12 — REST API / Swagger / README Completion implementation/acceptance.**
+**Slice 13 — Security + Official Definition-of-Done Acceptance: NOT STARTED.**
 Governance PR #1 merged at `16929fd` (**M0 CLOSED**); Slice 6 PR #7
 merged at `55fef2d` (**M1 — CV Ingestion & Candidate Library is
 CLOSED**, issue #6 closed); Slice 7 PR #9 merged at `24b1d67` (issue #8
@@ -9,9 +9,12 @@ closed); Slice 8 PR #11 Squash-merged at `412d978` (issue #10 closed).
 Slice 9 PR #13 merged at `1be5d51` (issue #12 closed; **M2 CLOSED**).
 Slice 10 PR #15 merged at `1c9dbbd` (issue #14 and **M3 — JD Matching &
 Ranking CLOSED**). Slice 11 PR #17 squash-merged at `e182bdd` (issue #16
-closed). Slice 12 issue #18 is implemented on
-`feat/rest-api-openapi-completion`, associated with open **M4 — Internal
-Product Interface & API**, and is pending independent acceptance/owner merge.
+closed). Slice 12 PR #19 squash-merged at `93fa567` (issue #18 closed;
+**M4 — Internal Product Interface & API CLOSED**). Local `main` and
+`origin/main` currently sit at `93fa567`. **M5 — Security, Target-Mac
+Validation & MVP Acceptance is OPEN**, containing only issue #20 (Slice
+13 — Security + Official Definition-of-Done Acceptance, a governance/
+placeholder issue). Slice 13 implementation has not started.
 
 GitHub remote established (`https://github.com/a-r3/meyar.git`, private,
 temporary development remote — see D-012, `docs/DECISIONS.md`). `main`
@@ -511,8 +514,8 @@ due date because the official timeline has not been supplied.
 | M1 — CV Ingestion & Candidate Library | Slice 6 | CLOSED — merged `55fef2d` (PR #7), issue #6 closed |
 | M2 — Candidate Search Intelligence | Slices 7–9 | CLOSED — PRs #9/#11/#13 merged; issues #8/#10/#12 closed |
 | M3 — JD Matching & Ranking | Slice 10 | CLOSED — PR #15 merged at `1c9dbbd`, issue #14 closed |
-| M4 — Internal Product Interface & API | Slices 11–12 | OPEN / IN REVIEW — Slice 11 merged (PR #17, issue #16 closed); Slice 12 implemented, issue #18 open, pending acceptance/merge |
-| M5 — Security, Target-Mac Validation & MVP Acceptance | Slice 13 + target-Mac benchmark | NOT STARTED |
+| M4 — Internal Product Interface & API | Slices 11–12 | CLOSED — Slice 11 merged (PR #17, issue #16 closed); Slice 12 merged (PR #19 at `93fa567`, issue #18 closed) |
+| M5 — Security, Target-Mac Validation & MVP Acceptance | Slice 13 + target-Mac benchmark | OPEN — issue #20 (Slice 13, governance/placeholder) open; Slice 13 implementation NOT STARTED |
 
 ## Official requirement gap matrix
 
