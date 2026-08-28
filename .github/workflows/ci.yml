@@ -59,5 +59,16 @@ jobs:
       - name: mypy (production source)
         run: uv run mypy src
 
+      - name: Alembic migration chain (upgrade head, single head)
+        env:
+          MEYAR_DATABASE_URL: postgresql+asyncpg://meyar:meyar_dev_password@localhost:55719/meyar
+        run: |
+          uv run alembic upgrade head
+          head_count=$(uv run alembic heads | grep -c '(head)')
+          if [ "$head_count" -ne 1 ]; then
+            echo "Expected exactly one Alembic head, found $head_count" >&2
+            exit 1
+          fi
+
       - name: pytest
         run: uv run pytest -q
