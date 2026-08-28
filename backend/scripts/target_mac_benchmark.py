@@ -94,11 +94,9 @@ def _tool_version(cmd: list[str]) -> str:
 async def _run_operations(report: BenchmarkReport) -> None:
     from meyar.config import get_settings
     from meyar.embedding.dependency import get_embedding_provider
-    from meyar.embedding.provider import EmbeddingProviderError
     from meyar.extraction.view import ModelInputBlock, ProfessionalDocumentView
     from meyar.ingestion.parsers.local_text_parser import LocalTextParser
     from meyar.llm.dependency import get_llm_provider
-    from meyar.llm.provider import LLMProviderError
 
     settings = get_settings()
     report.llm_model = settings.ollama_model
@@ -138,7 +136,7 @@ async def _run_operations(report: BenchmarkReport) -> None:
             report.llm_model_revision = getattr(llm, "model_revision", "")
             await llm.extract_candidate_profile(view)
             success, error = True, None
-        except (LLMProviderError, Exception) as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             success, error = False, f"{type(exc).__name__}: {exc}"
     report.operations.append(
         OperationResult(
@@ -152,7 +150,7 @@ async def _run_operations(report: BenchmarkReport) -> None:
             embed_result = await embedder.embed("Skills: Python, SQL, Docker")
             report.embedding_model_revision = embed_result.model_revision
             success, error = True, None
-        except (EmbeddingProviderError, Exception) as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             success, error = False, f"{type(exc).__name__}: {exc}"
     report.operations.append(
         OperationResult(

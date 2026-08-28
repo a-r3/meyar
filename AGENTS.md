@@ -91,8 +91,10 @@ that debt is resolved.
   merged; **M4 — Internal Product Interface & API is CLOSED**. **M5 —
   Security, Target-Mac Validation & MVP Acceptance is OPEN**, containing only
   issue #20 (Slice 13 — Security + Official Definition-of-Done Acceptance,
-  open). Slice 13 implementation has not started. The old External Async
-  Evaluation API Slice 6 remains cancelled and superseded.
+  open). Slice 13 implementation Pass 1 is in PR #22 (open); the Target-Mac
+  benchmark execution on the owner-confirmed Mac mini M4 Pro remains the
+  sole mandatory blocker to closing M5. The old External Async Evaluation
+  API Slice 6 remains cancelled and superseded.
 - The GitHub repository is currently a private personal development repository
   and may later migrate to an official bank-owned repository. Preserve full
   Git history during any migration.

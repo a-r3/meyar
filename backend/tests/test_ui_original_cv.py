@@ -119,7 +119,7 @@ async def test_response_never_leaks_storage_key_or_filesystem_path(
     assert response.status_code == 200
     for header_value in response.headers.values():
         assert "/storage/" not in header_value
-        assert str(candidate_id) not in header_value or "content-disposition" not in header_value
+        assert str(candidate_id) not in header_value
     # only the opaque document UUID may appear (in the synthetic filename) —
     # never a storage_key segment or an absolute/relative filesystem path.
     disposition = response.headers["content-disposition"]

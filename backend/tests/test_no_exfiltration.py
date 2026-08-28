@@ -4,10 +4,10 @@ Layered proof that candidate-content workflows never contact a public
 network service:
 
 1. Static inventory (verified during Slice 13 preparation, restated
-   here as an executable check): the only two `httpx.AsyncClient`
-   constructions in `src/meyar` are `OllamaLLMProvider._chat` and
-   `OllamaEmbeddingProvider.embed`, both of which call
-   `require_loopback_url` at construction time (see
+   here as an executable check): there are three `httpx.AsyncClient`
+   construction sites in `src/meyar` — `OllamaLLMProvider.health`,
+   `OllamaLLMProvider._chat`, and `OllamaEmbeddingProvider.embed` — all
+   loopback-gated via `require_loopback_url` at construction time (see
    `test_ollama_provider_rejects_non_loopback_url` /
    `test_ollama_embedding_provider_rejects_non_loopback_url`, already
    covered elsewhere).
