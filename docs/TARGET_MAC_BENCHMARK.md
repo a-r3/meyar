@@ -11,14 +11,31 @@ is not Apple Silicon and is explicitly not the target — production LLM
 D-014) and embedding model selection is deferred until real numbers
 exist from the actual target hardware.
 
-## Canonical target hardware
+## Canonical target hardware (owner-confirmed, 2026-08-28)
 
-**Not yet recorded anywhere in project documentation.** Every existing
-reference to "Mac Mini" / "target hardware" is generic (see
-`docs/MASTER_SPEC.md`, `docs/MVP_PLAN.md`). This is an **owner input
-required** item — the exact model, chip, RAM, and macOS version must be
-supplied and recorded here (and in `docs/DECISIONS.md`) before a
-benchmark run can count as the official acceptance gate.
+**Validated MVP reference configuration:**
+
+- Mac mini M4 Pro
+- 12-core CPU
+- 16-core GPU
+- 24 GB unified memory
+- 512 GB SSD
+
+This is the **MVP reference configuration**, not a permanent platform
+lock-in. MEYAR must not be documented as "Mac-mini-only" or
+"M4-Pro-only." Future deployment to another Mac, a Mac Studio, a
+Linux/NVIDIA server, or other bank-controlled server infrastructure
+remains architecturally possible, subject to platform-specific
+dependency validation, a fresh performance benchmark, and (where the
+deployment topology changes) the required security/deployment
+decisions.
+
+If a future deployment ever separates the MEYAR application host from
+the inference (Ollama) host, the current loopback-only inference
+security assumption (`meyar.llm.loopback.require_loopback_url`) no
+longer holds by construction and must be revisited under a separate,
+explicitly approved architecture/security decision — this is a future
+change, not implemented as part of Slice 13.
 
 ## Acceptance policy for this pass (owner decision, 2026-08-28)
 
@@ -78,9 +95,30 @@ requires: real numbers from the approved target hardware, recorded
 model name + revision, and an explicit decision recorded in
 `docs/DECISIONS.md` (D-020 or a dedicated entry).
 
+## How to run the actual acceptance benchmark
+
+On the confirmed target Mac mini M4 Pro:
+
+```bash
+uname -a; sw_vers; system_profiler SPHardwareDataType   # record, never the serial number
+cd backend
+uv sync --locked
+# point MEYAR_DATABASE_URL / MEYAR_OLLAMA_BASE_URL at a real local Postgres/Ollama
+uv run alembic upgrade head
+uv run python scripts/target_mac_benchmark.py --out target-mac-report.json
+```
+
+Then record the result in this file's Status section and in
+`docs/DECISIONS.md` D-020 (item 15), and update `docs/STATUS.md`'s matrix
+row 1 accordingly. Do not approve a production model, mark this row DONE,
+or close issue #20/M5 until that has actually happened.
+
 ## Status
 
-- Target hardware supplied: **NO**
+- Target hardware confirmed by owner: **YES** — Mac mini M4 Pro (2026-08-28)
+- Target hardware physically available to this session: **NO** (this
+  session's environment is an x86_64 Linux laptop, confirmed via `uname -a`
+  during Slice 13 finalization — does not match)
 - Benchmark harness built: **YES** (partial — see scope above)
 - Benchmark executed on target hardware: **NO**
 - Production LLM model approved: **NO**

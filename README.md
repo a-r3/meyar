@@ -92,9 +92,12 @@ Implemented and tested:
 
 Planned or in progress:
 
-- **Next: Slice 13** — full security and target-Mac acceptance (Definition of
-  Done matrix), including rate-limiting/backup/restore/DoD sign-off. Not yet
-  claimed as complete by Slice 12.
+- **Slice 13** — security and Definition-of-Done acceptance. Implementation
+  pass 1 (PR #22) is complete: original-CV access, no-exfiltration formal
+  verification, backup/restore acceptance, audit-privacy guard, and
+  multilingual evidence. **Remaining**: Target-Mac benchmark execution on the
+  owner-confirmed reference hardware (Mac mini M4 Pro) and the resulting
+  production-model decision — see `docs/STATUS.md`. Not yet claimed complete.
 
 The superseded External Async Evaluation API version of Slice 6 is cancelled.
 
@@ -444,17 +447,24 @@ updated `backend/uv.lock` when applicable.
   proficiency, skill-specific duration, identity, salary/location, and
   custom-weight requests rather than weakening their meaning — this is
   deliberate fail-closed behavior, not a gap.
-- Raw CV file download/retrieval is not exposed over `/api/v1` or `/ui` —
-  only extracted structured facts and parse metadata.
+- Raw CV file download/retrieval is not exposed over `/api/v1` — only
+  extracted structured facts and parse metadata there. It is available,
+  UI-only and authenticated (`candidates:read`, tenant/candidate/document
+  ownership verified server-side), at
+  `GET /ui/candidates/{candidate_id}/documents/{document_id}/original`
+  (Slice 13) — see `docs/STATUS.md`.
 - No rate limiting is implemented yet (`MEYAR_RATE_LIMIT_PER_MINUTE` exists in
-  config but is not yet enforced) — a Slice 13 security-acceptance item.
+  config but is not yet enforced).
 - No CORS policy is configured; the current same-origin UI + internal API
   deployment does not require one. A specific internal cross-origin client
   would need an explicit allowlisted-origin decision, not a wildcard.
 - OCR fallback for scanned PDFs is not implemented.
 - The configured embedding model is a development/integration default
   (`DEV_INTEGRATION_MODEL`), not an approved final production model —
-  approval is blocked on the target Mac Mini benchmark.
+  approval is blocked on the target Mac Mini benchmark. Target reference
+  hardware (Mac mini M4 Pro, 12-core CPU/16-core GPU/24GB unified memory/
+  512GB SSD) is now owner-confirmed but the benchmark has not yet been
+  executed on it — see `docs/TARGET_MAC_BENCHMARK.md`.
 - Profile/identity extraction (`extract-profile`, `extract-identity`) and
   folder indexing remain CLI/service-only by design — not part of the
   official REST API surface.
@@ -462,9 +472,13 @@ updated `backend/uv.lock` when applicable.
   candidate data requires the approved protected storage environment.
 - Server-side branch protection is unavailable on the current private
   repository plan; hooks, PRs, CI, and owner review are the accepted fallback.
-- Full security/Definition-of-Done acceptance (Slice 13) — including
-  penetration testing, backup/restore validation, and target-Mac
-  benchmarking — has not yet run.
+- Slice 13 security/Definition-of-Done acceptance, implementation pass 1
+  (original CV access, no-exfiltration formal verification, backup/restore
+  acceptance, audit-privacy guard, multilingual evidence) is complete
+  (PR #22) — see `docs/STATUS.md`. Target-Mac benchmark execution on the
+  now owner-confirmed reference hardware has not yet run and remains the
+  sole mandatory blocker to MVP closure; no formal penetration test has
+  been performed.
 
 See [`docs/STATUS.md`](docs/STATUS.md) for the complete current gap matrix and
 the latest next action.

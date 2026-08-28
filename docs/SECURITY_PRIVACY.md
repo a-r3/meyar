@@ -77,6 +77,7 @@
 | Retry-induced duplicate work/cost | `Idempotency-Key` on unsafe writes where relevant |
 | Inference overload | Global concurrency semaphore around the `LLMProvider` call; per-tenant rate limit |
 | Candidate content leaving bank infrastructure via embeddings | Local-only embedding provider abstraction, same boundary pattern as `LLMProvider`; no external embedding API call anywhere in code |
+| Candidate content leaving the host machine via any outbound network call | Formally verified (Slice 13): static inventory confirms only two `httpx.AsyncClient` construction sites exist in the app, both loopback-gated; a deterministic runtime guard (`test_no_exfiltration.py`) proves a representative extract+embed workflow, run through the real provider classes, never attempts a non-loopback request. Validated as an application-level, tested-configuration claim — not a physical-firewall/network-layer guarantee. |
 | Identity data (name/contact) leaking into scoring/ranking as a hidden signal | `CandidateIdentityVersion` is presentation-only by construction — matching/search/ranking inputs include only `CandidateProfile` fields, and Slice 11 resolves identity after backend order is fixed |
 | Untrusted local files treated as more trustworthy than uploads | Folder-discovered files go through the identical MIME/size/opaque-id validation path as direct upload — no separate, weaker code path |
 
@@ -133,8 +134,11 @@ skill; CV text/PII must never be passed to the logger.
 
 ## Retention / deletion
 
-Policy values (retention days, backup handling) are configurable, not
-hardcoded — open business decision, see DECISIONS.md. `DELETE
+Policy values (retention days, backup frequency/schedule) are configurable,
+not hardcoded — open business decision, see DECISIONS.md. The backup/restore
+*mechanism* itself (PostgreSQL-native `pg_dump`/`pg_restore` + document-
+storage archive, both required together) is documented and has an executed
+synthetic acceptance proof — see `docs/BACKUP_RESTORE.md`. `DELETE
 /v1/candidates/{id}` hard-deletes identity + raw document content
 immediately; evaluation audit rows are tombstoned per tenant policy, not
 necessarily deleted (needed for audit/compliance defense), but never expose

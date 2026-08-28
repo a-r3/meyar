@@ -1,7 +1,16 @@
 # MEYAR — Status
 
 ## Current phase
-**Slice 13 — Security + Official Definition-of-Done Acceptance: NOT STARTED.**
+**Slice 13 — Security + Official Definition-of-Done Acceptance: implementation
+pass 1 complete (PR #22, `Refs #20`), Target-Mac hardware gate PENDING.**
+Original-CV access, no-exfiltration formal verification, backup/restore
+acceptance, audit-privacy guard, and multilingual (AZ/RU/EN) evidence are all
+implemented and tested. Target reference hardware is now owner-confirmed (Mac
+mini M4 Pro, 12-core CPU, 16-core GPU, 24 GB unified memory, 512 GB SSD — a
+validated MVP reference configuration, not a permanent platform lock-in; see
+`docs/TARGET_MAC_BENCHMARK.md`), but the benchmark has not yet been executed
+on that hardware — this remains the sole mandatory blocker to closing M5.
+Issue #20 and M5 remain OPEN.
 Governance PR #1 merged at `16929fd` (**M0 CLOSED**); Slice 6 PR #7
 merged at `55fef2d` (**M1 — CV Ingestion & Candidate Library is
 CLOSED**, issue #6 closed); Slice 7 PR #9 merged at `24b1d67` (issue #8
@@ -483,22 +492,31 @@ pending independent acceptance/owner merge. M4 remains open because this PR
 must not be merged automatically.
 
 ## Blockers
-None blocking. Same open items as before (D-001 Mac benchmark pending —
-now also the blocker for approving a final production embedding model,
-D-014, Auto Mode script dry-run only, document encryption-at-rest
-deferred, D-009 Ollama upgrade needs root). Git remote is connected but
-is a personal/temporary one (D-012) — official bank-owned remote still
-pending, migration keeps full history when it arrives.
+**Mac Mini benchmark execution** — the sole remaining mandatory blocker to
+MVP closure. Target hardware is now owner-confirmed (Mac mini M4 Pro,
+12-core CPU/16-core GPU/24GB unified memory/512GB SSD — reference, not
+lock-in), and the benchmark harness is built and dry-run smoke-tested, but
+it has not been executed on the actual confirmed hardware — this also
+blocks approving a final production LLM/embedding model (D-014). Other
+previously-open items: document encryption-at-rest remains a deployment
+responsibility, not an application feature, per `docs/SECURITY_PRIVACY.md`
+(unchanged); D-009 Ollama upgrade needs root (unchanged, non-blocking). Git
+remote is connected but is a personal/temporary one (D-012) — official
+bank-owned remote still pending, migration keeps full history when it
+arrives (organizational, non-blocking for MVP).
 
 ## Next action
-1. **Git Infrastructure** — remote connected (`a-r3/meyar`, private,
+1. **Slice 13 — Security + Official Definition-of-Done Acceptance**
+   (issue #20, PR #22 `feat/security-dod-acceptance` → `main`, `Refs #20`),
+   associated with **M5 — Security, Target-Mac Validation & MVP
+   Acceptance**: independently audit the Pass-1 implementation, then owner
+   Squash and merge PR #22. Do not close issue #20 or M5 on that merge —
+   the Mac Mini benchmark execution gate remains open until the owner runs
+   `backend/scripts/target_mac_benchmark.py` on the actual confirmed
+   target hardware and a production model decision is recorded.
+2. **Git Infrastructure** — remote connected (`a-r3/meyar`, private,
    temporary — D-012); governance merged (`16929fd`). May later migrate
    to an official bank-owned remote (history preserved).
-2. **Slice 12 — REST API / Swagger / README Completion** (issue #18, D-019),
-   associated with **M4 — Internal Product Interface & API**: independently
-   audit the focused implementation/CI, then owner Squash and merge. Do not
-   close M4 or start Slice 13 until the merge is live-verified and local main
-   is synchronized.
 
 The previously planned "Slice 6 — External Async Evaluation API" is
 CANCELLED (superseded by D-011) — it is not what "Slice 6" now refers to.
@@ -515,7 +533,7 @@ due date because the official timeline has not been supplied.
 | M2 — Candidate Search Intelligence | Slices 7–9 | CLOSED — PRs #9/#11/#13 merged; issues #8/#10/#12 closed |
 | M3 — JD Matching & Ranking | Slice 10 | CLOSED — PR #15 merged at `1c9dbbd`, issue #14 closed |
 | M4 — Internal Product Interface & API | Slices 11–12 | CLOSED — Slice 11 merged (PR #17, issue #16 closed); Slice 12 merged (PR #19 at `93fa567`, issue #18 closed) |
-| M5 — Security, Target-Mac Validation & MVP Acceptance | Slice 13 + target-Mac benchmark | OPEN — issue #20 (Slice 13, governance/placeholder) open; Slice 13 implementation NOT STARTED |
+| M5 — Security, Target-Mac Validation & MVP Acceptance | Slice 13 + target-Mac benchmark | OPEN — issue #20 open; PR #22 implements Pass 1 (original CV, no-exfiltration, backup/restore, audit guard, multilingual evidence) with `Refs #20`; Mac Mini benchmark execution on the now owner-confirmed target hardware remains the sole open mandatory gate |
 
 ## Official requirement gap matrix
 
@@ -525,11 +543,11 @@ no code yet.
 
 | Requirement | Status | Evidence | Remaining work | Slice |
 |---|---|---|---|---|
-| Mac Mini / model benchmark | NOT STARTED | D-001 dev-machine substitute only | Benchmark on real Apple Silicon hardware | — (blocked on hardware) |
+| Mac Mini / model benchmark | NOT STARTED | Target reference hardware now owner-confirmed (Mac mini M4 Pro, 12-core CPU/16-core GPU/24GB unified memory/512GB SSD — reference, not lock-in); harness built (`backend/scripts/target_mac_benchmark.py`) and dry-run smoke-tested on the dev machine only | Execute the benchmark on the actual confirmed target hardware; no numeric latency threshold is approved (functional success + recorded timings, per owner decision 2026-08-28) | 13 (blocked on physical hardware access) |
 | PDF parsing | DONE | `pypdf`-based `LocalTextParser` (Slice 3) | — | 3 |
 | DOCX parsing | DONE | `python-docx`-based parsing (Slice 3) | — | 3 |
-| Scanned PDF detection / OCR | NOT STARTED | Digital-PDF-only parsing (D-007) | Local OCR fallback | future |
-| Multilingual CV tests | NOT STARTED | No tracked Azerbaijani/Cyrillic synthetic CV tests currently prove this requirement | Add genuine AZ/RU/EN synthetic fixtures and extraction tests | future |
+| Scanned PDF detection / OCR | NOT STARTED | Digital-PDF-only parsing (D-007) | Local OCR fallback — explicitly deferred, non-MVP | future |
+| Multilingual CV tests | DONE | Synthetic Azerbaijani/Russian/English fixtures + 9 regression tests proving the existing parser (Unicode-transparent) and extraction/identity pipeline (Pydantic + Postgres JSON) round-trip all three languages unchanged, via `FakeLLMProvider` (`test_multilingual_evidence.py`). Owner-approved classification (2026-08-28): pipeline/schema evidence, not a claim of real-model per-language quality | Real-model sanity sampling may occur during the actual Target-Mac run where practical — supplements, does not replace, this evidence | 13 |
 | Structured extraction | DONE | `CandidateProfileExtraction` schema (Slice 4); `CandidateIdentityExtraction` (full_name/email/phone, separate schema, Slice 7) | — | 4, 7 |
 | Strict JSON validation | DONE | Pydantic v2, `extra="forbid"`, bounded retry (Slice 4, Slice 7 identity, Slice 9 planner) | — | 4, 7, 9 |
 | Uncertainty handling | DONE | `UNKNOWN` never auto-downgraded (D-010), Slice 5 | — | 5 |
@@ -550,21 +568,26 @@ no code yet.
 | README examples | DONE | API-key provisioning, auth header, Swagger access, synthetic curl examples for search/NL-search/score/rank, local-AI dependency map, error semantics (Slice 12) | — | 12 |
 | Bad-file testing | DONE | Oversized/malformed/MIME-mismatch tests (Slice 3); malformed-PDF/DOCX isolation + path-traversal/symlink tests for the folder indexer (Slice 6) | — | 6, 13 |
 | Scoring consistency | DONE | Exact input reuse, explicit historical date, Decimal boundary/rounding/recomputation, version-change, stable-tie, gate-vs-score, and identity-invariance regressions (Slice 10) | Final target acceptance remains Slice 13 | 10, 13 |
-| External-network/exfiltration verification | NOT STARTED | Local-only enforced by construction (`OllamaLLMProvider` loopback check) | Explicit verification pass | 13 |
-| Data-protection / backup description | PARTIAL | Retention/deletion documented (SECURITY_PRIVACY.md); no backup policy written | Document backup approach | 13 |
-| Git branch / PR workflow | PARTIAL | Remote connected (`a-r3/meyar`, private), CI + hooks + PR template merged (`16929fd`, D-012) | Migrate to official bank remote when supplied | Git Infrastructure |
+| External-network/exfiltration verification | DONE | Static inventory (only two `httpx.AsyncClient` construction sites in the whole app, both loopback-gated) plus a deterministic runtime guard (`test_no_exfiltration.py`) that patches `httpx.AsyncClient.send` to reject any non-loopback request, exercised against a representative extract+embed workflow via the real `OllamaLLMProvider`/`OllamaEmbeddingProvider` classes (`MockTransport`), plus a negative control proving the guard itself works | — | 13 |
+| Data-protection / backup description | DONE | `docs/BACKUP_RESTORE.md` runbook; `backend/scripts/backup_restore_acceptance.py` executed successfully against synthetic, disposable data — DB (`pg_dump`/`pg_restore`) + document storage (`tar`) backed up and restored into an isolated destination, row counts/relationships verified, original-CV bytes byte-identical, repeat score request reused the exact same `Evaluation` (`reused=true`) | — | 13 |
+| Git branch / PR workflow | PARTIAL | Remote connected (`a-r3/meyar`, private), CI + hooks + PR template merged (`16929fd`, D-012) | Migrate to official bank remote when supplied — organizational, owner-dependent, not a Slice 13 software gap | Git Infrastructure |
 
-**Official numbered task matrix — 28 items.** Summary: **22 DONE, 2 PARTIAL,
-4 NOT STARTED** (28 items), independently recounted after Slice 12. Three rows
-moved from the Slice-11 baseline: REST API, Swagger/OpenAPI, and README
-examples all moved PARTIAL/NOT STARTED → DONE (Slice 12, D-019). Original-file
-reference remains DONE at the storage layer, but the separate mandatory
-"open original CV" product capability (`docs/PROJECT_VISION.md`) is not
-implemented and is now explicitly carried into Slice 13 / M5 as a mandatory
-acceptance item (see issue #20) — it does not add a 29th matrix row or change
-this row's DONE status. The two remaining PARTIAL rows are
-data-protection/backup description and Git branch/PR workflow. The four
-remaining NOT STARTED rows are target-Mac benchmark, OCR, multilingual-CV
-fixtures, and external-network/exfiltration verification — all explicitly
-Slice 13 (Security + Official Definition-of-Done Acceptance), not started,
-not claimed by Slice 12.
+**Official numbered task matrix — 28 items.** Summary (independently
+recounted during Slice 13 finalization, 2026-08-28): **25 DONE, 1 PARTIAL,
+2 NOT STARTED** (28 items). Since the Slice-12 baseline (22/2/4): multilingual
+CV tests, external-network/exfiltration verification, and data-protection/
+backup description all moved NOT STARTED/PARTIAL → DONE (Slice 13 Pass 1,
+PR #22). Original-file reference remains DONE at the storage layer; the
+separate mandatory "open original CV" product capability
+(`docs/PROJECT_VISION.md`) **is now implemented** (Slice 13 Pass 1 — see
+`GET /ui/candidates/{candidate_id}/documents/{document_id}/original`) — this
+does not add a 29th matrix row or change row 10's DONE status, it closes the
+separate mandatory item tracked in issue #20. The one remaining PARTIAL row
+(Git branch/PR workflow) is organizational, pending a bank-owned remote, and
+is not a Slice 13 or MVP-closure blocker. The two remaining NOT STARTED rows
+are Mac Mini/model benchmark (mandatory — target hardware is now
+owner-confirmed, but execution on that hardware has not occurred; this is the
+sole remaining mandatory MVP blocker) and OCR (explicitly deferred/non-MVP
+per D-007, durable decision authority, not a blocker). **MVP cannot be
+declared complete and M5/issue #20 must not close until the Mac Mini
+benchmark row moves to DONE** on the actual confirmed target hardware.
