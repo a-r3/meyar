@@ -21,6 +21,7 @@ from meyar.core.auth import authenticate_raw_api_key
 from meyar.db import get_db
 from meyar.embedding.dependency import get_embedding_provider, get_embedding_search_config
 from meyar.embedding.provider import EmbeddingProvider, EmbeddingProviderError
+from meyar.ingestion.validation import PDF_MIME
 from meyar.llm.dependency import get_llm_provider
 from meyar.llm.provider import LLMProvider
 from meyar.scoring.batch import BatchRankingError, rank_candidates_for_job
@@ -32,6 +33,9 @@ from meyar.services.browser_session_repo import (
     create_browser_session,
     revoke_browser_session_by_id,
 )
+from meyar.services.candidate_document_repo import get_candidate_document
+from meyar.storage.base import DocumentStorage
+from meyar.storage.dependency import get_document_storage
 from meyar.ui.auth import (
     UI_SESSION_COOKIE,
     UIAccessError,
@@ -313,6 +317,43 @@ async def candidate_detail(
             status_code=status.HTTP_404_NOT_FOUND,
         )
     return _render(request, "candidate_detail.html", _context(ctx, candidate=candidate))
+
+
+def _original_document_filename(document_id: uuid.UUID, mime_type: str) -> str:
+    extension = "pdf" if mime_type == PDF_MIME else "docx"
+    return f"cv-{document_id.hex}.{extension}"
+
+
+@router.get("/candidates/{candidate_id}/documents/{document_id}/original")
+async def candidate_document_original(
+    request: Request,
+    candidate_id: uuid.UUID,
+    document_id: uuid.UUID,
+    ctx: UIContext = Depends(require_ui_scopes("candidates:read")),
+    db: AsyncSession = Depends(get_db),
+    storage: DocumentStorage = Depends(get_document_storage),
+) -> Response:
+    """Authorized original-CV retrieval. storage_key is always resolved
+    server-side from the document row — the client supplies only the
+    candidate/document UUIDs, never a storage key or filesystem path."""
+    document = await get_candidate_document(
+        db, tenant_id=ctx.tenant_id, candidate_id=candidate_id, document_id=document_id
+    )
+    if document is None:
+        return _render(
+            request,
+            "error.html",
+            _context(ctx, title="Tapılmadı", message="Sənəd tapılmadı."),
+            status_code=status.HTTP_404_NOT_FOUND,
+        )
+    content = await storage.read(storage_key=document.storage_key)
+    filename = _original_document_filename(document.id, document.mime_type)
+    disposition = "inline" if document.mime_type == PDF_MIME else "attachment"
+    return Response(
+        content=content,
+        media_type=document.mime_type,
+        headers={"Content-Disposition": f'{disposition}; filename="{filename}"'},
+    )
 
 
 @router.get("/jobs", response_class=HTMLResponse)

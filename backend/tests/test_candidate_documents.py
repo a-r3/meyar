@@ -1,5 +1,7 @@
+import io
 from pathlib import Path
 
+import pypdf
 from httpx import AsyncClient
 
 FIXTURES_DIR = Path(__file__).resolve().parent.parent.parent / "fixtures" / "synthetic_cvs"
@@ -170,6 +172,36 @@ async def test_upload_malformed_pdf_uploads_but_parse_fails(
 
     resp = await _upload(
         client, plaintext, candidate_id, "malformed.pdf", "application/pdf", _read("malformed.pdf")
+    )
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["parser_status"] == "PARSE_FAILED"
+    assert body["parse_error_code"] == "PARSE_FAILED"
+    assert body["canonical"] is None
+
+
+async def test_upload_pdf_exceeding_max_pages_rejected_safely(
+    client: AsyncClient, tenant_and_key
+) -> None:
+    """_MAX_PAGES (300) in local_text_parser.py is enforced before any
+    per-page text extraction. A well-formed 301-page PDF must upload but
+    fail parsing safely — not crash the request, not silently truncate."""
+    _tenant, _key, plaintext = tenant_and_key
+    candidate_id = await _create_candidate(client, plaintext)
+
+    writer = pypdf.PdfWriter()
+    for _ in range(301):
+        writer.add_blank_page(width=72, height=72)
+    buffer = io.BytesIO()
+    writer.write(buffer)
+
+    resp = await _upload(
+        client,
+        plaintext,
+        candidate_id,
+        "oversized_pages.pdf",
+        "application/pdf",
+        buffer.getvalue(),
     )
     assert resp.status_code == 201
     body = resp.json()

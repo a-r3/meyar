@@ -1020,3 +1020,113 @@ small, easily-replaceable dependency (`backend/uv.lock`) — switching to a
 different offline-asset strategy later requires no change to any route or
 schema. The `/usage` fix only changes two integer values in an existing
 response shape; no API consumer contract is broken.
+
+## D-020 — MVP security and acceptance boundary (Target-Mac gate PENDING)
+
+**Date:** 2026-08-28
+**Status:** Partial/interim record. This is NOT a declaration of MVP
+completion — the Target-Mac benchmark gate is explicitly pending (see
+below) and this decision must be revisited and finalized once it closes.
+
+**Decision:** Records the exact tested security/acceptance boundary MEYAR
+can currently claim, after Slice 13 implementation pass 1 (PR #22).
+
+1. **Tested reference hardware.** Mac mini M4 Pro (12-core CPU, 16-core
+   GPU, 24 GB unified memory, 512 GB SSD) is the owner-confirmed MVP
+   *reference* configuration — not a permanent platform lock-in. Future
+   deployment to another Mac, a Mac Studio, or bank-controlled
+   Linux/NVIDIA infrastructure remains architecturally possible subject to
+   fresh dependency/performance/model validation on that platform. **The
+   benchmark has not yet been executed on this reference hardware** — see
+   item 15.
+2. **Local-only candidate-data AI boundary.** Every LLM/embedding call is
+   made through `meyar.llm.LLMProvider`/`meyar.embedding` abstractions,
+   both of which reject any non-loopback `base_url` at construction time
+   (`require_loopback_url`). Formally verified this pass: a deterministic
+   runtime guard (`test_no_exfiltration.py`) proves a representative
+   extract+embed workflow, run through the real provider classes, never
+   attempts a non-loopback network request, plus a negative control
+   proving the guard itself works. Claim scope: validated
+   application-level, tested-configuration behavior — not a
+   physical-firewall or network-layer guarantee.
+3. **Original-CV access boundary.** `GET /ui/candidates/{candidate_id}
+   /documents/{document_id}/original` — UI-only, `candidates:read`
+   scope via the existing live-revalidating `BrowserSession`, tenant +
+   candidate + document ownership verified server-side, storage_key
+   never client-supplied, synthetic filename only, safe 404 for
+   foreign/mismatched resources. No REST byte-serving route exists.
+4. **API/UI auth boundaries.** Bearer + scopes + tenant-derived-from-key
+   for REST; `BrowserSession` (8h fixed TTL, live API-key revalidation
+   every request, Secure/HttpOnly/SameSite=Lax cookie, HMAC CSRF) for
+   `/ui`. Both pre-date this decision and are unchanged by it.
+5. **Score/rank write-scope rule.** `evaluations:write` is required for
+   both scoring and ranking; `evaluations:read` alone is rejected (403).
+   No read-only scope carries a mutation capability anywhere in the API.
+6. **No-exfiltration evidence.** See item 2.
+7. **Backup/restore tested scope.** PostgreSQL (`pg_dump`/`pg_restore`)
+   and document storage (`tar`) must be backed up and restored together;
+   an executed synthetic proof (`backend/scripts/backup_restore_acceptance.py`)
+   confirms row counts, relationships, byte-identical original-CV
+   restoration, and exact-provenance score reuse (`reused=true`) survive
+   the cycle, entirely against disposable, non-production data. Backup
+   *scheduling* policy (frequency, retention) remains an explicit,
+   undecided deployment/business decision (`docs/SECURITY_PRIVACY.md`).
+8. **Multilingual evidence scope.** Azerbaijani/Russian/English synthetic
+   fixtures prove the existing local parser (Unicode-transparent by
+   construction) and extraction/identity pipeline (Pydantic validation +
+   Postgres JSON persistence) round-trip all three languages unchanged,
+   via `FakeLLMProvider`. This is pipeline/schema evidence, not a
+   real-model per-language quality claim — real-model sampling, where
+   practical, is a Target-Mac-run activity (item 15), supplementary to,
+   not a replacement for, this evidence.
+9. **Deterministic vs. AI reproducibility boundary.** Score/rank/
+   evaluation are exact-provenance deterministic: an identical
+   `(candidate_profile_version_id, job_criteria_version_id,
+   evaluation_as_of_date)` tuple always reuses the same `Evaluation`
+   (`reused=true`), never recomputes a different value — proven again
+   this pass surviving a full backup/restore cycle. Extraction and NL
+   planning are versioned and provenance-pinned (model name+revision,
+   `request_sha256`, schema/prompt versions recorded) but never claimed
+   bit-for-bit identical across LLM calls.
+10. **Deployment encryption responsibility.** Application-layer
+    encryption-at-rest is not implemented in MVP; `LocalFilesystemStorage`
+    relies on host/disk-level protection. Unchanged by this pass — a
+    deployment-owner responsibility, not a new gap.
+11. **OCR — explicitly deferred, non-MVP.** Per D-007, unchanged.
+    Scanned-image PDF support is out of MVP scope.
+12. **Git-infrastructure limitation.** The development remote
+    (`a-r3/meyar`) is personal/temporary (D-012); migration to an
+    official bank-owned remote is pending owner action, preserving full
+    history when it happens. Organizational, not a software gap, not an
+    MVP blocker.
+13. **Known technical debt (non-blocking).** `ApiCandidateDetailResponse`
+    reuses the UI-owned `CandidateDetailView` model (reviewed this pass —
+    already excludes storage paths/raw bytes/prompts/vectors by
+    construction; no security/contract risk found) — classified P3
+    post-MVP, no action taken.
+14. **No blanket security claim.** This decision records what has been
+    tested, under the tested configuration, as of this pass. It is not
+    "bank secure," "fully secure," or "production secure" in any
+    unqualified sense — each claim above is scoped to what was actually
+    exercised and how.
+15. **Exact limitation — Target-Mac gate PENDING.** The benchmark
+    (`backend/scripts/target_mac_benchmark.py`) has not been executed on
+    the confirmed Mac mini M4 Pro reference hardware; the current
+    development machine (Intel x86_64 laptop, Linux) is confirmed not to
+    match it. No production LLM or embedding model is approved. This is
+    the sole remaining mandatory blocker to MVP closure — M5 and issue
+    #20 remain open until it closes and this decision is updated to
+    record the actual result (or the finding that measured behavior is
+    impractical, per the owner's 2026-08-28 acceptance-policy decision,
+    which sets no invented latency threshold).
+
+**Why:** Slice 13's official task requires a Definition-of-Done boundary
+statement before MVP can be considered for closure. Recording it now, with
+the pending item explicitly flagged, prevents two failure modes: silently
+treating Pass-1 software completion as full MVP acceptance, and losing
+track of exactly what has vs. has not been validated once the Target-Mac
+run eventually happens.
+**Reversibility:** This entry is expected to be revised (not superseded by
+a new D-0xx) once the Target-Mac benchmark executes and a production model
+decision is recorded — item 15 and the model-approval status are the parts
+expected to change; items 1–14 record already-tested, stable boundaries.
