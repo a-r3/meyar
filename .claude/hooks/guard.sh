@@ -21,6 +21,16 @@ block() {
   exit 2
 }
 
+# Mirrors .githooks/pre-commit and scripts/scan-tracked-tree.sh exactly —
+# the tracked, non-secret env template variants are the one allowed
+# exception to the blanket .env guard below.
+is_allowed_env_file() {
+  case "$(basename "$1")" in
+    .env.example | .env.sample | .env.template) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 case "$tool_name" in
   Bash)
     cmd="$(get_field command)"
@@ -42,7 +52,11 @@ case "$tool_name" in
     ;;
   Write|Edit)
     fp="$(get_field file_path)"
-    if printf '%s' "$fp" | grep -Eiq '(^|/)\.env(\..*)?$|(^|/)\.ssh(/|$)|id_rsa|id_ed25519|credentials\.json|\.pem$'; then
+    if printf '%s' "$fp" | grep -Eiq '(^|/)\.env(\..*)?$'; then
+      is_allowed_env_file "$fp" ||
+        block "writing to a secret/credential path ($fp) is not allowed automatically."
+    fi
+    if printf '%s' "$fp" | grep -Eiq '(^|/)\.ssh(/|$)|id_rsa|id_ed25519|credentials\.json|\.pem$'; then
       block "writing to a secret/credential path ($fp) is not allowed automatically."
     fi
     if printf '%s' "$fp" | grep -Eiq '(^|/)(real_cvs?|customer_data|prod_data)(/|$)'; then

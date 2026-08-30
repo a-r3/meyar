@@ -153,9 +153,9 @@ exact-content dedup, and one CLI command
 initial bulk import and repeatable reconciliation. No new database
 migration (readiness is derived from existing Slice 4/7 provenance) and no
 new runtime dependency (periodic reconciliation, not a filesystem
-watcher). Implemented on `feat/folder-reconciliation`, pending independent
-acceptance and owner merge (D-021, issue #23). GitHub milestone:
-**M6 — Operational CV Intake & Reconciliation**.
+watcher). **DONE** — merged as PR #24 at squash SHA `f6e31ff`, closes
+issue #23 (D-021). GitHub milestone: **M6 — Operational CV Intake &
+Reconciliation**.
 
 ## Deferred (still explicitly out of scope)
 

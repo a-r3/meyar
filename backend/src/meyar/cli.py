@@ -30,6 +30,7 @@ from meyar.services.candidate_embedding_service import (
     embed_candidate_profile,
 )
 from meyar.services.candidate_profile_repo import get_current_profile_version
+from meyar.services.demo_seed_service import DemoTenantAmbiguousError, reset_demo, seed_demo
 from meyar.services.folder_indexer_service import index_folder
 from meyar.services.folder_reconciliation_service import reconcile_folder
 from meyar.services.job_criteria_repo import get_current_criteria_version
@@ -335,6 +336,77 @@ async def _reconcile_folder(tenant_id: str, root: str, limit: int | None) -> Non
         raise SystemExit(1)
 
 
+async def _seed_demo(reset: bool) -> None:
+    """CLI entry point for the presentation-readiness synthetic demo
+    bootstrap (issue #25 — not a product feature; see
+    meyar.services.demo_seed_service and docs/LOCAL_DEMO.md). Never runs
+    automatically; only this explicit operator command creates or resets
+    demo data. Only ever touches the positively-identified demo tenant
+    (display name alone is never sufficient — see
+    demo_seed_service._find_demo_tenant); if that tenant cannot be
+    identified unambiguously, this exits 2 without creating, deleting,
+    or mutating anything. Every profile/identity/embedding was produced
+    from pre-written synthetic input through the real extraction/
+    embedding services, never a live model — this command never claims
+    otherwise. PII-safe output: no synthetic name/email/phone is
+    printed, only ids and counts."""
+    settings = get_settings()
+    factory = get_session_factory()
+    storage = get_document_storage()
+    parser = get_document_parser()
+
+    try:
+        async with factory() as db:
+            if reset:
+                deleted = await reset_demo(db)
+                await db.commit()
+                print(
+                    "Reset: existing demo tenant removed."
+                    if deleted
+                    else "Reset: no existing demo tenant found."
+                )
+
+            summary = await seed_demo(
+                db,
+                storage,
+                parser,
+                max_bytes=settings.max_upload_bytes,
+                max_profile_input_chars=settings.llm_max_input_chars,
+                max_identity_input_chars=settings.llm_max_input_chars,
+                max_embedding_input_chars=settings.embedding_max_input_chars,
+            )
+            await db.commit()
+    except DemoTenantAmbiguousError as exc:
+        print(f"Refusing to proceed: {exc}")
+        raise SystemExit(2) from exc
+
+    print(f"Demo tenant: {summary.tenant_id}")
+    if summary.already_seeded:
+        print(
+            "Demo data already present — reused existing synthetic dataset, "
+            "no duplicates created."
+        )
+    else:
+        print(f"Candidates created: {summary.candidates_created}")
+        print(f"Documents created: {summary.documents_created}")
+        print(
+            "Profiles created (synthetic input, not a live-model result): "
+            f"{summary.profiles_created}"
+        )
+        print(f"Identities created (synthetic input): {summary.identities_created}")
+        print(f"Embeddings created (synthetic input): {summary.embeddings_created}")
+        print(f"Jobs created: {summary.jobs_created}")
+        print(f"Evaluations created (real deterministic evaluator): {summary.evaluations_created}")
+    print(f"API key prefix (safe to log/display): {summary.api_key_prefix}")
+    if summary.api_key_plaintext:
+        print(f"API key (shown once, store it now): {summary.api_key_plaintext}")
+    else:
+        print(
+            "A fresh API key was minted for this run — a previous run's plaintext "
+            "can never be recovered."
+        )
+
+
 async def _extract_identity(tenant_id: str, candidate_id: str, document_id: str) -> None:
     """PII-safe by design: never prints full_name/email/phone. Only ids,
     status, and a non-identifying found-field count. There is no
@@ -612,6 +684,20 @@ def main() -> None:
         ),
     )
 
+    seed_demo_parser = sub.add_parser(
+        "seed-demo",
+        help=(
+            "Bootstrap a synthetic, no-Ollama-required demo tenant (candidates, "
+            "documents, jobs, deterministic evaluations) for local presentation. "
+            "Dev/operator-only; never runs automatically. See docs/LOCAL_DEMO.md."
+        ),
+    )
+    seed_demo_parser.add_argument(
+        "--reset",
+        action="store_true",
+        help="Delete the existing demo tenant (and only the demo tenant) before reseeding.",
+    )
+
     extract_identity_parser = sub.add_parser(
         "extract-identity",
         help="Run candidate identity extraction (name/email/phone) against a real local LLM.",
@@ -671,6 +757,8 @@ def main() -> None:
         asyncio.run(_index_folder(args.tenant_id, args.root))
     elif args.command == "reconcile-folder":
         asyncio.run(_reconcile_folder(args.tenant_id, args.root, args.limit))
+    elif args.command == "seed-demo":
+        asyncio.run(_seed_demo(args.reset))
     elif args.command == "extract-identity":
         asyncio.run(_extract_identity(args.tenant_id, args.candidate_id, args.document_id))
     elif args.command == "embed-candidate":
