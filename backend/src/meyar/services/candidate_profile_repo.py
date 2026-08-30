@@ -73,6 +73,27 @@ async def get_current_profile_version(
     return result.scalar_one_or_none()
 
 
+async def get_latest_profile_version_for_document(
+    db: AsyncSession, *, tenant_id: uuid.UUID, candidate_document_id: uuid.UUID
+) -> CandidateProfileVersion | None:
+    """Tenant-scoped lookup of the most recent extraction attempt tied to
+    one specific CandidateDocument (Slice 14). Used to derive per-document
+    processing readiness from existing provenance without a redundant
+    status column: a COMPLETED row here means this exact document's
+    profile is already extracted and current; any other status, or no
+    row at all, means extraction must (re)run for this document."""
+    result = await db.execute(
+        select(CandidateProfileVersion)
+        .where(
+            CandidateProfileVersion.tenant_id == tenant_id,
+            CandidateProfileVersion.candidate_document_id == candidate_document_id,
+        )
+        .order_by(CandidateProfileVersion.version_number.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
 async def get_profile_version_by_id(
     db: AsyncSession, *, tenant_id: uuid.UUID, profile_version_id: uuid.UUID
 ) -> CandidateProfileVersion | None:

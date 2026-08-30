@@ -72,6 +72,26 @@ async def get_current_identity_version(
     return result.scalar_one_or_none()
 
 
+async def get_latest_identity_version_for_document(
+    db: AsyncSession, *, tenant_id: uuid.UUID, candidate_document_id: uuid.UUID
+) -> CandidateIdentityVersion | None:
+    """Tenant-scoped lookup of the most recent identity-extraction attempt
+    tied to one specific CandidateDocument (Slice 14) — mirrors
+    get_latest_profile_version_for_document. A COMPLETED row means this
+    exact document's identity is already extracted and current; any
+    other status, or no row at all, means extraction must (re)run."""
+    result = await db.execute(
+        select(CandidateIdentityVersion)
+        .where(
+            CandidateIdentityVersion.tenant_id == tenant_id,
+            CandidateIdentityVersion.candidate_document_id == candidate_document_id,
+        )
+        .order_by(CandidateIdentityVersion.version_number.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
 async def get_identity_version_by_id(
     db: AsyncSession, *, tenant_id: uuid.UUID, identity_version_id: uuid.UUID
 ) -> CandidateIdentityVersion | None:

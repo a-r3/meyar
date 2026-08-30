@@ -1,3 +1,4 @@
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -19,6 +20,7 @@ from meyar.services.candidate_document_service import ingest_candidate_document
 from meyar.services.candidate_repo import create_candidate
 from meyar.services.folder_indexed_file_repo import (
     create_folder_indexed_file,
+    find_indexed_file_by_content_hash,
     list_folder_indexed_files,
     update_folder_indexed_file,
 )
@@ -37,6 +39,7 @@ class FolderScanSummary:
     successful: int
     failed: int
     missing: int
+    skipped_unstable: int = 0
 
 
 async def index_folder(
@@ -47,6 +50,7 @@ async def index_folder(
     tenant_id: uuid.UUID,
     root_path: str,
     max_bytes: int,
+    stability_window_seconds: float = 0.0,
 ) -> FolderScanSummary:
     """Scans a local folder for supported CV files, ingests new/changed
     ones through the existing secure ingestion pipeline
@@ -57,7 +61,17 @@ async def index_folder(
     that disappears is tombstoned (MISSING), never hard-deleted. One
     malformed file never aborts the rest of the scan. Never commits —
     the caller controls the transaction boundary. Triggers no LLM/
-    embedding extraction — discovery, validation, and parsing only."""
+    embedding extraction — discovery, validation, and parsing only.
+
+    stability_window_seconds (Slice 14): a discovered file whose mtime is
+    newer than (now - this many seconds) is treated as possibly still
+    being written and is skipped entirely this scan — not counted as
+    discovered, not marked FAILED, and (if it already has an existing
+    index row) left untouched rather than tombstoned MISSING, since it
+    is simply not being observed this pass, not actually gone. Defaults
+    to 0 (no stability filtering) for backward compatibility with
+    existing callers/tests; production callers pass
+    Settings.folder_stability_seconds."""
     # Eager validation before any DB write — scan_source_root is a
     # generator and would otherwise only raise once first iterated,
     # after the FolderSource row below had already been created.
@@ -71,9 +85,20 @@ async def index_folder(
     remaining: dict[str, FolderIndexedFile] = {row.relative_path: row for row in existing_rows}
 
     discovered = new_count = changed_count = retried_count = unchanged_count = 0
-    successful_count = failed_count = 0
+    successful_count = failed_count = skipped_unstable_count = 0
+    now = time.time()
 
     for entry in scan_source_root(root_path):
+        if now - entry.mtime < stability_window_seconds:
+            # Too recently modified to trust: pop it from `remaining` (so
+            # it is not later swept into the missing-tombstone loop —
+            # the path IS still present on disk, just not observed this
+            # pass) but otherwise leave its row completely untouched and
+            # do not count it as discovered/new/changed.
+            remaining.pop(entry.relative_path, None)
+            skipped_unstable_count += 1
+            continue
+
         discovered += 1
         existing = remaining.pop(entry.relative_path, None)
 
@@ -154,6 +179,7 @@ async def index_folder(
         successful=successful_count,
         failed=failed_count,
         missing=missing_count,
+        skipped_unstable=skipped_unstable_count,
     )
     await record_event(
         db,
@@ -169,6 +195,7 @@ async def index_folder(
             "successful": successful_count,
             "failed": failed_count,
             "missing": missing_count,
+            "skipped_unstable": skipped_unstable_count,
         },
     )
     return summary
@@ -186,7 +213,43 @@ async def _handle_new_file(
 ) -> str:
     """Creates a new Candidate for a never-before-seen path, attempts
     ingestion, and persists the resulting index row. Returns the
-    resulting index_status."""
+    resulting index_status.
+
+    Exact-content dedup (Slice 14): if this tenant already has a
+    successfully-ingested file with the identical SHA-256 at a
+    different path, the new path is linked to that same
+    candidate_id/candidate_document_id instead of minting a duplicate
+    Candidate and a duplicate stored copy — content dedup only, never
+    an inference that two different-content candidates are the same
+    person (see docs/DECISIONS.md D-021)."""
+    duplicate = await find_indexed_file_by_content_hash(
+        db, tenant_id=tenant_id, sha256_hash=entry.sha256_hash
+    )
+    if duplicate is not None:
+        await create_folder_indexed_file(
+            db,
+            tenant_id=tenant_id,
+            folder_source_id=source_id,
+            relative_path=entry.relative_path,
+            document_type=_extension_document_type(entry.relative_path),
+            byte_size=entry.byte_size,
+            sha256_hash=entry.sha256_hash,
+            index_status=INDEX_STATUS_INDEXED,
+            candidate_id=duplicate.candidate_id,
+            candidate_document_id=duplicate.candidate_document_id,
+            last_seen_at=datetime.now(UTC),
+        )
+        await record_event(
+            db,
+            tenant_id=tenant_id,
+            event_type="FOLDER_FILE_DUPLICATE_CONTENT_LINKED",
+            metadata={
+                "folder_source_id": str(source_id),
+                "candidate_id": str(duplicate.candidate_id),
+            },
+        )
+        return INDEX_STATUS_INDEXED
+
     candidate = await create_candidate(db, tenant_id=tenant_id)
     filename = _synthetic_filename(entry.relative_path)
     try:

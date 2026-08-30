@@ -589,7 +589,85 @@ One distinction matters specifically for security posture:
   Ollama is not loopback-local to the application. Do not deploy this
   topology on the basis of this document.
 
-## 20. Operator checklist
+## 20. Folder ingestion & reconciliation scheduling
+
+Slice 14 (`docs/DECISIONS.md` D-021) adds one operator command,
+`meyar reconcile-folder --tenant-id <id> --root <path> [--limit N]`, that
+serves both the initial bulk import of an approved bank-controlled CV
+folder and its repeatable reconciliation afterward. It reuses the Slice 6
+folder scanner/indexer unchanged for discovery/ingestion, then drives
+whichever candidates are not yet fully processed through profile
+extraction, identity extraction, and embedding — so a newly added or
+changed PDF/DOCX becomes searchable without a separate manual per-candidate
+command.
+
+- **Initial import:** run the command once against the approved source
+  directory. Safe to interrupt and re-run — every step is idempotent.
+- **Continuous reconciliation is periodic, not event-driven.** MEYAR does
+  not ship or require a filesystem watcher (see D-021: restart safety,
+  network/shared-filesystem portability, and avoiding an OS-specific
+  dependency all favor a repeatable scan over an event stream). Scheduling
+  the command to run periodically is a deployment-infrastructure
+  responsibility, not an application one — MEYAR owns the command, not the
+  timer.
+- **Do not commit a bank-specific source path or a bank-specific scheduler
+  configuration to this repository** — those are per-deployment operator
+  configuration, same rule as `backend/.env` (§5).
+- **Run at most one active `reconcile-folder` invocation per
+  `(tenant, source root)` at a time.** This is the supported MVP
+  operational model, not something MEYAR enforces at the database level —
+  overlapping concurrent reconcilers against the same source can race on
+  the exact-content dedup check and each mint a separate candidate for
+  identical content (see `docs/DECISIONS.md` D-021 item 9). Do not
+  configure two overlapping scheduled jobs (e.g. two different timers, or
+  a manual run overlapping a scheduled one) against the same source.
+  Distributed locking is not implemented.
+
+Generic scheduler examples (illustrative only — adapt for the actual
+deployment host, do not commit the result):
+
+macOS (reference host, `launchd`) — a per-user LaunchAgent plist invoking
+`uv run meyar reconcile-folder --tenant-id <id> --root <path>` from
+`backend/` on an interval, with `StandardOutPath`/`StandardErrorPath`
+pointed at a log location the operator controls.
+
+Linux (future server) — either a `systemd` timer unit paired with a
+oneshot service unit running the same command, or a `cron` entry; either
+approach is equivalent from the application's perspective.
+
+Operational notes:
+
+- The command's exit code distinguishes clean success (`0`) from
+  completed-with-failures (`1`, at least one ingestion or downstream
+  processing failure — safe to simply re-run on the next scheduled
+  invocation, per-candidate work is retried automatically), an invalid
+  source folder (`2`), and an infrastructure/database failure (`3`) — treat
+  `0`/`1` as "ran," and `2`/`3` as needing operator attention before the
+  next scheduled run. Exit `1`/"Failed/pending retry" in the printed
+  summary means that candidate's downstream processing did not fully
+  complete this run (profile, identity, or embedding) — it does not by
+  itself mean the candidate is unsearchable: a candidate whose profile
+  and embedding already succeeded but whose identity extraction failed
+  still remains fully searchable by professional profile (identity is
+  presentation-only, never a search/ranking input).
+- `--limit` bounds how many not-yet-ready candidates are processed in one
+  invocation, so a large initial backlog does not force one unbounded
+  sequential local-Ollama run — a large backlog is worked off across
+  several scheduled invocations instead. Discovery/ingestion itself is
+  never bounded by `--limit`; only downstream profile/identity/embedding
+  processing is. Within the bound, a candidate that has never been
+  attempted is always processed before one that already has a recorded
+  failed attempt, so a persistently-failing candidate cannot permanently
+  starve a candidate that has not been tried yet — later scheduled
+  invocations always make progress on genuinely new work first.
+- Output is PII-safe (ids and counts only), so command output is safe to
+  forward to normal log aggregation, same as application logs (§6).
+- `MEYAR_FOLDER_STABILITY_SECONDS` (default 60) controls the file-stability
+  window — a file modified more recently than this is skipped for that run
+  and picked up on the next one, so a slow/partial copy onto the source
+  folder is never ingested mid-write.
+
+## 21. Operator checklist
 
 **Fresh deployment** — §4, §16.
 
@@ -602,6 +680,8 @@ One distinction matters specifically for security posture:
 **Repository handover** — §14.
 
 **Rollback** — §15, then §16.
+
+**Folder reconciliation scheduling** — §20.
 
 ---
 

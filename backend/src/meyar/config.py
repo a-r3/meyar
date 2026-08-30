@@ -34,6 +34,12 @@ class Settings(BaseSettings):
     # default. Local loopback development must opt out explicitly.
     ui_session_ttl_hours: int = Field(default=8, ge=1, le=24)
     ui_cookie_secure: bool = True
+    # Folder-import file-stability window (Slice 14): a discovered file
+    # whose mtime is newer than (scan time - this many seconds) is
+    # skipped for this scan only — never marked FAILED — so a partial/
+    # in-progress copy onto the source folder is never ingested
+    # mid-write. Conservative default; see docs/DECISIONS.md D-021.
+    folder_stability_seconds: int = Field(default=60, ge=0)
 
     @model_validator(mode="after")
     def _production_ui_cookie_must_be_secure(self) -> "Settings":

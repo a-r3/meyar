@@ -15,12 +15,17 @@ class InvalidSourceRootError(ValueError):
 class DiscoveredFile:
     """One supported CV file found under a scan root. relative_path is
     POSIX-normalized and always relative to the scan root — never a raw
-    absolute path — so the same source is portable across machines."""
+    absolute path — so the same source is portable across machines.
+    mtime is the filesystem modification time (seconds since epoch) at
+    scan time, used by the caller to apply a file-stability window
+    (Slice 14) — never interpreted here, since the stability policy
+    (threshold, whether to apply it) belongs to the service layer."""
 
     relative_path: str
     data: bytes
     byte_size: int
     sha256_hash: str
+    mtime: float
 
 
 def resolve_source_root(root_path: str) -> Path:
@@ -70,10 +75,12 @@ def scan_source_root(root_path: str) -> Iterator[DiscoveredFile]:
         resolved = file_path.resolve()
         if not resolved.is_relative_to(root):
             continue
+        stat_result = resolved.stat()
         data = resolved.read_bytes()
         yield DiscoveredFile(
             relative_path=relative,
             data=data,
             byte_size=len(data),
             sha256_hash=hashlib.sha256(data).hexdigest(),
+            mtime=stat_result.st_mtime,
         )

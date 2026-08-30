@@ -18,6 +18,9 @@ FIXTURES_DIR = Path(__file__).resolve().parent.parent.parent / "fixtures" / "syn
 
 class _FakeSettings:
     max_upload_bytes = 10 * 1024 * 1024
+    # 0 disables the Slice 14 stability window so these CLI tests (whose
+    # fixture files are always freshly written) behave exactly as before.
+    folder_stability_seconds = 0
 
 
 class _SessionCtx:
