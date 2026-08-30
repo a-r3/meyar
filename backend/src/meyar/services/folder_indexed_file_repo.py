@@ -36,6 +36,32 @@ async def get_folder_indexed_file(
     return result.scalar_one_or_none()
 
 
+async def find_indexed_file_by_content_hash(
+    db: AsyncSession, *, tenant_id: uuid.UUID, sha256_hash: str
+) -> FolderIndexedFile | None:
+    """Tenant-scoped exact-content-dedup lookup (Slice 14): is there
+    already a successfully-ingested row (any relative_path, any
+    FolderSource) for this exact byte content in this tenant? Never
+    crosses tenants — the tenant_id filter is not optional. Only rows
+    with a candidate_document_id are eligible (a FAILED
+    validation-level row has none, so it is never treated as an
+    ingested original to link against). The earliest-ingested match
+    (created_at ascending) is the stable, deterministic owner a new
+    duplicate path is linked to. This is document-content dedup only —
+    it never implies the underlying candidates are the same person."""
+    result = await db.execute(
+        select(FolderIndexedFile)
+        .where(
+            FolderIndexedFile.tenant_id == tenant_id,
+            FolderIndexedFile.sha256_hash == sha256_hash,
+            FolderIndexedFile.candidate_document_id.is_not(None),
+        )
+        .order_by(FolderIndexedFile.created_at.asc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
 async def create_folder_indexed_file(
     db: AsyncSession,
     *,

@@ -603,6 +603,304 @@ async def test_tenant_isolation_indexed_files_never_leak(
     assert rows_a[0].candidate_document_id != rows_b[0].candidate_document_id
 
 
+async def test_unstable_recent_file_skipped_not_failed(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    """Slice 14 file-stability window: a just-written file (mtime within
+    the window) must be skipped this scan — never discovered, never
+    marked FAILED — so a partial/in-progress copy is never ingested."""
+    tenant = await create_tenant(db_session, name="T-unstable")
+    await db_session.commit()
+    root = tmp_path / "cvs"
+    _copy_fixture("valid_cv.pdf", root / "candidate.pdf")  # mtime = now
+
+    summary = await index_folder(
+        db_session,
+        _storage(tmp_path),
+        _parser(),
+        tenant_id=tenant.id,
+        root_path=str(root),
+        max_bytes=MAX_BYTES,
+        stability_window_seconds=60,
+    )
+    await db_session.commit()
+
+    assert summary.discovered == 0
+    assert summary.skipped_unstable == 1
+    assert summary.new == summary.successful == summary.failed == 0
+    rows = await _rows(db_session, tenant.id, summary.folder_source_id)
+    assert rows == []
+
+
+async def test_stable_file_processed_on_later_reconciliation(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    """A file that was too recent on one scan is processed normally once
+    its mtime falls outside the stability window on a later scan — no
+    manual intervention, no producer-side rename convention required."""
+    tenant = await create_tenant(db_session, name="T-stable-later")
+    await db_session.commit()
+    root = tmp_path / "cvs"
+    path = root / "candidate.pdf"
+    _copy_fixture("valid_cv.pdf", path)  # fresh mtime = now
+    storage = _storage(tmp_path)
+    parser = _parser()
+
+    first = await index_folder(
+        db_session,
+        storage,
+        parser,
+        tenant_id=tenant.id,
+        root_path=str(root),
+        max_bytes=MAX_BYTES,
+        stability_window_seconds=60,
+    )
+    await db_session.commit()
+    assert first.discovered == 0
+    assert first.skipped_unstable == 1
+
+    # Time passes (simulated by backdating mtime) — the file is now
+    # outside the stability window and must be processed normally.
+    old_time = os.stat(path).st_mtime - 120
+    os.utime(path, (old_time, old_time))
+
+    second = await index_folder(
+        db_session,
+        storage,
+        parser,
+        tenant_id=tenant.id,
+        root_path=str(root),
+        max_bytes=MAX_BYTES,
+        stability_window_seconds=60,
+    )
+    await db_session.commit()
+
+    assert second.discovered == 1
+    assert second.skipped_unstable == 0
+    assert second.successful == 1
+
+
+async def test_unstable_existing_file_not_tombstoned_missing(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    """An already-tracked path that becomes unstable on a later scan
+    (e.g. being overwritten concurrently) must not be tombstoned MISSING
+    — it is still present, merely not observed this pass."""
+    tenant = await create_tenant(db_session, name="T-unstable-existing")
+    await db_session.commit()
+    root = tmp_path / "cvs"
+    path = root / "candidate.pdf"
+    _copy_fixture("valid_cv.pdf", path)
+    old_time = os.stat(path).st_mtime - 120
+    os.utime(path, (old_time, old_time))
+    storage = _storage(tmp_path)
+    parser = _parser()
+
+    first = await index_folder(
+        db_session,
+        storage,
+        parser,
+        tenant_id=tenant.id,
+        root_path=str(root),
+        max_bytes=MAX_BYTES,
+        stability_window_seconds=60,
+    )
+    await db_session.commit()
+    assert first.successful == 1
+    first_rows = await _rows(db_session, tenant.id, first.folder_source_id)
+    original_document_id = first_rows[0].candidate_document_id
+
+    # Touch the file again (fresh mtime) without changing its content —
+    # simulates a concurrent in-progress overwrite being observed mid-write.
+    path.touch()
+
+    second = await index_folder(
+        db_session,
+        storage,
+        parser,
+        tenant_id=tenant.id,
+        root_path=str(root),
+        max_bytes=MAX_BYTES,
+        stability_window_seconds=60,
+    )
+    await db_session.commit()
+
+    assert second.discovered == 0
+    assert second.skipped_unstable == 1
+    assert second.missing == 0
+    rows = await _rows(db_session, tenant.id, first.folder_source_id)
+    assert rows[0].index_status == INDEX_STATUS_INDEXED
+    assert rows[0].candidate_document_id == original_document_id
+
+
+async def test_cross_path_exact_content_dedup(db_session: AsyncSession, tmp_path: Path) -> None:
+    """Slice 14: byte-identical content at a second path, same tenant,
+    must not mint a second Candidate/CandidateDocument — it links to the
+    already-ingested one. Document-content dedup only, not human-identity
+    resolution."""
+    tenant = await create_tenant(db_session, name="T-cross-dedup")
+    await db_session.commit()
+    root = tmp_path / "cvs"
+    _copy_fixture("valid_cv.pdf", root / "first" / "candidate.pdf")
+    _copy_fixture("valid_cv.pdf", root / "second" / "duplicate.pdf")
+
+    summary = await index_folder(
+        db_session,
+        _storage(tmp_path),
+        _parser(),
+        tenant_id=tenant.id,
+        root_path=str(root),
+        max_bytes=MAX_BYTES,
+    )
+    await db_session.commit()
+
+    assert summary.discovered == 2
+    assert summary.new == 2
+    assert summary.successful == 2
+
+    rows = await _rows(db_session, tenant.id, summary.folder_source_id)
+    assert len(rows) == 2
+    candidate_ids = {r.candidate_id for r in rows}
+    document_ids = {r.candidate_document_id for r in rows}
+    assert len(candidate_ids) == 1  # same candidate, not two
+    assert len(document_ids) == 1  # same stored document, not a duplicate copy
+
+    doc_count = await db_session.execute(
+        select(CandidateDocument).where(CandidateDocument.tenant_id == tenant.id)
+    )
+    assert len(doc_count.scalars().all()) == 1  # no duplicate CandidateDocument row
+
+
+async def test_cross_path_dedup_does_not_cross_tenants(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    """The same bytes ingested by two different tenants must never share
+    a Candidate/CandidateDocument — the dedup lookup is tenant-scoped."""
+    tenant_a = await create_tenant(db_session, name="T-dedup-iso-A")
+    tenant_b = await create_tenant(db_session, name="T-dedup-iso-B")
+    await db_session.commit()
+    root_a = tmp_path / "cvs-a"
+    root_b = tmp_path / "cvs-b"
+    _copy_fixture("valid_cv.pdf", root_a / "candidate.pdf")
+    _copy_fixture("valid_cv.pdf", root_b / "candidate.pdf")
+    storage = _storage(tmp_path)
+    parser = _parser()
+
+    summary_a = await index_folder(
+        db_session,
+        storage,
+        parser,
+        tenant_id=tenant_a.id,
+        root_path=str(root_a),
+        max_bytes=MAX_BYTES,
+    )
+    summary_b = await index_folder(
+        db_session,
+        storage,
+        parser,
+        tenant_id=tenant_b.id,
+        root_path=str(root_b),
+        max_bytes=MAX_BYTES,
+    )
+    await db_session.commit()
+
+    rows_a = await _rows(db_session, tenant_a.id, summary_a.folder_source_id)
+    rows_b = await _rows(db_session, tenant_b.id, summary_b.folder_source_id)
+    assert rows_a[0].candidate_id != rows_b[0].candidate_id
+    assert rows_a[0].candidate_document_id != rows_b[0].candidate_document_id
+
+
+async def test_different_content_different_path_no_dedup(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    """Different bytes at different paths are never linked, even though
+    both are plausibly CVs — no automatic person merge is performed."""
+    tenant = await create_tenant(db_session, name="T-no-merge")
+    await db_session.commit()
+    root = tmp_path / "cvs"
+    _copy_fixture("valid_cv.pdf", root / "a.pdf")
+    _copy_fixture("prompt_injection_cv.pdf", root / "b.pdf")
+
+    summary = await index_folder(
+        db_session,
+        _storage(tmp_path),
+        _parser(),
+        tenant_id=tenant.id,
+        root_path=str(root),
+        max_bytes=MAX_BYTES,
+    )
+    await db_session.commit()
+
+    rows = await _rows(db_session, tenant.id, summary.folder_source_id)
+    assert len({r.candidate_id for r in rows}) == 2
+    assert len({r.candidate_document_id for r in rows}) == 2
+
+
+async def test_folder_path_oversized_file_rejected(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    """Folder-path files follow the same size cap as direct upload."""
+    tenant = await create_tenant(db_session, name="T-folder-oversized")
+    await db_session.commit()
+    root = tmp_path / "cvs"
+    _copy_fixture("valid_cv.pdf", root / "candidate.pdf")
+
+    summary = await index_folder(
+        db_session,
+        _storage(tmp_path),
+        _parser(),
+        tenant_id=tenant.id,
+        root_path=str(root),
+        max_bytes=10,  # smaller than any real fixture
+    )
+    await db_session.commit()
+
+    assert summary.discovered == 1
+    assert summary.failed == 1
+    rows = await _rows(db_session, tenant.id, summary.folder_source_id)
+    assert rows[0].index_status == INDEX_STATUS_FAILED
+    assert rows[0].failure_code == "DocumentTooLargeError"
+
+
+async def test_folder_path_pdf_exceeding_max_pages(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    """Folder-path PDFs follow the same _MAX_PAGES (300) parse-time cap
+    as direct upload — still INDEXED (parse failure, not a validation
+    failure), matching D-013 point 5."""
+    import io
+
+    import pypdf
+
+    tenant = await create_tenant(db_session, name="T-folder-pages")
+    await db_session.commit()
+    root = tmp_path / "cvs"
+    root.mkdir()
+    writer = pypdf.PdfWriter()
+    for _ in range(301):
+        writer.add_blank_page(width=72, height=72)
+    buffer = io.BytesIO()
+    writer.write(buffer)
+    (root / "oversized_pages.pdf").write_bytes(buffer.getvalue())
+
+    summary = await index_folder(
+        db_session,
+        _storage(tmp_path),
+        _parser(),
+        tenant_id=tenant.id,
+        root_path=str(root),
+        max_bytes=MAX_BYTES,
+    )
+    await db_session.commit()
+
+    assert summary.discovered == 1
+    assert summary.successful == 1  # INDEXED — parse failure, not validation failure
+    rows = await _rows(db_session, tenant.id, summary.folder_source_id)
+    doc = await db_session.get(CandidateDocument, rows[0].candidate_document_id)
+    assert doc is not None
+    assert doc.parser_status == "PARSE_FAILED"
+
+
 async def test_audit_events_recorded_without_pii(db_session: AsyncSession, tmp_path: Path) -> None:
     tenant = await create_tenant(db_session, name="T-audit")
     await db_session.commit()

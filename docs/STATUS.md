@@ -2,15 +2,16 @@
 
 ## Current phase
 **Slice 13 — Security + Official Definition-of-Done Acceptance: implementation
-pass 1 complete (PR #22, `Refs #20`), Target-Mac hardware gate PENDING.**
-Original-CV access, no-exfiltration formal verification, backup/restore
-acceptance, audit-privacy guard, and multilingual (AZ/RU/EN) evidence are all
-implemented and tested. Target reference hardware is now owner-confirmed (Mac
-mini M4 Pro, 12-core CPU, 16-core GPU, 24 GB unified memory, 512 GB SSD — a
-validated MVP reference configuration, not a permanent platform lock-in; see
-`docs/TARGET_MAC_BENCHMARK.md`), but the benchmark has not yet been executed
-on that hardware — this remains the sole mandatory blocker to closing M5.
-Issue #20 and M5 remain OPEN.
+pass 1 MERGED (PR #22, squash SHA `a709ce1`, `Refs #20`); Target-Mac hardware
+gate PENDING.** Original-CV access, no-exfiltration formal verification,
+backup/restore acceptance, audit-privacy guard, and multilingual (AZ/RU/EN)
+evidence are all implemented and tested. Target reference hardware is now
+owner-confirmed (Mac mini M4 Pro, 12-core CPU, 16-core GPU, 24 GB unified
+memory, 512 GB SSD — a validated MVP reference configuration, not a permanent
+platform lock-in; see `docs/TARGET_MAC_BENCHMARK.md`), but the benchmark has
+not yet been executed on that hardware — this remains the sole mandatory
+blocker to closing M5. Issue #20 and M5 remain OPEN (PR #22's merge did not
+and must not close either).
 Governance PR #1 merged at `16929fd` (**M0 CLOSED**); Slice 6 PR #7
 merged at `55fef2d` (**M1 — CV Ingestion & Candidate Library is
 CLOSED**, issue #6 closed); Slice 7 PR #9 merged at `24b1d67` (issue #8
@@ -19,11 +20,15 @@ Slice 9 PR #13 merged at `1be5d51` (issue #12 closed; **M2 CLOSED**).
 Slice 10 PR #15 merged at `1c9dbbd` (issue #14 and **M3 — JD Matching &
 Ranking CLOSED**). Slice 11 PR #17 squash-merged at `e182bdd` (issue #16
 closed). Slice 12 PR #19 squash-merged at `93fa567` (issue #18 closed;
-**M4 — Internal Product Interface & API CLOSED**). Local `main` and
-`origin/main` currently sit at `93fa567`. **M5 — Security, Target-Mac
-Validation & MVP Acceptance is OPEN**, containing only issue #20 (Slice
-13 — Security + Official Definition-of-Done Acceptance, a governance/
-placeholder issue). Slice 13 implementation has not started.
+**M4 — Internal Product Interface & API CLOSED**). Slice 13 PR #22
+squash-merged at `a709ce1` (`Refs #20`, issue #20 deliberately left open —
+see above). Local `main` and `origin/main` currently sit at `a709ce1`.
+**M5 — Security, Target-Mac Validation & MVP Acceptance is OPEN**,
+containing only issue #20 (Slice 13 — Security + Official
+Definition-of-Done Acceptance) pending the Target-Mac benchmark gate.
+**M6 — Operational CV Intake & Reconciliation is OPEN**, containing issue
+#23 (Slice 14 — CV Folder Import & Continuous Ingestion, in progress on
+`feat/folder-reconciliation`, D-021) — see "In progress" below.
 
 GitHub remote established (`https://github.com/a-r3/meyar.git`, private,
 temporary development remote — see D-012, `docs/DECISIONS.md`). `main`
@@ -267,6 +272,26 @@ remains disabled.
   schema. See D-019. Slice 13 final security/DoD acceptance was not started.
 
 ## Tests
+**535/535 passing** as of Slice 14 (`feat/folder-reconciliation`): 511 prior
+(post-Slice-13-merge baseline) + 24 Slice 14 regressions —
+`test_folder_indexer.py` (8 new: file-stability skip/later-processing,
+unstable-existing-file-not-tombstoned, cross-path exact-content dedup,
+cross-tenant dedup isolation, no-merge-on-different-content, folder-path
+oversized/`_MAX_PAGES` limits), `test_folder_reconciliation.py` (12: fresh
+PDF/DOCX reconciliation produces profile/identity/embedding, resulting
+candidate is searchable end-to-end, unchanged-reconciliation idempotency
+(no duplicate Candidate/downstream versions), per-candidate isolation on
+extraction failure, embedding-failure-then-safe-retry, `--limit`
+bounding, PII-safe audit output, full `reconcile_folder` restart-safe
+flow), `test_folder_reconciliation_cli.py` (4: happy path, invalid root
+exit 2, downstream-failure exit 1, `--limit` flag). The breakdown below
+predates Slice 13/14 and is retained as historical record of Slices
+1–12; it has not been backfilled for Slice 13's own test additions
+(`test_no_exfiltration.py`, `test_ui_original_cv.py`,
+`test_e2e_synthetic_mvp.py`, `test_multilingual_evidence.py`,
+`test_audit_privacy_guard.py`, `test_candidate_documents.py` additions —
+see PR #22).
+
 473/473 passing (430 prior + 43 Slice 12 search/NL-search/evaluation/
 ranking/candidate-detail/usage/OpenAPI-contract regressions). Slice 12
 focused coverage proves: `STRUCTURED_ONLY` search never invokes the
@@ -484,12 +509,33 @@ Evaluation's persisted `candidate_profile_version_id`/
 `job_criteria_version_id` verified to equal the exact input versions.
 
 ## In progress
-Slice 11 (PR #17, closed issue #16) merged at `e182bdd` — squash SHA
-`e182bdd58da6992a552fbfeb248f88852ef5a8c8`, single parent `1c9dbbd`, tree
-verified identical to accepted PR head `181a634`, CI green. Slice 12
-(`feat/rest-api-openapi-completion`, closes issue #18) is implemented and
-pending independent acceptance/owner merge. M4 remains open because this PR
-must not be merged automatically.
+Slice 14 (`feat/folder-reconciliation`, closes issue #23, associated with
+**M6 — Operational CV Intake & Reconciliation**) is implemented and pending
+independent acceptance/owner merge. Closes the gap left after Slice 6: a
+folder-imported `CandidateDocument` never automatically continued through
+profile extraction, identity extraction, or embedding, so a folder-imported
+candidate was not searchable without a manual per-candidate command. Reuses
+`meyar.services.folder_indexer_service.index_folder` unchanged for
+discovery/ingestion; adds a new `meyar.services.folder_reconciliation_service`
+that drives whichever of `extract_candidate_profile`/
+`extract_candidate_identity`/`embed_candidate_profile` (Slice 4/7, unchanged)
+each pending candidate's *current* document still needs, deriving readiness
+from existing `candidate_document_id`-scoped provenance rather than a new
+migration. A `stability_window_seconds` parameter on `index_folder`
+(`MEYAR_FOLDER_STABILITY_SECONDS`, default 60) skips a file that was
+modified too recently to trust — never marked FAILED, never tombstoned
+MISSING if already tracked. `find_indexed_file_by_content_hash`
+(tenant-scoped SHA-256 lookup) links a byte-identical file at a second path
+to the already-ingested `candidate_id`/`candidate_document_id` instead of
+minting a duplicate — document-content dedup only, never human-identity
+resolution, never cross-tenant. New CLI command
+`meyar reconcile-folder --tenant-id --root [--limit N]` serves both initial
+bulk import and repeatable reconciliation in one invocation (same exit-code
+discipline as `index-folder`: 0 clean, 1 completed-with-failures, 2 invalid
+source, 3 infra/DB failure), PII-safe output. No database migration (Slice
+4/7's existing `candidate_document_id` FKs are sufficient); no new runtime
+dependency (periodic reconciliation, not a filesystem watcher — see D-021).
+M6 remains open because this PR must not be merged automatically.
 
 ## Blockers
 **Mac Mini benchmark execution** — the sole remaining mandatory blocker to
@@ -506,15 +552,18 @@ bank-owned remote still pending, migration keeps full history when it
 arrives (organizational, non-blocking for MVP).
 
 ## Next action
-1. **Slice 13 — Security + Official Definition-of-Done Acceptance**
-   (issue #20, PR #22 `feat/security-dod-acceptance` → `main`, `Refs #20`),
-   associated with **M5 — Security, Target-Mac Validation & MVP
-   Acceptance**: independently audit the Pass-1 implementation, then owner
-   Squash and merge PR #22. Do not close issue #20 or M5 on that merge —
-   the Mac Mini benchmark execution gate remains open until the owner runs
+1. **Slice 14 — CV Folder Import & Continuous Ingestion** (issue #23,
+   `feat/folder-reconciliation` → `main`), associated with
+   **M6 — Operational CV Intake & Reconciliation**: independently audit
+   the implementation, then owner Squash and merge. Do not close issue
+   #20 or M5, and do not change Target-Mac status, as part of this merge
+   — Slice 14 is unrelated to that gate.
+2. **Mac Mini benchmark execution** (issue #20, **M5**) — the sole
+   remaining mandatory blocker to MVP closure: run
    `backend/scripts/target_mac_benchmark.py` on the actual confirmed
-   target hardware and a production model decision is recorded.
-2. **Git Infrastructure** — remote connected (`a-r3/meyar`, private,
+   target hardware and record a production model decision. M5/issue #20
+   must not close until this moves to DONE.
+3. **Git Infrastructure** — remote connected (`a-r3/meyar`, private,
    temporary — D-012); governance merged (`16929fd`). May later migrate
    to an official bank-owned remote (history preserved).
 
@@ -533,7 +582,8 @@ due date because the official timeline has not been supplied.
 | M2 — Candidate Search Intelligence | Slices 7–9 | CLOSED — PRs #9/#11/#13 merged; issues #8/#10/#12 closed |
 | M3 — JD Matching & Ranking | Slice 10 | CLOSED — PR #15 merged at `1c9dbbd`, issue #14 closed |
 | M4 — Internal Product Interface & API | Slices 11–12 | CLOSED — Slice 11 merged (PR #17, issue #16 closed); Slice 12 merged (PR #19 at `93fa567`, issue #18 closed) |
-| M5 — Security, Target-Mac Validation & MVP Acceptance | Slice 13 + target-Mac benchmark | OPEN — issue #20 open; PR #22 implements Pass 1 (original CV, no-exfiltration, backup/restore, audit guard, multilingual evidence) with `Refs #20`; Mac Mini benchmark execution on the now owner-confirmed target hardware remains the sole open mandatory gate |
+| M5 — Security, Target-Mac Validation & MVP Acceptance | Slice 13 + target-Mac benchmark | OPEN — issue #20 open; PR #22 merged at `a709ce1` implementing Pass 1 (original CV, no-exfiltration, backup/restore, audit guard, multilingual evidence) with `Refs #20`; Mac Mini benchmark execution on the now owner-confirmed target hardware remains the sole open mandatory gate |
+| M6 — Operational CV Intake & Reconciliation | Slice 14 | OPEN — issue #23 open; Slice 14 implemented on `feat/folder-reconciliation`, pending independent acceptance/owner merge |
 
 ## Official requirement gap matrix
 

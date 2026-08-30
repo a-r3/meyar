@@ -59,6 +59,7 @@ No due dates are assigned until the official project timeline is supplied.
 | **M3 — JD Matching & Ranking** | Slice 10: deterministic 0–100 score, batch ranking, explanations |
 | **M4 — Internal Product Interface & API** | Slices 11–12: Chat UI, CV Library UI, internal REST API, Swagger/README completion |
 | **M5 — Security, Target-Mac Validation & MVP Acceptance** | Slice 13, target Mac Mini model benchmark, external-network/data-exfiltration verification, privacy/security acceptance, official Definition of Done |
+| **M6 — Operational CV Intake & Reconciliation** | Slice 14: automatic profile/identity/embedding processing for folder-imported CVs, so a folder-imported candidate becomes searchable without a manual per-candidate command |
 
 Material product work uses the applicable approved milestone and, when useful,
 one issue per coherent deliverable. Avoid micro-issues for tiny tests or edits.
@@ -85,11 +86,14 @@ toolchain.
 ### Slice 6 — Local CV Library & Folder Indexer
 
 Scan a configured local folder for PDF/DOCX, hash-based change detection,
-ingest new/changed files only (idempotent, safe to re-run), parse/extract
-through the existing Slice 3/4 pipeline, persist indexing state
-(discovered path, hash, scan timestamp, parse/extraction status, current
-candidate/profile linkage). **DONE** (Slice 6, D-013).
-GitHub milestone: **M1 — CV Ingestion & Candidate Library**.
+ingest new/changed files only (idempotent, safe to re-run), parse through
+the existing Slice 3 pipeline, persist indexing state (discovered path,
+hash, scan timestamp, parse status, current candidate/document linkage).
+Downstream profile extraction (Slice 4), identity extraction (Slice 7),
+and embedding (Slice 7) remained a separate, manually-triggered operator
+step, same as for direct upload — closed by Slice 14, not by Slice 6.
+**DONE** (Slice 6, D-013). GitHub milestone: **M1 — CV Ingestion &
+Candidate Library**.
 
 ### Slice 7 — Candidate Identity + Local Embeddings / Vector Index
 
@@ -134,6 +138,24 @@ Swagger docs; README usage examples. Not started.
 Full acceptance pass against the official DoD matrix (`docs/STATUS.md`),
 including bad-file testing, scoring consistency, and an
 external-network/exfiltration verification pass. Not started.
+
+### Slice 14 — CV Folder Import & Continuous Ingestion
+
+Closes the operational/product gap left after Slice 6: a folder-imported
+`CandidateDocument` never automatically continued through profile
+extraction, identity extraction, or embedding, so a folder-imported
+candidate was not searchable without a separate manual per-candidate
+command. Reuses the Slice 6 scanner/indexer unchanged; adds a
+reconciliation orchestration layer (`meyar.services
+.folder_reconciliation_service`), a file-stability window, tenant-scoped
+exact-content dedup, and one CLI command
+(`meyar reconcile-folder --tenant-id --root [--limit N]`) serving both
+initial bulk import and repeatable reconciliation. No new database
+migration (readiness is derived from existing Slice 4/7 provenance) and no
+new runtime dependency (periodic reconciliation, not a filesystem
+watcher). Implemented on `feat/folder-reconciliation`, pending independent
+acceptance and owner merge (D-021, issue #23). GitHub milestone:
+**M6 — Operational CV Intake & Reconciliation**.
 
 ## Deferred (still explicitly out of scope)
 

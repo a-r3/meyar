@@ -31,6 +31,7 @@ from meyar.services.candidate_embedding_service import (
 )
 from meyar.services.candidate_profile_repo import get_current_profile_version
 from meyar.services.folder_indexer_service import index_folder
+from meyar.services.folder_reconciliation_service import reconcile_folder
 from meyar.services.job_criteria_repo import get_current_criteria_version
 from meyar.services.tenant_repo import create_tenant
 from meyar.storage.dependency import get_document_storage
@@ -247,6 +248,7 @@ async def _index_folder(tenant_id: str, root: str) -> None:
                 tenant_id=uuid.UUID(tenant_id),
                 root_path=root,
                 max_bytes=settings.max_upload_bytes,
+                stability_window_seconds=settings.folder_stability_seconds,
             )
             await db.commit()
     except InvalidSourceRootError as exc:
@@ -265,7 +267,71 @@ async def _index_folder(tenant_id: str, root: str) -> None:
     print(f"Successful: {summary.successful}")
     print(f"Failed: {summary.failed}")
     print(f"Missing: {summary.missing}")
+    print(f"Skipped (unstable): {summary.skipped_unstable}")
     if summary.failed > 0:
+        raise SystemExit(1)
+
+
+async def _reconcile_folder(tenant_id: str, root: str, limit: int | None) -> None:
+    """CLI entry point for Slice 14 — one command serves both initial
+    bulk import and repeatable reconciliation: discovery/ingestion
+    (reusing index_folder unchanged) followed by profile/identity/
+    embedding processing for whatever isn't yet fully processed for its
+    current document, so a folder-imported candidate becomes searchable
+    without a separate manual per-candidate command. PII-safe output:
+    only ids and counts. Exit codes: 0 = clean run (nothing failed and
+    nothing was left pending by --limit), 1 = completed with at least
+    one ingestion or downstream-processing failure, 2 = invalid source
+    folder, 3 = infrastructure/database failure."""
+    settings = get_settings()
+    factory = get_session_factory()
+    storage = get_document_storage()
+    parser = get_document_parser()
+    llm = get_llm_provider()
+    embedding_provider = get_embedding_provider()
+
+    try:
+        async with factory() as db:
+            scan_summary, reconciliation_summary = await reconcile_folder(
+                db,
+                storage,
+                parser,
+                llm,
+                embedding_provider,
+                tenant_id=uuid.UUID(tenant_id),
+                root_path=root,
+                max_bytes=settings.max_upload_bytes,
+                stability_window_seconds=settings.folder_stability_seconds,
+                model_provider_name=settings.llm_provider,
+                max_profile_input_chars=settings.llm_max_input_chars,
+                max_identity_input_chars=settings.llm_max_input_chars,
+                max_embedding_input_chars=settings.embedding_max_input_chars,
+                limit=limit,
+            )
+    except InvalidSourceRootError as exc:
+        print(f"Invalid source folder: {exc}")
+        raise SystemExit(2) from exc
+    except Exception as exc:  # infrastructure/database failure
+        print(f"Folder reconciliation failed: {type(exc).__name__}")
+        raise SystemExit(3) from exc
+
+    print(f"Source: {scan_summary.folder_source_id}")
+    print(f"Discovered: {scan_summary.discovered}")
+    print(f"New: {scan_summary.new}")
+    print(f"Changed: {scan_summary.changed}")
+    print(f"Retried: {scan_summary.retried}")
+    print(f"Unchanged: {scan_summary.unchanged}")
+    print(f"Ingestion successful: {scan_summary.successful}")
+    print(f"Ingestion failed: {scan_summary.failed}")
+    print(f"Missing: {scan_summary.missing}")
+    print(f"Skipped (unstable): {scan_summary.skipped_unstable}")
+    print(f"Candidates considered: {reconciliation_summary.candidates_considered}")
+    print(f"Already ready: {reconciliation_summary.already_ready}")
+    print(f"Processed this run: {reconciliation_summary.processed}")
+    print(f"Ready after this run: {reconciliation_summary.ready_after}")
+    print(f"Failed/pending retry: {reconciliation_summary.failed}")
+    print(f"Skipped due to --limit: {reconciliation_summary.skipped_due_to_limit}")
+    if scan_summary.failed > 0 or reconciliation_summary.failed > 0:
         raise SystemExit(1)
 
 
@@ -522,6 +588,30 @@ def main() -> None:
     index_folder_parser.add_argument("--tenant-id", required=True)
     index_folder_parser.add_argument("--root", required=True, help="Local folder path to scan.")
 
+    reconcile_folder_parser = sub.add_parser(
+        "reconcile-folder",
+        help=(
+            "Scan a local folder for PDF/DOCX CVs, ingest new/changed files, and drive "
+            "them through profile/identity extraction and embedding so they become "
+            "searchable — one command for both initial bulk import and repeatable "
+            "reconciliation."
+        ),
+    )
+    reconcile_folder_parser.add_argument("--tenant-id", required=True)
+    reconcile_folder_parser.add_argument(
+        "--root", required=True, help="Local folder path to scan."
+    )
+    reconcile_folder_parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help=(
+            "Bound how many not-yet-ready candidates are processed this invocation "
+            "(already-ready candidates are free and never count against it). "
+            "Default: unlimited."
+        ),
+    )
+
     extract_identity_parser = sub.add_parser(
         "extract-identity",
         help="Run candidate identity extraction (name/email/phone) against a real local LLM.",
@@ -579,6 +669,8 @@ def main() -> None:
         )
     elif args.command == "index-folder":
         asyncio.run(_index_folder(args.tenant_id, args.root))
+    elif args.command == "reconcile-folder":
+        asyncio.run(_reconcile_folder(args.tenant_id, args.root, args.limit))
     elif args.command == "extract-identity":
         asyncio.run(_extract_identity(args.tenant_id, args.candidate_id, args.document_id))
     elif args.command == "embed-candidate":

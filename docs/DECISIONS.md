@@ -1130,3 +1130,120 @@ run eventually happens.
 a new D-0xx) once the Target-Mac benchmark executes and a production model
 decision is recorded — item 15 and the model-approval status are the parts
 expected to change; items 1–14 record already-tested, stable boundaries.
+
+## D-021 — Slice 14 folder reconciliation and automatic candidate processing
+
+**Date:** 2026-08-30
+**Decision:** Slice 6's folder indexer (D-013) already delivered discovery,
+secure canonical ingestion, and idempotent per-path tracking, reusing
+`ingest_candidate_document` unchanged. It stopped there: a folder-imported
+`CandidateDocument` never automatically continued through profile
+extraction, identity extraction, or embedding — the same gap that applies
+to direct upload, since `meyar.services.candidate_document_service
+.ingest_candidate_document` has exactly one downstream-processing
+convention across the whole app: an explicit, separate operator/CLI step.
+Slice 14 closes this gap for the folder path only, without creating a
+second ingestion pipeline:
+
+1. **Existing folder scanner/indexer reused unchanged for
+   discovery/ingestion.** `meyar.ingestion.folder_scanner` and
+   `meyar.services.folder_indexer_service.index_folder` are extended
+   in place (a new `stability_window_seconds` parameter, a cross-path
+   dedup lookup inside `_handle_new_file`), never duplicated. The new
+   orchestration lives in a sibling module,
+   `meyar.services.folder_reconciliation_service`, which calls
+   `index_folder` and then drives whichever of
+   `extract_candidate_profile` / `extract_candidate_identity` /
+   `embed_candidate_profile` (Slice 4/7, unchanged) each pending
+   candidate still needs.
+2. **Periodic reconciliation, not a filesystem watcher.** A watcher
+   (inotify/FSEvents/`watchdog`) loses events across a process restart,
+   is unreliable over a network/shared filesystem a bank-controlled
+   folder plausibly is, and needs an OS-specific dependency to work on
+   both the reference macOS host and a future Linux host. A periodic,
+   idempotent full re-scan (the same design Slice 6 already assumed)
+   needs none of that: it re-derives truth from the filesystem plus
+   `folder_indexed_files` every run, has no persisted watcher state to
+   lose, and adds zero new dependencies. The application owns one
+   repeatable CLI command (`meyar reconcile-folder`); deployment
+   infrastructure (macOS `launchd`, Linux `systemd` timer/cron) owns
+   scheduling — see `docs/DEPLOYMENT_AND_OPERATIONS.md`.
+3. **File-stability window: 60-second default, stdlib only.**
+   `MEYAR_FOLDER_STABILITY_SECONDS` (default 60). A discovered file
+   whose mtime is newer than `now - window` is skipped for that scan
+   only — never marked FAILED, and (if already tracked) never
+   tombstoned MISSING, since it is simply not observed this pass, not
+   actually gone. No atomic-rename producer convention is required
+   (MEYAR does not control how the bank's own systems write into the
+   folder), no OS-specific dependency, no busy-wait inside the scan.
+4. **Exact-content (SHA-256) dedup is document-content dedup only,
+   never human-identity resolution.** Same relative path + same bytes:
+   unchanged Slice 6 no-op. Same relative path + changed bytes: new
+   immutable `CandidateDocument`/`CanonicalDocument` version under the
+   *same*, path-derived `Candidate` identity (D-013 #2, unchanged) —
+   Slice 14 additionally ensures a new profile/identity/embedding is
+   generated for that new document so search/scoring is never left
+   stale on the superseded content. Different relative path + identical
+   bytes, same tenant: the new path is linked to the already-ingested
+   `candidate_id`/`candidate_document_id` (tenant-scoped lookup by
+   `sha256_hash` in `find_indexed_file_by_content_hash`) instead of
+   minting a duplicate `Candidate` and a duplicate stored copy — never
+   cross-tenant. Different bytes at different paths are **never**
+   linked, even when plausibly the same person: MEYAR has no
+   candidate-identity matching/merge capability, and Slice 14
+   deliberately does not invent one.
+5. **Downstream readiness is derived from existing provenance — no new
+   migration.** `CandidateProfileVersion` and `CandidateIdentityVersion`
+   both already carry `candidate_document_id` directly (established in
+   Slice 4/7, unchanged); a `COMPLETED` row for the *current* document
+   id is sufficient to know that stage is done, with no redundant
+   processing-status column. Embedding readiness reuses
+   `embed_candidate_profile`'s own idempotency (Slice 7, D-014) — it is
+   always safe/cheap to call once a profile is `COMPLETED`. New
+   read-only lookups (`get_latest_profile_version_for_document`,
+   `get_latest_identity_version_for_document`) were added to the
+   existing repositories; no schema change, no Alembic revision.
+6. **Per-candidate commit boundary inside
+   `process_pending_candidates` — a deliberate, narrow deviation from
+   the "caller controls the transaction boundary" convention used
+   elsewhere (e.g. `index_folder`).** A bounded batch loop over
+   independent candidates needs its own commit boundary for restart
+   safety: each candidate's outcome (success, or a caught/logged
+   failure after `db.rollback()`) is committed immediately, so a crash
+   or an unexpected exception mid-batch only ever loses that one
+   candidate's uncommitted work — never previously-completed
+   candidates in the same run, and never candidate B's turn because
+   candidate A failed. `index_folder` itself is unchanged in this
+   respect; the initial scan is committed once, immediately before
+   downstream processing starts, by the new `reconcile_folder` entry
+   point.
+7. **Sequential processing, bounded by `--limit`, no concurrency yet.**
+   `meyar reconcile-folder --tenant-id --root [--limit N]` serves both
+   initial bulk import and repeatable reconciliation in one command.
+   `--limit` bounds how many *not-yet-ready* candidates are attempted
+   per invocation (already-ready candidates are free and never count
+   against it) so a large backlog is worked off incrementally rather
+   than forcing one unbounded sequential local-Ollama run. No bounded-
+   concurrency primitive is added — `docs/MASTER_SPEC.md` §11 already
+   frames local Ollama as a single-worker resource; real throughput
+   evidence is a Target-Mac-benchmark question (D-020), not invented
+   here.
+8. **New `FOLDER_FILE_DUPLICATE_CONTENT_LINKED` and
+   `FOLDER_RECONCILE_CANDIDATE_FAILED` audit event types**, both
+   ids/counts/codes only, verified against the existing privacy guard
+   (`meyar.services.audit_repo._assert_metadata_is_privacy_safe`).
+
+**Why:** Closes the gap identified in the pre-implementation Slice 14 gap
+analysis: Slice 6 already solved discovery/ingestion/idempotency; the
+missing piece was purely the downstream orchestration to make a
+folder-imported candidate actually searchable, without inventing a second
+ingestion pipeline, a new background-worker subsystem, or a filesystem
+watcher the architecture rules would require separate justification for.
+
+**Reversibility:** Fully reversible and additive. `stability_window_seconds`
+defaults to 0 (disabled) on `index_folder` itself for backward
+compatibility with existing callers/tests; production callers (both CLI
+commands) pass `Settings.folder_stability_seconds`. No data is destroyed by
+any of these choices — a future policy change (e.g. a real processing-status
+column, bounded concurrency once Target-Mac throughput is known) can be
+layered on without touching the semantics recorded here.
