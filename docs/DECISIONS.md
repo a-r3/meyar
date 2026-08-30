@@ -1300,3 +1300,76 @@ designed. This does not change the design recorded above; it records the
 fixes and the accepted limitations precisely rather than leaving them
 implicit. No Target-Mac validation occurred as part of this pass —
 unrelated to and does not affect issue #20/M5.
+
+## D-022 — Pre-presentation readiness: synthetic demo bootstrap and guard-hook fix
+
+**Date:** 2026-08-31
+**Decision:** Chore-level work (issue #25, not a Slice) ahead of a local
+product demonstration:
+
+1. **`meyar seed-demo` bootstraps one fixed-name, isolated demo tenant
+   (`MEYAR Demo (Synthetic)`) through the real service layers only.**
+   `meyar.services.demo_seed_service` calls the exact same
+   `ingest_candidate_document`, `extract_candidate_profile`,
+   `extract_candidate_identity`, `embed_candidate_profile`, and
+   `evaluate_and_score_candidate` functions every other code path uses —
+   no parallel data path, no hand-inserted scores. The one deliberate
+   exception: `_DemoLLMProvider`/`_DemoEmbeddingProvider` supply
+   pre-written, evidence-matched extraction/embedding results instead of
+   calling a live model, exactly the same technique `tests/fakes.py`
+   already uses for the test suite. **This is not a fake production AI
+   mode:** these classes are constructed only inside
+   `demo_seed_service.seed_demo`, never wired into
+   `meyar.llm.dependency.get_llm_provider` or
+   `meyar.embedding.dependency.get_embedding_provider` (the real,
+   Ollama-backed factories every request-serving path uses), and the
+   command only ever runs from an explicit operator invocation — never
+   at application startup, never automatically. Live search/extraction
+   endpoints remain honestly dependent on a reachable Ollama daemon
+   exactly as before (see `docs/LOCAL_DEMO.md` §9–10 for exactly which
+   surfaces do and don't need one).
+2. **Idempotent by tenant-name lookup, not a new schema.** `seed_demo`
+   looks up the tenant by the fixed `DEMO_TENANT_NAME`; if it already has
+   any candidates, reseeding is skipped (a fresh API key is still minted,
+   since a prior plaintext can never be recovered). `--reset` deletes
+   *only* the tenant matching that exact name — cascading via each
+   table's existing `ondelete="CASCADE"` foreign key, no bespoke deletion
+   logic, and no path that accepts an arbitrary tenant id. No migration.
+3. **`.claude/hooks/guard.sh` gained the same env-file exception
+   `.githooks/pre-commit` and `scripts/scan-tracked-tree.sh` already
+   had.** The guard previously blocked automated Write/Edit to *any*
+   `.env`-shaped path, including the tracked, non-secret
+   `backend/.env.example` template — an inconsistency with the other two
+   governance tools, which already carve out exactly
+   `.env.example`/`.env.sample`/`.env.template` via an
+   `is_allowed_env_file` helper. `guard.sh` now uses the identical
+   helper/allowlist; real `.env`, `.env.local`, `.env.production`, etc.
+   remain fully blocked (manually verified: `.env`/`.env.local`/
+   `.env.production`/`id_rsa` all still block; `.env.example` and an
+   unrelated file both pass).
+4. **`backend/.env.example` completeness.** Added the 6 active
+   `MEYAR_*` settings it was missing (5 `MEYAR_EMBEDDING_*` fields, plus
+   `MEYAR_FOLDER_STABILITY_SECONDS` from D-021) — all already had safe
+   code-level defaults; this is documentation completeness, not a
+   behavior change.
+5. **Stale test-count/status wording corrected.** `docs/STATUS.md`'s
+   Tests section said "535/535"; the actual count (post-Slice-14
+   hardening pass) is 537. `docs/STATUS.md`/`docs/MVP_PLAN.md`'s Slice 14
+   sections also still described it as "pending merge" after PR #24 had
+   already merged (squash `f6e31ff`) — corrected to MERGED, with M6 noted
+   as having no remaining open issues but deliberately left open pending
+   an explicit owner closure decision, per the standing rule against
+   closing milestones without an approved roadmap decision.
+
+**Why:** A department-head-facing local demo needs a truthful, inspectable
+UI without requiring live Ollama for every screen, and without any
+production code branching on "is this a demo." The synthetic dataset gives
+that without touching search/scoring/matching logic at all. The guard-hook
+fix removes recurring friction on a file the project's own other two
+governance tools already treat as safe to edit.
+
+**Reversibility:** Fully reversible and additive. The demo tenant can be
+removed at any time with `meyar seed-demo --reset` and affects nothing
+else. The guard-hook change only narrows what was already blocked for one
+specific, non-secret, already-tracked filename pattern — every other
+`.env`-shaped path remains blocked exactly as before.
