@@ -87,7 +87,7 @@ async def test_cli_reconcile_folder_happy_path(
     assert "Ingestion successful: 1" in captured.out
     assert "Candidates considered: 1" in captured.out
     assert "Ready after this run: 1" in captured.out
-    assert "Failed/pending retry: 0" in captured.out
+    assert "Not fully ready (pending retry): 0" in captured.out
     # PII-safety: no candidate/document identity leaks into CLI output.
     assert "candidate.pdf" not in captured.out
 
@@ -124,7 +124,7 @@ async def test_cli_reconcile_folder_downstream_failure_exits_1(
 
     assert exc_info.value.code == 1
     captured = capsys.readouterr()
-    assert "Failed/pending retry: 1" in captured.out
+    assert "Not fully ready (pending retry): 1" in captured.out
 
 
 async def test_cli_reconcile_folder_limit_flag(

@@ -613,6 +613,15 @@ command.
 - **Do not commit a bank-specific source path or a bank-specific scheduler
   configuration to this repository** — those are per-deployment operator
   configuration, same rule as `backend/.env` (§5).
+- **Run at most one active `reconcile-folder` invocation per
+  `(tenant, source root)` at a time.** This is the supported MVP
+  operational model, not something MEYAR enforces at the database level —
+  overlapping concurrent reconcilers against the same source can race on
+  the exact-content dedup check and each mint a separate candidate for
+  identical content (see `docs/DECISIONS.md` D-021 item 9). Do not
+  configure two overlapping scheduled jobs (e.g. two different timers, or
+  a manual run overlapping a scheduled one) against the same source.
+  Distributed locking is not implemented.
 
 Generic scheduler examples (illustrative only — adapt for the actual
 deployment host, do not commit the result):
@@ -634,11 +643,23 @@ Operational notes:
   invocation, per-candidate work is retried automatically), an invalid
   source folder (`2`), and an infrastructure/database failure (`3`) — treat
   `0`/`1` as "ran," and `2`/`3` as needing operator attention before the
-  next scheduled run.
+  next scheduled run. Exit `1`/"Failed/pending retry" in the printed
+  summary means that candidate's downstream processing did not fully
+  complete this run (profile, identity, or embedding) — it does not by
+  itself mean the candidate is unsearchable: a candidate whose profile
+  and embedding already succeeded but whose identity extraction failed
+  still remains fully searchable by professional profile (identity is
+  presentation-only, never a search/ranking input).
 - `--limit` bounds how many not-yet-ready candidates are processed in one
   invocation, so a large initial backlog does not force one unbounded
   sequential local-Ollama run — a large backlog is worked off across
-  several scheduled invocations instead.
+  several scheduled invocations instead. Discovery/ingestion itself is
+  never bounded by `--limit`; only downstream profile/identity/embedding
+  processing is. Within the bound, a candidate that has never been
+  attempted is always processed before one that already has a recorded
+  failed attempt, so a persistently-failing candidate cannot permanently
+  starve a candidate that has not been tried yet — later scheduled
+  invocations always make progress on genuinely new work first.
 - Output is PII-safe (ids and counts only), so command output is safe to
   forward to normal log aggregation, same as application logs (§6).
 - `MEYAR_FOLDER_STABILITY_SECONDS` (default 60) controls the file-stability

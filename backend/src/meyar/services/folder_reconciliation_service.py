@@ -192,32 +192,53 @@ async def process_pending_candidates(
     call (already-ready candidates are free/no-op and never count
     against it) — a large backlog is processed incrementally across
     repeated reconciliation calls rather than forcing one unbounded
-    sequential Ollama run."""
+    sequential Ollama run.
+
+    Fairness under --limit: never-attempted candidates are processed
+    before previously-attempted-but-not-yet-ready ones (deterministically
+    tie-broken by relative_path), so a candidate that keeps failing can
+    never permanently starve a candidate that has not been tried yet —
+    each repeated call re-derives this ordering fresh from current
+    provenance, no separate scheduling state needed. See
+    docs/DECISIONS.md D-021."""
     rows = await list_folder_indexed_files(
         db, tenant_id=tenant_id, folder_source_id=folder_source_id
     )
 
     considered = already_ready = processed = ready_after = failed = skipped_due_to_limit = 0
     seen_documents: set[uuid.UUID] = set()
+    pending: list[tuple[uuid.UUID, uuid.UUID, str, bool]] = []
 
     for row in rows:
         if row.candidate_id is None or row.candidate_document_id is None:
             continue  # ingestion-level FAILED row — nothing to process yet
-        if row.candidate_document_id in seen_documents:
+        candidate_id = row.candidate_id
+        candidate_document_id = row.candidate_document_id
+        if candidate_document_id in seen_documents:
             continue  # a dedup-linked duplicate path — same document, already considered
-        seen_documents.add(row.candidate_document_id)
+        seen_documents.add(candidate_document_id)
         considered += 1
 
-        ready, _profile = await _is_ready(
+        ready, profile = await _is_ready(
             db,
             tenant_id=tenant_id,
-            candidate_id=row.candidate_id,
-            candidate_document_id=row.candidate_document_id,
+            candidate_id=candidate_id,
+            candidate_document_id=candidate_document_id,
         )
         if ready:
             already_ready += 1
             continue
 
+        # profile is not None whenever a prior extraction attempt already
+        # exists for this exact document (COMPLETED-but-still-not-ready,
+        # FAILED, or MANUAL_REVIEW_REQUIRED) — the fairness signal below.
+        pending.append(
+            (candidate_id, candidate_document_id, row.relative_path, profile is not None)
+        )
+
+    pending.sort(key=lambda item: (item[3], item[2]))
+
+    for candidate_id, candidate_document_id, _relative_path, _was_attempted in pending:
         if limit is not None and processed >= limit:
             skipped_due_to_limit += 1
             continue
@@ -229,8 +250,8 @@ async def process_pending_candidates(
                 llm,
                 embedding_provider,
                 tenant_id=tenant_id,
-                candidate_id=row.candidate_id,
-                candidate_document_id=row.candidate_document_id,
+                candidate_id=candidate_id,
+                candidate_document_id=candidate_document_id,
                 model_provider_name=model_provider_name,
                 max_profile_input_chars=max_profile_input_chars,
                 max_identity_input_chars=max_identity_input_chars,
@@ -243,7 +264,7 @@ async def process_pending_candidates(
                 db,
                 tenant_id=tenant_id,
                 event_type="FOLDER_RECONCILE_CANDIDATE_FAILED",
-                metadata={"candidate_id": str(row.candidate_id), "error_type": type(exc).__name__},
+                metadata={"candidate_id": str(candidate_id), "error_type": type(exc).__name__},
             )
             await db.commit()
             success = False

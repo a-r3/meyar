@@ -72,6 +72,66 @@ def _identity_extraction() -> CandidateIdentityExtraction:
     )
 
 
+def _write_single_paragraph_docx(dest: Path, text: str) -> None:
+    """A minimal real DOCX with exactly one non-empty paragraph, which
+    LocalTextParser parses to page=1, block_index=0 — lets tests use
+    real, distinguishable, non-fabricated document content instead of a
+    fixture file, e.g. to prove a changed CV's new content (not the old
+    content) is what search reflects."""
+    from docx import Document
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    document = Document()
+    document.add_paragraph(text)
+    document.save(str(dest))
+
+
+def _skill_extraction(skill_name: str, *, quote: str, block_index: int = 0) -> (
+    CandidateProfileExtraction
+):
+    """Like _profile_extraction, but with a caller-chosen skill name and
+    evidence quote — used where a test needs distinguishable, real
+    document content (see _write_single_paragraph_docx)."""
+    return CandidateProfileExtraction(
+        skills=[
+            SkillItem(
+                name=skill_name,
+                evidence=[EvidenceRef(page=1, block_index=block_index, quote=quote)],
+            )
+        ],
+    )
+
+
+class _SelectiveFailureLLMProvider:
+    """A minimal LLMProvider stub that fails deterministically only for
+    documents whose real parsed text contains fail_marker, and succeeds
+    for everything else — used to prove --limit fairness: a candidate
+    that keeps failing must not permanently starve a candidate that has
+    never been attempted. Inspecting the real view text (rather than
+    call count) ties the failure to a specific document regardless of
+    processing order."""
+
+    provider_name = "fake-selective"
+
+    def __init__(self, *, fail_marker: str, ok_extraction, ok_identity) -> None:
+        self._fail_marker = fail_marker
+        self._ok_extraction = ok_extraction
+        self._ok_identity = ok_identity
+
+    def _should_fail(self, view) -> bool:
+        return any(self._fail_marker in block.text for block in view.blocks)
+
+    async def extract_candidate_profile(self, view):
+        if self._should_fail(view):
+            raise ModelUnavailableError("simulated persistent failure")
+        return self._ok_extraction, "fake-model"
+
+    async def extract_candidate_identity(self, view):
+        if self._should_fail(view):
+            raise ModelUnavailableError("simulated persistent failure")
+        return self._ok_identity, "fake-model"
+
+
 async def _process(
     db_session: AsyncSession,
     tmp_path: Path,
@@ -447,3 +507,232 @@ async def test_reconcile_folder_full_flow(db_session: AsyncSession, tmp_path: Pa
     assert scan_summary_2.unchanged == 1
     assert recon_summary_2.already_ready == 1
     assert recon_summary_2.processed == 0
+
+
+async def test_changed_cv_reconciliation_updates_search_no_stale_state(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    """Critical scenario (independent-audit P1 follow-up): D1 says Java,
+    reconcile, candidate searchable for Java. The SAME relative path is
+    then replaced with D2 saying Python, reconciled again — through
+    reconcile_folder only, never a manual extract-profile/
+    extract-identity/embed-candidate command. Verifies: the same
+    Candidate identity/path semantics are preserved; a new
+    CandidateDocument version exists for D2; a new CandidateProfileVersion
+    and CandidateIdentityVersion exist for D2; the current
+    CandidateEmbeddingVersion corresponds to the D2-derived profile; and
+    structured search reflects only D2's current content — a Java query
+    no longer matches (stale D1 state is not treated as current), a
+    Python query does."""
+    tenant = await create_tenant(db_session, name="T-changed-cv-e2e")
+    await db_session.commit()
+    root = tmp_path / "cvs"
+    path = root / "candidate.docx"
+    _write_single_paragraph_docx(path, "Skills: Java")
+    storage = _storage(tmp_path)
+    parser = _parser()
+
+    llm_v1 = FakeLLMProvider(
+        extraction=_skill_extraction("Java", quote="Skills: Java"),
+        identity_extraction=_identity_extraction(),
+    )
+    scan1, recon1 = await reconcile_folder(
+        db_session, storage, parser, llm_v1, FakeEmbeddingProvider(vector=[1.0, 0.0]),
+        tenant_id=tenant.id,
+        root_path=str(root),
+        max_bytes=MAX_BYTES,
+        stability_window_seconds=0,
+        model_provider_name="fake",
+        max_profile_input_chars=MAX_INPUT_CHARS,
+        max_identity_input_chars=MAX_INPUT_CHARS,
+        max_embedding_input_chars=MAX_INPUT_CHARS,
+        limit=None,
+    )
+    await db_session.commit()
+    assert recon1.ready_after == 1
+
+    rows = await list_folder_indexed_files(
+        db_session, tenant_id=tenant.id, folder_source_id=scan1.folder_source_id
+    )
+    candidate_id = rows[0].candidate_id
+    d1_document_id = rows[0].candidate_document_id
+    assert candidate_id is not None
+
+    java_before = await search_candidates(
+        db_session,
+        tenant_id=tenant.id,
+        request=CandidateSearchRequest(
+            mode=SearchMode.STRUCTURED_ONLY, required_filters=RequiredFilters(skills=["Java"])
+        ),
+    )
+    assert candidate_id in {r.candidate_id for r in java_before.results}
+
+    # Same relative path, different bytes — the D1 -> D2 transition.
+    _write_single_paragraph_docx(path, "Skills: Python")
+
+    llm_v2 = FakeLLMProvider(
+        extraction=_skill_extraction("Python", quote="Skills: Python"),
+        identity_extraction=_identity_extraction(),
+    )
+    scan2, recon2 = await reconcile_folder(
+        db_session, storage, parser, llm_v2, FakeEmbeddingProvider(vector=[0.0, 1.0]),
+        tenant_id=tenant.id,
+        root_path=str(root),
+        max_bytes=MAX_BYTES,
+        stability_window_seconds=0,
+        model_provider_name="fake",
+        max_profile_input_chars=MAX_INPUT_CHARS,
+        max_identity_input_chars=MAX_INPUT_CHARS,
+        max_embedding_input_chars=MAX_INPUT_CHARS,
+        limit=None,
+    )
+    await db_session.commit()
+
+    assert scan2.changed == 1
+    assert recon2.ready_after == 1
+
+    rows2 = await list_folder_indexed_files(
+        db_session, tenant_id=tenant.id, folder_source_id=scan1.folder_source_id
+    )
+    assert rows2[0].candidate_id == candidate_id  # same Candidate identity preserved
+    d2_document_id = rows2[0].candidate_document_id
+    assert d2_document_id is not None
+    assert d2_document_id != d1_document_id  # new CandidateDocument version
+
+    from meyar.services.candidate_identity_repo import get_latest_identity_version_for_document
+    from meyar.services.candidate_profile_repo import get_latest_profile_version_for_document
+
+    profile_d2 = await get_latest_profile_version_for_document(
+        db_session, tenant_id=tenant.id, candidate_document_id=d2_document_id
+    )
+    assert profile_d2 is not None
+    assert profile_d2.status == "COMPLETED"
+
+    identity_d2 = await get_latest_identity_version_for_document(
+        db_session, tenant_id=tenant.id, candidate_document_id=d2_document_id
+    )
+    assert identity_d2 is not None
+    assert identity_d2.status == "COMPLETED"
+
+    embeddings = await db_session.execute(
+        select(CandidateEmbeddingVersion).where(CandidateEmbeddingVersion.tenant_id == tenant.id)
+    )
+    assert any(
+        e.candidate_profile_version_id == profile_d2.id for e in embeddings.scalars().all()
+    )
+
+    python_after = await search_candidates(
+        db_session,
+        tenant_id=tenant.id,
+        request=CandidateSearchRequest(
+            mode=SearchMode.STRUCTURED_ONLY, required_filters=RequiredFilters(skills=["Python"])
+        ),
+    )
+    assert candidate_id in {r.candidate_id for r in python_after.results}
+
+    java_after = await search_candidates(
+        db_session,
+        tenant_id=tenant.id,
+        request=CandidateSearchRequest(
+            mode=SearchMode.STRUCTURED_ONLY, required_filters=RequiredFilters(skills=["Java"])
+        ),
+    )
+    assert candidate_id not in {r.candidate_id for r in java_after.results}
+
+
+async def test_limit_fairness_prevents_permanent_starvation(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    """Independent-audit P1 follow-up: candidate A fails every downstream
+    attempt; candidate B is valid. With --limit equivalent to 1, A sorts
+    first alphabetically and consumes the whole budget on the first
+    call — but must not consume it forever. On the next call, A already
+    has a recorded failed attempt while B has never been attempted, so
+    fairness ordering processes B first — B becomes ready without being
+    permanently starved by A's repeated failure."""
+    tenant = await create_tenant(db_session, name="T-limit-fairness")
+    await db_session.commit()
+    root = tmp_path / "cvs"
+    _write_single_paragraph_docx(root / "a-always-fails.docx", "Skills: TRIGGER_FAILURE_MARKER")
+    _write_single_paragraph_docx(root / "b-valid.docx", "Skills: Python")
+    storage = _storage(tmp_path)
+    parser = _parser()
+
+    llm = _SelectiveFailureLLMProvider(
+        fail_marker="TRIGGER_FAILURE_MARKER",
+        ok_extraction=_skill_extraction("Python", quote="Skills: Python"),
+        ok_identity=_identity_extraction(),
+    )
+    embedder = FakeEmbeddingProvider()
+
+    scan = await index_folder(
+        db_session, storage, parser,
+        tenant_id=tenant.id, root_path=str(root), max_bytes=MAX_BYTES,
+    )
+    await db_session.commit()
+
+    # Run 1: both candidates never attempted -> tie-break by relative_path
+    # puts "a-always-fails.docx" first; it consumes the limit=1 budget
+    # and fails.
+    first = await process_pending_candidates(
+        db_session, llm, embedder,
+        tenant_id=tenant.id,
+        folder_source_id=scan.folder_source_id,
+        model_provider_name="fake",
+        max_profile_input_chars=MAX_INPUT_CHARS,
+        max_identity_input_chars=MAX_INPUT_CHARS,
+        max_embedding_input_chars=MAX_INPUT_CHARS,
+        limit=1,
+    )
+    assert first.candidates_considered == 2
+    assert first.processed == 1
+    assert first.failed == 1
+    assert first.ready_after == 0
+
+    # Run 2: "a" now has a recorded failed attempt (previously attempted);
+    # "b" has never been attempted -> fairness processes "b" first this
+    # time, even though "a" still sorts first alphabetically.
+    second = await process_pending_candidates(
+        db_session, llm, embedder,
+        tenant_id=tenant.id,
+        folder_source_id=scan.folder_source_id,
+        model_provider_name="fake",
+        max_profile_input_chars=MAX_INPUT_CHARS,
+        max_identity_input_chars=MAX_INPUT_CHARS,
+        max_embedding_input_chars=MAX_INPUT_CHARS,
+        limit=1,
+    )
+    assert second.processed == 1
+    assert second.ready_after == 1  # "b" got through — not starved by "a"
+    assert second.failed == 0
+
+    rows = await list_folder_indexed_files(
+        db_session, tenant_id=tenant.id, folder_source_id=scan.folder_source_id
+    )
+    b_row = next(r for r in rows if r.relative_path == "b-valid.docx")
+    a_row = next(r for r in rows if r.relative_path == "a-always-fails.docx")
+
+    from meyar.services.candidate_profile_repo import get_latest_profile_version_for_document
+
+    assert b_row.candidate_document_id is not None
+    b_profile = await get_latest_profile_version_for_document(
+        db_session, tenant_id=tenant.id, candidate_document_id=b_row.candidate_document_id
+    )
+    assert b_profile is not None
+    assert b_profile.status == "COMPLETED"
+
+    assert a_row.candidate_document_id is not None
+    a_profile = await get_latest_profile_version_for_document(
+        db_session, tenant_id=tenant.id, candidate_document_id=a_row.candidate_document_id
+    )
+    assert a_profile is not None
+    assert a_profile.status == "FAILED"  # a was correctly deprioritized, not retried this run
+
+    b_search = await search_candidates(
+        db_session,
+        tenant_id=tenant.id,
+        request=CandidateSearchRequest(
+            mode=SearchMode.STRUCTURED_ONLY, required_filters=RequiredFilters(skills=["Python"])
+        ),
+    )
+    assert b_row.candidate_id in {r.candidate_id for r in b_search.results}

@@ -10,11 +10,16 @@ from meyar.models.folder_indexed_file import FolderIndexedFile
 async def list_folder_indexed_files(
     db: AsyncSession, *, tenant_id: uuid.UUID, folder_source_id: uuid.UUID
 ) -> list[FolderIndexedFile]:
+    """Ordered by relative_path so callers that need deterministic
+    iteration (e.g. Slice 14 reconciliation) don't depend on
+    unspecified physical row order."""
     result = await db.execute(
-        select(FolderIndexedFile).where(
+        select(FolderIndexedFile)
+        .where(
             FolderIndexedFile.tenant_id == tenant_id,
             FolderIndexedFile.folder_source_id == folder_source_id,
         )
+        .order_by(FolderIndexedFile.relative_path.asc())
     )
     return list(result.scalars().all())
 

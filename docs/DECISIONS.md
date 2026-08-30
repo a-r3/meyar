@@ -1176,6 +1176,17 @@ second ingestion pipeline:
    actually gone. No atomic-rename producer convention is required
    (MEYAR does not control how the bank's own systems write into the
    folder), no OS-specific dependency, no busy-wait inside the scan.
+   **Accepted bounded limitation (independent-audit item, 2026-08-31):**
+   mtime is read immediately before the bytes, so a writer still actively
+   appending to a file *after* it happens to pass the stability check can
+   still produce a torn read on that pass. This is not corruption-prone —
+   a torn read either fails MIME/parse validation (already retried
+   automatically on the next scan) or simply hashes differently from a
+   later, genuinely stable read (handled as an ordinary `changed` file,
+   not silently accepted as final). No second stat/hash consistency
+   check is added for this pass; the window plus the existing
+   retry-on-next-scan behavior is the accepted MVP mitigation, not a
+   claim of atomicity.
 4. **Exact-content (SHA-256) dedup is document-content dedup only,
    never human-identity resolution.** Same relative path + same bytes:
    unchanged Slice 6 no-op. Same relative path + changed bytes: new
@@ -1223,15 +1234,49 @@ second ingestion pipeline:
    `--limit` bounds how many *not-yet-ready* candidates are attempted
    per invocation (already-ready candidates are free and never count
    against it) so a large backlog is worked off incrementally rather
-   than forcing one unbounded sequential local-Ollama run. No bounded-
+   than forcing one unbounded sequential local-Ollama run. Discovery/
+   ingestion (`index_folder`) itself is never bounded by `--limit` — a
+   full scan/hash of the folder always runs first; only the downstream
+   extraction/identity/embedding stage is bounded. No bounded-
    concurrency primitive is added — `docs/MASTER_SPEC.md` §11 already
    frames local Ollama as a single-worker resource; real throughput
    evidence is a Target-Mac-benchmark question (D-020), not invented
    here.
+   **Fairness fix (independent-audit item, 2026-08-31):** the initial
+   implementation attempted not-yet-ready candidates in whatever order
+   the database happened to return them, which — combined with a small
+   `--limit` and no explicit ordering — let a persistently-failing
+   candidate consume the entire budget on every run, indefinitely
+   starving a candidate that had never been attempted. Fixed with two
+   changes, both derived from existing state, no new schema: (a)
+   `list_folder_indexed_files` now orders by `relative_path` for
+   deterministic iteration; (b) within one `process_pending_candidates`
+   call, not-yet-ready candidates are sorted so a document with **no**
+   existing profile-extraction attempt (`get_latest_profile_version_for
+   _document` returns `None`) is always processed before a document that
+   already has one (any status) — this ordering is recomputed fresh from
+   provenance on every call, so as soon as a persistently-failing
+   candidate has one recorded failed attempt, a genuinely-untried
+   candidate is prioritized ahead of it on the next run. Regression:
+   `test_limit_fairness_prevents_permanent_starvation`.
 8. **New `FOLDER_FILE_DUPLICATE_CONTENT_LINKED` and
    `FOLDER_RECONCILE_CANDIDATE_FAILED` audit event types**, both
    ids/counts/codes only, verified against the existing privacy guard
    (`meyar.services.audit_repo._assert_metadata_is_privacy_safe`).
+9. **Single-active-reconciler operational model — stated explicitly, not
+   enforced by the database.** The supported MVP deployment model is at
+   most one `meyar reconcile-folder` invocation running at a time per
+   `(tenant, source root)`. Concurrency is not DB-enforced: two
+   simultaneous invocations importing identical new content before
+   either commits could both miss each other's uncommitted exact-content
+   dedup lookup (item 4) and each mint a separate `Candidate`. This is a
+   narrow, non-destructive race (no data corruption, no cross-tenant
+   leak — worst case is a duplicate candidate later resolved by
+   operator/product review), and distributed locking is deliberately
+   **not** implemented for MVP — see
+   `docs/DEPLOYMENT_AND_OPERATIONS.md` §20 for the explicit operational
+   statement. Do not run two overlapping scheduled reconcilers against
+   the same source.
 
 **Why:** Closes the gap identified in the pre-implementation Slice 14 gap
 analysis: Slice 6 already solved discovery/ingestion/idempotency; the
@@ -1247,3 +1292,11 @@ commands) pass `Settings.folder_stability_seconds`. No data is destroyed by
 any of these choices — a future policy change (e.g. a real processing-status
 column, bounded concurrency once Target-Mac throughput is known) can be
 layered on without touching the semantics recorded here.
+
+**Hardening pass (2026-08-31, same PR):** an independent acceptance audit
+found two real-but-non-blocking gaps (items 3 and 7 above record the
+accepted/fixed outcomes) and confirmed items 1-2, 4-6, 8 correct as
+designed. This does not change the design recorded above; it records the
+fixes and the accepted limitations precisely rather than leaving them
+implicit. No Target-Mac validation occurred as part of this pass —
+unrelated to and does not affect issue #20/M5.

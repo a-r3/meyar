@@ -329,7 +329,7 @@ async def _reconcile_folder(tenant_id: str, root: str, limit: int | None) -> Non
     print(f"Already ready: {reconciliation_summary.already_ready}")
     print(f"Processed this run: {reconciliation_summary.processed}")
     print(f"Ready after this run: {reconciliation_summary.ready_after}")
-    print(f"Failed/pending retry: {reconciliation_summary.failed}")
+    print(f"Not fully ready (pending retry): {reconciliation_summary.failed}")
     print(f"Skipped due to --limit: {reconciliation_summary.skipped_due_to_limit}")
     if scan_summary.failed > 0 or reconciliation_summary.failed > 0:
         raise SystemExit(1)
