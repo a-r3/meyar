@@ -33,6 +33,7 @@ from meyar.extraction.service import extract_candidate_profile
 from meyar.extraction.view import ProfessionalDocumentView
 from meyar.ingestion.parser import DocumentParser
 from meyar.llm.provider import LLMResultProvenance
+from meyar.models.audit_event import AuditEvent
 from meyar.models.tenant import Tenant
 from meyar.schemas.candidate_identity import CandidateIdentityExtraction, IdentityFieldItem
 from meyar.schemas.candidate_profile import (
@@ -47,6 +48,7 @@ from meyar.schemas.candidate_profile import (
 from meyar.schemas.criteria import CriterionIn, CriterionKind, CriterionType
 from meyar.search.planner_schemas import PlannerDraft
 from meyar.services.api_key_repo import create_api_key
+from meyar.services.audit_repo import record_event
 from meyar.services.candidate_document_service import ingest_candidate_document
 from meyar.services.candidate_embedding_service import embed_candidate_profile
 from meyar.services.candidate_profile_repo import get_current_profile_version
@@ -56,11 +58,23 @@ from meyar.services.job_repo import create_job
 from meyar.services.tenant_repo import create_tenant
 from meyar.storage.base import DocumentStorage
 
-# The one fixed, unmistakable name this whole module keys off. seed-demo
-# and reset-demo both resolve "the demo tenant" by this exact name —
-# never by an arbitrary/latest tenant — so a reset can never touch any
-# other tenant's data.
+# The display name every demo tenant is created with. NEVER sufficient
+# proof of demo ownership by itself — an ordinary tenant could share this
+# exact name by accident or by another operator's choice. Positive
+# identification always additionally requires DEMO_TENANT_MARKER_EVENT
+# (see _find_demo_tenant) before seed-demo/reset-demo will touch a
+# tenant. See docs/DECISIONS.md D-022.
 DEMO_TENANT_NAME = "MEYAR Demo (Synthetic)"
+
+# Written once, as an AuditEvent, at the moment seed_demo creates a new
+# demo tenant — reusing the existing tenant-scoped audit_events table as
+# the durable positive-identification marker, deliberately avoiding a
+# schema migration for this. Never written anywhere else, and audit
+# events are only ever created by trusted application code (no route
+# lets a client write an arbitrary event_type for a tenant it doesn't
+# own), so this is a reliable proof-of-origin marker in this operator/
+# dev-tool context.
+DEMO_TENANT_MARKER_EVENT = "DEMO_TENANT_BOOTSTRAPPED"
 
 
 class _DemoLLMProvider:
@@ -733,18 +747,75 @@ class DemoSeedSummary:
     evaluations_created: int
 
 
-async def _get_demo_tenant(db: AsyncSession) -> Tenant | None:
+class DemoTenantAmbiguousError(Exception):
+    """Raised whenever the demo tenant cannot be positively and
+    unambiguously identified. Never caught internally — seed_demo and
+    reset_demo must both abort before taking any destructive or
+    tenant-creating action when this is raised. See module docstring
+    and docs/DECISIONS.md D-022 (reset-safety hardening)."""
+
+
+async def _find_demo_tenant(db: AsyncSession) -> Tenant | None:
+    """Positively identifies the demo tenant. Display name alone is
+    NEVER sufficient proof of demo ownership — a tenant is only ever
+    treated as "the demo tenant" if it (a) is the sole tenant named
+    exactly DEMO_TENANT_NAME, AND (b) carries the DEMO_TENANT_MARKER_EVENT
+    audit-trail marker this module itself writes at creation time (see
+    seed_demo). That marker lives in the existing tenant-scoped
+    audit_events table — no new column, no migration.
+
+    Returns None only when zero tenants are named DEMO_TENANT_NAME (the
+    normal first-run case). Raises DemoTenantAmbiguousError — never
+    silently guesses, adopts, deletes, or mutates anything — when:
+    - more than one tenant is named DEMO_TENANT_NAME (even if one of
+      them is legitimately marked: the ambiguity itself is unsafe), or
+    - exactly one tenant has that name but does not carry the marker
+      (almost certainly an unrelated tenant that merely happens to
+      share the display name)."""
     result = await db.execute(select(Tenant).where(Tenant.name == DEMO_TENANT_NAME))
-    return result.scalars().first()
+    candidates = result.scalars().all()
+
+    if len(candidates) > 1:
+        raise DemoTenantAmbiguousError(
+            f"{len(candidates)} tenants are named exactly {DEMO_TENANT_NAME!r}. "
+            "Refusing to guess which one is the demo tenant — no data was "
+            "read, adopted, created, or deleted. Resolve the name collision "
+            "manually (rename or remove the non-demo tenant) before running "
+            "seed-demo again."
+        )
+    if not candidates:
+        return None
+
+    tenant = candidates[0]
+    marker = await db.execute(
+        select(AuditEvent.id)
+        .where(
+            AuditEvent.tenant_id == tenant.id,
+            AuditEvent.event_type == DEMO_TENANT_MARKER_EVENT,
+        )
+        .limit(1)
+    )
+    if marker.scalar_one_or_none() is None:
+        raise DemoTenantAmbiguousError(
+            f"A tenant named {DEMO_TENANT_NAME!r} exists (id={tenant.id}) but "
+            "was not created by seed-demo — it carries no bootstrap marker. "
+            "Refusing to adopt, reset, or reseed it; nothing was changed. "
+            "This is very likely an unrelated tenant that happens to share "
+            "the demo display name — rename it if the collision is real."
+        )
+    return tenant
 
 
 async def reset_demo(db: AsyncSession) -> bool:
-    """Deletes ONLY the tenant whose name is exactly DEMO_TENANT_NAME, and
-    only that tenant — every tenant-owned table cascades via its existing
-    ondelete=CASCADE foreign key, no bespoke deletion logic. Returns
-    whether a demo tenant existed to delete. Never touches any other
-    tenant; there is no path here that accepts an arbitrary tenant id."""
-    tenant = await _get_demo_tenant(db)
+    """Deletes ONLY the positively-identified demo tenant (see
+    _find_demo_tenant) — every tenant-owned table cascades via its
+    existing ondelete=CASCADE foreign key, no bespoke deletion logic.
+    Returns whether a demo tenant existed to delete. Raises
+    DemoTenantAmbiguousError (never deletes anything) if the demo tenant
+    cannot be positively and unambiguously identified — see
+    _find_demo_tenant. There is no path here that accepts an arbitrary
+    tenant id."""
+    tenant = await _find_demo_tenant(db)
     if tenant is None:
         return False
     await db.delete(tenant)
@@ -769,10 +840,22 @@ async def seed_demo(
     row is created through the same real service functions the rest of
     the application uses; only the LLM/embedding *inputs* are synthetic,
     pre-written, evidence-matched data instead of a live model's output
-    (see module docstring) — nothing here is a fake production AI mode."""
-    tenant = await _get_demo_tenant(db)
+    (see module docstring) — nothing here is a fake production AI mode.
+
+    Raises DemoTenantAmbiguousError (creates/mutates nothing) if the
+    demo tenant cannot be positively and unambiguously identified — see
+    _find_demo_tenant. A same-named-but-unmarked tenant is never adopted
+    or reseeded, even implicitly."""
+    tenant = await _find_demo_tenant(db)
     if tenant is None:
         tenant = await create_tenant(db, name=DEMO_TENANT_NAME)
+        # The positive-identification marker itself — written once, at
+        # creation, through the existing tenant-scoped audit trail. This
+        # is what future _find_demo_tenant calls trust; the display name
+        # alone is never sufficient (see docs/DECISIONS.md D-022).
+        await record_event(
+            db, tenant_id=tenant.id, event_type=DEMO_TENANT_MARKER_EVENT, metadata={}
+        )
 
     existing_candidate_count = await count_candidates_for_tenant(db, tenant_id=tenant.id)
     if existing_candidate_count > 0:

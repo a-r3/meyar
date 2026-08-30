@@ -30,7 +30,7 @@ from meyar.services.candidate_embedding_service import (
     embed_candidate_profile,
 )
 from meyar.services.candidate_profile_repo import get_current_profile_version
-from meyar.services.demo_seed_service import reset_demo, seed_demo
+from meyar.services.demo_seed_service import DemoTenantAmbiguousError, reset_demo, seed_demo
 from meyar.services.folder_indexer_service import index_folder
 from meyar.services.folder_reconciliation_service import reconcile_folder
 from meyar.services.job_criteria_repo import get_current_criteria_version
@@ -341,36 +341,44 @@ async def _seed_demo(reset: bool) -> None:
     bootstrap (issue #25 — not a product feature; see
     meyar.services.demo_seed_service and docs/LOCAL_DEMO.md). Never runs
     automatically; only this explicit operator command creates or resets
-    demo data. Only ever touches the one fixed-name demo tenant. Every
-    profile/identity/embedding was produced from pre-written synthetic
-    input through the real extraction/embedding services, never a live
-    model — this command never claims otherwise. PII-safe output: no
-    synthetic name/email/phone is printed, only ids and counts."""
+    demo data. Only ever touches the positively-identified demo tenant
+    (display name alone is never sufficient — see
+    demo_seed_service._find_demo_tenant); if that tenant cannot be
+    identified unambiguously, this exits 2 without creating, deleting,
+    or mutating anything. Every profile/identity/embedding was produced
+    from pre-written synthetic input through the real extraction/
+    embedding services, never a live model — this command never claims
+    otherwise. PII-safe output: no synthetic name/email/phone is
+    printed, only ids and counts."""
     settings = get_settings()
     factory = get_session_factory()
     storage = get_document_storage()
     parser = get_document_parser()
 
-    async with factory() as db:
-        if reset:
-            deleted = await reset_demo(db)
-            await db.commit()
-            print(
-                "Reset: existing demo tenant removed."
-                if deleted
-                else "Reset: no existing demo tenant found."
-            )
+    try:
+        async with factory() as db:
+            if reset:
+                deleted = await reset_demo(db)
+                await db.commit()
+                print(
+                    "Reset: existing demo tenant removed."
+                    if deleted
+                    else "Reset: no existing demo tenant found."
+                )
 
-        summary = await seed_demo(
-            db,
-            storage,
-            parser,
-            max_bytes=settings.max_upload_bytes,
-            max_profile_input_chars=settings.llm_max_input_chars,
-            max_identity_input_chars=settings.llm_max_input_chars,
-            max_embedding_input_chars=settings.embedding_max_input_chars,
-        )
-        await db.commit()
+            summary = await seed_demo(
+                db,
+                storage,
+                parser,
+                max_bytes=settings.max_upload_bytes,
+                max_profile_input_chars=settings.llm_max_input_chars,
+                max_identity_input_chars=settings.llm_max_input_chars,
+                max_embedding_input_chars=settings.embedding_max_input_chars,
+            )
+            await db.commit()
+    except DemoTenantAmbiguousError as exc:
+        print(f"Refusing to proceed: {exc}")
+        raise SystemExit(2) from exc
 
     print(f"Demo tenant: {summary.tenant_id}")
     if summary.already_seeded:

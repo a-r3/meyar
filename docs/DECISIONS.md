@@ -1328,13 +1328,45 @@ product demonstration:
    endpoints remain honestly dependent on a reachable Ollama daemon
    exactly as before (see `docs/LOCAL_DEMO.md` §9–10 for exactly which
    surfaces do and don't need one).
-2. **Idempotent by tenant-name lookup, not a new schema.** `seed_demo`
-   looks up the tenant by the fixed `DEMO_TENANT_NAME`; if it already has
-   any candidates, reseeding is skipped (a fresh API key is still minted,
-   since a prior plaintext can never be recovered). `--reset` deletes
-   *only* the tenant matching that exact name — cascading via each
-   table's existing `ondelete="CASCADE"` foreign key, no bespoke deletion
-   logic, and no path that accepts an arbitrary tenant id. No migration.
+2. **Idempotent by positive tenant identification, not by display name,
+   and not a new schema.** Display name (`DEMO_TENANT_NAME`) alone is
+   *never* sufficient proof that a tenant is the demo tenant — an
+   ordinary tenant could share that exact string by accident (no
+   uniqueness constraint on `tenants.name`) or by another operator's
+   own choice, and treating "same name" as "same tenant" would let
+   `--reset` delete real, unrelated data (see item 2a below).
+   `_find_demo_tenant` instead requires a tenant to be (a) the *sole*
+   tenant named `DEMO_TENANT_NAME`, AND (b) carry a
+   `DEMO_TENANT_BOOTSTRAPPED` marker — an `AuditEvent` this module
+   itself writes, once, at the moment it creates a new demo tenant,
+   reusing the existing tenant-scoped `audit_events` table as the
+   durable proof-of-origin. No new column, no migration. If more than
+   one tenant shares the name, or exactly one does but it lacks the
+   marker, `_find_demo_tenant` raises `DemoTenantAmbiguousError` and
+   both `seed_demo`/`reset_demo` abort before reading, adopting,
+   creating, deleting, or mutating anything. Only when a tenant is
+   positively identified this way does `seed_demo` treat it as already
+   seeded (skip reseeding, still mint a fresh API key since a prior
+   plaintext can never be recovered) and does `--reset` delete it —
+   cascading via each table's existing `ondelete="CASCADE"` foreign
+   key, no bespoke deletion logic, and no path that accepts an
+   arbitrary tenant id.
+   2a. **Hardening (2026-08-31, same PR, independent-audit P0 follow-up).**
+       The first implementation of this item resolved the demo tenant
+       by display name alone. An independent acceptance audit
+       constructed and reproduced the exact failure this design
+       predicted: creating an ordinary tenant literally named
+       `MEYAR Demo (Synthetic)` caused `seed-demo --reset` to delete
+       the real demo tenant and silently adopt the ordinary one,
+       and a second `--reset` then deleted *that* tenant's real data.
+       Fixed by adding the positive-identification marker described
+       above; regression tests cover all of: no tenant with the name
+       (normal create), one *marked* tenant (normal operate), one
+       *unmarked* same-named tenant (refuse, untouched), two same-named
+       tenants where one is genuinely marked (refuse — the ambiguity
+       itself is unsafe even though one candidate is legitimate), and a
+       repeated seed/reset cycle (stays idempotent, never accumulates
+       tenants). See `backend/tests/test_demo_seed.py`.
 3. **`.claude/hooks/guard.sh` gained the same env-file exception
    `.githooks/pre-commit` and `scripts/scan-tracked-tree.sh` already
    had.** The guard previously blocked automated Write/Edit to *any*

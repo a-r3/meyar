@@ -68,9 +68,14 @@ To wipe and regenerate the demo dataset from scratch:
 uv run meyar seed-demo --reset
 ```
 
-`--reset` deletes **only** the tenant named exactly `MEYAR Demo (Synthetic)`
-(and everything under it, via normal cascading foreign keys) — it can never
-touch any other tenant. There is no generic database-reset command.
+`--reset` deletes only the *positively identified* demo tenant — display
+name alone (`MEYAR Demo (Synthetic)`) is never sufficient proof; the tenant
+must also carry the bootstrap marker `seed-demo` itself writes when it
+first creates it. If an unrelated tenant happens to share the exact same
+name (however that happened), `--reset` **refuses outright** rather than
+guessing — it exits with a clear error and touches nothing. There is no
+generic database-reset command, and no path that accepts an arbitrary
+tenant id.
 
 ## 6. Start the application
 
