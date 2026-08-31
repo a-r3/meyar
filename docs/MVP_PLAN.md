@@ -169,6 +169,56 @@ Note: RAG/vector search and numeric JD scoring were previously deferred
 here — both are now **required** (D-011) and appear as Slices 7–10
 above, not in this deferred list.
 
+## Roadmap after product-direction pivot: bounded local-AI agent (D-030/D-031/D-032)
+
+Following completion of the official-task MVP roadmap above (through Slice
+14 / M6, plus the in-progress M7 HR UI productization), MEYAR's roadmap
+continues with the bounded local-AI agent direction recorded in
+`docs/DECISIONS.md` D-030/D-031/D-032. This does not reorganize, rename, or
+close any existing milestone (M0–M7 unchanged; M5/#20 explicitly stays open
+until its Target-Mac gate is executed — see Slice 7 below).
+
+### M8 — Bounded Local-AI HR Agent Platform
+
+- **Slice 1 — Human Identity & Dual Access** (#30): real human user/session
+  → tenant membership → role, alongside the unchanged API-key machine path.
+- **Slice 2 — Read-Only Local AI Agent Foundation** (#31): local Ollama
+  agent orchestration, typed tool dispatch over existing deterministic
+  services, conversation/session state, evidence-grounded responses,
+  prompt-injection boundaries, Ollama concurrency control, primary "MEYAR
+  AI" workspace. No mutating actions.
+- **Slice 3 — Evidence Capability Completion** (#32): close provable
+  evidence-model gaps (skill-specific duration, skill↔employment grounding,
+  sector/domain experience, recency) — missing evidence stays UNKNOWN,
+  never fabricated.
+- **Slice 4 — Agent Product UX & JD Matching** (#33): MEYAR AI becomes the
+  primary surface; conversational search/refinement, comparison, evidence
+  explanations, JD-to-draft-criteria, human review, deterministic ranking;
+  de-emphasizes classic search/Vacancies navigation once accepted; evaluates
+  and, if accepted, acts on the D-031 fast-path sunset condition.
+- **Slice 5 — Confirmed Actions Framework** (#34): propose → validated
+  pending action → human confirmation (gated on Slice 1 identity) → typed
+  tool execution → audit. No silent mutations.
+
+### M9 — Deployment, Benchmark & Integration Readiness
+
+- **Slice 6 — Agentless Mac Deployment Readiness** (#35): tested,
+  executable (not just documented) provisioning/config/migration/Ollama
+  setup/startup/healthcheck/backup/restore/update/rollback/diagnostics, no
+  Claude Code/Codex dependency on the bank Mac.
+- **Slice 7 — Real Target-Mac Model Selection & Benchmark** (#36): executes
+  the benchmark on real bank Mac-mini hardware, extending issue #20/M5's
+  scope to agent workloads (concurrency, multi-user, agent understanding).
+  **#20/M5 remain open and are not superseded or closed by this slice.**
+- **Slice 8 — Bank Integrations** (#37): conditional tracking only (SSO,
+  calendar/interview scheduling, ATS) — not implemented until the bank's
+  actual environment is known; consistent with the existing "Deferred"
+  list above (complex RBAC, enterprise SSO remain deferred).
+
+Implementation of these slices is explicitly **not** authorized by this
+roadmap entry alone — each proceeds through the normal branch → quality
+gate → PR → review workflow when separately started.
+
 ## Current status
 
 See `STATUS.md`.

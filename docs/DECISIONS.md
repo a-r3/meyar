@@ -2175,3 +2175,198 @@ change to `_parse_criterion_row` or any Pydantic schema. Removing the
 tag restores the exact pre-D-029 form (every field always enabled) while
 server-side rejection of the invalid combination is untouched either
 way — the two are fully decoupled.
+
+## D-030 — Product-direction pivot: bounded local-AI HR agent as primary future UX
+
+**Date:** 2026-09-01
+**Decision:** Following an independent full product/architecture audit
+(owner-requested, `feat/hr-ui-productization` @ `2296b6f`), MEYAR adopts a
+**bounded local-AI HR agent** as the primary future user experience, rather
+than continuing to grow the current natural-language search/filter surface
+indefinitely. This is a product-direction decision, not a code change —
+implementation proceeds only through the roadmap slices this decision
+authorizes (see GitHub milestones **M8 — Bounded Local-AI HR Agent
+Platform** and **M9 — Deployment, Benchmark & Integration Readiness**,
+issues #30–#37).
+
+1. **Permanent product principles (unchanged, now explicit as the agent's
+   operating constraint, not just the search planner's):**
+   AI understands. Database remembers. Search retrieves. Deterministic
+   policy evaluates. Evidence explains. Humans decide.
+2. **The LLM/agent must never:** decide the final numeric score; decide a
+   hiring outcome; silently weaken a requirement; fabricate an unsupported
+   fact; use identity/PII secretly in ranking; or bypass tenant/auth/tool
+   schemas. These are the same invariants D-016 and D-017 already enforce
+   for the search planner and scoring engine respectively — this decision
+   extends them to cover every future agent tool call, not just the NL
+   search path.
+3. **Local-only, unchanged.** Candidate-content AI remains local via Ollama
+   (`meyar.llm.LLMProvider`, no direct Ollama import outside `meyar/llm/`).
+   No external AI API may receive candidate content, at any point in an
+   agent's tool-calling loop, exactly as already required for extraction and
+   search.
+4. **Target primary product surface:** "MEYAR AI" (a conversational
+   workspace) + Candidate Library / Candidate Detail. Intended future
+   interactions include: finding candidates from natural HR requirements;
+   refining results conversationally; explaining candidate evidence;
+   comparing candidates; evaluating a JD; drafting structured criteria; and
+   proposing approved operational actions. Every consequential/mutating
+   action requires explicit human confirmation (see D-031 point 4 and the
+   Slice 5 / confirmed-actions issue, #34) — the agent proposes, it never
+   silently executes a mutation.
+5. **Supersedes/clarifies D-016 point 7's framing.** D-016 point 7 states
+   "No cloud fallback or agent framework exists" — that sentence described
+   the accurate Slice 9 baseline at the time and is **not** read retroactively
+   as a permanent prohibition on ever building a local agent. D-016's other
+   points (strict `PlannerDraft` boundary, deterministic mode selection,
+   meaning-preserved-or-rejected, protected-criteria enforcement,
+   trusted-runtime-owned execution configuration, local-LLM-only, bounded
+   provenance) remain fully in force and are generalized to typed tool
+   calls in general, not narrowed to the NL-search planner alone — see
+   D-031.
+6. **Vacancy/Job product direction** is a related but separate decision —
+   see D-032.
+7. **Audit scope note.** This decision was informed by, and does not
+   contradict, the independent audit's finding that the deterministic
+   scoring/evaluation engine (D-010, D-017) is already agent-safe
+   (UI/search-agnostic, reproducible, UNKNOWN-correct) and requires no
+   rework — the pivot is concentrated at the search/interaction layer
+   (D-031) and the vacancy-creation UX layer (D-032), not the core engine.
+
+**Why:** The owner's audit found the product had organically grown a
+traditional search/filter application with an increasingly complex
+deterministic NL-parsing layer, while the intended direction is a bounded
+local-AI agent operating typed MEYAR tools under unchanged deterministic
+guarantees. This decision records that direction as canonical product
+authority so implementation work (M8/M9) proceeds against an unambiguous
+target instead of being re-litigated per slice.
+
+**Reversibility:** Documentation/governance only — no source code changed
+by this decision. Fully reversible by a future superseding decision; no
+migration, no schema change, no removed functionality. PR #29's existing
+functionality is unaffected.
+
+## D-031 — Search architecture: SearchPlan/deterministic policy become internal tool boundaries; deterministic fast-path FROZEN
+
+**Date:** 2026-09-01
+**Decision:** `SearchPlan`, `PlannerDraft`, and the deterministic
+precheck/fidelity-validation machinery in
+`meyar.search.planner_policy`/`planner_schemas` (D-016) **remain** — their
+role is reframed, not removed:
+
+1. **New role: internal typed tool/policy boundary, not the user-facing
+   parse target.** Once Slice 2 (#31) ships, the intended shape is that a
+   local agent populates tool-call arguments directly (already close to
+   today's `PlannerDraft` shape — strict Pydantic, `extra="forbid"`) rather
+   than the current design of guessing intent from a whole free-text
+   sentence and reconciling the guess against the original text after the
+   fact. `SearchPlanResult`'s executable/outcome contract is retained as-is
+   — it is already the right shape for a typed tool result.
+2. **The deterministic language fast-path (D-026, `try_deterministic_intent_parse`)
+   is FROZEN effective immediately.** No new phrase/suffix/regex intent
+   pattern is to be added to it, and its scope is not to be widened, unless
+   the change is required to fix a genuine security or correctness bug in
+   already-shipped behavior before agent parity exists (in the spirit of
+   D-027's correctness fix, not new capability). This freeze applies to
+   `planner_policy.py`'s precheck/fidelity heuristics in general: no new
+   language-specific heuristic surface area is to be added there while the
+   agent foundation (#31) is being built.
+3. **Explicit sunset condition.** Once the read-only local agent (#31)
+   demonstrates accepted functional parity — evaluated and accepted by the
+   owner, not automatic — for the search intents the fast path currently
+   covers, the fast path (D-026) is to be removed or materially reduced.
+   D-026 already documents this as a one-line reversal: deleting the single
+   `try_deterministic_intent_parse` call site in `plan_candidate_search`
+   restores 100% LLM/agent-dependent behavior with no other pipeline change.
+   This sunset is tracked as part of Slice 4 (#33), which is the point at
+   which parity is evaluated and, if accepted, acted on.
+4. **Tool-calling does not eliminate deterministic validation — it is
+   subject to the same rules as today's NL path, with no exception.**
+   Every LLM/agent-produced tool argument remains **untrusted input** and
+   must pass, unchanged: typed schema validation (`extra="forbid"` Pydantic
+   boundaries, same discipline as `PlannerDraft`); the prohibited-attribute
+   policy (`find_prohibited_term`, D-006, checked before and after any model
+   call); the no-silent-weakening rule (a mandatory requirement can be
+   preserved or rejected, never quietly downgraded to a soft/preferred
+   signal, and vice versa); tenant/auth boundaries (`tenant_id` is always an
+   explicit trusted-runtime parameter, never model- or client-supplied); and
+   evidence/provenance rules (no claim without a traceable `EvidenceRef` or
+   persisted score/criterion result; a schema-incapable claim — e.g.
+   per-skill duration until Slice 3/#32 closes that gap — is `UNKNOWN`,
+   never fabricated, exactly as D-027 already established for the NL path).
+   An agent tool-dispatch layer is a new *producer* of these arguments; it
+   is never a new *validator* of them, and it does not get a weaker or
+   parallel validation surface.
+5. **Conversation/multi-turn state.** As D-026 already noted but left
+   unimplemented, a server-held, tenant-scoped, short-TTL pending-action/
+   plan mechanism (extending `BrowserSession`, not a new auth system) is the
+   intended shape for multi-turn clarification and for the propose→confirm
+   pipeline (Slice 5, #34) — the LLM proposes each turn, but the persisted
+   pending-action row, not the model's own memory, is authoritative for
+   what actually executes on confirmation.
+
+**Why:** The audit found `planner_policy.py` had grown three overlapping
+NL-understanding subsystems (precheck rejection patterns, the D-026 fast
+path, and post-hoc fidelity re-parsing) totaling 992 lines, +451 in the
+`feat/hr-ui-productization` slice alone — a trajectory that, left
+unacknowledged, risks becoming a permanent pseudo-NLP engine parallel to,
+rather than replaced by, a future agent. Freezing new heuristic growth now
+and recording an explicit, evaluatable sunset condition prevents that
+outcome without discarding anything already shipped and verified.
+
+**Reversibility:** Documentation/governance only — no source code changed
+by this decision. The freeze and sunset condition are policy, not a code
+change; D-026's own fast path remains merged and functional until the
+sunset condition is met and acted on in a future slice. Fully reversible by
+a future superseding decision.
+
+## D-032 — Job/Vacancy product direction: backend retained, primary UX deferred to agent-drafted criteria flow
+
+**Date:** 2026-09-01
+**Decision:** The existing `Job` / `JobCriteriaVersion` / deterministic
+evaluation backend (D-010, D-017, D-028) is **retained as-is** and requires
+no rework for the agent direction (D-030) — the audit confirmed
+`evaluation`/`scoring` import only `meyar.schemas`/`meyar.models`, with no
+`ui`/`search` coupling, and are already safe to wrap in an agent tool
+(`rank_candidates_for_job`) without modification.
+
+1. **No further vacancy-management CRUD growth.** The Job/vacancy lifecycle
+   work already merged (D-028: ACTIVE/ARCHIVED, duplicate-signature safety)
+   and the hand-built criteria form (D-023/D-024/D-025/D-029) are kept
+   as-is and are not to be extended with additional lifecycle states,
+   workflow steps, or form-UX polish beyond what already exists, ahead of
+   the agent-drafted-criteria decision below.
+2. **The current user-facing Vacancies section is supporting/deferred
+   functionality, not the intended primary product workflow.** It remains
+   fully functional and reachable; it is not being removed by this
+   decision. Its primary-navigation prominence is a Slice 4 (#33) UX
+   decision, gated on the agent-drafted-criteria replacement flow being
+   accepted by the owner — this decision does not itself change any
+   navigation or template.
+3. **Future primary workflow:**
+   ```
+   HR/JD request → local agent → structured criteria DRAFT
+     → human review/confirmation → deterministic evaluation
+   ```
+   The agent drafts (`draft_job_criteria`, Slice 4/#33); nothing is
+   persisted until an accountable human confirms
+   (`create_job_after_confirmation`, Slice 5/#34, gated on Slice 1/#30 for
+   accountable identity). The existing `CriterionKind`/`CriterionType`/
+   weight taxonomy and the prohibited-attribute denylist
+   (`schemas/criteria.py`, D-006) are the target shape the agent populates
+   — unchanged by this decision.
+4. **The current vacancy-creation form (`job_new.html`) may later be
+   repurposed as the human review/edit screen for an agent-drafted
+   criteria set**, per Slice 4 (#33). This decision authorizes that future
+   repurposing; it does not implement it.
+
+**Why:** The audit found vacancy criteria are entirely hand-built via form
+today — a real HR-usability gap — while the model/schema layer underneath
+is already exactly the right shape for an agent to populate as a reviewable
+draft. Recording this now prevents further investment in the hand-built
+form as a permanent primary path while the higher-leverage agent-drafting
+capability is unbuilt.
+
+**Reversibility:** Documentation/governance only — no source code changed
+by this decision, no existing functionality removed. Fully reversible by a
+future superseding decision.

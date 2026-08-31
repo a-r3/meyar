@@ -78,6 +78,23 @@ and cleared for every kind but EXPERIENCE with or without JavaScript;
 server-side validation is unchanged and remains authoritative; see
 D-029. PR #29 still **NOT merged** — awaiting owner re-inspection.
 
+**Product-direction pivot recorded (2026-09-01).** Following an
+owner-requested independent full product/architecture audit, MEYAR adopts a
+bounded local-AI HR agent as the primary future UX; see D-030 (product
+direction), D-031 (search architecture — `SearchPlan`/deterministic policy
+become internal tool boundaries; the D-026 deterministic fast-path is now
+FROZEN with an explicit parity-based sunset condition; tool-calling does
+not weaken deterministic validation), and D-032 (Job/Vacancy backend
+retained as-is; primary UX shifts toward agent-drafted criteria + human
+confirmation; current Vacancies UI is supporting/deferred). This is a
+documentation/governance-only change on the `feat/hr-ui-productization`
+branch — no source code changed, no PR #29 functionality removed. Roadmap
+recorded in `docs/MVP_PLAN.md`; tracked via new GitHub milestones **M8 —
+Bounded Local-AI HR Agent Platform** and **M9 — Deployment, Benchmark &
+Integration Readiness** (issues #30–#37), without closing M5/#20 or any
+other existing milestone/issue. Implementation of these slices has **not**
+started.
+
 GitHub remote established (`https://github.com/a-r3/meyar.git`, private,
 temporary development remote — see D-012, `docs/DECISIONS.md`). `main`
 bootstrap-pushed at `f8ac183`, then governance-merged at `16929fd`, then
@@ -865,6 +882,8 @@ due date because the official timeline has not been supplied.
 | M5 — Security, Target-Mac Validation & MVP Acceptance | Slice 13 + target-Mac benchmark | OPEN — issue #20 open; PR #22 merged at `a709ce1` implementing Pass 1 (original CV, no-exfiltration, backup/restore, audit guard, multilingual evidence) with `Refs #20`; Mac Mini benchmark execution on the now owner-confirmed target hardware remains the sole open mandatory gate |
 | M6 — Operational CV Intake & Reconciliation | Slice 14 | CLOSED — Slice 14 merged (PR #24 at `f6e31ff`), issue #23 closed; owner-approved closure |
 | M7 — HR UI & Presentation Readiness | HR UI productization (chore, issue #27) | OPEN — branch `feat/hr-ui-productization`, PR #29 open, pending final owner visual check; Job lifecycle implemented; see D-023 through D-029 |
+| M8 — Bounded Local-AI HR Agent Platform | Slices 1–5 (issues #30–#34) | OPEN — created 2026-09-01 per D-030/D-031/D-032; no implementation started |
+| M9 — Deployment, Benchmark & Integration Readiness | Slices 6–8 (issues #35–#37) | OPEN — created 2026-09-01 per D-030/D-031/D-032; no implementation started; does not supersede or close M5/#20 |
 
 ## Official requirement gap matrix
 
