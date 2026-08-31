@@ -212,6 +212,33 @@ async def test_experience_criterion_without_min_years_is_rejected_and_input_pres
     assert 'value="AML JD"' in response.text  # title preserved, not lost
 
 
+async def test_non_experience_criterion_rejects_stray_min_years_input(
+    client: AsyncClient, tenant_and_key, local_ui_settings: Settings
+) -> None:
+    """Kind-aware validation (semantic-correctness audit): a value typed
+    into the 'Təcrübə (il)' field for a SKILL/CERTIFICATION/EDUCATION/
+    LANGUAGE row must never be silently ignored — the form must reject
+    it with a clear error rather than accept-then-drop the input."""
+    _tenant, _key, plaintext = tenant_and_key
+    csrf = await _login_and_csrf(client, plaintext)
+    data = {"title": "Kind Mismatch JD", "csrf_token": csrf}
+    data.update(
+        _blank_rows(
+            "must",
+            filled=_row("must", 0, kind="SKILL", requirement="Python", min_years="5"),
+        )
+    )
+    data.update(_blank_rows("pref"))
+
+    response = await client.post("/ui/jobs", data=data)
+
+    assert response.status_code == 422
+    assert "yalnız" in response.text
+    assert "Təcrübə&#39; növü üçündür" in response.text
+    jobs_page = await client.get("/ui/jobs")
+    assert "Kind Mismatch JD" not in jobs_page.text
+
+
 async def test_sensitive_criterion_term_is_rejected(
     client: AsyncClient, tenant_and_key, local_ui_settings: Settings
 ) -> None:

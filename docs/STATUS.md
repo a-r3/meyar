@@ -33,7 +33,7 @@ Definition-of-Done Acceptance) pending the Target-Mac benchmark gate.
 closure; issue #23 closed by PR #24, no remaining open issues).
 **M7 — HR UI & Presentation Readiness is OPEN** (issue #27; owner-driven
 HR UI productization pass following visual inspection of the running
-local UI — see D-023, D-024, D-025, D-026, and "In progress" below). PR
+local UI — see D-023 through D-027, and "In progress" below). PR
 #29 (same branch) received a second owner visual inspection that found
 seven further blockers (NL search still generically failing on ordinary
 Azerbaijani phrasing, no vacancy-creation UI, raw criterion ids on the
@@ -52,8 +52,15 @@ addressed with a conservative deterministic fast-path parser (skills,
 languages, certifications, total experience, simple "və" combinations)
 that executes with zero LLM calls for exactly the concepts SearchPlan
 already represents, falling back to the LLM unchanged for everything
-else; see D-026. PR #29 still **NOT merged** — awaiting owner
-re-inspection.
+else; see D-026. A dedicated semantic-correctness audit of that fast path
+then found it was silently converting "N years of experience IN skill X"
+into "skill + N years TOTAL experience" — a real weakening, not just an
+honesty issue — fixed at the shared precheck (so no consumer can produce
+that combination without an explicit HR confirmation via a new
+clarification screen); also fixed a previously-unimplemented vacancy
+kind-aware validation gap and reported (not yet fixed) a Job duplicate-
+title/no-lifecycle gap; see D-027. PR #29 still **NOT merged** — awaiting
+owner re-inspection.
 
 GitHub remote established (`https://github.com/a-r3/meyar.git`, private,
 temporary development remote — see D-012, `docs/DECISIONS.md`). `main`
@@ -297,6 +304,19 @@ remains disabled.
   schema. See D-019. Slice 13 final security/DoD acceptance was not started.
 
 ## Tests
+**659/659 passing** as of the semantic-correctness audit pass (branch
+`feat/hr-ui-productization`, still not merged): 639 prior (D-026 pass,
+see below) + 20 new/changed for D-027 — the skill-specific-duration
+never-weakens-to-total-experience matrix (locative/ablative suffix,
+üzrə/ilə connector, ASCII vs diacritic, the "ən az" precheck gap),
+extraction-for-clarification and Java/JavaScript-boundary tests
+(`test_search_planner_policy.py`), the reversed "təcrübəsi ... N il"
+word-order fast-path pattern and its tenant-isolation/audit coverage for
+the confirmed clarification alternative (`test_search_deterministic_parser.py`),
+the end-to-end clarification-then-confirm UI flow with zero LLM calls
+(`test_ui_routes.py`), and the vacancy kind-aware min_years rejection
+(`test_ui_job_creation.py`).
+
 **639/639 passing** as of the deterministic-fast-path pass (branch
 `feat/hr-ui-productization`, still not merged): 607 prior (D-025 pass,
 see below) + 32 new for D-026 — the full parser regression matrix and
@@ -667,6 +687,36 @@ folded into this pass, since this parser never actually produces a
 partial state (binary: full match or decline). No search/matching/
 scoring behavior changed; no migration.
 
+A dedicated semantic-correctness audit of that fast path found the
+"continues to fail exactly as before" claim above was only half true
+(see D-027): the *connector* phrasing ("Python üzrə 5 il təcrübəsi") did
+still correctly decline, but the *locative/ablative-suffix* phrasing
+("Pythonda 5 il təcrübəsi", including the original owner-reported query)
+was in fact producing `skills=["python"], min_total_experience_years=5.0`
+— silently reading "5 years IN Python" as "Python skill + 5 years of
+ANY experience". Inspected the evidence model directly (not assumed):
+`CandidateProfileExtraction` has no field linking a `SkillItem` to an
+`EmploymentItem` date range, so MEYAR genuinely cannot prove per-skill
+duration — confirmed this must never be invented. Fixed at the shared
+`precheck_natural_language_request` (a fifth `_SKILL_DURATION_PATTERNS`
+entry for the suffix shape, plus an "ən az"-without-"ı" fold gap found
+while writing the regression matrix) so every equivalent phrasing is now
+rejected identically, for the deterministic fast path, the LLM path, the
+REST API, and the CLI alike — one fix, one source of truth, no new
+`PlannerOutcome`/API contract change. Added a genuinely honest
+alternative: a `/ui/search`-only clarification screen
+(`search_clarification.html`) naming the extracted skill/years, offering
+one explicit confirm action that resubmits an unambiguous
+explicit-separation rephrasing through the normal flow — never executed
+without that click. Also fixed, on the same audit pass: vacancy-creation
+kind-aware validation was previously incomplete (a stray "Təcrübə (il)"
+value on a non-EXPERIENCE row was silently dropped, not rejected — now
+rejected). Reported, not fixed: `Job` has no unique-title constraint and
+no lifecycle/status field at all (no close/archive/soft-delete) — a
+genuine open product gap for a future slice, not a scoring/tenant-
+isolation issue. No search/matching/scoring behavior changed beyond the
+precheck rejection scope; no migration.
+
 Slice 14 (`feat/folder-reconciliation`, **MERGED as PR #24 at squash SHA
 `f6e31ff`, closes issue #23**, associated with
 **M6 — Operational CV Intake & Reconciliation**). Closes the gap left after Slice 6: a
@@ -747,7 +797,7 @@ due date because the official timeline has not been supplied.
 | M4 — Internal Product Interface & API | Slices 11–12 | CLOSED — Slice 11 merged (PR #17, issue #16 closed); Slice 12 merged (PR #19 at `93fa567`, issue #18 closed) |
 | M5 — Security, Target-Mac Validation & MVP Acceptance | Slice 13 + target-Mac benchmark | OPEN — issue #20 open; PR #22 merged at `a709ce1` implementing Pass 1 (original CV, no-exfiltration, backup/restore, audit guard, multilingual evidence) with `Refs #20`; Mac Mini benchmark execution on the now owner-confirmed target hardware remains the sole open mandatory gate |
 | M6 — Operational CV Intake & Reconciliation | Slice 14 | CLOSED — Slice 14 merged (PR #24 at `f6e31ff`), issue #23 closed; owner-approved closure |
-| M7 — HR UI & Presentation Readiness | HR UI productization (chore, issue #27) | OPEN — branch `feat/hr-ui-productization`, PR #29 open, pending owner re-inspection (fourth round); see D-023, D-024, D-025, D-026 |
+| M7 — HR UI & Presentation Readiness | HR UI productization (chore, issue #27) | OPEN — branch `feat/hr-ui-productization`, PR #29 open, pending owner re-inspection (fifth round); Job duplicate-title/lifecycle gap open; see D-023 through D-027 |
 
 ## Official requirement gap matrix
 

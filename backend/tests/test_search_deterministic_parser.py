@@ -97,30 +97,27 @@ def _never_called() -> FakeLLMProvider:
 
 
 @pytest.mark.parametrize(
-    ("text", "expected_skills", "expected_years"),
+    "text",
     [
-        # Azerbaijani diacritics vs ASCII typing variants (D-023's shared
-        # fold_az_ascii), both must resolve to the same interpretation.
-        ("pythonda 5 il təcrübəsi olan", ["python"], 5.0),
-        ("pythonda 5 il tecrubesi olan", ["python"], 5.0),
-        # Case differences.
-        ("PYTHONDA 5 il tecrubesi olan", ["PYTHON"], 5.0),
-        ("PythonDA 5 IL tecrubesi OLAN", ["Python"], 5.0),
-        # Whitespace / newline / CRLF (a <textarea> submission).
-        ("pythonda 5 il tecrubesi olan\n", ["python"], 5.0),
-        ("pythonda 5 il tecrubesi olan\r\n", ["python"], 5.0),
-        ("  pythonda 5 il tecrubesi olan  ", ["python"], 5.0),
-        # A different agglutinated locative/ablative suffix (SQL-dan).
-        ("SQL-dan 3 il təcrübəsi olan", ["SQL"], 3.0),
+        # Skill-SPECIFIC duration ("N years IN skill X") is never
+        # deterministically resolved — CandidateProfile cannot prove it
+        # (docs/DECISIONS.md D-027). The fast path must decline (None),
+        # never silently read this as "skill + total experience". Covers
+        # Azerbaijani diacritics vs ASCII typing, case, whitespace/CRLF,
+        # and the agglutinated locative/ablative suffix shape generally.
+        "pythonda 5 il təcrübəsi olan",
+        "pythonda 5 il tecrubesi olan",
+        "PYTHONDA 5 il tecrubesi olan",
+        "PythonDA 5 IL tecrubesi OLAN",
+        "pythonda 5 il tecrubesi olan\n",
+        "pythonda 5 il tecrubesi olan\r\n",
+        "  pythonda 5 il tecrubesi olan  ",
+        "SQL-dan 3 il təcrübəsi olan",
+        "Python üzrə 5 il təcrübəsi olan",
     ],
 )
-def test_skill_plus_experience_shape_regression_matrix(
-    text: str, expected_skills: list[str], expected_years: float
-) -> None:
-    draft = try_deterministic_intent_parse(text)
-    assert draft is not None, f"expected a deterministic draft for {text!r}"
-    assert draft.required_filters.skills == expected_skills
-    assert draft.required_filters.min_total_experience_years == expected_years
+def test_skill_specific_duration_never_deterministically_resolves(text: str) -> None:
+    assert try_deterministic_intent_parse(text) is None
 
 
 def test_multiple_skills_via_conjunction() -> None:
@@ -168,6 +165,42 @@ def test_java_vs_javascript_are_never_conflated() -> None:
     assert java.required_filters.skills == ["Java"]
     assert javascript.required_filters.skills == ["Javascript"]
     assert javascript.required_filters.skills != java.required_filters.skills
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_skills", "expected_languages", "expected_certs", "expected_years"),
+    [
+        # The exact "keep the fast path for unambiguous intents" list from
+        # the semantic-correctness audit — all genuinely representable by
+        # the existing SearchPlan, none involve skill-specific duration.
+        ("Python bilən", ["Python"], [], [], None),
+        ("Java bilən", ["Java"], [], [], None),
+        ("Python və SQL bilən", ["Python", "SQL"], [], [], None),
+        ("ümumi iş təcrübəsi ən az 5 il olan", [], [], [], 5.0),
+        (
+            "Python bilən və ümumi iş təcrübəsi ən az 5 il olan",
+            ["Python"],
+            [],
+            [],
+            5.0,
+        ),
+        ("İngilis dili bilən", [], ["English"], [], None),
+        ("ACAMS sertifikatı olan", [], [], ["ACAMS"], None),
+    ],
+)
+def test_unambiguous_intents_stay_on_the_fast_path(
+    text: str,
+    expected_skills: list[str],
+    expected_languages: list[str],
+    expected_certs: list[str],
+    expected_years: float | None,
+) -> None:
+    draft = try_deterministic_intent_parse(text)
+    assert draft is not None, f"expected a deterministic draft for {text!r}"
+    assert draft.required_filters.skills == expected_skills
+    assert draft.required_filters.languages == expected_languages
+    assert draft.required_filters.certifications == expected_certs
+    assert draft.required_filters.min_total_experience_years == expected_years
 
 
 @pytest.mark.parametrize(
@@ -242,13 +275,15 @@ async def test_deterministic_fast_path_search_plan_passes_existing_validation(
     db_session: AsyncSession,
 ) -> None:
     """The produced CandidateSearchRequest is the exact same Pydantic
-    model the LLM path constructs — proves no second, weaker schema."""
+    model the LLM path constructs — proves no second, weaker schema. Uses
+    the explicit-separation phrasing (skill and total-experience stated as
+    two distinct clauses), the only case where combining both is honest."""
     tenant = await _tenant(db_session)
     result = await plan_candidate_search(
         db_session,
         _never_called(),
         tenant_id=tenant.id,
-        natural_language_request="pythonda 5 il tecrubesi olan",
+        natural_language_request="Python bilən və ümumi iş təcrübəsi ən az 5 il olan",
         as_of_date=AS_OF_DATE,
         embedding_config=_config(),
     )
@@ -259,6 +294,7 @@ async def test_deterministic_fast_path_search_plan_passes_existing_validation(
     assert request.embedding_config is None
     assert request.as_of_date == AS_OF_DATE
     assert request.required_filters.min_total_experience_years == 5.0
+    assert request.required_filters.skills == ["Python"]
 
 
 async def test_deterministic_fast_path_executes_structured_search_correctly(
@@ -337,6 +373,78 @@ async def test_deterministic_fast_path_is_safely_audited(db_session: AsyncSessio
     # same PII-safety contract as the LLM path (existing D-0xx guarantee).
     serialized = str(event.event_metadata)
     assert "ACAMS sertifikatı olan" not in serialized
+
+
+async def test_skill_specific_duration_rejected_deterministically_with_audit(
+    db_session: AsyncSession,
+) -> None:
+    """The precheck rejection for skill-specific duration (D-027) still
+    goes through zero LLM calls and is still safely audited — proving the
+    clarification flow built on top of this (meyar.ui.router) inherits
+    the same tenant-isolation and PII-safety guarantees."""
+    tenant = await _tenant(db_session)
+    result = await plan_candidate_search(
+        db_session,
+        _never_called(),
+        tenant_id=tenant.id,
+        natural_language_request="pythonda 5 il tecrübesi olan",
+        as_of_date=AS_OF_DATE,
+        embedding_config=_config(),
+    )
+    assert not result.executable
+    assert result.outcome == PlannerOutcome.UNSUPPORTED_SEMANTICS
+    assert result.attempt_count == 0
+
+    event = await _latest_plan_event(db_session, tenant.id)
+    assert event.event_type == "SEARCH_PLAN_REJECTED"
+    assert "SKILL_SPECIFIC_EXPERIENCE_DURATION_UNSUPPORTED" in event.event_metadata["reason_codes"]
+    assert "pythonda 5 il tecrübesi olan" not in str(event.event_metadata)
+
+
+async def test_confirmed_explicit_separation_alternative_preserves_tenant_isolation(
+    db_session: AsyncSession,
+) -> None:
+    """The clarification screen's confirmed alternative (skill + total
+    experience, explicit-separation phrasing) is itself just an ordinary
+    deterministic fast-path request — tenant isolation holds exactly as
+    for any other fast-path search."""
+    tenant_a = await _tenant(db_session, prefix="ClarifyA")
+    tenant_b = await _tenant(db_session, prefix="ClarifyB")
+    experienced_profile = {
+        **_profile(["Python"]),
+        "employment_history": [
+            {
+                "title": "Backend Engineer",
+                "organization": "Synthetic Co",
+                "start_date": "2018",
+                "end_date": None,
+                "is_current": True,
+                "evidence": [{"page": 1, "block_index": 0, "quote": "2018-present"}],
+            }
+        ],
+    }
+    candidate_a, _pa = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant_a.id, profile_content=experienced_profile
+    )
+    candidate_b, _pb = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant_b.id, profile_content=experienced_profile
+    )
+    await db_session.commit()
+
+    confirmed_query = "python bilən və ümumi iş təcrübəsi 5 il olan"
+    response = await plan_and_search_candidates(
+        db_session,
+        _never_called(),
+        tenant_id=tenant_a.id,
+        natural_language_request=confirmed_query,
+        as_of_date=AS_OF_DATE,
+        embedding_config=_config(),
+    )
+    assert response.plan.executable
+    assert response.search_response is not None
+    result_ids = {r.candidate_id for r in response.search_response.results}
+    assert candidate_a.id in result_ids
+    assert candidate_b.id not in result_ids
 
 
 async def test_declined_deterministic_request_falls_through_to_llm(

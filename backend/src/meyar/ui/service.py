@@ -822,6 +822,16 @@ def _parse_criterion_row(
                 f"'{requirement}' meyarı üçün illik təcrübə rəqəm olmalıdır."
             ) from exc
         value = None
+    elif row.min_years.strip():
+        # Kind-aware validation: "Təcrübə (il)" is only meaningful for an
+        # EXPERIENCE criterion — a value typed there for SKILL/
+        # CERTIFICATION/EDUCATION/LANGUAGE must never be silently dropped,
+        # since that would mean the form accepted input it then ignored.
+        raise UIServiceInputError(
+            f"'{requirement}' meyarı üçün illik təcrübə sahəsi yalnız "
+            "'Təcrübə' növü üçündür — bu sahəni boş buraxın və ya növü "
+            "'Təcrübə' olaraq dəyişin."
+        )
 
     raw_weight = row.weight.strip()
     try:

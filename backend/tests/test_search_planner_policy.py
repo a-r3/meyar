@@ -15,6 +15,7 @@ from meyar.search.planner_policy import (
     PlannerPolicyError,
     convert_planner_draft,
     derive_search_mode,
+    find_skill_specific_duration_mention,
     precheck_natural_language_request,
 )
 from meyar.search.planner_prompts import build_search_planner_user_prompt
@@ -163,44 +164,81 @@ def test_azerbaijani_required_plus_semantic_preference_is_hybrid() -> None:
     [
         "pythonda 5 il tecrübesi olan",
         "pythonda 5 il təcrübəsi olan",
+        "Python-da 5 il təcrübəsi olan",
+        "SQL-dan 3 il təcrübəsi olan",
+        "Python üzrə 5 il təcrübəsi olan",
+        "Python üzrə ən az 5 il təcrübəsi olan",
     ],
 )
-def test_ordinary_azerbaijani_skill_and_years_query_is_executable(text: str) -> None:
-    """Regression for the owner-reported visual-acceptance blocker: a normal
-    HR query typed without the Azerbaijani schwa keyboard character (plain
-    'e' for 'ə', as most HR staff type without a dedicated AZ layout) and
-    with the skill name in its natural agglutinated locative case
-    ("pythonda" = "in Python") must produce a real, executable SearchPlan —
-    not a generic VALIDATION_FAILURE/UNSUPPORTED_SEMANTICS outcome. This
-    covers both the ASCII-folded diacritic form and the fully-diacriticized
-    form to prove the fix is general, not a special case of one sentence."""
-    request = _convert(
-        text,
-        PlannerDraft(
-            required_filters=RequiredFilters(
-                skills=["Python"], min_total_experience_years=5.0
-            )
-        ),
+def test_skill_specific_duration_is_never_silently_weakened_to_total_experience(
+    text: str,
+) -> None:
+    """Semantic-correctness audit regression (docs/DECISIONS.md D-027):
+    "N years of experience IN skill X" is a claim CandidateProfile cannot
+    prove — there is no evidence linking a SkillItem to a specific
+    EmploymentItem date range, only (a) "has skill X" and (b) "has N years
+    of TOTAL career experience" as independent facts. Every equivalent
+    phrasing of this skill-specific-duration intent — an agglutinated
+    locative/ablative case suffix directly on the skill ("Pythonda",
+    "SQL-dan") or an explicit "üzrə"/"ilə" connector — must be rejected
+    identically, never silently reinterpreted as "skill + total
+    experience >= N" (that combination was the exact bug this audit
+    found and fixed: it previously slipped through for the locative/
+    ablative-suffix phrasing only, while the connector phrasing was
+    already, and remains, correctly rejected)."""
+    with pytest.raises(PlannerPolicyError) as exc_info:
+        precheck_natural_language_request(text)
+    assert exc_info.value.outcome == PlannerOutcome.UNSUPPORTED_SEMANTICS
+    assert (
+        PlannerReasonCode.SKILL_SPECIFIC_EXPERIENCE_DURATION_UNSUPPORTED
+        in exc_info.value.reason_codes
     )
-    assert request.mode == SearchMode.STRUCTURED_ONLY
-    assert request.required_filters.skills == ["Python"]
-    assert request.required_filters.min_total_experience_years == 5.0
-    assert request.as_of_date == AS_OF_DATE
+    # convert_planner_draft shares the same precheck, so even a
+    # (hypothetically) correctly-fidelity-matching draft cannot slip this
+    # shape through the LLM path either.
+    with pytest.raises(PlannerPolicyError):
+        _convert(
+            text,
+            PlannerDraft(
+                required_filters=RequiredFilters(
+                    skills=["Python"], min_total_experience_years=5.0
+                )
+            ),
+        )
 
 
-def test_skill_name_in_ablative_case_is_supported() -> None:
-    """"SQL-dan" ("from SQL") — the ablative case suffix, hyphenated as is
-    common when attaching a case ending to a Latin acronym."""
-    request = _convert(
-        "SQL-dan 3 il təcrübəsi olan namizədlər",
-        PlannerDraft(
-            required_filters=RequiredFilters(
-                skills=["SQL"], min_total_experience_years=3.0
-            )
-        ),
+@pytest.mark.parametrize(
+    ("text", "expected_skill", "expected_years"),
+    [
+        ("pythonda 5 il tecrübesi olan", "python", 5.0),
+        ("pythonda 5 il təcrübəsi olan", "python", 5.0),
+        ("Python-da 5 il təcrübəsi olan", "Python", 5.0),
+        ("SQL-dan 3 il təcrübəsi olan", "SQL", 3.0),
+        ("Python üzrə 5 il təcrübəsi olan", "Python", 5.0),
+    ],
+)
+def test_skill_specific_duration_is_recoverable_for_clarification(
+    text: str, expected_skill: str, expected_years: float
+) -> None:
+    """The declined request's (skill, years) are still extractable — this
+    is what powers the HR-safe clarification screen (meyar.ui.router),
+    never a silent guess and never a raw internal reason code shown to
+    HR."""
+    assert find_skill_specific_duration_mention(text) == (expected_skill, expected_years)
+
+
+def test_skill_specific_duration_extraction_preserves_java_javascript_boundary() -> None:
+    """The new locative-suffix duration pattern must not resurrect the
+    "Java matches inside JavaScript" collision — captures the literal
+    typed token only."""
+    assert find_skill_specific_duration_mention("Javascript-da 5 il təcrübəsi olan") == (
+        "Javascript",
+        5.0,
     )
-    assert request.required_filters.skills == ["SQL"]
-    assert request.required_filters.min_total_experience_years == 3.0
+    assert find_skill_specific_duration_mention("Java-da 5 il təcrübəsi olan") == (
+        "Java",
+        5.0,
+    )
 
 
 def test_agglutinated_suffix_does_not_relax_whole_term_matching() -> None:
@@ -331,11 +369,11 @@ def test_model_self_declined_interpretation_is_tagged_distinctly() -> None:
     mentioned a language — a model-quality issue, not a policy-regex bug.
     See docs/DECISIONS.md D-025."""
     draft = PlannerDraft(
-        required_filters=RequiredFilters(skills=["Python"], min_total_experience_years=5),
+        required_filters=RequiredFilters(skills=["Python"]),
         unsupported_reason_codes=[PlannerReasonCode.LANGUAGE_PROFICIENCY_UNSUPPORTED],
     )
     with pytest.raises(PlannerPolicyError) as exc_info:
-        _convert("pythonda 5 il təcrübəsi olan", draft)
+        _convert("Python bilən namizədləri göstər.", draft)
     assert exc_info.value.outcome == PlannerOutcome.UNSUPPORTED_SEMANTICS
     assert PlannerReasonCode.MODEL_DECLINED_INTERPRETATION in exc_info.value.reason_codes
     assert PlannerReasonCode.LANGUAGE_PROFICIENCY_UNSUPPORTED in exc_info.value.reason_codes
@@ -344,11 +382,11 @@ def test_model_self_declined_interpretation_is_tagged_distinctly() -> None:
 @pytest.mark.parametrize(
     "text",
     [
-        "pythonda 5 il tecrubesi olan\n",  # <textarea> trailing Enter
-        "pythonda 5 il tecrubesi olan\r\n",  # browser CRLF normalization
-        "pythonda 5 il\ntecrubesi olan",  # internal newline
-        "pythonda 5 il\ttecrubesi olan",  # pasted tab
-        "\n\npythonda 5 il tecrubesi olan\n",  # leading + trailing
+        "Java bilən namizədləri göstər\n",  # <textarea> trailing Enter
+        "Java bilən namizədləri göstər\r\n",  # browser CRLF normalization
+        "Java bilən\nnamizədləri göstər",  # internal newline
+        "Java bilən\tnamizədləri göstər",  # pasted tab
+        "\n\nJava bilən namizədləri göstər\n",  # leading + trailing
     ],
 )
 def test_benign_textarea_whitespace_does_not_trigger_control_character_guard(

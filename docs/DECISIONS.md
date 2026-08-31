@@ -1858,3 +1858,124 @@ change. Deleting the single `try_deterministic_intent_parse` call site in
 `plan_candidate_search` restores 100% LLM-dependent behavior instantly;
 nothing else in the pipeline (precheck, `convert_planner_draft`,
 `search_candidates`, audit) was modified to accommodate it.
+
+## D-027 — Deterministic search-semantics audit: no silent skill-duration weakening
+
+**Date:** 2026-08-31
+**Decision:** A dedicated semantic-correctness audit of D-026's fast path
+found a real correctness bug, root-caused before any change (per the
+audit's own requirement): for `"pythonda 5 il tecrubesi olan"`
+("5 years of experience IN Python"), the fast path introduced in D-026
+was producing `RequiredFilters(skills=["python"],
+min_total_experience_years=5.0)` — i.e. "has the Python skill" AND
+"has >= 5 years of TOTAL career experience", **not** "has 5 years of
+experience specifically in Python". These are not equivalent: a
+candidate with 1 year of Python and 10 years of unrelated total
+experience would incorrectly satisfy the first, weaker reading. The
+identical connector phrasing (`"Python üzrə 5 il təcrübəsi"`) was already
+correctly rejected as unsupported — so the same HR intent was getting
+inconsistent treatment purely based on which grammatical form was typed.
+
+1. **Can MEYAR prove per-skill duration? Inspected, not assumed: no.**
+   `CandidateProfileExtraction` (`meyar/schemas/candidate_profile.py`)
+   holds `skills: list[SkillItem]` and
+   `employment_history: list[EmploymentItem]` as two independent flat
+   lists — `SkillItem` has no field referencing an `EmploymentItem`, and
+   `EmploymentItem` has no field listing which skills were used.
+   `meyar.evaluation.evaluators.evaluate_skill` only checks a skill NAME
+   is present; `evaluate_experience` only sums `EmploymentItem` date
+   ranges. There is no code path, schema field, or evidence relationship
+   anywhere that could substantiate "N years of experience with skill X"
+   as a single fact. Per the audit's own instruction, this means the
+   fast path must **not** invent that duration by combining a skill
+   mention with total career years — a missing capability stays UNKNOWN/
+   declined, never guessed.
+2. **Unified fix at the shared precheck, not two separate patches.**
+   `precheck_natural_language_request` (shared by the LLM path, the
+   deterministic fast path, the REST API, and the CLI — it is the very
+   first thing every one of them runs) already rejected the "üzrə"/"ilə"
+   connector phrasing as `SKILL_SPECIFIC_EXPERIENCE_DURATION_UNSUPPORTED`
+   via `_SKILL_DURATION_PATTERNS`. Added a fifth pattern there for the
+   agglutinated locative/ablative-suffix shape ("Pythonda", "SQL-dan",
+   reusing D-023's `_AZ_LOCATIVE_ABLATIVE_SUFFIXES`), so **every**
+   equivalent phrasing is now rejected identically, before either the
+   deterministic parser or the LLM ever sees the request — closing the
+   gap for all four consumers with one change. Also fixed a latent gap
+   surfaced while writing the regression matrix: the connector pattern's
+   optional marker only recognized `"ən azı"`, not the equally common
+   `"ən az"` (no trailing "ı") — `"Python üzrə ən az 5 il təcrübəsi"` was
+   silently passing precheck unrejected; now folds both spellings, same
+   as the deterministic total-experience pattern already did.
+   `try_deterministic_intent_parse`'s own skill+experience pattern is
+   removed (dead code — precheck rejects it first) with a comment
+   explaining why it is deliberately absent, not merely missing.
+3. **New: `find_skill_specific_duration_mention(text) ->
+   (skill, years) | None`.** Extracts what a rejected request named, for
+   two honest purposes only: powering an HR-safe clarification (never a
+   silent guess) and letting `_skill_duration_is_unsupported` reuse one
+   source of truth instead of duplicating the pattern list.
+4. **HR-safe clarification instead of a generic failure page.** When
+   `/ui/search`'s outcome is `UNSUPPORTED_SEMANTICS` with reason
+   `SKILL_SPECIFIC_EXPERIENCE_DURATION_UNSUPPORTED`, a new
+   `search_clarification.html` explains, in plain HR language and naming
+   the actual skill/years, that MEYAR can check "has this skill" and
+   "total experience" independently but not "N years with this skill",
+   and offers one explicit, CSRF-protected confirm action. Confirming
+   resubmits a reconstructed, unambiguous request
+   (`"{skill} bilən və ümumi iş təcrübəsi {years} il olan"`) through the
+   *normal* `/ui/search` flow — no bypass of precheck/fidelity
+   validation, no new outcome type, no REST API contract change (the
+   "exact 7-way" `PlannerOutcome` documented in
+   `ApiNaturalLanguageSearchResponse` is untouched; API/CLI clients keep
+   getting the existing typed `UNSUPPORTED_SEMANTICS` rejection and can
+   build their own handling from `reason_codes`, exactly as before). The
+   confirmed alternative only ever executes after this explicit click —
+   never automatically. Added a matching deterministic pattern
+   (`"[ümumi/peşəkar] iş təcrübəsi [ən az/minimum] N il olan"`, the
+   duration-second word order) and its `explicit_total_experience_years`
+   fidelity-check counterpart, so the confirmed alternative — and any
+   other request already phrased with skill and total-experience as two
+   distinct clauses — resolves deterministically with zero LLM calls.
+5. **Vacancy kind-aware validation (owner follow-up): was not
+   implemented, now is.** Investigated as requested rather than assumed:
+   `meyar.ui.service._parse_criterion_row` correctly required
+   `min_years` for EXPERIENCE and correctly kept SKILL/CERTIFICATION
+   distinct via `CriterionKind`, but a value typed into the "Təcrübə
+   (il)" field for any NON-EXPERIENCE row (SKILL/CERTIFICATION/
+   EDUCATION/LANGUAGE) was silently read and discarded — the form
+   accepted input it then ignored, exactly the "no silent ignoring of
+   incompatible form fields" failure mode the owner asked to check for.
+   Fixed: any non-empty `min_years` on a non-EXPERIENCE row now raises a
+   clear validation error instead.
+6. **Job duplicate/lifecycle finding (reported, not implemented this
+   pass).** `Job` (`meyar/models/job.py`) has no unique constraint on
+   `(tenant_id, title)` and no status/lifecycle field at all (no active/
+   closed/archived state, no soft-delete) — `create_job` inserts
+   unconditionally and neither `/ui/jobs` nor `POST /api/v1/jobs` checks
+   for an existing title. Two vacancies can be created with the
+   identical title, each independently rankable, and a filled/cancelled
+   vacancy has no way to be closed or hidden from the active listing —
+   it remains visible and rankable forever. This is a genuine product
+   gap for a real HR tool, not a scoring/tenant-isolation/security issue
+   (each `Job`/`JobCriteriaVersion` is still a distinct, correctly
+   tenant-scoped row; nothing cross-contaminates). Not fixed in this
+   pass — a full lifecycle (status field, close/reopen action, listing
+   filter) is a materially new feature, not a blocker fix, and no
+   concrete desired behavior was specified to implement against. Left as
+   an explicit open gap for a future slice.
+
+**Why:** The owner's core objection was structural, not cosmetic: a
+deterministic system that silently reinterprets "N years IN skill X" as
+"skill + N years of anything" produces a materially different (weaker)
+candidate pool than what was asked, with no way for HR to know. The fix
+keeps the guarantee "the system never invents what it cannot prove"
+intact while still giving HR an honest, one-click path to the weaker
+search when they genuinely want it.
+
+**Reversibility:** Fully reversible. No migration; no schema change.
+Removing the fifth `_SKILL_DURATION_PATTERNS` entry and the "ən az"
+fold restores the exact pre-audit (buggy) precheck behavior; removing
+the clarification branch in `meyar.ui.router.search` restores the
+generic outcome page for this reason code. The kind-aware validation
+addition only rejects input that was previously silently dropped —
+no previously-accepted request is now rejected.

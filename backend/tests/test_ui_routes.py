@@ -190,38 +190,51 @@ async def test_executable_zero_result_is_not_presented_as_infrastructure_error(
     assert "Axtarış xidməti əlçatan deyil" not in response.text
 
 
-async def test_ordinary_azerbaijani_experience_query_executes_end_to_end(
+async def test_skill_specific_duration_shows_clarification_not_silent_weakening(
     client: AsyncClient,
     tenant_and_key,
     local_ui_settings: Settings,
 ) -> None:
-    """Full-pipeline regression for the owner-reported visual-acceptance
-    blocker: textarea input -> normalization -> security precheck ->
-    planner request construction -> provider boundary -> SearchPlan
-    parsing/validation -> deterministic execution -> HR-safe rendering,
-    for an ordinary query typed without the Azerbaijani schwa keyboard
-    character and with the skill in its natural agglutinated case
-    ("pythonda" = "in Python"). Uses the deterministic FakeLLMProvider test
-    double per repository policy — this does not require live Ollama."""
+    """Semantic-correctness audit regression (docs/DECISIONS.md D-027):
+    the owner-reported query "pythonda 5 il tecrübesi olan" ("5 years of
+    experience IN Python") must never be silently converted into "Python
+    skill + TOTAL experience >= 5" — MEYAR cannot prove that skill-
+    specific duration from structured evidence (no SkillItem<->
+    EmploymentItem link). It must show an HR-safe clarification instead
+    of a generic failure page, naming the skill and years without any
+    raw internal reason code, and the weaker alternative may only execute
+    after the HR user explicitly confirms it. Zero LLM calls throughout —
+    both the initial precheck rejection and the confirmed alternative
+    (an explicit-separation phrasing) are fully deterministic."""
     _tenant, _key, plaintext = tenant_and_key
-    fake = FakeLLMProvider(
-        planner_draft=PlannerDraft(
-            required_filters=RequiredFilters(
-                skills=["Python"], min_total_experience_years=5
-            )
-        )
-    )
-    app.dependency_overrides[get_llm_provider] = lambda: fake
+    never_called = FakeLLMProvider(error=ModelUnavailableError("must not be called"))
+    app.dependency_overrides[get_llm_provider] = lambda: never_called
     csrf = await _login_and_csrf(client, plaintext)
+
     response = await client.post(
         "/ui/search",
-        data={
-            "query": "pythonda 5 il tecrübesi olan",
-            "csrf_token": csrf,
-        },
+        data={"query": "pythonda 5 il tecrübesi olan", "csrf_token": csrf},
     )
     assert response.status_code == 200
-    assert "Sorğu icra edildi" in response.text
+    # The extracted skill preserves the HR user's own typed casing
+    # ("pythonda" -> "python") rather than guessing a canonical form.
+    assert "python üzrə təcrübə müddətini nəzərdə tutursunuz" in response.text
+    assert "Sorğu icra edildi" not in response.text
+    assert "Tələb hazırda dəstəklənmir" not in response.text
+    assert "SKILL_SPECIFIC_EXPERIENCE_DURATION_UNSUPPORTED" not in response.text
+    assert never_called.call_count == 0
+
+    confirm_match = re.search(r'name="query" value="([^"]+)"', response.text)
+    assert confirm_match is not None
+    confirmed_query = confirm_match.group(1)
+
+    confirm_response = await client.post(
+        "/ui/search",
+        data={"query": confirmed_query, "csrf_token": csrf},
+    )
+    assert confirm_response.status_code == 200
+    assert "Sorğu icra edildi" in confirm_response.text
+    assert never_called.call_count == 0
     assert "Sorğu təhlükəsiz icra edilə bilmədi" not in response.text
     assert "Tələb hazırda dəstəklənmir" not in response.text
 
@@ -242,6 +255,9 @@ async def test_ordinary_azerbaijani_experience_query_executes_end_to_end(
             # (0 calls: draft.unsupported_reason_codes below is unreachable
             # dead weight for this particular query, kept only to show the
             # outcome is the same either way for a genuine precheck hit).
+            # This reason code is special-cased to the clarification screen
+            # (docs/DECISIONS.md D-027), not the generic outcome message —
+            # see test_skill_specific_duration_shows_clarification_not_silent_weakening.
             "5 il Java təcrübəsi olan namizədləri göstər.",
             PlannerDraft(
                 required_filters=RequiredFilters(
@@ -251,7 +267,7 @@ async def test_ordinary_azerbaijani_experience_query_executes_end_to_end(
                     PlannerReasonCode.SKILL_SPECIFIC_EXPERIENCE_DURATION_UNSUPPORTED
                 ],
             ),
-            "Tələb hazırda dəstəklənmir",
+            "Java üzrə təcrübə müddətini nəzərdə tutursunuz",
             0,
         ),
         (

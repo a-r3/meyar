@@ -96,20 +96,49 @@ _PREFERRED_MARKERS = (
     "arzuolunandır",
 )
 
+# Azerbaijani is agglutinative: a locative ("in X") or ablative ("from X")
+# case suffix attaches directly to a noun with no space, e.g. "Pythonda"
+# ("in Python") or "SQL-dan" ("from SQL"). A bare word-boundary match would
+# reject every such case-marked mention of a skill/certification/language
+# the request otherwise genuinely names — not a SearchPlan/domain-model
+# limitation, just an overly strict safety-net regex. This is deliberately
+# limited to the standard locative/ablative markers (with the regular
+# voiced/voiceless consonant alternation) and gated to values of at least
+# 3 characters, so it cannot turn e.g. "Java" into a false match for the
+# unrelated word "JavaScript" (whose suffix, "script", is not one of
+# these). See docs/DECISIONS.md D-023.
+_AZ_LOCATIVE_ABLATIVE_SUFFIXES = ("dan", "dən", "tan", "tən", "da", "də", "ta", "tə")
+
 _SKILL_DURATION_PATTERNS = (
     _az_pattern(
-        rf"(?i)\b\d+(?:\.\d+)?\s*(?:years?|yrs?)\s+(?:of\s+)?"
+        rf"(?i)\b(?P<years>\d+(?:\.\d+)?)\s*(?:years?|yrs?)\s+(?:of\s+)?"
         rf"(?P<skill>[{_WORD}/-]{{1,60}})\s+experience\b"
     ),
     _az_pattern(
         rf"(?i)\b(?P<skill>[{_WORD}/-]{{1,60}})\s+experience\s+(?:of|for)\s+"
-        r"\d+(?:\.\d+)?\s*(?:years?|yrs?)\b"
+        r"(?P<years>\d+(?:\.\d+)?)\s*(?:years?|yrs?)\b"
     ),
     _az_pattern(
         rf"(?i)\b(?P<skill>[{_WORD}/-]{{1,60}})\s+(?:üzrə|ilə)\s+"
-        r"(?:ən\s+azı\s+)?\d+(?:[.,]\d+)?\s*il\s+(?:iş\s+)?təcrüb"
+        r"(?:ən\s+az[ıi]?\s+)?(?P<years>\d+(?:[.,]\d+)?)\s*il\s+(?:iş\s+)?təcrüb"
     ),
-    _az_pattern(rf"(?i)\b\d+(?:[.,]\d+)?\s*il\s+(?P<skill>[{_WORD}/-]{{1,60}})\s+təcrüb"),
+    _az_pattern(
+        rf"(?i)\b(?P<years>\d+(?:[.,]\d+)?)\s*il\s+(?P<skill>[{_WORD}/-]{{1,60}})\s+təcrüb"
+    ),
+    # "Pythonda 5 il təcrübəsi olan" ("[having] 5 years of experience in
+    # Python") — the skill takes the duration mention directly via a
+    # locative/ablative case suffix instead of a "üzrə"/"ilə" connector.
+    # Grammatically the same skill-SPECIFIC-duration claim as the
+    # patterns above; CandidateProfile has no evidence linking a skill to
+    # a duration (see docs/DECISIONS.md D-027), so this must be rejected
+    # exactly like the connector forms, not silently read as "skill +
+    # total experience". Optional hyphen for a bare acronym skill (e.g.
+    # "SQL-dan").
+    _az_pattern(
+        rf"(?i)\b(?P<skill>[A-Za-z][A-Za-z0-9+#.]{{0,30}})-?"
+        rf"(?:{'|'.join(_AZ_LOCATIVE_ABLATIVE_SUFFIXES)})\s+"
+        r"(?P<years>\d+(?:[.,]\d+)?)\s*il\s+təcrüb"
+    ),
 )
 _TOTAL_EXPERIENCE_PATTERNS = (
     _az_pattern(
@@ -119,6 +148,14 @@ _TOTAL_EXPERIENCE_PATTERNS = (
     _az_pattern(
         r"(?i)\b(?P<years>\d+(?:[.,]\d+)?)\s*il\s+"
         r"(?:(?:ümumi|peşəkar)\s+)?(?:iş\s+)?təcrüb"
+    ),
+    # Reversed word order: "[ümumi/peşəkar] iş təcrübəsi [ən az/minimum]
+    # N il" — the duration comes after "təcrübə" instead of before it
+    # (e.g. the explicit-separation phrasing "ümumi iş təcrübəsi ən az 5
+    # il olan").
+    _az_pattern(
+        r"(?i)\b(?:(?:ümumi|peşəkar)\s+)?(?:iş\s+)?təcrübə\w*\s+"
+        r"(?:minimum\s+|ən\s+az[ıi]?\s+)?(?P<years>\d+(?:[.,]\d+)?)\s*il\b"
     ),
 )
 _RESULT_LIMIT_PATTERNS = (
@@ -241,14 +278,39 @@ def _has_custom_search_weighting(text: str) -> bool:
     )
 
 
-def _skill_duration_is_unsupported(text: str) -> bool:
-    total_words = {"total", "overall", "professional", "work", "umumi", "is", "pesekar"}
+_SKILL_DURATION_TOTAL_WORDS = frozenset(
+    {"total", "overall", "professional", "work", "umumi", "is", "pesekar"}
+)
+
+
+def find_skill_specific_duration_mention(text: str) -> tuple[str, float] | None:
+    """The (skill, years) a request names when it expresses skill-SPECIFIC
+    experience duration ("N years of experience IN skill X"), e.g.
+    "Pythonda 5 il təcrübəsi" or "Python üzrə 5 il təcrübəsi". Returns
+    ``None`` when no such shape is present.
+
+    ``CandidateProfile`` has no evidence linking a ``SkillItem`` to a
+    specific ``EmploymentItem`` date range (see docs/DECISIONS.md D-027)
+    — MEYAR can currently prove "has skill X" and "has N years of total
+    career experience" as two independent facts, never "N years WITH
+    skill X" as one. This function exists only to power an HR-safe
+    clarification (never to silently combine a skill mention with total
+    experience) and to let the shared precheck below reject the shape
+    uniformly regardless of phrasing."""
     folded = fold_az_ascii(text)
     for pattern in _SKILL_DURATION_PATTERNS:
         match = pattern.search(folded)
-        if match and _canonical(match.group("skill")) not in total_words:
-            return True
-    return False
+        if not match:
+            continue
+        skill = match.group("skill")
+        if _canonical(skill) in _SKILL_DURATION_TOTAL_WORDS:
+            continue
+        return skill, float(match.group("years").replace(",", "."))
+    return None
+
+
+def _skill_duration_is_unsupported(text: str) -> bool:
+    return find_skill_specific_duration_mention(text) is not None
 
 
 def explicit_total_experience_years(text: str) -> set[float]:
@@ -333,18 +395,6 @@ def _value_variants(category: str, value: str) -> tuple[str, ...]:
     return (value,)
 
 
-# Azerbaijani is agglutinative: a locative ("in X") or ablative ("from X")
-# case suffix attaches directly to a noun with no space, e.g. "Pythonda"
-# ("in Python") or "SQL-dan" ("from SQL"). A bare word-boundary match would
-# reject every such case-marked mention of a skill/certification/language
-# the request otherwise genuinely names — not a SearchPlan/domain-model
-# limitation, just an overly strict safety-net regex. This is deliberately
-# limited to the standard locative/ablative markers (with the regular
-# voiced/voiceless consonant alternation) and gated to values of at least
-# 3 characters, so it cannot turn e.g. "Java" into a false match for the
-# unrelated word "JavaScript" (whose suffix, "script", is not one of
-# these). See docs/DECISIONS.md D-023.
-_AZ_LOCATIVE_ABLATIVE_SUFFIXES = ("dan", "dən", "tan", "tən", "da", "də", "ta", "tə")
 _MIN_SUFFIX_TOLERANT_VALUE_LENGTH = 3
 
 
@@ -748,18 +798,24 @@ def build_interpretation_summary(
 
 
 # ---------------------------------------------------------------------------
-# Conservative deterministic fast path (D-026). A narrowly-scoped,
-# whole-clause-anchored pattern set for a handful of explicit HR search
-# intents that already have exact SearchPlan representations — skills,
-# languages, certifications, and total experience years, singly or
-# combined with a simple "və" conjunction. This is NOT a general NLP
-# engine: every one of the five patterns below matches an ENTIRE clause
-# start-to-end (anchored `^...$`), so a request containing anything this
-# module cannot confidently attribute to a known concept or a fixed,
-# bounded set of connector/boilerplate words never partially matches —
-# `try_deterministic_intent_parse` returns None and the caller MUST fall
-# back to the LLM planner rather than execute a narrower search than what
-# was actually asked. See docs/DECISIONS.md D-026.
+# Conservative deterministic fast path (D-026, refined by D-027). A
+# narrowly-scoped, whole-clause-anchored pattern set for a handful of
+# explicit HR search intents that already have exact, evidence-provable
+# SearchPlan representations — skills, languages, certifications, and
+# TOTAL (career-wide) experience years, singly or combined with a simple
+# "və" conjunction. This is NOT a general NLP engine: every pattern below
+# matches an ENTIRE clause start-to-end (anchored `^...$`), so a request
+# containing anything this module cannot confidently attribute to a known
+# concept or a fixed, bounded set of connector/boilerplate words never
+# partially matches — `try_deterministic_intent_parse` returns None and
+# the caller MUST fall back to the LLM planner rather than execute a
+# narrower search than what was actually asked. Skill-SPECIFIC experience
+# duration (e.g. "Pythonda 5 il təcrübəsi", "Python üzrə 5 il təcrübəsi")
+# is deliberately absent here — see the note above
+# `find_skill_specific_duration_mention` and docs/DECISIONS.md D-027 for
+# why, and `meyar.ui.router`'s clarification flow for how a user can
+# explicitly opt into the (weaker, but now honest) skill + total-
+# experience alternative. See docs/DECISIONS.md D-026.
 # ---------------------------------------------------------------------------
 
 _DET_TERM = rf"[{_WORD}/-]{{1,60}}"
@@ -780,20 +836,30 @@ _DET_LANGUAGE_PATTERN = _az_pattern(
 _DET_CERT_PATTERN = _az_pattern(
     rf"(?i)^{_DET_LEADING}(?P<term>{_DET_TERM})\s+sertifikatı\s+olan{_DET_TRAILING}\s*$"
 )
+# "N il [ümumi/peşəkar] təcrübəsi olan" — the duration comes first.
 _DET_TOTAL_EXPERIENCE_PATTERN = _az_pattern(
     rf"(?i)^{_DET_LEADING}(?:minimum\s+|ən\s+az[ıi]?\s+)?"
     rf"(?P<years>\d+(?:[.,]\d+)?)\s*il\s+(?:(?:ümumi|peşəkar)\s+)?(?:iş\s+)?"
     rf"təcrübəsi\s+olan{_DET_TRAILING}\s*$"
 )
-# The reported-bug shape: a skill with a locative/ablative case suffix
-# directly attached ("pythonda" = "in Python") immediately followed by a
-# total-experience mention. Reuses the same bounded suffix set as
-# _value_supported_by_request above (D-023) — not free suffix stripping.
-_DET_SKILL_PLUS_EXPERIENCE_PATTERN = _az_pattern(
-    rf"(?i)^{_DET_LEADING}(?P<skill>[A-Za-z][A-Za-z0-9+#.]{{0,30}})-?"
-    rf"(?:{'|'.join(_AZ_LOCATIVE_ABLATIVE_SUFFIXES)})\s+"
-    rf"(?P<years>\d+(?:[.,]\d+)?)\s*il\s+təcrübəsi\s+olan{_DET_TRAILING}\s*$"
+# "[ümumi/peşəkar] iş təcrübəsi [ən az/minimum] N il olan" — the same
+# total-experience intent with "təcrübəsi" stated first, e.g. the
+# explicit-separation phrasing "ümumi iş təcrübəsi ən az 5 il olan".
+_DET_TOTAL_EXPERIENCE_REVERSED_PATTERN = _az_pattern(
+    rf"(?i)^{_DET_LEADING}(?:(?:ümumi|peşəkar)\s+)?(?:iş\s+)?təcrübəsi\s+"
+    rf"(?:minimum\s+|ən\s+az[ıi]?\s+)?(?P<years>\d+(?:[.,]\d+)?)\s*il\s+"
+    rf"olan{_DET_TRAILING}\s*$"
 )
+# Deliberately NOT a pattern here: "Xda N il təcrübəsi olan" (a skill
+# with a locative/ablative suffix immediately followed by a duration
+# mention, e.g. "pythonda 5 il təcrübəsi olan") is skill-SPECIFIC
+# duration — CandidateProfile cannot prove it (see docs/DECISIONS.md
+# D-027) and it is rejected upstream by precheck_natural_language_request
+# (find_skill_specific_duration_mention) before this module is ever
+# reached, exactly like "Python üzrə 5 il təcrübəsi". It must not be
+# silently read here as "skill + total experience" — that combination is
+# only ever produced after an explicit user confirmation (see the /ui
+# clarification flow in meyar.ui.router).
 
 _DET_TERM_LIST_SPLIT = _az_pattern(r"(?i)\s*,\s*|\s+və\s+|\s+and\s+")
 _DET_CLAUSE_SPLIT = _az_pattern(r"(?i)\s+və\s+")
@@ -829,16 +895,9 @@ def _parse_single_deterministic_clause(clause: str) -> PlannerDraft | None:
     if not clause:
         return None
 
-    match = _DET_SKILL_PLUS_EXPERIENCE_PATTERN.match(clause)
-    if match:
-        years = float(match.group("years").replace(",", "."))
-        return PlannerDraft(
-            required_filters=RequiredFilters(
-                skills=[match.group("skill")], min_total_experience_years=years
-            )
-        )
-
     match = _DET_TOTAL_EXPERIENCE_PATTERN.match(clause)
+    if match is None:
+        match = _DET_TOTAL_EXPERIENCE_REVERSED_PATTERN.match(clause)
     if match:
         years = float(match.group("years").replace(",", "."))
         return PlannerDraft(

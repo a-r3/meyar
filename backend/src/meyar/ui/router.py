@@ -26,6 +26,8 @@ from meyar.llm.dependency import get_llm_provider
 from meyar.llm.provider import LLMProvider
 from meyar.scoring.batch import BatchRankingError, rank_candidates_for_job
 from meyar.scoring.policy import ScoringPolicyError
+from meyar.search.planner_policy import find_skill_specific_duration_mention
+from meyar.search.planner_schemas import PlannerOutcome, PlannerReasonCode
 from meyar.search.planner_service import plan_and_search_candidates
 from meyar.search.schemas import EmbeddingSearchConfig
 from meyar.search.service import SearchRequestError
@@ -253,6 +255,36 @@ async def search(
             _context(ctx, query=query, as_of_date=as_of_date, outcome=outcome, results=[]),
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
+
+    plan = planned.plan
+    if (
+        plan.outcome == PlannerOutcome.UNSUPPORTED_SEMANTICS
+        and PlannerReasonCode.SKILL_SPECIFIC_EXPERIENCE_DURATION_UNSUPPORTED in plan.reason_codes
+    ):
+        # A skill-SPECIFIC duration claim ("N years IN skill X") cannot be
+        # proven from CandidateProfile evidence (docs/DECISIONS.md D-027)
+        # — never silently weakened into "skill + total experience".
+        # Offer the HR user that weaker-but-honest alternative explicitly
+        # instead of a generic failure page; it only ever executes if
+        # they click through, which resubmits an unambiguous rephrasing
+        # of their own request via the normal /ui/search flow below.
+        clarification = find_skill_specific_duration_mention(query)
+        if clarification is not None:
+            skill, years = clarification
+            years_text = f"{years:g}"
+            return _render(
+                request,
+                "search_clarification.html",
+                _context(
+                    ctx,
+                    query=query,
+                    skill=skill,
+                    years=years_text,
+                    confirmed_query=(
+                        f"{skill} bilən və ümumi iş təcrübəsi {years_text} il olan"
+                    ),
+                ),
+            )
 
     from meyar.ui.presentation import planner_outcome_view
 
