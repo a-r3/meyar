@@ -33,7 +33,7 @@ Definition-of-Done Acceptance) pending the Target-Mac benchmark gate.
 closure; issue #23 closed by PR #24, no remaining open issues).
 **M7 — HR UI & Presentation Readiness is OPEN** (issue #27; owner-driven
 HR UI productization pass following visual inspection of the running
-local UI — see D-023 through D-028, and "In progress" below). PR
+local UI — see D-023 through D-029, and "In progress" below). PR
 #29 (same branch) received a second owner visual inspection that found
 seven further blockers (NL search still generically failing on ordinary
 Azerbaijani phrasing, no vacancy-creation UI, raw criterion ids on the
@@ -69,7 +69,14 @@ normalized title+criteria combination is rejected for a second ACTIVE
 job, enforced by a real partial-unique-index DB constraint against
 concurrent double-submits, not just an application-level check) — scoped
 to the `/ui/jobs` form path only, `POST /api/v1/jobs` unchanged; see
-D-028. PR #29 still **NOT merged** — awaiting owner re-inspection.
+D-028. A fourth owner visual check then found the "Minimum müddət (il)"
+duration input still visibly enabled for non-EXPERIENCE rows even though
+`_parse_criterion_row` (D-027) already rejected it server-side — fixed
+with a self-hosted vanilla-JS presentation enhancement plus a matching
+server-rendered initial/re-rendered state, so the control is disabled
+and cleared for every kind but EXPERIENCE with or without JavaScript;
+server-side validation is unchanged and remains authoritative; see
+D-029. PR #29 still **NOT merged** — awaiting owner re-inspection.
 
 GitHub remote established (`https://github.com/a-r3/meyar.git`, private,
 temporary development remote — see D-012, `docs/DECISIONS.md`). `main`
@@ -313,6 +320,16 @@ remains disabled.
   schema. See D-019. Slice 13 final security/DoD acceptance was not started.
 
 ## Tests
+**677/677 passing** as of the kind-aware duration-field UI pass (branch
+`feat/hr-ui-productization`, still not merged): 673 prior (D-028 pass,
+see below) + 4 new for D-029 — rendered-form assertions that the
+"Minimum müddət (il)" control is disabled/cleared for a default SKILL
+row and enabled for an EXPERIENCE row, that a kind-switched EXPERIENCE→
+SKILL submission neither echoes the stale value back as editable nor
+persists a `Job`, and a direct manual POST of SKILL + `min_years`
+(bypassing the client script entirely, equivalent to JavaScript
+disabled) is still rejected server-side with no `Job` created.
+
 **673/673 passing** as of the Job lifecycle pass (branch
 `feat/hr-ui-productization`, still not merged): 659 prior (D-027 pass,
 see below) + 14 new for D-028 — the migration backfill-to-ACTIVE test
@@ -847,7 +864,7 @@ due date because the official timeline has not been supplied.
 | M4 — Internal Product Interface & API | Slices 11–12 | CLOSED — Slice 11 merged (PR #17, issue #16 closed); Slice 12 merged (PR #19 at `93fa567`, issue #18 closed) |
 | M5 — Security, Target-Mac Validation & MVP Acceptance | Slice 13 + target-Mac benchmark | OPEN — issue #20 open; PR #22 merged at `a709ce1` implementing Pass 1 (original CV, no-exfiltration, backup/restore, audit guard, multilingual evidence) with `Refs #20`; Mac Mini benchmark execution on the now owner-confirmed target hardware remains the sole open mandatory gate |
 | M6 — Operational CV Intake & Reconciliation | Slice 14 | CLOSED — Slice 14 merged (PR #24 at `f6e31ff`), issue #23 closed; owner-approved closure |
-| M7 — HR UI & Presentation Readiness | HR UI productization (chore, issue #27) | OPEN — branch `feat/hr-ui-productization`, PR #29 open, pending final owner visual check; Job lifecycle implemented; see D-023 through D-028 |
+| M7 — HR UI & Presentation Readiness | HR UI productization (chore, issue #27) | OPEN — branch `feat/hr-ui-productization`, PR #29 open, pending final owner visual check; Job lifecycle implemented; see D-023 through D-029 |
 
 ## Official requirement gap matrix
 

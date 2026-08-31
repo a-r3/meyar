@@ -2094,3 +2094,84 @@ pre-check call and the partial unique index (via a follow-up migration)
 would restore unrestricted duplicate creation; removing the archive route
 and the `?status=` branch restores the single unfiltered listing —
 neither touches scoring, evidence, or tenant isolation.
+
+## D-029 — Vacancy-form kind-aware duration field: client-side presentation fix
+
+**Date:** 2026-08-31
+**Decision:** D-027 fixed the server-side rule (`_parse_criterion_row`
+rejects a "Minimum müddət (il)"/`min_years` value on any non-EXPERIENCE
+row) but never touched the form's presentation — a fourth owner visual
+check confirmed the input stayed visibly enabled for every criterion
+kind, inviting exactly the invalid combination the server then rejected
+(Növ=Bacarıq, Tələb=Python, Təcrübə=4 → correctly rejected, but the field
+never signaled that before submit).
+
+1. **Progressive enhancement, not a new source of truth.** Server-side
+   validation in `meyar.ui.service._parse_criterion_row` is unchanged and
+   remains the sole authority — this pass only changes what
+   `job_new.html`/`base.html` render and adds one static asset,
+   `backend/src/meyar/ui/static/job-form.js` (self-hosted, loaded via
+   `<script src="/ui/static/job-form.js" defer>`; no inline script, no
+   CDN — compliant with the existing `script-src 'self'` UI CSP, which
+   required no change).
+2. **Server-rendered initial/re-rendered state, not JS-only.** Each
+   criterion row's `min_years` `<input>` now carries the HTML `disabled`
+   attribute at render time whenever `row.kind != "EXPERIENCE"` (Jinja:
+   `{% if not is_experience %} disabled aria-disabled="true"{% endif %}`),
+   and its displayed value is blanked for a non-EXPERIENCE row
+   (`value="{{ row.min_years if is_experience else "" }}"`) — this holds
+   for the initial `GET /jobs/new` blank-row render *and* every
+   validation-error re-render, so the correct disabled/cleared state is
+   present even with JavaScript disabled, not just as a JS side effect.
+3. **JS enhancement handles the live, same-page case.** `job-form.js`
+   listens for `change` on each `.js-kind-select`; when a row's kind
+   differs from EXPERIENCE it disables the paired `.js-min-years` input,
+   clears its value, and swaps its placeholder to "Tətbiq olunmur" —
+   this is the only way to reproduce, without a server round-trip, "HR
+   selected Təcrübə, typed 4, then switched to Bacarıq" and see the
+   stale 4 disappear rather than sit in a disabled-but-still-populated
+   field. Verified live in a real browser session against the running
+   dev server (not just `pytest`, since `httpx` never executes page
+   JavaScript): initial load showed every default SKILL row's duration
+   field disabled with the "Tətbiq olunmur" placeholder; switching a
+   row's Növ to Təcrübə enabled it with the "Minimum müddət (il)"
+   placeholder; typing "4" then switching back to Bacarıq left the field
+   disabled and empty (confirmed via `element.value === ""` and
+   `element.disabled === true`, not just visual inspection); the only
+   `<script>` loaded was the same-origin `job-form.js`.
+4. **No-JS fallback is the pre-existing server-side rejection, not a
+   parallel client-side guarantee.** A disabled HTML input is never
+   submitted by the browser, so a JS-enabled client naturally can't
+   reproduce the invalid combination in the first place; a client with
+   JavaScript off (or a hand-crafted/malicious POST — added as an
+   explicit regression test) can still submit `kind=SKILL` with a
+   `min_years` value, and `_parse_criterion_row` rejects it exactly as
+   before D-029 — no weakening of server-side validation was made or
+   was needed.
+5. **Wording.** The shared table header changed from "Təcrübə (il)" to
+   "Minimum müddət (il) (yalnız Təcrübə üçün)" so the column itself no
+   longer implies every criterion kind accepts a duration; the per-row
+   placeholder further disambiguates "Minimum müddət (il)" (EXPERIENCE)
+   vs "Tətbiq olunmur" (every other kind).
+6. **Tests.** Four new cases in `test_ui_job_creation.py`: SKILL → years
+   control rendered disabled/cleared; EXPERIENCE → years control
+   rendered enabled with the new placeholder (via a mixed-row re-render
+   that preserves a valid EXPERIENCE row's posted values alongside a
+   second, invalid row); EXPERIENCE→SKILL kind-switch submission neither
+   echoes the stale value back as editable nor persists a `Job`; and a
+   direct manual POST of SKILL + `min_years` (the JS-disabled/malicious
+   case) is still rejected server-side with no `Job` row created.
+
+**Why:** A disabled-but-visible-anyway control is worse than either a
+truly disabled one or an honest error — the owner's objection was that
+the UI actively invited input the system already knew it would reject.
+The fix keeps the deterministic policy engine and its validator as the
+single source of truth (per project non-negotiables) while making the
+form itself stop lying about which fields apply to which criterion kind.
+
+**Reversibility:** Fully reversible, no migration, no schema change, no
+change to `_parse_criterion_row` or any Pydantic schema. Removing the
+`disabled`/blanked-value template logic and `job-form.js`'s `<script>`
+tag restores the exact pre-D-029 form (every field always enabled) while
+server-side rejection of the invalid combination is untouched either
+way — the two are fully decoupled.
