@@ -1505,3 +1505,135 @@ what the guard treats as benign formatting; reverting the five-character
 translate table restores the previous (overly strict) behavior instantly.
 The demo-key rotation only affects the already demo-scoped, chore-level
 `seed-demo` command.
+
+## D-024 — HR UI productization: second-round visual-inspection fixes (M7)
+
+**Date:** 2026-08-31
+**Decision:** A second owner visual inspection of PR #29 (same branch,
+`feat/hr-ui-productization`, still unmerged) found seven remaining
+blockers. All are UI-layer or safety-net-regex fixes; scoring, tenant
+isolation, and the LLM/embedding boundary are untouched. Real local Ollama
+inference was not made a required acceptance dependency, per the owner's
+8GB-laptop constraint — the natural-language pipeline fix was diagnosed
+and verified with the deterministic `FakeLLMProvider` test double and
+direct unit tests of the policy module, not a live model run.
+
+1. **Root-caused the still-generic outcome for `"pythonda 5 il tecrübesi
+   olan"`.** D-023 fixed the `REQUEST_CONTROL_CHARACTERS` false positive on
+   this exact query, but two separate, deeper problems in the deterministic
+   fidelity-check safety net (`meyar.search.planner_policy`) remained and
+   independently produced a generic `VALIDATION_FAILURE`/
+   `UNSUPPORTED_SEMANTICS` outcome for an entirely ordinary request — a
+   SearchPlan/domain-model limitation was ruled out; both are regex gaps in
+   the guard that verifies the model didn't invent/weaken a filter:
+   - The fixed keyword/marker regexes (`təcrüb`, `il`, `mütləq`, etc.) are
+     written with correct Azerbaijani spelling and require it literally;
+     most HR staff type on a plain Latin keyboard without the dedicated
+     diacritic keys and substitute the nearest ASCII letter (e.g.
+     "tecrübə" for "təcrübə"), so `explicit_total_experience_years` found
+     no explicit year in the request text and rejected the model's
+     (correct) `min_total_experience_years=5`. Fixed with a shared
+     `meyar.core.text.fold_az_ascii` diacritic-folding helper applied to
+     both the searched text and (at compile time) the fixed pattern
+     source/marker canonicalizers, so either spelling matches.
+   - Azerbaijani is agglutinative: a locative/ablative case suffix attaches
+     directly to a noun with no space ("Pythonda" = "in Python"), but
+     `_value_supported_by_request` required the exact word `python` at a
+     hard boundary, so a plainly-supported skill mention was rejected as
+     `STRUCTURED_FILTER_NOT_SUPPORTED_BY_REQUEST`. Fixed by adding a second,
+     narrowly-scoped match attempt that tolerates exactly the standard
+     locative/ablative suffixes (`da/də/ta/tə/dan/dən/tan/tən`, the regular
+     voiced/voiceless alternation), gated to values of 3+ characters so a
+     short acronym (e.g. "C") still cannot false-positive-match an unrelated
+     word — verified this does not resurrect the "Java matches inside
+     JavaScript" false positive the strict boundary exists to prevent.
+   Neither fix special-cases the reported sentence — both are general
+   typing/morphology accommodations, covered by parametrized regression
+   tests including the ASCII-only and fully-diacriticized spelling, an
+   ablative-case example, and an explicit non-regression case for the
+   Java/JavaScript boundary (`backend/tests/test_search_planner_policy.py`,
+   `backend/tests/test_ui_routes.py`).
+2. **New vacancy creation.** `/ui/jobs` previously had no create action —
+   vacancies could only be made via the API/CLI. Added
+   `GET /ui/jobs/new` (form) and `POST /ui/jobs` (create), both requiring
+   the existing `jobs:write` scope and CSRF token like every other
+   state-changing `/ui/*` route. The handler reuses the exact same
+   `create_job`/`create_criteria_version` repository functions as
+   `POST /api/v1/jobs` (`meyar.api.v1.jobs.post_job`) and the same
+   `CriterionIn`/`JobCreateRequest` Pydantic schemas — one job/criteria
+   creation path, one deterministic scoring model, for both surfaces. The
+   HR user never types a criterion id or job UUID: `meyar.ui.service
+   .build_job_create_request` derives a stable ASCII-only slug from the
+   HR-entered label (`meyar.core.text.fold_az_ascii` again, plus a
+   collision-safe numeric suffix) purely as the policy engine's internal
+   join key. The form is a fixed set of rows (no JS row-adding, consistent
+   with the rest of this JS-free `/ui` surface, and compatible with the
+   strict `script-src 'self'` CSP already in place); blank rows are
+   silently skipped, kind-specific validation (e.g. `EXPERIENCE` requires
+   `min_years`) and the existing sensitive/prohibited-term denylist both
+   fire through the same `CriterionIn` validators the API uses, and a
+   validation failure re-renders the form with the HR user's own input
+   preserved rather than discarding it.
+3. **Raw internal criterion ids/kind enums no longer reach the ranking
+   table.** `ranking_results.html` rendered
+   `{criterion_id} ({criterion_kind})` — e.g. `aml_skill (SKILL)` — because
+   `CriterionScoreContribution` (the deterministic scoring engine's own
+   output schema, intentionally unchanged — scoring semantics are
+   untouched) only carries the internal id, not the label. Fixed
+   presentation-side only: `meyar.ui.service.build_ranked_candidate_views`
+   now resolves each contribution's id against the same job criteria
+   version's stored `criteria` JSON (which already carries the HR-entered
+   `label`) and a new `meyar.ui.presentation.CRITERION_KIND_LABELS` maps
+   the kind enum to an Azerbaijani noun (`SKILL` → "Bacarıq", etc.) for
+   display only; the raw id/kind remain on `ScoreContributionView` for any
+   future API-parity use, just no longer rendered as the visible text.
+4. **Ranking-page wording.** Column headers softened
+   (`Status`→`Nəticə`, `Əmsal`→`Uyğunluq dərəcəsi`, "Meyar töhfələri"→
+   "Meyarlar üzrə təfərrüat"); `/ui/jobs`'s "sıralayın deterministik
+   şəkildə" replaced with the owner-suggested "Namizədləri vakansiya
+   meyarlarına əsasən sıralayın." No numeric calculation changed.
+5. **Candidate-detail "Texniki məlumat" reduced to genuinely HR-meaningful
+   facts.** Dropped `parser_name`/`parser_version` (implementation
+   identity) and the raw `parse_error_code` from the rendered table; kept
+   only file type (now shown as "PDF"/"DOCX" like the row above it, not
+   the raw MIME string), file size, and the existing friendly
+   `state_label(parser_status)` readiness badge. Nothing was deleted from
+   `CandidateDocumentView`/the database — this is a template-only
+   reduction of what's rendered, per the same pattern D-023 item 4 already
+   established for the rest of this page.
+6. **CV-preview XSS: confirmed, not newly introduced.** Jinja2 autoescaping
+   was already on for `.html` templates project-wide
+   (`select_autoescape(...)`) and no template uses `|safe`/`Markup`, so
+   candidate-controlled canonical-document text was already rendered as
+   inert text. Added a regression test that seeds a `CanonicalDocument`
+   block directly with `<script>alert(1)</script>`,
+   `<img src=x onerror=alert(1)>`, and `< > & " '`, and asserts the
+   response contains only the escaped form
+   (`backend/tests/test_ui_candidate_preview.py`) — this is now enforced,
+   not just believed true from reading the template.
+7. **"Originalı yüklə" now truthfully downloads.** The original-CV route
+   previously used `Content-Disposition: inline` for PDFs specifically
+   (D-023 item 5 kept this unchanged), so clicking the button labeled
+   "download" silently opened the PDF in the browser tab instead — a
+   truthfulness gap the owner's second inspection flagged directly. The
+   safe in-app text view already lives at the separate `/preview` route
+   introduced in D-023, so there is no remaining reason for `/original` to
+   ever be anything but a true download: it now always sends
+   `Content-Disposition: attachment` regardless of MIME type.
+
+**Why:** The owner's second pass found the natural-language search path
+still practically unusable for ordinary Azerbaijani phrasing/typing, no
+way for HR to create a vacancy at all (a core documented product
+capability), and several of the same "reads like an engineering console"
+symptoms D-023 addressed elsewhere on the page that had not yet been
+applied to the ranking table and candidate-detail technical section.
+
+**Reversibility:** Fully reversible. No migration; no schema change. The
+planner-policy fold/suffix-tolerance changes only widen what the
+safety-net regex accepts — reverting `meyar.core.text.fold_az_ascii` usage
+and the locative/ablative suffix branch in `_value_supported_by_request`
+restores the previous (stricter) behavior instantly. Vacancy creation is
+a net-new, additive route pair; disabling it (removing the two routes)
+does not affect existing jobs, criteria, or the API/CLI creation path,
+which is unchanged. The ranking-table/candidate-detail wording and the
+`/original` disposition change are presentation-only.

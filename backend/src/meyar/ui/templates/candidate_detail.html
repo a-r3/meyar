@@ -46,8 +46,8 @@
     {% endfor %}
   </div>
   {% if candidate.documents %}
-  <details class="tech-disclosure"><summary>Texniki məlumat</summary>
-    <div class="table-wrap"><table><thead><tr><th>Tip</th><th>Ölçü</th><th>Parser</th><th>Vəziyyət</th></tr></thead><tbody>{% for document in candidate.documents %}<tr><td>{{ document.mime_type }}</td><td>{{ document.byte_size }} bayt</td><td>{{ document.parser_name or "—" }} {{ document.parser_version or "" }}</td><td><span class="status-badge" data-state="{{ document.parser_status }}">{{ state_label(document.parser_status) }}</span>{% if document.parse_error_code %} · {{ document.parse_error_code }}{% endif %}</td></tr>{% endfor %}</tbody></table></div>
+  <details class="tech-disclosure"><summary>Sənəd məlumatı</summary>
+    <div class="table-wrap"><table><thead><tr><th>Tip</th><th>Ölçü</th><th>Vəziyyət</th></tr></thead><tbody>{% for document in candidate.documents %}<tr><td>{{ "PDF" if "pdf" in document.mime_type else "DOCX" }}</td><td>{{ document.byte_size }} bayt</td><td><span class="status-badge" data-state="{{ document.parser_status }}">{{ state_label(document.parser_status) }}</span></td></tr>{% endfor %}</tbody></table></div>
   </details>
   {% endif %}
 </section>

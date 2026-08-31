@@ -1,8 +1,10 @@
 """Slice 13 — authorized original-CV retrieval
 (GET /ui/candidates/{candidate_id}/documents/{document_id}/original).
 
-Covers: same-tenant PDF/DOCX success, disposition per type, stored MIME
-type used, candidate/document mismatch and foreign-tenant safe 404,
+Covers: same-tenant PDF/DOCX success, always-attachment disposition (a
+true download regardless of MIME type — the in-app text view is the
+separate /preview route), stored MIME type used, candidate/document
+mismatch and foreign-tenant safe 404,
 missing-scope 403, unauthenticated redirect, session revocation, no
 storage key/path leakage, synthetic filename only, and absence from the
 public OpenAPI schema.
@@ -67,9 +69,12 @@ def _original_url(candidate_id: str, document_id: str) -> str:
     return f"/ui/candidates/{candidate_id}/documents/{document_id}/original"
 
 
-async def test_authorized_pdf_open_succeeds_inline_with_stored_mime(
+async def test_authorized_pdf_download_succeeds_as_attachment_with_stored_mime(
     client: AsyncClient, tenant_and_key, local_ui_settings: Settings
 ) -> None:
+    """'Originalı yüklə' must truthfully download, not silently open the PDF
+    inline in the browser tab — the safe in-app view is the separate
+    /preview route. Regression for owner visual-inspection Blocker 7."""
     _tenant, _key, plaintext = tenant_and_key
     candidate_id, document_id = await _upload_document(
         client, plaintext, filename="valid_cv.pdf", content_type="application/pdf"
@@ -82,7 +87,7 @@ async def test_authorized_pdf_open_succeeds_inline_with_stored_mime(
     assert response.headers["content-type"].startswith("application/pdf")
     assert response.content == _read("valid_cv.pdf")
     disposition = response.headers["content-disposition"]
-    assert disposition.startswith("inline;")
+    assert disposition.startswith("attachment;")
     assert f"cv-{document_id.replace('-', '')}.pdf" in disposition
 
 

@@ -190,6 +190,42 @@ async def test_executable_zero_result_is_not_presented_as_infrastructure_error(
     assert "Axtarış xidməti əlçatan deyil" not in response.text
 
 
+async def test_ordinary_azerbaijani_experience_query_executes_end_to_end(
+    client: AsyncClient,
+    tenant_and_key,
+    local_ui_settings: Settings,
+) -> None:
+    """Full-pipeline regression for the owner-reported visual-acceptance
+    blocker: textarea input -> normalization -> security precheck ->
+    planner request construction -> provider boundary -> SearchPlan
+    parsing/validation -> deterministic execution -> HR-safe rendering,
+    for an ordinary query typed without the Azerbaijani schwa keyboard
+    character and with the skill in its natural agglutinated case
+    ("pythonda" = "in Python"). Uses the deterministic FakeLLMProvider test
+    double per repository policy — this does not require live Ollama."""
+    _tenant, _key, plaintext = tenant_and_key
+    fake = FakeLLMProvider(
+        planner_draft=PlannerDraft(
+            required_filters=RequiredFilters(
+                skills=["Python"], min_total_experience_years=5
+            )
+        )
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake
+    csrf = await _login_and_csrf(client, plaintext)
+    response = await client.post(
+        "/ui/search",
+        data={
+            "query": "pythonda 5 il tecrübesi olan",
+            "csrf_token": csrf,
+        },
+    )
+    assert response.status_code == 200
+    assert "Sorğu icra edildi" in response.text
+    assert "Sorğu təhlükəsiz icra edilə bilmədi" not in response.text
+    assert "Tələb hazırda dəstəklənmir" not in response.text
+
+
 @pytest.mark.parametrize(
     ("query", "draft", "expected", "expected_calls"),
     [
@@ -529,6 +565,59 @@ async def test_ranking_ui_preserves_slice10_order_not_identity_order(
     assert "Məlumat məlum deyil" in response.text
     assert "HIRE" not in response.text and "REJECT" not in response.text
     assert unavailable.call_count == 0
+
+
+async def test_ranking_contribution_shows_human_label_not_raw_criterion_id(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_key,
+    local_ui_settings: Settings,
+) -> None:
+    """Regression for owner visual-inspection Blockers 3/4: the per-criterion
+    ranking-contribution table must show the HR-facing label and a
+    human-readable criterion kind ('Bacarıq'), never the raw internal
+    criterion id/enum (e.g. 'aml_skill (SKILL)') the deterministic policy
+    engine keys on internally, and must not use developer-oriented page
+    wording ('deterministik')."""
+    tenant, _key, plaintext = tenant_and_key
+    candidate, profile = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=_profile("Python")
+    )
+    await _identity(
+        db_session, tenant_id=tenant.id, candidate=candidate, profile=profile, name="Synthetic"
+    )
+    job = await create_job(db_session, tenant_id=tenant.id, title="AML JD")
+    criteria = await create_criteria_version(
+        db_session,
+        tenant_id=tenant.id,
+        job_id=job.id,
+        criteria=[
+            CriterionIn(
+                id="aml_skill",
+                kind=CriterionKind.SKILL,
+                type=CriterionType.MUST_HAVE,
+                label="AML biliyi",
+                value="Python",
+                weight=1,
+            ).model_dump(mode="json")
+        ],
+        created_by_api_key_id=None,
+    )
+    await db_session.commit()
+    csrf = await _login_and_csrf(client, plaintext)
+    response = await client.post(
+        f"/ui/jobs/{criteria.id}/rank",
+        data={"csrf_token": csrf},
+    )
+    assert response.status_code == 200
+    assert "AML biliyi" in response.text
+    assert "(Bacarıq)" in response.text
+    assert "aml_skill" not in response.text
+    assert ">SKILL<" not in response.text
+    assert "deterministik" not in response.text
+
+    jobs_response = await client.get("/ui/jobs")
+    assert "deterministik" not in jobs_response.text
 
 
 async def test_manual_review_fit_is_presented_as_human_review_not_decision(

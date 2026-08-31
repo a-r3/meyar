@@ -1,10 +1,13 @@
+import re
 import uuid
 from collections import defaultdict
+from dataclasses import dataclass
 
 from pydantic import ValidationError
 from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meyar.core.text import fold_az_ascii
 from meyar.ingestion.parser import CanonicalDocumentContent
 from meyar.models.candidate import Candidate
 from meyar.models.candidate_document import (
@@ -31,6 +34,8 @@ from meyar.models.job import Job
 from meyar.models.job_criteria_version import JobCriteriaVersion
 from meyar.schemas.candidate_identity import CandidateIdentityExtraction
 from meyar.schemas.candidate_profile import CandidateProfileExtraction, EvidenceRef
+from meyar.schemas.criteria import CriterionIn, CriterionKind, CriterionType
+from meyar.schemas.job import JobCreateRequest
 from meyar.scoring.schemas import BatchRankingResult
 from meyar.search.schemas import CandidateSearchResponse
 from meyar.services.candidate_document_repo import (
@@ -600,10 +605,38 @@ async def list_job_views(db: AsyncSession, *, tenant_id: uuid.UUID) -> list[JobV
     return views
 
 
+async def _criterion_labels_by_id(
+    db: AsyncSession, *, tenant_id: uuid.UUID, job_criteria_version_id: uuid.UUID
+) -> dict[str, str]:
+    """HR-facing criterion label lookup for the ranking-contribution table
+    (owner visual-inspection Blocker 3): the deterministic scoring engine's
+    ``CriterionScoreContribution.criterion_id`` is an internal slug
+    (e.g. ``aml_skill``) never meant for HR display — the human label
+    lives only on the criteria version the job was ranked against."""
+    version = (
+        await db.execute(
+            select(JobCriteriaVersion).where(
+                JobCriteriaVersion.id == job_criteria_version_id,
+                JobCriteriaVersion.tenant_id == tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if version is None:
+        return {}
+    return {
+        item["id"]: item["label"]
+        for item in version.criteria
+        if item.get("id") and item.get("label")
+    }
+
+
 async def build_ranked_candidate_views(
     db: AsyncSession, *, tenant_id: uuid.UUID, ranking: BatchRankingResult
 ) -> list[RankedCandidateView]:
     """Add names only after Slice 10 has finalized rank and score."""
+    criterion_labels = await _criterion_labels_by_id(
+        db, tenant_id=tenant_id, job_criteria_version_id=ranking.job_criteria_version_id
+    )
     views: list[RankedCandidateView] = []
     for result in ranking.results:
         identity = await get_current_identity_version(
@@ -624,6 +657,7 @@ async def build_ranked_candidate_views(
                 contributions=[
                     ScoreContributionView(
                         criterion_id=item.criterion_id,
+                        label=criterion_labels.get(item.criterion_id, item.criterion_id),
                         criterion_kind=item.criterion_kind,
                         criterion_type=item.criterion_type,
                         weight=item.weight,
@@ -700,3 +734,138 @@ async def get_job_title_for_criteria_version(
         )
     ).scalar_one_or_none()
     return row
+
+
+# Owner visual-inspection Blocker 2 — new-vacancy creation. The HR-facing
+# form is a fixed set of rows (no JS row-adding, matching the rest of this
+# JS-free /ui surface); empty rows (blank label) are silently skipped
+# below, so HR only fills in as many criteria as the vacancy needs.
+CRITERION_ROW_COUNT = 6
+CRITERION_KIND_OPTIONS: tuple[tuple[str, str], ...] = (
+    (CriterionKind.SKILL.value, "Bacarıq"),
+    (CriterionKind.CERTIFICATION.value, "Sertifikat"),
+    (CriterionKind.EDUCATION.value, "Təhsil"),
+    (CriterionKind.LANGUAGE.value, "Dil"),
+    (CriterionKind.EXPERIENCE.value, "Təcrübə"),
+)
+
+_CRITERION_ID_FALLBACK = "meyar"
+
+
+@dataclass(frozen=True)
+class CriterionRowInput:
+    kind: str
+    label: str
+    value: str
+    min_years: str
+    weight: str
+
+
+def _slugify_criterion_label(label: str, used_ids: set[str]) -> str:
+    """A stable, ASCII-only criterion id derived from the HR-entered label.
+    The HR user never types or sees a raw id/UUID (owner visual-inspection
+    Blocker 2: 'no raw UUID entry by the HR user') — it exists only as the
+    deterministic policy engine's internal join key."""
+    ascii_text = fold_az_ascii(label).lower()
+    base = re.sub(r"[^a-z0-9]+", "_", ascii_text).strip("_")[:60] or _CRITERION_ID_FALLBACK
+    candidate = base
+    suffix = 2
+    while candidate in used_ids:
+        candidate = f"{base}_{suffix}"[:64]
+        suffix += 1
+    used_ids.add(candidate)
+    return candidate
+
+
+def _first_pydantic_message(exc: ValidationError) -> str:
+    errors = exc.errors()
+    if not errors:
+        return "Meyar məlumatları etibarsızdır."
+    raw = str(errors[0].get("msg", ""))
+    return raw.removeprefix("Value error, ") or "Meyar məlumatları etibarsızdır."
+
+
+def _parse_criterion_row(
+    row: CriterionRowInput, *, criterion_type: CriterionType, used_ids: set[str]
+) -> CriterionIn | None:
+    label = row.label.strip()
+    if not label:
+        return None
+    try:
+        kind = CriterionKind(row.kind)
+    except ValueError as exc:
+        raise UIServiceInputError(f"'{label}' üçün meyar növü tanınmadı.") from exc
+
+    min_years: float | None = None
+    value: str | None = row.value.strip() or None
+    if kind is CriterionKind.EXPERIENCE:
+        raw_years = row.min_years.strip()
+        if not raw_years:
+            raise UIServiceInputError(
+                f"'{label}' meyarı üçün minimum illik təcrübəni daxil edin."
+            )
+        try:
+            min_years = float(raw_years.replace(",", "."))
+        except ValueError as exc:
+            raise UIServiceInputError(
+                f"'{label}' meyarı üçün illik təcrübə rəqəm olmalıdır."
+            ) from exc
+        value = None
+    elif not value:
+        raise UIServiceInputError(f"'{label}' meyarı üçün dəyəri daxil edin.")
+
+    raw_weight = row.weight.strip()
+    try:
+        weight = float(raw_weight.replace(",", ".")) if raw_weight else 1.0
+    except ValueError as exc:
+        raise UIServiceInputError(f"'{label}' meyarı üçün çəki rəqəm olmalıdır.") from exc
+
+    try:
+        return CriterionIn(
+            id=_slugify_criterion_label(label, used_ids),
+            kind=kind,
+            type=criterion_type,
+            label=label,
+            value=value,
+            min_years=min_years,
+            weight=weight,
+        )
+    except ValidationError as exc:
+        raise UIServiceInputError(f"'{label}': {_first_pydantic_message(exc)}") from exc
+
+
+def build_job_create_request(
+    *,
+    title: str,
+    must_have_rows: list[CriterionRowInput],
+    preferred_rows: list[CriterionRowInput],
+) -> JobCreateRequest:
+    """Pure form-parsing + validation, reusing the exact same
+    ``CriterionIn``/``JobCreateRequest`` domain schemas the internal REST
+    API's ``POST /api/v1/jobs`` validates against (see
+    ``meyar.api.v1.jobs.post_job``) — no second criteria/scoring model."""
+    stripped_title = title.strip()
+    if not stripped_title:
+        raise UIServiceInputError("Vakansiya başlığı boş ola bilməz.")
+
+    used_ids: set[str] = set()
+    criteria: list[CriterionIn] = []
+    for criterion_type, rows in (
+        (CriterionType.MUST_HAVE, must_have_rows),
+        (CriterionType.PREFERRED, preferred_rows),
+    ):
+        for row in rows:
+            criterion = _parse_criterion_row(
+                row, criterion_type=criterion_type, used_ids=used_ids
+            )
+            if criterion is not None:
+                criteria.append(criterion)
+
+    if not criteria:
+        raise UIServiceInputError(
+            "Ən azı bir Mütləq və ya Üstünlük meyarı daxil edin."
+        )
+    try:
+        return JobCreateRequest(title=stripped_title, criteria=criteria)
+    except ValidationError as exc:
+        raise UIServiceInputError(_first_pydantic_message(exc)) from exc

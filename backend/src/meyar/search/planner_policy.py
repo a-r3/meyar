@@ -12,7 +12,7 @@ from datetime import date
 
 from pydantic import ValidationError
 
-from meyar.core.text import normalize_azerbaijani_case
+from meyar.core.text import fold_az_ascii, normalize_azerbaijani_case
 from meyar.schemas.criteria import ProhibitedCriterionError, find_prohibited_term
 from meyar.search.planner_schemas import (
     PlanInterpretationSummary,
@@ -48,6 +48,24 @@ _BENIGN_WHITESPACE_CONTROL_CHARS = str.maketrans(
     {"\t": " ", "\n": " ", "\r": " ", "\v": " ", "\f": " "}
 )
 
+# HR users frequently type Azerbaijani text on a plain Latin keyboard without
+# the dedicated diacritic keys (ə/ç/ş/ö/ü/ğ/ı), substituting the nearest
+# ASCII letter (e.g. "tecrübə" for "təcrübə"). The fixed-marker/keyword
+# regexes below are written with correct Azerbaijani spelling for
+# readability, but every literal keyword match is done against text (and,
+# for these specific patterns, against a folded copy of the pattern source
+# itself) with diacritics folded to their ASCII base letter via the shared
+# meyar.core.text.fold_az_ascii, so either spelling is accepted. This is a
+# general typing-variance normalization, not a special case for any one
+# query. See docs/DECISIONS.md D-023.
+
+
+def _az_pattern(source: str) -> re.Pattern[str]:
+    """Compile a keyword/marker regex whose literal Azerbaijani diacritics
+    are folded to ASCII, so it matches either spelling once the searched
+    text is folded the same way with :func:`fold_az_ascii`."""
+    return re.compile(fold_az_ascii(source))
+
 _WORD = r"A-Za-z0-9_+#.ƏəĞğİıÖöÜüÇçŞşА-Яа-яЁё"
 _BOUNDARY_WORD = r"A-Za-z0-9_ƏəĞğİıÖöÜüÇçŞşА-Яа-яЁё"
 _REQUIRED_MARKERS = (
@@ -78,35 +96,35 @@ _PREFERRED_MARKERS = (
 )
 
 _SKILL_DURATION_PATTERNS = (
-    re.compile(
+    _az_pattern(
         rf"(?i)\b\d+(?:\.\d+)?\s*(?:years?|yrs?)\s+(?:of\s+)?"
         rf"(?P<skill>[{_WORD}/-]{{1,60}})\s+experience\b"
     ),
-    re.compile(
+    _az_pattern(
         rf"(?i)\b(?P<skill>[{_WORD}/-]{{1,60}})\s+experience\s+(?:of|for)\s+"
         r"\d+(?:\.\d+)?\s*(?:years?|yrs?)\b"
     ),
-    re.compile(
+    _az_pattern(
         rf"(?i)\b(?P<skill>[{_WORD}/-]{{1,60}})\s+(?:üzrə|ilə)\s+"
         r"(?:ən\s+azı\s+)?\d+(?:[.,]\d+)?\s*il\s+(?:iş\s+)?təcrüb"
     ),
-    re.compile(
+    _az_pattern(
         rf"(?i)\b\d+(?:[.,]\d+)?\s*il\s+(?P<skill>[{_WORD}/-]{{1,60}})\s+təcrüb"
     ),
 )
 _TOTAL_EXPERIENCE_PATTERNS = (
-    re.compile(
+    _az_pattern(
         r"(?i)\b(?P<years>\d+(?:\.\d+)?)\s*(?:years?|yrs?)\s+"
         r"(?:of\s+)?(?:(?:total|overall|professional)\s+)?(?:work\s+)?experience\b"
     ),
-    re.compile(
+    _az_pattern(
         r"(?i)\b(?P<years>\d+(?:[.,]\d+)?)\s*il\s+"
         r"(?:(?:ümumi|peşəkar)\s+)?(?:iş\s+)?təcrüb"
     ),
 )
 _RESULT_LIMIT_PATTERNS = (
-    re.compile(r"(?i)\b(?P<count>\d{1,4})\s+(?:best\s+)?candidates?\b"),
-    re.compile(r"(?i)\b(?P<count>\d{1,4})\s+namizəd(?:i|ə|lər|ləri)?\b"),
+    _az_pattern(r"(?i)\b(?P<count>\d{1,4})\s+(?:best\s+)?candidates?\b"),
+    _az_pattern(r"(?i)\b(?P<count>\d{1,4})\s+namizəd(?:i|ə|lər|ləri)?\b"),
 )
 
 _LANGUAGE_TERMS = (
@@ -119,49 +137,49 @@ _PROFICIENCY_TERMS = (
     r"advanced|fluent|native|səlis|ana\s+dili"
 )
 _LANGUAGE_PROFICIENCY_PATTERNS = (
-    re.compile(rf"(?i)\b(?:{_LANGUAGE_TERMS})\b.{{0,40}}\b(?:{_PROFICIENCY_TERMS})\b"),
-    re.compile(rf"(?i)\b(?:{_PROFICIENCY_TERMS})\b.{{0,40}}\b(?:{_LANGUAGE_TERMS})\b"),
+    _az_pattern(rf"(?i)\b(?:{_LANGUAGE_TERMS})\b.{{0,40}}\b(?:{_PROFICIENCY_TERMS})\b"),
+    _az_pattern(rf"(?i)\b(?:{_PROFICIENCY_TERMS})\b.{{0,40}}\b(?:{_LANGUAGE_TERMS})\b"),
 )
 
 _IDENTITY_PATTERNS = (
-    re.compile(
+    _az_pattern(
         r"(?i)\b(?:candidate\s+)?(?:name|named|full[_ -]?name|email|e-mail|phone|"
         r"telephone|contact|adlı|adı|e-poçt|emaili|telefon)\b"
     ),
-    re.compile(
+    _az_pattern(
         rf"(?i)^\s*(?:find|show|search\s+for)\s+(?:a\s+)?[{_WORD}'-]{{2,40}}\s*[.!?]*$"
     ),
 )
 _EXPLICIT_CUSTOM_WEIGHT_PATTERNS = (
-    re.compile(r"(?i)\bprioriti[sz]e\b.{0,80}\bover\s+everything\b"),
-    re.compile(r"(?i)\bfocus\s+mostly\b"),
-    re.compile(r"(?i)\bhər\s+şeydən\s+üstün\b"),
+    _az_pattern(r"(?i)\bprioriti[sz]e\b.{0,80}\bover\s+everything\b"),
+    _az_pattern(r"(?i)\bfocus\s+mostly\b"),
+    _az_pattern(r"(?i)\bhər\s+şeydən\s+üstün\b"),
 )
 _SEARCH_WEIGHT_COMPONENT_PATTERNS = (
-    re.compile(r"(?i)\bsemantics?\b|\bsemantic(?:\s+(?:search|score|relevance|results?))?\b"),
-    re.compile(r"(?i)\bstructured(?:\s+(?:search|score|relevance|results?))?\b"),
-    re.compile(r"(?i)\bsemantik\b|\bstruktur(?:laşdırılmış)?\b"),
+    _az_pattern(r"(?i)\bsemantics?\b|\bsemantic(?:\s+(?:search|score|relevance|results?))?\b"),
+    _az_pattern(r"(?i)\bstructured(?:\s+(?:search|score|relevance|results?))?\b"),
+    _az_pattern(r"(?i)\bsemantik\b|\bstruktur(?:laşdırılmış)?\b"),
 )
 _SEARCH_WEIGHT_CONTROL_PATTERNS = (
-    re.compile(
+    _az_pattern(
         r"(?i)(?:\bweights?\b|\bweighting\b|\bpercent(?:age)?\b|%|"
         r"\bmore\s+important\b|\bprioriti[sz]e\b)"
     ),
-    re.compile(
+    _az_pattern(
         r"(?i)(?:\bçəki\b|\bfaiz\b|%|\bprioritet\b|\bdaha\s+çox(?:\s+çəki)?\b|"
         r"\büstün\s+tut\b)"
     ),
 )
-_SALARY_PATTERNS = (re.compile(r"(?i)\b(?:salary|compensation|maaş|əmək\s+haqqı)\b"),)
+_SALARY_PATTERNS = (_az_pattern(r"(?i)\b(?:salary|compensation|maaş|əmək\s+haqqı)\b"),)
 _LOCATION_PATTERNS = (
-    re.compile(
+    _az_pattern(
         r"(?i)\b(?:location|located|based\s+in|resident\s+in|living\s+in|"
         r"yerləşən|yaşayan|məkan)\b"
     ),
 )
 _PROJECT_DURATION_PATTERNS = (
-    re.compile(r"(?i)\b\d+(?:\.\d+)?\s*(?:years?|months?)\s+(?:on|in)\s+.+projects?\b"),
-    re.compile(r"(?i)\b.+layihə(?:si|ləri)?ndə\s+\d+(?:[.,]\d+)?\s*(?:il|ay)\b"),
+    _az_pattern(r"(?i)\b\d+(?:\.\d+)?\s*(?:years?|months?)\s+(?:on|in)\s+.+projects?\b"),
+    _az_pattern(r"(?i)\b.+layihə(?:si|ləri)?ndə\s+\d+(?:[.,]\d+)?\s*(?:il|ay)\b"),
 )
 _PROMPT_INJECTION_PATTERNS = (
     re.compile(r"(?i)\bignore\s+(?:all\s+)?(?:previous|system|developer)\b"),
@@ -200,7 +218,15 @@ def _canonical_az(text: str) -> str:
     return " ".join(normalize_azerbaijani_case(text).split())
 
 
-_CANONICALIZERS: tuple[Callable[[str], str], ...] = (_canonical, _canonical_az)
+def _canonical_az_ascii_fold(text: str) -> str:
+    return fold_az_ascii(_canonical_az(text))
+
+
+_CANONICALIZERS: tuple[Callable[[str], str], ...] = (
+    _canonical,
+    _canonical_az,
+    _canonical_az_ascii_fold,
+)
 
 
 def _canonical_variants(text: str) -> tuple[str, ...]:
@@ -208,7 +234,8 @@ def _canonical_variants(text: str) -> tuple[str, ...]:
 
 
 def _matches_any(text: str, patterns: tuple[re.Pattern[str], ...]) -> bool:
-    return any(pattern.search(text) for pattern in patterns)
+    folded = fold_az_ascii(text)
+    return any(pattern.search(folded) for pattern in patterns)
 
 
 def _has_custom_search_weighting(text: str) -> bool:
@@ -220,9 +247,10 @@ def _has_custom_search_weighting(text: str) -> bool:
 
 
 def _skill_duration_is_unsupported(text: str) -> bool:
-    total_words = {"total", "overall", "professional", "work", "ümumi", "iş", "peşəkar"}
+    total_words = {"total", "overall", "professional", "work", "umumi", "is", "pesekar"}
+    folded = fold_az_ascii(text)
     for pattern in _SKILL_DURATION_PATTERNS:
-        match = pattern.search(text)
+        match = pattern.search(folded)
         if match and _canonical(match.group("skill")) not in total_words:
             return True
     return False
@@ -230,16 +258,18 @@ def _skill_duration_is_unsupported(text: str) -> bool:
 
 def explicit_total_experience_years(text: str) -> set[float]:
     values: set[float] = set()
+    folded = fold_az_ascii(text)
     for pattern in _TOTAL_EXPERIENCE_PATTERNS:
-        for match in pattern.finditer(text):
+        for match in pattern.finditer(folded):
             values.add(float(match.group("years").replace(",", ".")))
     return values
 
 
 def explicit_result_limits(text: str) -> set[int]:
     values: set[int] = set()
+    folded = fold_az_ascii(text)
     for pattern in _RESULT_LIMIT_PATTERNS:
-        values.update(int(match.group("count")) for match in pattern.finditer(text))
+        values.update(int(match.group("count")) for match in pattern.finditer(folded))
     return values
 
 
@@ -310,16 +340,39 @@ def _value_variants(category: str, value: str) -> tuple[str, ...]:
     return (value,)
 
 
+# Azerbaijani is agglutinative: a locative ("in X") or ablative ("from X")
+# case suffix attaches directly to a noun with no space, e.g. "Pythonda"
+# ("in Python") or "SQL-dan" ("from SQL"). A bare word-boundary match would
+# reject every such case-marked mention of a skill/certification/language
+# the request otherwise genuinely names — not a SearchPlan/domain-model
+# limitation, just an overly strict safety-net regex. This is deliberately
+# limited to the standard locative/ablative markers (with the regular
+# voiced/voiceless consonant alternation) and gated to values of at least
+# 3 characters, so it cannot turn e.g. "Java" into a false match for the
+# unrelated word "JavaScript" (whose suffix, "script", is not one of
+# these). See docs/DECISIONS.md D-023.
+_AZ_LOCATIVE_ABLATIVE_SUFFIXES = ("dan", "dən", "tan", "tən", "da", "də", "ta", "tə")
+_MIN_SUFFIX_TOLERANT_VALUE_LENGTH = 3
+
+
 def _value_supported_by_request(category: str, value: str, request: str) -> bool:
-    return any(
-        re.search(
-            rf"(?<![{_BOUNDARY_WORD}]){re.escape(canonicalize(variant))}"
-            rf"(?![{_BOUNDARY_WORD}])",
-            canonicalize(request),
-        )
-        for canonicalize in _CANONICALIZERS
-        for variant in _value_variants(category, value)
-    )
+    for canonicalize in _CANONICALIZERS:
+        canonical_request = canonicalize(request)
+        for variant in _value_variants(category, value):
+            escaped = re.escape(canonicalize(variant))
+            if re.search(
+                rf"(?<![{_BOUNDARY_WORD}]){escaped}(?![{_BOUNDARY_WORD}])",
+                canonical_request,
+            ):
+                return True
+            if len(variant) >= _MIN_SUFFIX_TOLERANT_VALUE_LENGTH and re.search(
+                rf"(?<![{_BOUNDARY_WORD}]){escaped}"
+                rf"(?:{'|'.join(_AZ_LOCATIVE_ABLATIVE_SUFFIXES)})"
+                rf"(?![{_BOUNDARY_WORD}])",
+                canonical_request,
+            ):
+                return True
+    return False
 
 
 def _closest_marker_distance(

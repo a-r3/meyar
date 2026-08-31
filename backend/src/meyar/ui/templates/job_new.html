@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Yeni vakansiya — MEYAR{% endblock %}
+{% macro criterion_rows(prefix, rows) %}
+<div class="table-wrap">
+<table>
+<thead><tr><th>Növ</th><th>Ad</th><th>Dəyər</th><th>Min. illik təcrübə</th><th>Çəki</th></tr></thead>
+<tbody>
+{% for row in rows %}
+<tr>
+  <td><select name="{{ prefix }}_kind_{{ loop.index0 }}">{% for value, label in kind_options %}<option value="{{ value }}"{% if row.kind == value %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></td>
+  <td><input type="text" name="{{ prefix }}_label_{{ loop.index0 }}" value="{{ row.label }}" maxlength="200" placeholder="Məs. AML biliyi"></td>
+  <td><input type="text" name="{{ prefix }}_value_{{ loop.index0 }}" value="{{ row.value }}" maxlength="200" placeholder="Məs. Python (Təcrübə üçün boş saxlayın)"></td>
+  <td><input type="number" step="0.5" min="0" max="60" name="{{ prefix }}_min_years_{{ loop.index0 }}" value="{{ row.min_years }}" placeholder="Yalnız Təcrübə üçün"></td>
+  <td><input type="number" step="0.5" min="0" max="10" name="{{ prefix }}_weight_{{ loop.index0 }}" value="{{ row.weight }}" placeholder="1"></td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+</div>
+{% endmacro %}
+{% block content %}
+<a class="back-link" href="/ui/jobs">← Vakansiyalar</a>
+<div class="page-heading"><div><p class="eyebrow">Yeni vakansiya</p><h1>Vakansiya yaradın</h1><p class="lede">Başlığı və meyarları daxil edin. Boş sətirlər nəzərə alınmır.</p></div></div>
+{% if error %}<div class="alert alert-error" role="alert">{{ error }}</div>{% endif %}
+<form method="post" action="/ui/jobs" class="stack-form">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <label for="title">Vakansiya başlığı</label>
+  <input id="title" name="title" type="text" required maxlength="255" value="{{ title }}" placeholder="Məs. Baş Backend Mühəndisi">
+
+  <section class="panel">
+    <h2>Mütləq meyarlar</h2>
+    <p class="field-help">Namizəd bu meyarların hamısına cavab verməlidir. "Təcrübə" növü üçün Dəyər sahəsini boş saxlayıb Min. illik təcrübəni doldurun; digər növlər üçün əksinə.</p>
+    {{ criterion_rows("must", must_have_rows) }}
+  </section>
+
+  <section class="panel">
+    <h2>Üstünlük meyarları</h2>
+    <p class="field-help">Bu meyarlar mütləq deyil, lakin uyğunluğu artırır.</p>
+    {{ criterion_rows("pref", preferred_rows) }}
+  </section>
+
+  <button class="button" type="submit">Vakansiyanı yarat</button>
+</form>
+{% endblock %}

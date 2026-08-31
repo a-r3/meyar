@@ -1,8 +1,8 @@
 {% extends "base.html" %}
 {% block title %}Vakansiyalar — MEYAR{% endblock %}
 {% block content %}
-<div class="page-heading"><div><p class="eyebrow">Vakansiyalar</p><h1>Vakansiyalar</h1><p class="lede">Cari meyarlarla namizədləri deterministik şəkildə sıralayın.</p></div></div>
-{% if not jobs %}<div class="empty-state"><h2>Vakansiya yoxdur</h2><p>Vakansiyalar mövcud API/CLI axını ilə yaradılır; bu UI yalnız oxuyur və reytinqi işə salır.</p></div>{% endif %}
+<div class="page-heading"><div><p class="eyebrow">Vakansiyalar</p><h1>Vakansiyalar</h1><p class="lede">Namizədləri vakansiya meyarlarına əsasən sıralayın.</p></div><a class="button" href="/ui/jobs/new">Yeni vakansiya</a></div>
+{% if not jobs %}<div class="empty-state"><h2>Vakansiya yoxdur</h2><p>Aşağıdakı düymə ilə ilk vakansiyanı yaradın.</p></div>{% endif %}
 <div class="card-grid">
   {% for job in jobs %}
   <article class="candidate-card">

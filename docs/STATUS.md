@@ -33,7 +33,14 @@ Definition-of-Done Acceptance) pending the Target-Mac benchmark gate.
 closure; issue #23 closed by PR #24, no remaining open issues).
 **M7 — HR UI & Presentation Readiness is OPEN** (issue #27; owner-driven
 HR UI productization pass following visual inspection of the running
-local UI — see D-023 and "In progress" below).
+local UI — see D-023, D-024, and "In progress" below). PR #29 (same
+branch) received a second owner visual inspection that found seven
+further blockers (NL search still generically failing on ordinary
+Azerbaijani phrasing, no vacancy-creation UI, raw criterion ids on the
+ranking table, developer wording, technical metadata on candidate detail,
+CV-preview XSS confirmation, and a mislabeled inline-vs-download original
+CV action) — all fixed in the same PR; see D-024. PR #29 still
+**NOT merged** — awaiting owner re-inspection.
 
 GitHub remote established (`https://github.com/a-r3/meyar.git`, private,
 temporary development remote — see D-012, `docs/DECISIONS.md`). `main`
@@ -277,6 +284,19 @@ remains disabled.
   schema. See D-019. Slice 13 final security/DoD acceptance was not started.
 
 ## Tests
+**600/600 passing** as of the second-round PR #29 visual-inspection pass
+(branch `feat/hr-ui-productization`, still not merged): 582 prior (D-023
+pass, see below) + 18 new regressions for D-024 — the diacritic-fold and
+locative/ablative-suffix planner-policy fidelity fixes plus a
+Java/JavaScript non-regression case (`test_search_planner_policy.py`), an
+end-to-end ordinary-Azerbaijani-query executable-outcome test
+(`test_ui_routes.py`), the ranking-table human-label/kind test
+(`test_ui_routes.py`), the CV-preview XSS-escaping regression
+(`test_ui_candidate_preview.py`), the original-CV always-attachment
+disposition test (`test_ui_original_cv.py`), and 11 new vacancy-creation
+tests covering auth/CSRF/tenant-isolation/validation/successful-creation/
+rankability (`test_ui_job_creation.py`).
+
 **582/582 passing** as of the M7 HR UI productization pass (branch
 `feat/hr-ui-productization`, not yet merged): 537 prior (Slice 14 merge
 baseline, see below) + regression coverage added for D-023 — the
@@ -532,7 +552,8 @@ merged Slice work.
 demo bootstrap — **MERGED as PR #26 at squash SHA `a539e34`** (see D-022).
 
 **Chore (issue #27, not a Slice, M7):** HR UI productization and
-presentation readiness, on `feat/hr-ui-productization`, pending PR/review.
+presentation readiness, on `feat/hr-ui-productization`, PR #29 open,
+**pending owner re-inspection — not merged.**
 Following owner visual inspection of the running local `/ui/*` surfaces,
 reworked navigation/copy into HR language, removed the manual
 evaluation-date inputs (current date now injected explicitly at the UI
@@ -543,6 +564,23 @@ on the primary HR pages), added a truthful in-app CV preview route
 alongside the original-file download, resolved job titles into evaluation
 history, and fixed the `meyar seed-demo` key-rotation gap (idempotent
 reseed now always returns a usable, single active credential). See D-023.
+
+A second owner visual inspection of PR #29 found seven further blockers,
+all fixed on the same branch/PR (see D-024): (1) root-caused and fixed —
+without requiring live Ollama as an acceptance dependency — two remaining
+deterministic-fidelity-check regex gaps (Azerbaijani ASCII/diacritic
+typing variance, and agglutinative locative/ablative case suffixes) that
+were still rejecting ordinary Azerbaijani skill+experience queries after
+D-023's control-character fix; (2) added `/ui/jobs/new` +
+`POST /ui/jobs` — HR can now create a vacancy (title, MUST_HAVE/PREFERRED
+criteria, no raw id/UUID entry) from the UI for the first time, reusing
+the exact `POST /api/v1/jobs` domain services; (3) ranking table now shows
+the criterion's HR label instead of its raw internal id/kind enum;
+(4) softened remaining developer-oriented ranking/jobs-page wording;
+(5) candidate-detail "Texniki məlumat" no longer exposes parser
+name/version/error code; (6) confirmed and regression-tested CV-preview
+XSS escaping; (7) "Originalı yüklə" now always sends a true download
+(`Content-Disposition: attachment`) instead of opening PDFs inline.
 No search/matching/scoring behavior changed; no migration.
 
 Slice 14 (`feat/folder-reconciliation`, **MERGED as PR #24 at squash SHA
@@ -625,7 +663,7 @@ due date because the official timeline has not been supplied.
 | M4 — Internal Product Interface & API | Slices 11–12 | CLOSED — Slice 11 merged (PR #17, issue #16 closed); Slice 12 merged (PR #19 at `93fa567`, issue #18 closed) |
 | M5 — Security, Target-Mac Validation & MVP Acceptance | Slice 13 + target-Mac benchmark | OPEN — issue #20 open; PR #22 merged at `a709ce1` implementing Pass 1 (original CV, no-exfiltration, backup/restore, audit guard, multilingual evidence) with `Refs #20`; Mac Mini benchmark execution on the now owner-confirmed target hardware remains the sole open mandatory gate |
 | M6 — Operational CV Intake & Reconciliation | Slice 14 | CLOSED — Slice 14 merged (PR #24 at `f6e31ff`), issue #23 closed; owner-approved closure |
-| M7 — HR UI & Presentation Readiness | HR UI productization (chore, issue #27) | OPEN — branch `feat/hr-ui-productization`, pending PR/review; see D-023 |
+| M7 — HR UI & Presentation Readiness | HR UI productization (chore, issue #27) | OPEN — branch `feat/hr-ui-productization`, PR #29 open, pending owner re-inspection (second round); see D-023, D-024 |
 
 ## Official requirement gap matrix
 

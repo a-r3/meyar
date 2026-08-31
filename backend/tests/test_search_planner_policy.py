@@ -161,6 +161,65 @@ def test_azerbaijani_required_plus_semantic_preference_is_hybrid() -> None:
 @pytest.mark.parametrize(
     "text",
     [
+        "pythonda 5 il tecrübesi olan",
+        "pythonda 5 il təcrübəsi olan",
+    ],
+)
+def test_ordinary_azerbaijani_skill_and_years_query_is_executable(text: str) -> None:
+    """Regression for the owner-reported visual-acceptance blocker: a normal
+    HR query typed without the Azerbaijani schwa keyboard character (plain
+    'e' for 'ə', as most HR staff type without a dedicated AZ layout) and
+    with the skill name in its natural agglutinated locative case
+    ("pythonda" = "in Python") must produce a real, executable SearchPlan —
+    not a generic VALIDATION_FAILURE/UNSUPPORTED_SEMANTICS outcome. This
+    covers both the ASCII-folded diacritic form and the fully-diacriticized
+    form to prove the fix is general, not a special case of one sentence."""
+    request = _convert(
+        text,
+        PlannerDraft(
+            required_filters=RequiredFilters(
+                skills=["Python"], min_total_experience_years=5.0
+            )
+        ),
+    )
+    assert request.mode == SearchMode.STRUCTURED_ONLY
+    assert request.required_filters.skills == ["Python"]
+    assert request.required_filters.min_total_experience_years == 5.0
+    assert request.as_of_date == AS_OF_DATE
+
+
+def test_skill_name_in_ablative_case_is_supported() -> None:
+    """"SQL-dan" ("from SQL") — the ablative case suffix, hyphenated as is
+    common when attaching a case ending to a Latin acronym."""
+    request = _convert(
+        "SQL-dan 3 il təcrübəsi olan namizədlər",
+        PlannerDraft(
+            required_filters=RequiredFilters(
+                skills=["SQL"], min_total_experience_years=3.0
+            )
+        ),
+    )
+    assert request.required_filters.skills == ["SQL"]
+    assert request.required_filters.min_total_experience_years == 3.0
+
+
+def test_agglutinated_suffix_does_not_relax_whole_term_matching() -> None:
+    """The locative/ablative suffix tolerance must not resurrect the
+    "Java matches inside JavaScript" false-positive the strict word-boundary
+    check exists to prevent — "script" is not an Azerbaijani case suffix."""
+    with pytest.raises(PlannerPolicyError) as exc_info:
+        _convert(
+            "Javascript bilən namizədləri göstər.",
+            PlannerDraft(required_filters=RequiredFilters(skills=["Java"])),
+        )
+    assert PlannerReasonCode.STRUCTURED_FILTER_NOT_SUPPORTED_BY_REQUEST in (
+        exc_info.value.reason_codes
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
         "Java mütləqdir.",
         "Java tələb olunur.",
         "Java mütləq olmalıdır.",

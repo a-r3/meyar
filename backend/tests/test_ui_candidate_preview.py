@@ -8,14 +8,17 @@ public OpenAPI schema, and the "not yet available" state when a document
 has no CanonicalDocument.
 """
 
+import uuid
 from pathlib import Path
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.config import Settings, get_settings
 from meyar.main import app
 from meyar.services.api_key_repo import create_api_key
+from meyar.services.candidate_document_repo import create_canonical_document
 from meyar.services.tenant_repo import create_tenant
 
 FIXTURES_DIR = Path(__file__).resolve().parent.parent.parent / "fixtures" / "synthetic_cvs"
@@ -190,3 +193,42 @@ async def test_preview_route_is_absent_from_openapi_schema(client: AsyncClient) 
     assert response.status_code == 200
     schema = response.json()
     assert not any("/preview" in path for path in schema["paths"])
+
+
+async def test_candidate_controlled_text_is_never_rendered_as_active_html(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_key,
+    local_ui_settings: Settings,
+) -> None:
+    """CV text is untrusted document data (docs/SECURITY_PRIVACY.md). A
+    parser can only ever have extracted whatever bytes a candidate put in
+    their document, so the canonical block text is seeded directly here to
+    simulate a malicious/careless CV containing markup — the preview must
+    render it as inert text (Jinja's default autoescaping), never as
+    active HTML. Regression for owner visual-inspection Blocker 6."""
+    _tenant, _key, plaintext = tenant_and_key
+    candidate_id, document_id = await _upload_document(
+        client, plaintext, filename="valid_cv.pdf", content_type="application/pdf"
+    )
+    payload = "<script>alert(1)</script><img src=x onerror=alert(1)> < > & \" '"
+    await create_canonical_document(
+        db_session,
+        tenant_id=_tenant.id,
+        candidate_document_id=uuid.UUID(document_id),
+        parser_name="test-fixture-parser",
+        parser_version="1",
+        language=None,
+        content={"pages": [{"page": 1, "blocks": [{"index": 0, "text": payload}]}]},
+    )
+    await db_session.commit()
+    await _login(client, plaintext)
+
+    response = await client.get(_preview_url(candidate_id, document_id))
+
+    assert response.status_code == 200
+    assert "<script>alert(1)</script>" not in response.text
+    assert "<img src=x onerror=alert(1)>" not in response.text
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in response.text
+    assert "&lt;img src=x onerror=alert(1)&gt;" in response.text
+    assert "&lt; &gt; &amp; &#34; &#39;" in response.text

@@ -73,6 +73,17 @@ CRITERION_STATUS_LABELS = {
     "MANUAL_REVIEW_REQUIRED": "İnsan baxışı tələb olunur",
 }
 
+# HR-facing labels for the deterministic policy engine's CriterionKind enum
+# (docs/MASTER_SPEC.md). Purely a presentation lookup — never used by
+# scoring/matching itself, which continues to key on the raw enum value.
+CRITERION_KIND_LABELS = {
+    "SKILL": "Bacarıq",
+    "EXPERIENCE": "Təcrübə",
+    "CERTIFICATION": "Sertifikat",
+    "EDUCATION": "Təhsil",
+    "LANGUAGE": "Dil",
+}
+
 STATE_LABELS = {
     "PENDING": "Gözləyir",
     "PARSED": "Emal olunub",

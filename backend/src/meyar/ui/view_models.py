@@ -135,6 +135,7 @@ class CandidateDocumentPreviewView(BaseModel):
 
 class ScoreContributionView(BaseModel):
     criterion_id: str
+    label: str
     criterion_kind: str
     criterion_type: str
     weight: str
