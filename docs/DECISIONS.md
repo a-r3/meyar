@@ -1750,3 +1750,111 @@ only `CriterionIn.value`/`min_years`, never how a criterion was
 constructed. The `MODEL_DECLINED_INTERPRETATION` marker is additive and
 presentation-only; removing the `planner_outcome_view` branch instantly
 reverts to the single shared UNSUPPORTED_SEMANTICS message.
+
+## D-026 — Conservative deterministic fast path for explicit NL search intents (M7)
+
+**Date:** 2026-08-31
+**Decision:** D-025 explained *why* `"pythonda 5 il tecrubesi olan"` could
+fail even with a working local Ollama (the small `qwen3:0.6b` planner
+model self-declining) but left the request still dependent on that
+model's judgment. The owner asked for a stronger guarantee: common,
+explicit, supported HR search intents must not depend on local-model
+quality at all. Added `meyar.search.planner_policy.try_deterministic_intent_parse`
+— a narrowly-scoped, whole-clause-anchored pattern set for exactly the
+concepts `CandidateSearchRequest` already represents (skills, languages,
+certifications, total experience years, and simple `"və"`-joined
+combinations of these) — invoked in `plan_candidate_search`
+(`meyar.search.planner_service`) between the existing security precheck
+and the LLM loop. When it returns a draft, that draft is run through the
+*exact same* `convert_planner_draft` fidelity/validation the LLM path
+uses (no second, weaker validation surface) and executes with zero LLM
+calls; when it declines, the existing LLM loop runs completely unchanged.
+
+**Why "conservative," not a general NLP engine:**
+- Every one of the five patterns (skill list + "bilən", "X dili
+  olan/bilən", "X sertifikatı olan", "N il təcrübəsi olan", and the
+  reported-bug shape "Xda N il təcrübəsi olan" for an agglutinated
+  locative/ablative skill suffix) is anchored `^...$` against the whole
+  clause — a request with anything not accounted for by a recognized
+  concept or one of a tiny, fixed set of glue words (`namizədləri`,
+  `göstər`, `tap`, leading `mənə`, etc.) never partially matches. This is
+  the direct implementation of "never discard the remainder and execute a
+  weaker search": the function returns `None` (defer to the LLM) rather
+  than a subset.
+- Multiple concepts combine only via a literal `" və "` split into up to
+  4 clauses, each independently required to fully match on its own — not
+  a general clause grammar.
+- Recognized languages are limited to the existing `_LANGUAGE_ALIASES`
+  catalog (canonicalized to `"English"`/`"Russian"`/`"Azerbaijani"`/
+  `"Turkish"`); an unlisted language (e.g. French) declines rather than
+  inventing support.
+- Any preferred-marker vocabulary (`üstünlükdür`, `preferred`, ...)
+  anywhere in the request declines immediately — the fast path only ever
+  produces `MUST_HAVE` filters, so a request that might need the
+  required/preferred nuance goes to the LLM.
+- Skill-*specific* duration ("N years experience IN skill X", e.g.
+  `"Python üzrə ən az 5 il təcrübəsi"` or `"5 il Java təcrübəsi"`) is
+  deliberately **not** reinterpreted as total experience — `SearchPlan`
+  has no field for it, and guessing would silently change what was
+  asked. These already fail the *existing* precheck
+  (`_skill_duration_is_unsupported`, unchanged) before the fast path is
+  even reached, so behavior here is identical to before this change.
+  Regression-tested explicitly so this boundary doesn't drift.
+- Java vs. JavaScript: the skill value captured is always the literal
+  token the user typed (`"Javascript bilən"` → `skills=["Javascript"]`,
+  never truncated to `"Java"`) — there is no catalog-substring matching
+  to collide in the first place. Explicitly regression-tested.
+- Reuses, not duplicates, D-023's machinery: `fold_az_ascii` for
+  ASCII/diacritic typing variance and the same bounded
+  `_AZ_LOCATIVE_ABLATIVE_SUFFIXES` set for the agglutinated-skill shape.
+
+**Provenance and auditability:** a fast-path result is tagged with a
+fixed synthetic provenance (`provider="meyar-deterministic"`,
+`model_name="meyar-deterministic-parser-v1"`, `attempt_count=0`) so audit
+events (`SEARCH_PLAN_CREATED`, same as the LLM path) and any future
+`/api/v1/search/natural-language` consumer can tell a deterministic
+result apart from a model-produced one at a glance — this is a bounded
+resilience layer, not a "fake AI" mode: it never fabricates an AI
+provenance, and it is not a replacement for the local semantic planner
+(semantic/free-text requests, and anything outside the five patterns,
+still require it exactly as before).
+
+**Confirmation/clarification-state investigation (requested, not
+implemented):** the owner asked whether a structured
+clarification/confirmation state could be represented for a partially
+understood request using the existing server-rendered architecture. By
+construction, this fast path never produces a "partially understood"
+state — it is binary (full match -> draft, anything else -> `None`,
+handled by the unchanged LLM/precheck outcomes) — so no such state exists
+for this feature to represent. A genuine future "I understood X but not
+Y, confirm?" flow is architecturally feasible on top of the existing
+`BrowserSession`/CSRF/server-rendered pattern (e.g. a short-lived signed
+pending-plan token or a session-scoped pending-plan row, plus a new
+confirm/reject route), but is a materially new feature — session-state
+lifetime, CSRF, and audit implications of its own — not a fix folded into
+this pass. Left as a candidate for a future slice if the owner wants it.
+
+**Tests:** `backend/tests/test_search_deterministic_parser.py` — the
+requested regression matrix (diacritics vs. ASCII typing, case, the
+agglutinated-suffix shape, whitespace/CRLF, multiple skills, experience
+years, language, certification, Java/JavaScript non-collision, ambiguous/
+unsupported declines) plus full-pipeline proof: zero LLM calls
+(`FakeLLMProvider` configured to error if invoked), the produced
+`CandidateSearchRequest` passes the same validation and executes with
+real structured-search results, tenant isolation holds, and the audit
+event carries the synthetic provenance with no raw request text. Existing
+tests that used a now-fast-path-eligible query specifically to exercise
+LLM failure/repair paths (`test_malformed_then_valid_uses_exactly_one_repair`,
+`test_malformed_twice_stops_after_two_attempts`,
+`test_malformed_model_output_outcome_never_searches`,
+`test_malformed_planner_output_has_no_fallback_search`,
+`test_local_planner_outage_is_safe_and_library_remains_independent`, and
+one D-025 parametrized case) were updated to use semantic/free-text
+requests that are genuinely outside the fast path's scope, so they keep
+testing what they always tested.
+
+**Reversibility:** Fully reversible and additive. No migration; no schema
+change. Deleting the single `try_deterministic_intent_parse` call site in
+`plan_candidate_search` restores 100% LLM-dependent behavior instantly;
+nothing else in the pipeline (precheck, `convert_planner_draft`,
+`search_candidates`, audit) was modified to accommodate it.

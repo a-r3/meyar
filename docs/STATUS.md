@@ -33,9 +33,9 @@ Definition-of-Done Acceptance) pending the Target-Mac benchmark gate.
 closure; issue #23 closed by PR #24, no remaining open issues).
 **M7 — HR UI & Presentation Readiness is OPEN** (issue #27; owner-driven
 HR UI productization pass following visual inspection of the running
-local UI — see D-023, D-024, D-025, and "In progress" below). PR #29
-(same branch) received a second owner visual inspection that found seven
-further blockers (NL search still generically failing on ordinary
+local UI — see D-023, D-024, D-025, D-026, and "In progress" below). PR
+#29 (same branch) received a second owner visual inspection that found
+seven further blockers (NL search still generically failing on ordinary
 Azerbaijani phrasing, no vacancy-creation UI, raw criterion ids on the
 ranking table, developer wording, technical metadata on candidate detail,
 CV-preview XSS confirmation, and a mislabeled inline-vs-download original
@@ -45,8 +45,15 @@ had produced a malformed criterion (root-caused, not a scoring bug —
 value held the criterion's TYPE instead of the requirement) and that the
 NL-search "unsupported" message didn't distinguish a genuine deterministic
 product-policy gap from the small local planner model simply misjudging
-an ordinary request — both fixed; see D-025. PR #29 still **NOT merged** —
-awaiting owner re-inspection.
+an ordinary request — both fixed; see D-025. The owner then required a
+stronger guarantee: common explicit NL search intents must not depend on
+local-model quality at all, not just get a more honest failure message —
+addressed with a conservative deterministic fast-path parser (skills,
+languages, certifications, total experience, simple "və" combinations)
+that executes with zero LLM calls for exactly the concepts SearchPlan
+already represents, falling back to the LLM unchanged for everything
+else; see D-026. PR #29 still **NOT merged** — awaiting owner
+re-inspection.
 
 GitHub remote established (`https://github.com/a-r3/meyar.git`, private,
 temporary development remote — see D-012, `docs/DECISIONS.md`). `main`
@@ -290,6 +297,17 @@ remains disabled.
   schema. See D-019. Slice 13 final security/DoD acceptance was not started.
 
 ## Tests
+**639/639 passing** as of the deterministic-fast-path pass (branch
+`feat/hr-ui-productization`, still not merged): 607 prior (D-025 pass,
+see below) + 32 new for D-026 — the full parser regression matrix and
+full-pipeline (zero-LLM-call, valid-plan, real-execution, tenant-isolation,
+safe-audit) coverage in `test_search_deterministic_parser.py`, plus 6
+existing LLM-failure/repair-path tests updated to use query text that
+stays genuinely outside the new fast path's scope (their purpose —
+testing malformed/timeout/outage LLM handling — is otherwise now
+short-circuited by the fast path, which is the intended product
+improvement).
+
 **607/607 passing** as of the third-round PR #29 visual-inspection pass
 (branch `feat/hr-ui-productization`, still not merged): 600 prior (D-024
 pass, see below) + 7 new/changed for D-025 — the model-self-decline
@@ -625,6 +643,30 @@ message for that case only; genuine deterministic product-policy
 rejections keep the original message. No search/matching/scoring
 behavior changed; no migration.
 
+The owner then required a stronger guarantee than a more honest failure
+message: common, explicit, supported HR search intents must not depend
+on local-model interpretation quality at all (see D-026). Added
+`meyar.search.planner_policy.try_deterministic_intent_parse` — a
+conservative, whole-clause-anchored deterministic parser for exactly the
+concepts `CandidateSearchRequest` already represents (skills, languages,
+certifications, total experience years, simple "və" combinations),
+invoked between the existing security precheck and the LLM loop in
+`plan_candidate_search`. A match executes with zero LLM calls, through
+the *same* `convert_planner_draft` validation the LLM path uses; anything
+not fully, unambiguously accounted for declines and falls through to the
+LLM completely unchanged — never a partial/weaker search. Skill-specific
+duration (e.g. "Python üzrə 5 il təcrübəsi") is deliberately not
+reinterpreted as total experience (no SearchPlan field for it) and
+continues to fail the existing precheck exactly as before. Investigated
+(per the request) whether a structured clarification/confirmation state
+for a partially-understood request could be represented on the existing
+server-rendered architecture — concluded it's architecturally feasible
+(a session-scoped pending-plan + confirm/reject route) but is a
+materially new feature with its own session/CSRF/audit implications, not
+folded into this pass, since this parser never actually produces a
+partial state (binary: full match or decline). No search/matching/
+scoring behavior changed; no migration.
+
 Slice 14 (`feat/folder-reconciliation`, **MERGED as PR #24 at squash SHA
 `f6e31ff`, closes issue #23**, associated with
 **M6 — Operational CV Intake & Reconciliation**). Closes the gap left after Slice 6: a
@@ -705,7 +747,7 @@ due date because the official timeline has not been supplied.
 | M4 — Internal Product Interface & API | Slices 11–12 | CLOSED — Slice 11 merged (PR #17, issue #16 closed); Slice 12 merged (PR #19 at `93fa567`, issue #18 closed) |
 | M5 — Security, Target-Mac Validation & MVP Acceptance | Slice 13 + target-Mac benchmark | OPEN — issue #20 open; PR #22 merged at `a709ce1` implementing Pass 1 (original CV, no-exfiltration, backup/restore, audit guard, multilingual evidence) with `Refs #20`; Mac Mini benchmark execution on the now owner-confirmed target hardware remains the sole open mandatory gate |
 | M6 — Operational CV Intake & Reconciliation | Slice 14 | CLOSED — Slice 14 merged (PR #24 at `f6e31ff`), issue #23 closed; owner-approved closure |
-| M7 — HR UI & Presentation Readiness | HR UI productization (chore, issue #27) | OPEN — branch `feat/hr-ui-productization`, PR #29 open, pending owner re-inspection (third round); see D-023, D-024, D-025 |
+| M7 — HR UI & Presentation Readiness | HR UI productization (chore, issue #27) | OPEN — branch `feat/hr-ui-productization`, PR #29 open, pending owner re-inspection (fourth round); see D-023, D-024, D-025, D-026 |
 
 ## Official requirement gap matrix
 

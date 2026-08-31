@@ -745,3 +745,189 @@ def build_interpretation_summary(
         result_limit=request.limit if request else draft.requested_limit,
         used_default_limit=(request is not None and draft.requested_limit is None),
     )
+
+
+# ---------------------------------------------------------------------------
+# Conservative deterministic fast path (D-026). A narrowly-scoped,
+# whole-clause-anchored pattern set for a handful of explicit HR search
+# intents that already have exact SearchPlan representations — skills,
+# languages, certifications, and total experience years, singly or
+# combined with a simple "və" conjunction. This is NOT a general NLP
+# engine: every one of the five patterns below matches an ENTIRE clause
+# start-to-end (anchored `^...$`), so a request containing anything this
+# module cannot confidently attribute to a known concept or a fixed,
+# bounded set of connector/boilerplate words never partially matches —
+# `try_deterministic_intent_parse` returns None and the caller MUST fall
+# back to the LLM planner rather than execute a narrower search than what
+# was actually asked. See docs/DECISIONS.md D-026.
+# ---------------------------------------------------------------------------
+
+_DET_TERM = rf"[{_WORD}/-]{{1,60}}"
+_DET_TERM_LIST = (
+    rf"(?P<terms>{_DET_TERM}(?:\s*,\s*{_DET_TERM}|\s+və\s+{_DET_TERM}|\s+and\s+{_DET_TERM}){{0,4}})"
+)
+# Deliberately tiny, fixed vocabularies — not free-text glue matching.
+_DET_LEADING = r"(?:mənə\s+)?"
+_DET_TRAILING = (
+    r"(?:\s+(?:namizədləri|namizədi|namizədlər|namizəd|göstər|tap\w*|"
+    r"siyahısını|siyahıla))*"
+)
+
+_DET_SKILL_PATTERN = _az_pattern(rf"(?i)^{_DET_LEADING}{_DET_TERM_LIST}\s+bilən{_DET_TRAILING}\s*$")
+_DET_LANGUAGE_PATTERN = _az_pattern(
+    rf"(?i)^{_DET_LEADING}(?P<term>{_DET_TERM})\s+dili\s+(?:bilən|olan){_DET_TRAILING}\s*$"
+)
+_DET_CERT_PATTERN = _az_pattern(
+    rf"(?i)^{_DET_LEADING}(?P<term>{_DET_TERM})\s+sertifikatı\s+olan{_DET_TRAILING}\s*$"
+)
+_DET_TOTAL_EXPERIENCE_PATTERN = _az_pattern(
+    rf"(?i)^{_DET_LEADING}(?:minimum\s+|ən\s+az[ıi]?\s+)?"
+    rf"(?P<years>\d+(?:[.,]\d+)?)\s*il\s+(?:(?:ümumi|peşəkar)\s+)?(?:iş\s+)?"
+    rf"təcrübəsi\s+olan{_DET_TRAILING}\s*$"
+)
+# The reported-bug shape: a skill with a locative/ablative case suffix
+# directly attached ("pythonda" = "in Python") immediately followed by a
+# total-experience mention. Reuses the same bounded suffix set as
+# _value_supported_by_request above (D-023) — not free suffix stripping.
+_DET_SKILL_PLUS_EXPERIENCE_PATTERN = _az_pattern(
+    rf"(?i)^{_DET_LEADING}(?P<skill>[A-Za-z][A-Za-z0-9+#.]{{0,30}})-?"
+    rf"(?:{'|'.join(_AZ_LOCATIVE_ABLATIVE_SUFFIXES)})\s+"
+    rf"(?P<years>\d+(?:[.,]\d+)?)\s*il\s+təcrübəsi\s+olan{_DET_TRAILING}\s*$"
+)
+
+_DET_TERM_LIST_SPLIT = _az_pattern(r"(?i)\s*,\s*|\s+və\s+|\s+and\s+")
+_DET_CLAUSE_SPLIT = _az_pattern(r"(?i)\s+və\s+")
+_MAX_DETERMINISTIC_CLAUSES = 4
+
+_LANGUAGE_CANONICAL_NAMES: dict[str, str] = {
+    "english": "English",
+    "russian": "Russian",
+    "azerbaijani": "Azerbaijani",
+    "turkish": "Turkish",
+}
+
+
+def _split_term_list(raw: str) -> list[str]:
+    return [term.strip() for term in _DET_TERM_LIST_SPLIT.split(raw) if term.strip()]
+
+
+def _canonicalize_deterministic_language(term: str) -> str | None:
+    """Only the small, already-supported language catalog
+    (_LANGUAGE_ALIASES) is recognized — an unlisted language falls back
+    to the LLM rather than the fast path inventing a new one."""
+    for canonical_key, variants in _LANGUAGE_ALIASES.items():
+        aliases = (canonical_key, *variants)
+        if set(_canonical_variants(term)).intersection(
+            canonical for alias in aliases for canonical in _canonical_variants(alias)
+        ):
+            return _LANGUAGE_CANONICAL_NAMES[canonical_key]
+    return None
+
+
+def _parse_single_deterministic_clause(clause: str) -> PlannerDraft | None:
+    clause = clause.strip().rstrip(".!?").strip()
+    if not clause:
+        return None
+
+    match = _DET_SKILL_PLUS_EXPERIENCE_PATTERN.match(clause)
+    if match:
+        years = float(match.group("years").replace(",", "."))
+        return PlannerDraft(
+            required_filters=RequiredFilters(
+                skills=[match.group("skill")], min_total_experience_years=years
+            )
+        )
+
+    match = _DET_TOTAL_EXPERIENCE_PATTERN.match(clause)
+    if match:
+        years = float(match.group("years").replace(",", "."))
+        return PlannerDraft(
+            required_filters=RequiredFilters(min_total_experience_years=years)
+        )
+
+    match = _DET_LANGUAGE_PATTERN.match(clause)
+    if match:
+        canonical = _canonicalize_deterministic_language(match.group("term"))
+        if canonical is None:
+            return None
+        return PlannerDraft(required_filters=RequiredFilters(languages=[canonical]))
+
+    match = _DET_CERT_PATTERN.match(clause)
+    if match:
+        return PlannerDraft(
+            required_filters=RequiredFilters(certifications=[match.group("term")])
+        )
+
+    match = _DET_SKILL_PATTERN.match(clause)
+    if match:
+        terms = _split_term_list(match.group("terms"))
+        if not terms:
+            return None
+        return PlannerDraft(required_filters=RequiredFilters(skills=terms))
+
+    return None
+
+
+def _merge_deterministic_clauses(parts: list[PlannerDraft]) -> PlannerDraft | None:
+    skills: list[str] = []
+    certifications: list[str] = []
+    languages: list[str] = []
+    min_years: float | None = None
+    for part in parts:
+        skills.extend(part.required_filters.skills)
+        certifications.extend(part.required_filters.certifications)
+        languages.extend(part.required_filters.languages)
+        part_years = part.required_filters.min_total_experience_years
+        if part_years is not None:
+            if min_years is not None and min_years != part_years:
+                # Two conflicting experience mentions — ambiguous, must
+                # not silently pick one. Fall back to the LLM.
+                return None
+            min_years = part_years
+    if not (skills or certifications or languages or min_years is not None):
+        return None
+    return PlannerDraft(
+        required_filters=RequiredFilters(
+            skills=skills,
+            certifications=certifications,
+            languages=languages,
+            min_total_experience_years=min_years,
+        )
+    )
+
+
+def try_deterministic_intent_parse(text: str) -> PlannerDraft | None:
+    """Conservative fast-path extraction for explicit, unambiguous HR
+    search intents (see module-level note above). Returns a
+    ``PlannerDraft`` only when the ENTIRE request is confidently
+    accounted for; returns ``None`` for anything else, including a
+    request that is only partially understood — callers must treat
+    ``None`` as "use the LLM planner", never as "search on the part I
+    did understand". Assumes ``precheck_natural_language_request`` has
+    already passed for ``text`` (this function does not repeat the
+    control-character/prohibited-term checks)."""
+    stripped = text.strip()
+    if not stripped or len(stripped) > MAX_NATURAL_LANGUAGE_REQUEST_LENGTH:
+        return None
+    # A preferred/required distinction, salary/location/identity mentions,
+    # etc. need the fidelity nuance the LLM + existing validators provide
+    # — the fast path only ever produces MUST_HAVE filters, so any
+    # preferred-marker vocabulary means this is not a safe fit.
+    if _contains_marker(stripped, _PREFERRED_MARKERS):
+        return None
+
+    # All fixed-vocabulary patterns above were compiled ASCII-folded (see
+    # _az_pattern) — fold the text the same way so either spelling matches.
+    folded = fold_az_ascii(stripped)
+
+    single = _parse_single_deterministic_clause(folded)
+    if single is not None:
+        return single
+
+    clauses = _DET_CLAUSE_SPLIT.split(folded)
+    if not (2 <= len(clauses) <= _MAX_DETERMINISTIC_CLAUSES):
+        return None
+    parsed = [_parse_single_deterministic_clause(clause) for clause in clauses]
+    if any(part is None for part in parsed):
+        return None
+    return _merge_deterministic_clauses([part for part in parsed if part is not None])

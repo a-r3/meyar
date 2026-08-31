@@ -265,15 +265,16 @@ async def test_ordinary_azerbaijani_experience_query_executes_end_to_end(
             0,
         ),
         (
-            # The request text itself is ordinary and passes precheck (1
-            # LLM call happens), but the MODEL's own draft self-declines —
-            # must show the distinct AI-specific message. Root-caused from
-            # a live owner-reported case (see docs/DECISIONS.md D-025).
-            "pythonda 5 il tecrübesi olan",
+            # The request text itself is ordinary, passes precheck, and is
+            # outside the deterministic fast path's bounded structured
+            # intents (D-026, no digit/"bilən"/"dili"/"sertifikatı" shape
+            # here) so 1 LLM call genuinely happens — but the MODEL's own
+            # draft self-declines, and that must show the distinct
+            # AI-specific message. Root-caused from a live owner-reported
+            # case (see docs/DECISIONS.md D-025).
+            "React biliyi olan namizədləri göstər.",
             PlannerDraft(
-                required_filters=RequiredFilters(
-                    skills=["Python"], min_total_experience_years=5
-                ),
+                required_filters=RequiredFilters(skills=["React"]),
                 unsupported_reason_codes=[
                     PlannerReasonCode.LANGUAGE_PROFICIENCY_UNSUPPORTED
                 ],
@@ -339,10 +340,13 @@ async def test_malformed_planner_output_has_no_fallback_search(
     fake = FakeLLMProvider(fail_first_n_calls=2)
     app.dependency_overrides[get_llm_provider] = lambda: fake
     csrf = await _login_and_csrf(client, plaintext)
+    # Semantic/free-text — outside the deterministic fast path's bounded
+    # structured intents (D-026) — so this genuinely reaches the LLM
+    # planner call this test is verifying malformed-output handling for.
     response = await client.post(
         "/ui/search",
         data={
-            "query": "Python bilən namizədləri göstər.",
+            "query": "Find candidates experienced in modernizing legacy backend systems.",
             "csrf_token": csrf,
         },
     )
@@ -366,10 +370,13 @@ async def test_local_planner_outage_is_safe_and_library_remains_independent(
     fake = FakeLLMProvider(error=ModelUnavailableError("private provider detail"))
     app.dependency_overrides[get_llm_provider] = lambda: fake
     csrf = await _login_and_csrf(client, plaintext)
+    # Semantic/free-text — outside the deterministic fast path's bounded
+    # structured intents (D-026) — so this genuinely reaches the LLM
+    # planner call this test is verifying outage handling for.
     response = await client.post(
         "/ui/search",
         data={
-            "query": "Python bilən namizədləri göstər.",
+            "query": "Find candidates experienced in modernizing legacy backend systems.",
             "csrf_token": csrf,
         },
     )

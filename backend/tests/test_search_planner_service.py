@@ -186,11 +186,15 @@ async def test_malformed_then_valid_uses_exactly_one_repair(db_session: AsyncSes
         planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Java"])),
         fail_first_n_calls=1,
     )
+    # Contains "Java" (for filter-fidelity against the draft above) but is
+    # phrased outside the deterministic fast path's bounded structured
+    # intents (D-026) — so this genuinely reaches the LLM planner call
+    # this test is verifying repair behavior for.
     result = await plan_candidate_search(
         db_session,
         llm,
         tenant_id=tenant.id,
-        natural_language_request="Java bilən namizədləri göstər.",
+        natural_language_request="Java ilə bağlı təcrübəsi olan namizədləri tap.",
         as_of_date=AS_OF_DATE,
         embedding_config=_config(),
     )
@@ -206,7 +210,9 @@ async def test_malformed_twice_stops_after_two_attempts(db_session: AsyncSession
         db_session,
         llm,
         tenant_id=tenant.id,
-        natural_language_request="Java bilən namizədləri göstər.",
+        natural_language_request=(
+            "Find candidates experienced in modernizing legacy backend systems."
+        ),
         as_of_date=AS_OF_DATE,
         embedding_config=_config(),
     )
