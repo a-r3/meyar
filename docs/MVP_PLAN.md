@@ -205,15 +205,16 @@ until its Target-Mac gate is executed — see Slice 7 below).
 - **Slice 6 — Agentless Mac Deployment Readiness** (#35): tested,
   executable (not just documented) provisioning/config/migration/Ollama
   setup/startup/healthcheck/backup/restore/update/rollback/diagnostics, no
-  Claude Code/Codex dependency on the bank Mac.
+  Claude Code/Codex dependency on the target deployment host.
 - **Slice 7 — Real Target-Mac Model Selection & Benchmark** (#36): executes
-  the benchmark on real bank Mac-mini hardware, extending issue #20/M5's
+  the benchmark on real target deployment hardware, extending issue #20/M5's
   scope to agent workloads (concurrency, multi-user, agent understanding).
   **#20/M5 remain open and are not superseded or closed by this slice.**
-- **Slice 8 — Bank Integrations** (#37): conditional tracking only (SSO,
-  calendar/interview scheduling, ATS) — not implemented until the bank's
-  actual environment is known; consistent with the existing "Deferred"
-  list above (complex RBAC, enterprise SSO remain deferred).
+- **Slice 8 — Enterprise Integrations** (#37): conditional tracking only
+  (enterprise identity, calendar/scheduling, ATS/HR-system integration) —
+  not implemented until the target deployment environment's actual
+  requirements are known; consistent with the existing "Deferred" list
+  above (complex RBAC, enterprise SSO remain deferred).
 
 Implementation of these slices is explicitly **not** authorized by this
 roadmap entry alone — each proceeds through the normal branch → quality
