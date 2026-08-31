@@ -9,6 +9,7 @@ from meyar.evaluation.policy import POLICY_ENGINE_VERSION
 from meyar.evaluation.service import EvaluationInputError, evaluate_and_score_candidate
 from meyar.models.candidate import CANDIDATE_STATUS_ACTIVE
 from meyar.models.candidate_profile_version import PROFILE_STATUS_COMPLETED
+from meyar.models.job import JOB_STATUS_ACTIVE
 from meyar.schemas.criteria import CriterionIn
 from meyar.scoring.policy import (
     SCORING_POLICY_VERSION,
@@ -19,6 +20,7 @@ from meyar.services.audit_repo import record_event
 from meyar.services.candidate_profile_repo import list_current_profile_versions_for_tenant
 from meyar.services.candidate_repo import list_candidates_for_tenant
 from meyar.services.job_criteria_repo import get_criteria_version_by_id
+from meyar.services.job_repo import get_job
 
 FIT_TIERS = {
     "STRONG_MATCH": 0,
@@ -48,13 +50,29 @@ async def rank_candidates_for_job(
     job_criteria_version_id: uuid.UUID,
     evaluation_as_of_date: date,
 ) -> BatchRankingResult:
-    """Score the tenant's active library using one current profile per candidate."""
+    """Score the tenant's active library using one current profile per candidate.
+
+    Enforced here (the shared service every caller — UI, REST API, CLI, and
+    any future agent tool — goes through) rather than only at a router/
+    template layer: an ARCHIVED job is not a current, evaluable vacancy, so
+    no new ranking/Evaluation may be created against any of its criteria
+    versions, however the request reaches this function. See
+    docs/DECISIONS.md D-033. This never touches historical Evaluation rows
+    or JobCriteriaVersion data — archiving remains non-destructive, and
+    reading past results is a separate code path unaffected by this check.
+    """
     criteria_version = await get_criteria_version_by_id(
         db, tenant_id=tenant_id, criteria_version_id=job_criteria_version_id
     )
     if criteria_version is None:
         raise BatchRankingError(
             "CRITERIA_VERSION_NOT_FOUND", "No job criteria version found for this tenant."
+        )
+    job = await get_job(db, tenant_id=tenant_id, job_id=criteria_version.job_id)
+    if job is None or job.status != JOB_STATUS_ACTIVE:
+        raise BatchRankingError(
+            "JOB_ARCHIVED",
+            "The job for this criteria version is archived and can no longer be ranked.",
         )
     try:
         criteria = [CriterionIn.model_validate(item) for item in criteria_version.criteria]

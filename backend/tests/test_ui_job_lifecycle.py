@@ -363,6 +363,150 @@ async def test_archived_job_evaluation_history_still_resolves_title(
 
 
 # ---------------------------------------------------------------------------
+# Ranking lifecycle enforcement (D-033): an ARCHIVED job is not a current,
+# evaluable vacancy — enforced in the shared meyar.scoring.batch service so
+# no caller (UI, REST API, CLI, or a future agent tool) can bypass it by
+# avoiding the UI's hidden rank button.
+# ---------------------------------------------------------------------------
+
+
+async def _job_with_python_criteria(
+    db_session: AsyncSession, *, tenant_id: uuid.UUID, title: str
+) -> tuple[Job, JobCriteriaVersion]:
+    job = await create_job(db_session, tenant_id=tenant_id, title=title)
+    version = await create_criteria_version(
+        db_session,
+        tenant_id=tenant_id,
+        job_id=job.id,
+        criteria=[
+            CriterionIn(
+                id="python",
+                kind=CriterionKind.SKILL,
+                type=CriterionType.MUST_HAVE,
+                label="Python",
+                value="Python",
+            ).model_dump(mode="json")
+        ],
+        created_by_api_key_id=None,
+    )
+    return job, version
+
+
+async def test_active_job_can_still_be_ranked(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_key,
+    local_ui_settings: Settings,
+) -> None:
+    tenant, _key, plaintext = tenant_and_key
+    job, version = await _job_with_python_criteria(
+        db_session, tenant_id=tenant.id, title="Active Rank JD"
+    )
+    await db_session.commit()
+    csrf = await _login_and_csrf(client, plaintext)
+
+    response = await client.post(f"/ui/jobs/{version.id}/rank", data={"csrf_token": csrf})
+
+    assert response.status_code == 200
+    reloaded_job = (await db_session.execute(select(Job).where(Job.id == job.id))).scalar_one()
+    assert reloaded_job.status == "ACTIVE"
+
+
+async def test_archived_job_direct_stale_rank_post_is_rejected_with_hr_safe_message(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_key,
+    local_ui_settings: Settings,
+) -> None:
+    """Simulates a stale/bookmarked rank URL for a job archived after the
+    tab was opened: the button is gone from the UI, but the POST itself
+    must still be rejected — not just hidden."""
+    tenant, _key, plaintext = tenant_and_key
+    candidate, _profile = await seed_candidate_with_profile(
+        db_session,
+        tenant_id=tenant.id,
+        profile_content={
+            "skills": [
+                {
+                    "name": "Python",
+                    "category": None,
+                    "evidence": [{"page": 1, "block_index": 0, "quote": "Python"}],
+                }
+            ],
+            "employment_history": [],
+            "education": [],
+            "certifications": [],
+            "languages": [],
+            "projects": [],
+        },
+    )
+    job, version = await _job_with_python_criteria(
+        db_session, tenant_id=tenant.id, title="Archived Rank JD"
+    )
+    await db_session.commit()
+    csrf = await _login_and_csrf(client, plaintext)
+
+    # Capture plain ids up front: the app's rejected-request rollback below
+    # expires every ORM object tracked by this shared session (regardless
+    # of expire_on_commit), so later synchronous attribute access on
+    # `candidate`/`job`/`version` would itself trigger an async reload
+    # outside of an awaited context. Using plain uuid.UUID values instead
+    # sidesteps that entirely.
+    candidate_id = candidate.id
+    job_id = job.id
+    version_id = version.id
+
+    # A ranking run while still ACTIVE must remain in history after archiving.
+    first_rank = await client.post(f"/ui/jobs/{version_id}/rank", data={"csrf_token": csrf})
+    assert first_rank.status_code == 200
+
+    archive_response = await client.post(
+        f"/ui/jobs/{job_id}/archive", data={"csrf_token": csrf}, follow_redirects=False
+    )
+    assert archive_response.status_code == 303
+
+    # Stale/direct POST to the same rank URL after archiving.
+    stale_rank = await client.post(f"/ui/jobs/{version_id}/rank", data={"csrf_token": csrf})
+
+    assert stale_rank.status_code == 409
+    assert "JOB_ARCHIVED" not in stale_rank.text
+    assert "arxivləşdirilib" in stale_rank.text.lower()
+
+    # No new Evaluation was persisted by the rejected attempt, and the
+    # historical (pre-archive) evaluation remains readable: the candidate's
+    # evaluation-history table must show exactly the one evaluation row
+    # created by the earlier, successful ACTIVE-job ranking — never two.
+    detail_response = await client.get(f"/ui/candidates/{candidate_id}")
+    assert detail_response.status_code == 200
+    assert detail_response.text.count("Archived Rank JD") == 1
+
+
+async def test_archived_job_rank_rejection_does_not_leak_cross_tenant(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_key,
+    local_ui_settings: Settings,
+) -> None:
+    """A foreign tenant's job — archived or not — must resolve the same
+    generic not-found outcome; the new lifecycle check must never expose
+    that a foreign-tenant criteria version exists or is archived."""
+    tenant, _key, plaintext = tenant_and_key
+    foreign = await create_tenant(db_session, name="Foreign rank tenant")
+    foreign_job, foreign_version = await _job_with_python_criteria(
+        db_session, tenant_id=foreign.id, title="Foreign Archived JD"
+    )
+    foreign_job.status = "ARCHIVED"
+    await db_session.commit()
+    csrf = await _login_and_csrf(client, plaintext)
+
+    response = await client.post(f"/ui/jobs/{foreign_version.id}/rank", data={"csrf_token": csrf})
+
+    assert response.status_code == 404
+    assert "Foreign Archived JD" not in response.text
+    assert "arxivləşdirilib" not in response.text.lower()
+
+
+# ---------------------------------------------------------------------------
 # Duplicate-creation safety
 # ---------------------------------------------------------------------------
 

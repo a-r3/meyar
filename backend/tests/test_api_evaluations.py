@@ -302,6 +302,36 @@ async def test_rank_cross_tenant_criteria_is_safe_404(
     assert resp.status_code == 404
 
 
+async def test_rank_archived_job_is_rejected_via_shared_service(
+    db_session: AsyncSession, client: AsyncClient, tenant_and_key
+) -> None:
+    """D-033: rank_candidates_for_job enforces Job.status == ACTIVE for
+    every caller. The REST API reuses that same shared service, so an
+    archived job is rejected here too, not only via the UI's hidden CTA."""
+    tenant, _key, plaintext = tenant_and_key
+    job, criteria = await _job_with_criteria(
+        db_session,
+        tenant.id,
+        [_skill("python", "Python", weight=2.0, criterion_type=CriterionType.MUST_HAVE)],
+    )
+    job.status = "ARCHIVED"
+    await db_session.commit()
+
+    resp = await client.post(
+        f"/api/v1/jobs/{job.id}/criteria/{criteria.version_number}/rank",
+        json={"evaluation_as_of_date": AS_OF},
+        headers=_auth(plaintext),
+    )
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == "JOB_ARCHIVED"
+    # No Evaluation was ever created for this archived job: the shared
+    # service rejects before any candidate/profile lookup or evaluation
+    # creation begins (see test_archived_job_direct_stale_rank_post_is_
+    # rejected_with_hr_safe_message in test_ui_job_lifecycle.py for the
+    # end-to-end before/after persistence proof via the UI path).
+
+
 async def test_rank_order_matches_exact_backend_order(
     db_session: AsyncSession, client: AsyncClient, tenant_and_key
 ) -> None:

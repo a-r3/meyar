@@ -709,6 +709,20 @@ async def rank_job(
         await db.commit()
     except BatchRankingError as exc:
         await db.rollback()
+        if exc.code == "JOB_ARCHIVED":
+            return _render(
+                request,
+                "error.html",
+                _context(
+                    ctx,
+                    title="Vakansiya arxivləşdirilib",
+                    message=(
+                        "Bu vakansiya arxivləşdirilib və artıq yeni reytinq üçün "
+                        "istifadə edilə bilməz."
+                    ),
+                ),
+                status_code=status.HTTP_409_CONFLICT,
+            )
         code = (
             status.HTTP_404_NOT_FOUND
             if exc.code == "CRITERIA_VERSION_NOT_FOUND"

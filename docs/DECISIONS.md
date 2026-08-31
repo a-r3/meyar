@@ -2370,3 +2370,91 @@ capability is unbuilt.
 **Reversibility:** Documentation/governance only — no source code changed
 by this decision, no existing functionality removed. Fully reversible by a
 future superseding decision.
+
+## D-033 — Ranking lifecycle enforcement: an ARCHIVED job can no longer be ranked, at the shared-service boundary
+
+**Date:** 2026-09-01
+**Decision:** The independent PR #29 acceptance audit confirmed a real gap
+disclosed by D-028 point 6: `rank_candidates_for_job`
+(`meyar.scoring.batch`) never checked the parent `Job.status`, so an
+`ARCHIVED` job's criteria version remained fully rankable via a direct or
+stale request even though the normal HR UI hid the "Reytinq et" action.
+Closed at the shared service every caller goes through, not only at a
+router/template layer:
+
+1. **Enforcement location.** `rank_candidates_for_job` now resolves the
+   parent `Job` immediately after resolving the `JobCriteriaVersion`
+   (`meyar.services.job_repo.get_job`, tenant-scoped) and raises
+   `BatchRankingError("JOB_ARCHIVED", ...)` unless `Job.status ==
+   JOB_STATUS_ACTIVE`, before any candidate/profile iteration or
+   `Evaluation` construction begins. Because this is the one shared
+   service the UI, the REST API, the CLI, and any future agent tool all
+   call, none of them can bypass the check by avoiding the UI — the exact
+   property the audit asked for.
+2. **API/CLI impact — deliberate, not incidental.** `POST
+   /api/v1/jobs/{job_id}/criteria/{version_number}/rank`
+   (`meyar.api.v1.evaluations.post_rank_job`) and `meyar rank-job` (CLI)
+   both call the same function and are therefore now also protected by
+   this invariant, closing the same latent gap on those paths — the API
+   route maps `JOB_ARCHIVED` to `409 Conflict` (distinct from the existing
+   `404`/`422` mapping for other `BatchRankingError` codes); the CLI
+   already prints any `BatchRankingError.code` generically, so no CLI
+   change was needed.
+3. **HR-safe UI wording, no raw code.** `meyar.ui.router.rank_job` renders
+   a dedicated, Azerbaijani, human-readable message ("Bu vakansiya
+   arxivləşdirilib və artıq yeni reytinq üçün istifadə edilə bilməz.") with
+   HTTP `409` for this specific code — the raw string `JOB_ARCHIVED` is
+   never rendered to the HR user (regression-tested).
+4. **Historical data is untouched.** The check only gates *new* ranking
+   execution; it does not read, modify, or gate access to any existing
+   `Evaluation` row. `archive_job` (unchanged by this decision) still only
+   ever sets `status`/`archived_at` on the `Job` row itself —
+   `JobCriteriaVersion` and `Evaluation` history remain fully intact and
+   readable (regression-tested: a candidate's evaluation history still
+   shows the job title, and shows exactly one entry, not two, after a
+   rejected re-rank attempt against the now-archived job).
+5. **No new lifecycle state.** Only the existing `ACTIVE`/`ARCHIVED`
+   values (D-028) are read; nothing new was added to the `Job` model or
+   migration chain.
+6. **Tenant isolation unaffected.** The new check runs only after
+   `get_criteria_version_by_id`'s existing tenant-scoped lookup already
+   succeeded, and `get_job` is itself tenant-scoped — a foreign tenant's
+   criteria-version id still resolves the pre-existing, unchanged
+   `CRITERIA_VERSION_NOT_FOUND`/404 outcome regardless of that foreign
+   job's status, so this change introduces no new cross-tenant
+   existence-leak surface (regression-tested).
+7. **Scoring mathematics unchanged.** No line in `meyar.scoring.policy` or
+   `meyar.evaluation.*` was touched.
+
+**Tests:** `backend/tests/test_ui_job_lifecycle.py` —
+`test_active_job_can_still_be_ranked`,
+`test_archived_job_direct_stale_rank_post_is_rejected_with_hr_safe_message`
+(rank while ACTIVE succeeds and is preserved; archiving; a stale/direct
+POST to the same rank URL is rejected with `409` and the HR-safe message,
+never the raw code; the candidate's evaluation-history view shows exactly
+one entry afterward, proving no second `Evaluation` was persisted by the
+rejected attempt), and
+`test_archived_job_rank_rejection_does_not_leak_cross_tenant`.
+`backend/tests/test_api_evaluations.py` —
+`test_rank_archived_job_is_rejected_via_shared_service` (API path returns
+`409` with `detail: "JOB_ARCHIVED"`, proving the shared-service enforcement
+reaches the REST API too).
+
+**Why:** ARCHIVED is meant to represent "not a current, evaluable
+vacancy" (D-028). Leaving ranking execution reachable via a stale URL
+undermined that invariant at exactly the point that matters most — new
+`Evaluation` rows being created against a closed vacancy — and would have
+become materially riskier once a future agent (Slice 2, #31) can invoke
+ranking as a typed tool with no lifecycle awareness of its own. Enforcing
+in the shared service, not the router, means that risk is closed
+structurally rather than by convention.
+
+**Reversibility:** Fully reversible and additive. No migration, no schema
+change, no new lifecycle state. Removing the `Job.status` check in
+`rank_candidates_for_job` restores the exact pre-fix behavior on all three
+call paths simultaneously.
+
+**Follow-up tracking (not fixed here, per audit scope):** UI/API
+duplicate-signature consistency, concurrency-test hardening, and small
+UI/test cleanup findings from the same acceptance audit are tracked
+separately — see issue #38.
