@@ -239,6 +239,147 @@ async def test_non_experience_criterion_rejects_stray_min_years_input(
     assert "Kind Mismatch JD" not in jobs_page.text
 
 
+def _years_input_tag(html: str, name: str) -> str:
+    match = re.search(
+        r'<input type="number"[^>]*name="' + re.escape(name) + r'"[^>]*>', html
+    )
+    assert match is not None, f"years input {name!r} not found in rendered form"
+    return match.group(0)
+
+
+async def test_years_control_is_disabled_for_skill_criterion_rendered_ui(
+    client: AsyncClient, tenant_and_key, local_ui_settings: Settings
+) -> None:
+    """Owner follow-up: the client-side presentation must match the
+    server-side kind-aware rule. A row whose kind is not EXPERIENCE
+    (default new-form rows are SKILL) must render the 'Minimum müddət
+    (il)' control disabled and not user-editable, never implying it can
+    be filled in for a SKILL/CERTIFICATION/EDUCATION/LANGUAGE row."""
+    _tenant, _key, plaintext = tenant_and_key
+    await _login_and_csrf(client, plaintext)
+
+    response = await client.get("/ui/jobs/new")
+
+    assert response.status_code == 200
+    tag = _years_input_tag(response.text, "must_min_years_0")
+    assert "disabled" in tag
+    assert 'placeholder="Tətbiq olunmur"' in tag
+    assert 'value=""' in tag
+    # The self-hosted enhancement script is wired to this exact hook class,
+    # self-hosted (no external CDN), consistent with the UI CSP (script-src 'self').
+    assert 'class="js-min-years"' in tag
+    assert '<script src="/ui/static/job-form.js" defer></script>' in response.text
+
+
+async def test_years_control_is_enabled_for_experience_criterion_rendered_ui(
+    client: AsyncClient, tenant_and_key, local_ui_settings: Settings
+) -> None:
+    """A row whose kind is EXPERIENCE must render the duration control
+    enabled with HR-facing 'Minimum müddət (il)' wording — verified via a
+    form re-render (a second, invalid row forces re-render while
+    preserving the first, valid EXPERIENCE row's posted values)."""
+    _tenant, _key, plaintext = tenant_and_key
+    csrf = await _login_and_csrf(client, plaintext)
+    data = {"title": "Mixed Rows JD", "csrf_token": csrf}
+    data.update(
+        _blank_rows(
+            "must",
+            filled={
+                **_row(
+                    "must", 0, kind="EXPERIENCE", requirement="Minimum təcrübə", min_years="5"
+                ),
+                # A prohibited/sensitive term on a second row forces a
+                # validation failure and re-render without ever creating
+                # the job, while row 0's EXPERIENCE values are preserved.
+                **_row("must", 1, kind="SKILL", requirement="Yaş"),
+            },
+        )
+    )
+    data.update(_blank_rows("pref"))
+
+    response = await client.post("/ui/jobs", data=data)
+
+    assert response.status_code == 422
+    tag = _years_input_tag(response.text, "must_min_years_0")
+    assert "disabled" not in tag
+    assert 'placeholder="Minimum müddət (il)"' in tag
+    assert 'value="5"' in tag
+
+
+async def test_stale_experience_years_value_is_cleared_when_kind_switches_to_skill(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_key,
+    local_ui_settings: Settings,
+) -> None:
+    """Simulates: HR selected 'Təcrübə', typed 4, then changed the kind to
+    'Bacarıq' before submitting (the client-side toggle clears the stale
+    value on that same event; here the row is posted exactly as a
+    kind-switched submission would look). The stale duration must never
+    reach a persisted criterion and the re-rendered control must not echo
+    it back as an editable value."""
+    tenant, _key, plaintext = tenant_and_key
+    csrf = await _login_and_csrf(client, plaintext)
+    data = {"title": "Kind Switch JD", "csrf_token": csrf}
+    data.update(
+        _blank_rows(
+            "must",
+            filled=_row("must", 0, kind="SKILL", requirement="Python", min_years="4"),
+        )
+    )
+    data.update(_blank_rows("pref"))
+
+    response = await client.post("/ui/jobs", data=data)
+
+    assert response.status_code == 422
+    assert "Təcrübə&#39; növü üçündür" in response.text
+    tag = _years_input_tag(response.text, "must_min_years_0")
+    assert "disabled" in tag
+    assert 'value=""' in tag  # the stale "4" is not echoed back as editable
+
+    job = (
+        await db_session.execute(
+            select(Job).where(Job.tenant_id == tenant.id, Job.title == "Kind Switch JD")
+        )
+    ).scalar_one_or_none()
+    assert job is None
+
+
+async def test_direct_manual_post_of_skill_kind_with_years_rejected_server_side(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_key,
+    local_ui_settings: Settings,
+) -> None:
+    """Defense-in-depth: httpx never executes the client-side script, so
+    this reproduces a hand-crafted/malicious POST bypassing the JS
+    enhancement entirely (equivalent to JavaScript disabled). The
+    deterministic server-side rule in _parse_criterion_row must still be
+    the one rejecting SKILL + min_years, independent of any UI affordance."""
+    tenant, _key, plaintext = tenant_and_key
+    csrf = await _login_and_csrf(client, plaintext)
+    data = {"title": "Manual Bypass JD", "csrf_token": csrf}
+    data.update(
+        _blank_rows(
+            "must",
+            filled=_row("must", 0, kind="SKILL", requirement="Python", min_years="4"),
+        )
+    )
+    data.update(_blank_rows("pref"))
+
+    response = await client.post("/ui/jobs", data=data)
+
+    assert response.status_code == 422
+    assert "yalnız" in response.text
+    assert "Təcrübə&#39; növü üçündür" in response.text
+    job = (
+        await db_session.execute(
+            select(Job).where(Job.tenant_id == tenant.id, Job.title == "Manual Bypass JD")
+        )
+    ).scalar_one_or_none()
+    assert job is None
+
+
 async def test_sensitive_criterion_term_is_rejected(
     client: AsyncClient, tenant_and_key, local_ui_settings: Settings
 ) -> None:

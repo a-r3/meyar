@@ -3,13 +3,14 @@
 {% macro criterion_rows(prefix, rows) %}
 <div class="table-wrap">
 <table>
-<thead><tr><th>Növ</th><th>Tələb</th><th>Təcrübə (il)</th><th>Əhəmiyyət</th></tr></thead>
+<thead><tr><th>Növ</th><th>Tələb</th><th>Minimum müddət (il) <span class="muted">(yalnız Təcrübə üçün)</span></th><th>Əhəmiyyət</th></tr></thead>
 <tbody>
 {% for row in rows %}
+{% set is_experience = row.kind == "EXPERIENCE" %}
 <tr>
-  <td><select name="{{ prefix }}_kind_{{ loop.index0 }}">{% for value, label in kind_options %}<option value="{{ value }}"{% if row.kind == value %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></td>
+  <td><select class="js-kind-select" name="{{ prefix }}_kind_{{ loop.index0 }}">{% for value, label in kind_options %}<option value="{{ value }}"{% if row.kind == value %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></td>
   <td><input type="text" name="{{ prefix }}_requirement_{{ loop.index0 }}" value="{{ row.requirement }}" maxlength="200" placeholder="Məs. Python, ACAMS, İngilis dili — 'Təcrübə' üçün qısa təsvir, məs. Minimum backend təcrübəsi"></td>
-  <td><input type="number" step="0.5" min="0" max="60" name="{{ prefix }}_min_years_{{ loop.index0 }}" value="{{ row.min_years }}" placeholder="Yalnız Təcrübə üçün"></td>
+  <td><input type="number" step="0.5" min="0" max="60" class="js-min-years" name="{{ prefix }}_min_years_{{ loop.index0 }}" value="{{ row.min_years if is_experience else "" }}" placeholder="{{ "Minimum müddət (il)" if is_experience else "Tətbiq olunmur" }}"{% if not is_experience %} disabled aria-disabled="true"{% endif %}></td>
   <td><input type="number" step="0.5" min="0" max="10" name="{{ prefix }}_weight_{{ loop.index0 }}" value="{{ row.weight }}"></td>
 </tr>
 {% endfor %}
@@ -41,4 +42,7 @@
   <p class="field-help">Əhəmiyyət — tələbin yekun bala təsirini göstərən çəki (defolt: 1). Adətən dəyişdirmək lazım deyil.</p>
   <button class="button" type="submit">Vakansiyanı yarat</button>
 </form>
+{% endblock %}
+{% block scripts %}
+<script src="/ui/static/job-form.js" defer></script>
 {% endblock %}
