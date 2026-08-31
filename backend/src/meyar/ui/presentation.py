@@ -1,6 +1,6 @@
 from collections.abc import Iterable
 
-from meyar.search.planner_schemas import PlannerOutcome, SearchPlanResult
+from meyar.search.planner_schemas import PlannerOutcome, PlannerReasonCode, SearchPlanResult
 from meyar.ui.view_models import PlannerOutcomeView
 
 PLANNER_OUTCOME_TEXT: dict[PlannerOutcome, tuple[str, str]] = {
@@ -37,6 +37,22 @@ PLANNER_OUTCOME_TEXT: dict[PlannerOutcome, tuple[str, str]] = {
     ),
 }
 
+# When PlannerOutcome.UNSUPPORTED_SEMANTICS carries the internal
+# MODEL_DECLINED_INTERPRETATION marker, the AI planner model itself — not
+# a deterministic product-policy check — decided it could not interpret
+# the request. This is honestly a different situation from "this concept
+# is not part of the product" (true regardless of which model is
+# configured): on a small local model it can simply be a misjudged
+# ordinary request. Told separately so HR does not conclude their
+# requirement is unsupported by MEYAR when it may just be this machine's
+# configured model. See docs/DECISIONS.md D-025.
+_MODEL_DECLINED_INTERPRETATION_TEXT = (
+    "AI tələbi tam anlaya bilmədi",
+    "Yerli AI planlaşdırıcı modeli bu tələbi etibarlı şəkildə şərh edə bilmədi. Bu, "
+    "MEYAR-ın dəstəkləmədiyi bir şey demək deyil — konfiqurasiya olunmuş yerli modelin "
+    "məhdudiyyəti ola bilər. Tələbi sadələşdirib yenidən cəhd edin.",
+)
+
 READINESS_LABELS: dict[str | None, str] = {
     "COMPLETED": "Hazır",
     "MANUAL_REVIEW_REQUIRED": "Diqqət tələb edir",
@@ -56,6 +72,7 @@ def readiness_state(profile_status: str | None) -> str:
     """The data-state value used to color the readiness badge — reuses
     the existing status-badge CSS instead of adding new rules."""
     return profile_status or "PENDING"
+
 
 FIT_BAND_LABELS = {
     "STRONG_MATCH": "Güclü uyğunluq",
@@ -99,7 +116,13 @@ STATE_LABELS = {
 def planner_outcome_view(
     plan: SearchPlanResult, *, result_count: int | None = None
 ) -> PlannerOutcomeView:
-    title, message = PLANNER_OUTCOME_TEXT[plan.outcome]
+    if (
+        plan.outcome == PlannerOutcome.UNSUPPORTED_SEMANTICS
+        and PlannerReasonCode.MODEL_DECLINED_INTERPRETATION in plan.reason_codes
+    ):
+        title, message = _MODEL_DECLINED_INTERPRETATION_TEXT
+    else:
+        title, message = PLANNER_OUTCOME_TEXT[plan.outcome]
     return PlannerOutcomeView(
         outcome=plan.outcome.value,
         title=title,

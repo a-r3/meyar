@@ -66,6 +66,7 @@ def _az_pattern(source: str) -> re.Pattern[str]:
     text is folded the same way with :func:`fold_az_ascii`."""
     return re.compile(fold_az_ascii(source))
 
+
 _WORD = r"A-Za-z0-9_+#.ƏəĞğİıÖöÜüÇçŞşА-Яа-яЁё"
 _BOUNDARY_WORD = r"A-Za-z0-9_ƏəĞğİıÖöÜüÇçŞşА-Яа-яЁё"
 _REQUIRED_MARKERS = (
@@ -108,9 +109,7 @@ _SKILL_DURATION_PATTERNS = (
         rf"(?i)\b(?P<skill>[{_WORD}/-]{{1,60}})\s+(?:üzrə|ilə)\s+"
         r"(?:ən\s+azı\s+)?\d+(?:[.,]\d+)?\s*il\s+(?:iş\s+)?təcrüb"
     ),
-    _az_pattern(
-        rf"(?i)\b\d+(?:[.,]\d+)?\s*il\s+(?P<skill>[{_WORD}/-]{{1,60}})\s+təcrüb"
-    ),
+    _az_pattern(rf"(?i)\b\d+(?:[.,]\d+)?\s*il\s+(?P<skill>[{_WORD}/-]{{1,60}})\s+təcrüb"),
 )
 _TOTAL_EXPERIENCE_PATTERNS = (
     _az_pattern(
@@ -146,9 +145,7 @@ _IDENTITY_PATTERNS = (
         r"(?i)\b(?:candidate\s+)?(?:name|named|full[_ -]?name|email|e-mail|phone|"
         r"telephone|contact|adlı|adı|e-poçt|emaili|telefon)\b"
     ),
-    _az_pattern(
-        rf"(?i)^\s*(?:find|show|search\s+for)\s+(?:a\s+)?[{_WORD}'-]{{2,40}}\s*[.!?]*$"
-    ),
+    _az_pattern(rf"(?i)^\s*(?:find|show|search\s+for)\s+(?:a\s+)?[{_WORD}'-]{{2,40}}\s*[.!?]*$"),
 )
 _EXPLICIT_CUSTOM_WEIGHT_PATTERNS = (
     _az_pattern(r"(?i)\bprioriti[sz]e\b.{0,80}\bover\s+everything\b"),
@@ -202,9 +199,7 @@ _LANGUAGE_ALIASES: dict[str, tuple[str, ...]] = {
 
 
 class PlannerPolicyError(Exception):
-    def __init__(
-        self, outcome: PlannerOutcome, *reason_codes: PlannerReasonCode
-    ) -> None:
+    def __init__(self, outcome: PlannerOutcome, *reason_codes: PlannerReasonCode) -> None:
         self.outcome = outcome
         self.reason_codes = list(dict.fromkeys(reason_codes))
         super().__init__(",".join(code.value for code in self.reason_codes))
@@ -332,9 +327,7 @@ def _value_variants(category: str, value: str) -> tuple[str, ...]:
         for english_name, variants in _LANGUAGE_ALIASES.items():
             aliases = (english_name, *variants)
             if set(_canonical_variants(value)).intersection(
-                canonical
-                for alias in aliases
-                for canonical in _canonical_variants(alias)
+                canonical for alias in aliases for canonical in _canonical_variants(alias)
             ):
                 return variants
     return (value,)
@@ -420,17 +413,21 @@ def _intent_near_normalized_spans(
     required_distances = [
         distance
         for start, end in spans
-        if (distance := _closest_marker_distance(
-            normalized, start, end, _REQUIRED_MARKERS, canonicalize
-        ))
+        if (
+            distance := _closest_marker_distance(
+                normalized, start, end, _REQUIRED_MARKERS, canonicalize
+            )
+        )
         is not None
     ]
     preferred_distances = [
         distance
         for start, end in spans
-        if (distance := _closest_marker_distance(
-            normalized, start, end, _PREFERRED_MARKERS, canonicalize
-        ))
+        if (
+            distance := _closest_marker_distance(
+                normalized, start, end, _PREFERRED_MARKERS, canonicalize
+            )
+        )
         is not None
     ]
     required_distance = min(required_distances, default=None)
@@ -463,9 +460,7 @@ def _term_spans(
     return spans
 
 
-def _intent_near_terms(
-    request: str, terms: tuple[str, ...] | list[str]
-) -> tuple[bool, bool]:
+def _intent_near_terms(request: str, terms: tuple[str, ...] | list[str]) -> tuple[bool, bool]:
     required = False
     preferred = False
     for canonicalize in _CANONICALIZERS:
@@ -513,9 +508,7 @@ def derive_search_mode(draft: PlannerDraft) -> SearchMode:
         return SearchMode.SEMANTIC_ONLY
     if has_structured:
         return SearchMode.STRUCTURED_ONLY
-    raise PlannerPolicyError(
-        PlannerOutcome.AMBIGUOUS_REQUEST, PlannerReasonCode.NO_SEARCH_CRITERIA
-    )
+    raise PlannerPolicyError(PlannerOutcome.AMBIGUOUS_REQUEST, PlannerReasonCode.NO_SEARCH_CRITERIA)
 
 
 def _validate_filter_fidelity(draft: PlannerDraft, request: str) -> None:
@@ -651,9 +644,7 @@ def _validate_semantic_fidelity(draft: PlannerDraft, request: str) -> None:
         semantic_tokens = re.findall(r"[^\W_]+", normalized_semantic)
         normalized_request = canonicalize(request)
         request_tokens = set(re.findall(r"[^\W_]+", normalized_request))
-        if not semantic_tokens or any(
-            token not in request_tokens for token in semantic_tokens
-        ):
+        if not semantic_tokens or any(token not in request_tokens for token in semantic_tokens):
             continue
         supported = True
         current_required, current_preferred = _intent_near_normalized_spans(
@@ -686,8 +677,13 @@ def convert_planner_draft(
     """Pure draft + trusted context -> validated Slice 8 request."""
     precheck_natural_language_request(natural_language_request)
     if draft.unsupported_reason_codes:
+        # The model itself declined this interpretation — tag it so the
+        # presentation layer can tell this apart from a deterministic
+        # product-policy rejection below. See docs/DECISIONS.md D-025.
         raise PlannerPolicyError(
-            PlannerOutcome.UNSUPPORTED_SEMANTICS, *draft.unsupported_reason_codes
+            PlannerOutcome.UNSUPPORTED_SEMANTICS,
+            PlannerReasonCode.MODEL_DECLINED_INTERPRETATION,
+            *draft.unsupported_reason_codes,
         )
     _postcheck_protected_and_unsupported(draft)
     _validate_semantic_fidelity(draft, natural_language_request)

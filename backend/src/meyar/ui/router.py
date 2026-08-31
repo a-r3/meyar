@@ -60,6 +60,7 @@ from meyar.ui.service import (
     ALLOWED_PROFILE_STATUSES,
     CRITERION_KIND_OPTIONS,
     CRITERION_ROW_COUNT,
+    DEFAULT_CRITERION_WEIGHT,
     CriterionRowInput,
     UIServiceInputError,
     build_job_create_request,
@@ -427,8 +428,7 @@ def _job_form_row(form: object, prefix: str, index: int) -> CriterionRowInput:
 
     return CriterionRowInput(
         kind=field("kind"),
-        label=field("label"),
-        value=field("value"),
+        requirement=field("requirement"),
         min_years=field("min_years"),
         weight=field("weight"),
     )
@@ -457,7 +457,10 @@ async def job_new_form(
     request: Request, ctx: UIContext = Depends(require_ui_scopes("jobs:write"))
 ) -> HTMLResponse:
     empty_row = CriterionRowInput(
-        kind=CRITERION_KIND_OPTIONS[0][0], label="", value="", min_years="", weight=""
+        kind=CRITERION_KIND_OPTIONS[0][0],
+        requirement="",
+        min_years="",
+        weight=DEFAULT_CRITERION_WEIGHT,
     )
     return _render(
         request,
@@ -531,8 +534,7 @@ async def create_job_route(
                 ctx,
                 title="Vakansiya yaradıla bilmədi",
                 message=(
-                    "Verilənlər bazası hazırda əlçatan deyil. "
-                    "Bir qədər sonra yenidən cəhd edin."
+                    "Verilənlər bazası hazırda əlçatan deyil. Bir qədər sonra yenidən cəhd edin."
                 ),
             ),
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

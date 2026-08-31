@@ -33,14 +33,20 @@ Definition-of-Done Acceptance) pending the Target-Mac benchmark gate.
 closure; issue #23 closed by PR #24, no remaining open issues).
 **M7 — HR UI & Presentation Readiness is OPEN** (issue #27; owner-driven
 HR UI productization pass following visual inspection of the running
-local UI — see D-023, D-024, and "In progress" below). PR #29 (same
-branch) received a second owner visual inspection that found seven
+local UI — see D-023, D-024, D-025, and "In progress" below). PR #29
+(same branch) received a second owner visual inspection that found seven
 further blockers (NL search still generically failing on ordinary
 Azerbaijani phrasing, no vacancy-creation UI, raw criterion ids on the
 ranking table, developer wording, technical metadata on candidate detail,
 CV-preview XSS confirmation, and a mislabeled inline-vs-download original
-CV action) — all fixed in the same PR; see D-024. PR #29 still
-**NOT merged** — awaiting owner re-inspection.
+CV action) — all fixed in the same PR; see D-024. A third owner visual
+inspection found the new vacancy-creation form's "Ad"/"Dəyər" field split
+had produced a malformed criterion (root-caused, not a scoring bug —
+value held the criterion's TYPE instead of the requirement) and that the
+NL-search "unsupported" message didn't distinguish a genuine deterministic
+product-policy gap from the small local planner model simply misjudging
+an ordinary request — both fixed; see D-025. PR #29 still **NOT merged** —
+awaiting owner re-inspection.
 
 GitHub remote established (`https://github.com/a-r3/meyar.git`, private,
 temporary development remote — see D-012, `docs/DECISIONS.md`). `main`
@@ -284,6 +290,16 @@ remains disabled.
   schema. See D-019. Slice 13 final security/DoD acceptance was not started.
 
 ## Tests
+**607/607 passing** as of the third-round PR #29 visual-inspection pass
+(branch `feat/hr-ui-productization`, still not merged): 600 prior (D-024
+pass, see below) + 7 new/changed for D-025 — the model-self-decline
+marker and its distinct HR message (`test_search_planner_policy.py`,
+`test_ui_routes.py`), the single-"Tələb"-field form regression
+(`test_ui_job_creation.py`), and the two Blocker-A root-cause acceptance
+tests: a UI-created SKILL criterion resolving against real candidate
+evidence, and UI-created vs. API-created criterion structural equivalence
+(`test_ui_job_creation.py`).
+
 **600/600 passing** as of the second-round PR #29 visual-inspection pass
 (branch `feat/hr-ui-productization`, still not merged): 582 prior (D-023
 pass, see below) + 18 new regressions for D-024 — the diacritic-fold and
@@ -583,6 +599,32 @@ XSS escaping; (7) "Originalı yüklə" now always sends a true download
 (`Content-Disposition: attachment`) instead of opening PDFs inline.
 No search/matching/scoring behavior changed; no migration.
 
+A third owner visual inspection found two further acceptance blockers,
+both fixed on the same branch/PR (see D-025). Root-caused, live, before
+any change — not guessed: (A) an owner-created vacancy's Python SKILL
+criterion resolved to UNKNOWN against a candidate with verified Python
+evidence; traced to the persisted criterion having `value: "MUST_HAVE"`
+instead of `value: "Python"` — the previous two-field ("Ad"/"Dəyər") form
+let an HR tester type the requirement's type into the value field, and
+the deterministic scorer correctly found no matching skill for that
+malformed value (not a scoring/evaluator bug). Fixed by collapsing
+"Ad"/"Dəyər" into a single HR-facing "Tələb" field that becomes both the
+label and the matched value, making the mistake structurally impossible;
+added a critical acceptance test proving a UI-created SKILL criterion now
+resolves correctly against real evidence (and that missing evidence still
+correctly resolves to UNKNOWN), plus a structural-equivalence test against
+an API-created criterion. (B) The natural-language search "unsupported"
+message didn't distinguish a genuine, model-independent product-policy
+gap from the small local planner model (`qwen3:0.6b`) simply misjudging
+an ordinary request — reproduced live against real local Ollama and
+confirmed via the persisted audit event that the actual outcome was the
+*model itself* self-declining (`PlannerDraft.unsupported_reason_codes`),
+not a policy-regex false positive and not a provider failure. Added an
+internal `MODEL_DECLINED_INTERPRETATION` marker and a distinct, honest HR
+message for that case only; genuine deterministic product-policy
+rejections keep the original message. No search/matching/scoring
+behavior changed; no migration.
+
 Slice 14 (`feat/folder-reconciliation`, **MERGED as PR #24 at squash SHA
 `f6e31ff`, closes issue #23**, associated with
 **M6 — Operational CV Intake & Reconciliation**). Closes the gap left after Slice 6: a
@@ -663,7 +705,7 @@ due date because the official timeline has not been supplied.
 | M4 — Internal Product Interface & API | Slices 11–12 | CLOSED — Slice 11 merged (PR #17, issue #16 closed); Slice 12 merged (PR #19 at `93fa567`, issue #18 closed) |
 | M5 — Security, Target-Mac Validation & MVP Acceptance | Slice 13 + target-Mac benchmark | OPEN — issue #20 open; PR #22 merged at `a709ce1` implementing Pass 1 (original CV, no-exfiltration, backup/restore, audit guard, multilingual evidence) with `Refs #20`; Mac Mini benchmark execution on the now owner-confirmed target hardware remains the sole open mandatory gate |
 | M6 — Operational CV Intake & Reconciliation | Slice 14 | CLOSED — Slice 14 merged (PR #24 at `f6e31ff`), issue #23 closed; owner-approved closure |
-| M7 — HR UI & Presentation Readiness | HR UI productization (chore, issue #27) | OPEN — branch `feat/hr-ui-productization`, PR #29 open, pending owner re-inspection (second round); see D-023, D-024 |
+| M7 — HR UI & Presentation Readiness | HR UI productization (chore, issue #27) | OPEN — branch `feat/hr-ui-productization`, PR #29 open, pending owner re-inspection (third round); see D-023, D-024, D-025 |
 
 ## Official requirement gap matrix
 

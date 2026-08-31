@@ -236,6 +236,12 @@ async def test_ordinary_azerbaijani_experience_query_executes_end_to_end(
             0,
         ),
         (
+            # "5 il Java" (year-first) IS a deterministic, model-independent
+            # precheck rejection — SKILL_SPECIFIC_EXPERIENCE_DURATION_UNSUPPORTED
+            # fires on the raw request text before the LLM is ever called
+            # (0 calls: draft.unsupported_reason_codes below is unreachable
+            # dead weight for this particular query, kept only to show the
+            # outcome is the same either way for a genuine precheck hit).
             "5 il Java təcrübəsi olan namizədləri göstər.",
             PlannerDraft(
                 required_filters=RequiredFilters(
@@ -247,6 +253,33 @@ async def test_ordinary_azerbaijani_experience_query_executes_end_to_end(
             ),
             "Tələb hazırda dəstəklənmir",
             0,
+        ),
+        (
+            # Genuine, model-independent product-policy gap: rejected by the
+            # deterministic precheck before the LLM is ever called (0 calls)
+            # — must keep the original generic message, not the new
+            # AI-specific one.
+            "Namizədlərin maaş gözləntisini göstər.",
+            PlannerDraft(),
+            "Tələb hazırda dəstəklənmir",
+            0,
+        ),
+        (
+            # The request text itself is ordinary and passes precheck (1
+            # LLM call happens), but the MODEL's own draft self-declines —
+            # must show the distinct AI-specific message. Root-caused from
+            # a live owner-reported case (see docs/DECISIONS.md D-025).
+            "pythonda 5 il tecrübesi olan",
+            PlannerDraft(
+                required_filters=RequiredFilters(
+                    skills=["Python"], min_total_experience_years=5
+                ),
+                unsupported_reason_codes=[
+                    PlannerReasonCode.LANGUAGE_PROFICIENCY_UNSUPPORTED
+                ],
+            ),
+            "AI tələbi tam anlaya bilmədi",
+            1,
         ),
         (
             "Uyğun namizəd tap.",

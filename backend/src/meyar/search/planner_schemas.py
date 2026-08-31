@@ -34,6 +34,17 @@ class PlannerOutcome(StrEnum):
 
 
 class PlannerReasonCode(StrEnum):
+    # Internal marker only (never one of the model's own draft codes): set
+    # when the model itself populated ``PlannerDraft.unsupported_reason_codes``
+    # — i.e. the *model* declined to interpret the request — as opposed to
+    # every other UNSUPPORTED_SEMANTICS trigger below, which is a
+    # deterministic, model-independent product-policy decision made by this
+    # module before/after the model call. Lets the HR-facing presentation
+    # layer distinguish "the AI couldn't interpret this" (may be a small
+    # local-model quality limitation) from "this concept is not part of the
+    # product" (true regardless of which model is configured). See
+    # docs/DECISIONS.md D-025.
+    MODEL_DECLINED_INTERPRETATION = "MODEL_DECLINED_INTERPRETATION"
     PROTECTED_CRITERION = "PROTECTED_CRITERION"
     SKILL_SPECIFIC_EXPERIENCE_DURATION_UNSUPPORTED = (
         "SKILL_SPECIFIC_EXPERIENCE_DURATION_UNSUPPORTED"
@@ -54,21 +65,15 @@ class PlannerReasonCode(StrEnum):
     MODEL_UNAVAILABLE = "MODEL_UNAVAILABLE"
     MODEL_TIMEOUT = "MODEL_TIMEOUT"
     MODEL_PROVENANCE_MISMATCH = "MODEL_PROVENANCE_MISMATCH"
-    STRUCTURED_FILTER_NOT_SUPPORTED_BY_REQUEST = (
-        "STRUCTURED_FILTER_NOT_SUPPORTED_BY_REQUEST"
-    )
-    NUMERIC_EXPERIENCE_NOT_SUPPORTED_BY_REQUEST = (
-        "NUMERIC_EXPERIENCE_NOT_SUPPORTED_BY_REQUEST"
-    )
+    STRUCTURED_FILTER_NOT_SUPPORTED_BY_REQUEST = "STRUCTURED_FILTER_NOT_SUPPORTED_BY_REQUEST"
+    NUMERIC_EXPERIENCE_NOT_SUPPORTED_BY_REQUEST = "NUMERIC_EXPERIENCE_NOT_SUPPORTED_BY_REQUEST"
     NUMERIC_EXPERIENCE_OMITTED = "NUMERIC_EXPERIENCE_OMITTED"
     RESULT_LIMIT_NOT_SUPPORTED_BY_REQUEST = "RESULT_LIMIT_NOT_SUPPORTED_BY_REQUEST"
     RESULT_LIMIT_OMITTED = "RESULT_LIMIT_OMITTED"
     RESULT_LIMIT_OUT_OF_RANGE = "RESULT_LIMIT_OUT_OF_RANGE"
     MANDATORY_REQUIREMENT_DOWNGRADED = "MANDATORY_REQUIREMENT_DOWNGRADED"
     PREFERRED_REQUIREMENT_UPGRADED = "PREFERRED_REQUIREMENT_UPGRADED"
-    SEMANTIC_QUERY_NOT_SUPPORTED_BY_REQUEST = (
-        "SEMANTIC_QUERY_NOT_SUPPORTED_BY_REQUEST"
-    )
+    SEMANTIC_QUERY_NOT_SUPPORTED_BY_REQUEST = "SEMANTIC_QUERY_NOT_SUPPORTED_BY_REQUEST"
     SEMANTIC_QUERY_UNSAFE = "SEMANTIC_QUERY_UNSAFE"
     CANDIDATE_SEARCH_VALIDATION_FAILED = "CANDIDATE_SEARCH_VALIDATION_FAILED"
 
@@ -80,15 +85,11 @@ class PlannerDraft(BaseModel):
 
     required_filters: RequiredFilters = Field(default_factory=RequiredFilters)
     preferred_filters: PreferredFilters = Field(default_factory=PreferredFilters)
-    semantic_query: StrictStr | None = Field(
-        default=None, max_length=MAX_SEMANTIC_QUERY_LENGTH
-    )
+    semantic_query: StrictStr | None = Field(default=None, max_length=MAX_SEMANTIC_QUERY_LENGTH)
     requested_limit: StrictInt | None = Field(
         default=None, ge=MIN_SEARCH_LIMIT, le=MAX_SEARCH_LIMIT
     )
-    unsupported_reason_codes: list[PlannerReasonCode] = Field(
-        default_factory=list, max_length=20
-    )
+    unsupported_reason_codes: list[PlannerReasonCode] = Field(default_factory=list, max_length=20)
 
 
 class PlanInterpretationSummary(BaseModel):
@@ -121,9 +122,7 @@ class SearchPlanResult(BaseModel):
     model_revision: str = ""
     attempt_count: int = Field(ge=0, le=2)
     request_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    interpretation: PlanInterpretationSummary = Field(
-        default_factory=PlanInterpretationSummary
-    )
+    interpretation: PlanInterpretationSummary = Field(default_factory=PlanInterpretationSummary)
     reason_codes: list[PlannerReasonCode] = Field(default_factory=list, max_length=20)
 
     @model_validator(mode="after")
@@ -152,7 +151,5 @@ class PlannedCandidateSearchResponse(BaseModel):
     @model_validator(mode="after")
     def _validate_execution_contract(self) -> "PlannedCandidateSearchResponse":
         if self.plan.executable != (self.search_response is not None):
-            raise ValueError(
-                "search_response must be present exactly when the plan is executable."
-            )
+            raise ValueError("search_response must be present exactly when the plan is executable.")
         return self

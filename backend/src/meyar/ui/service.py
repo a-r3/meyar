@@ -421,9 +421,7 @@ async def get_candidate_detail_view(
             professional_summary = join_nonempty([current_role, ", ".join(top_skills) or None])
         except ValidationError:
             pass
-    documents = await list_candidate_documents(
-        db, tenant_id=tenant_id, candidate_id=candidate_id
-    )
+    documents = await list_candidate_documents(db, tenant_id=tenant_id, candidate_id=candidate_id)
     evaluations = list(
         (
             await db.execute(
@@ -736,11 +734,26 @@ async def get_job_title_for_criteria_version(
     return row
 
 
-# Owner visual-inspection Blocker 2 — new-vacancy creation. The HR-facing
+# Owner visual-inspection Blocker 2/B — new-vacancy creation. The HR-facing
 # form is a fixed set of rows (no JS row-adding, matching the rest of this
-# JS-free /ui surface); empty rows (blank label) are silently skipped
+# JS-free /ui surface); empty rows (blank requirement) are silently skipped
 # below, so HR only fills in as many criteria as the vacancy needs.
-CRITERION_ROW_COUNT = 6
+#
+# One HR-facing "Tələb" (requirement) field per row, not separate internal
+# "Ad"/"Dəyər" (label/value) fields: for SKILL/CERTIFICATION/EDUCATION/
+# LANGUAGE criteria the same text the HR user types becomes BOTH the
+# display label and the exact term the deterministic scorer matches
+# against candidate-profile evidence — this makes it structurally
+# impossible to construct a criterion whose displayed name and matched
+# value disagree (the root cause of owner-reported Blocker A: a vacancy
+# created through the previous two-field form persisted
+# {"label": "Python", "value": "MUST_HAVE"} because the HR tester,
+# confused by the Ad/Dəyər distinction, typed the requirement type into
+# the wrong field — the deterministic scorer then correctly, and
+# deterministically, found no candidate profile skill literally named
+# "MUST_HAVE" and returned UNKNOWN; that was not a scoring bug). See
+# docs/DECISIONS.md D-025.
+CRITERION_ROW_COUNT = 4
 CRITERION_KIND_OPTIONS: tuple[tuple[str, str], ...] = (
     (CriterionKind.SKILL.value, "Bacarıq"),
     (CriterionKind.CERTIFICATION.value, "Sertifikat"),
@@ -748,6 +761,7 @@ CRITERION_KIND_OPTIONS: tuple[tuple[str, str], ...] = (
     (CriterionKind.LANGUAGE.value, "Dil"),
     (CriterionKind.EXPERIENCE.value, "Təcrübə"),
 )
+DEFAULT_CRITERION_WEIGHT = "1"
 
 _CRITERION_ID_FALLBACK = "meyar"
 
@@ -755,17 +769,16 @@ _CRITERION_ID_FALLBACK = "meyar"
 @dataclass(frozen=True)
 class CriterionRowInput:
     kind: str
-    label: str
-    value: str
+    requirement: str
     min_years: str
     weight: str
 
 
 def _slugify_criterion_label(label: str, used_ids: set[str]) -> str:
-    """A stable, ASCII-only criterion id derived from the HR-entered label.
-    The HR user never types or sees a raw id/UUID (owner visual-inspection
-    Blocker 2: 'no raw UUID entry by the HR user') — it exists only as the
-    deterministic policy engine's internal join key."""
+    """A stable, ASCII-only criterion id derived from the HR-entered
+    requirement text. The HR user never types or sees a raw id/UUID (owner
+    visual-inspection Blocker 2: 'no raw UUID entry by the HR user') — it
+    exists only as the deterministic policy engine's internal join key."""
     ascii_text = fold_az_ascii(label).lower()
     base = re.sub(r"[^a-z0-9]+", "_", ascii_text).strip("_")[:60] or _CRITERION_ID_FALLBACK
     candidate = base
@@ -788,50 +801,48 @@ def _first_pydantic_message(exc: ValidationError) -> str:
 def _parse_criterion_row(
     row: CriterionRowInput, *, criterion_type: CriterionType, used_ids: set[str]
 ) -> CriterionIn | None:
-    label = row.label.strip()
-    if not label:
+    requirement = row.requirement.strip()
+    if not requirement:
         return None
     try:
         kind = CriterionKind(row.kind)
     except ValueError as exc:
-        raise UIServiceInputError(f"'{label}' üçün meyar növü tanınmadı.") from exc
+        raise UIServiceInputError(f"'{requirement}' üçün meyar növü tanınmadı.") from exc
 
     min_years: float | None = None
-    value: str | None = row.value.strip() or None
+    value: str | None = requirement
     if kind is CriterionKind.EXPERIENCE:
         raw_years = row.min_years.strip()
         if not raw_years:
-            raise UIServiceInputError(
-                f"'{label}' meyarı üçün minimum illik təcrübəni daxil edin."
-            )
+            raise UIServiceInputError(f"'{requirement}' meyarı üçün illik təcrübəni daxil edin.")
         try:
             min_years = float(raw_years.replace(",", "."))
         except ValueError as exc:
             raise UIServiceInputError(
-                f"'{label}' meyarı üçün illik təcrübə rəqəm olmalıdır."
+                f"'{requirement}' meyarı üçün illik təcrübə rəqəm olmalıdır."
             ) from exc
         value = None
-    elif not value:
-        raise UIServiceInputError(f"'{label}' meyarı üçün dəyəri daxil edin.")
 
     raw_weight = row.weight.strip()
     try:
         weight = float(raw_weight.replace(",", ".")) if raw_weight else 1.0
     except ValueError as exc:
-        raise UIServiceInputError(f"'{label}' meyarı üçün çəki rəqəm olmalıdır.") from exc
+        raise UIServiceInputError(
+            f"'{requirement}' meyarı üçün əhəmiyyət rəqəm olmalıdır."
+        ) from exc
 
     try:
         return CriterionIn(
-            id=_slugify_criterion_label(label, used_ids),
+            id=_slugify_criterion_label(requirement, used_ids),
             kind=kind,
             type=criterion_type,
-            label=label,
+            label=requirement,
             value=value,
             min_years=min_years,
             weight=weight,
         )
     except ValidationError as exc:
-        raise UIServiceInputError(f"'{label}': {_first_pydantic_message(exc)}") from exc
+        raise UIServiceInputError(f"'{requirement}': {_first_pydantic_message(exc)}") from exc
 
 
 def build_job_create_request(
@@ -855,16 +866,12 @@ def build_job_create_request(
         (CriterionType.PREFERRED, preferred_rows),
     ):
         for row in rows:
-            criterion = _parse_criterion_row(
-                row, criterion_type=criterion_type, used_ids=used_ids
-            )
+            criterion = _parse_criterion_row(row, criterion_type=criterion_type, used_ids=used_ids)
             if criterion is not None:
                 criteria.append(criterion)
 
     if not criteria:
-        raise UIServiceInputError(
-            "Ən azı bir Mütləq və ya Üstünlük meyarı daxil edin."
-        )
+        raise UIServiceInputError("Ən azı bir Mütləq və ya Üstünlük meyarı daxil edin.")
     try:
         return JobCreateRequest(title=stripped_title, criteria=criteria)
     except ValidationError as exc:

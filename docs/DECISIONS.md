@@ -1637,3 +1637,116 @@ a net-new, additive route pair; disabling it (removing the two routes)
 does not affect existing jobs, criteria, or the API/CLI creation path,
 which is unchanged. The ranking-table/candidate-detail wording and the
 `/original` disposition change are presentation-only.
+
+## D-025 — Third-round visual inspection: vacancy-form correctness/UX, search-outcome truthfulness (M7)
+
+**Date:** 2026-08-31
+**Decision:** A third owner visual inspection of PR #29 (same branch,
+still unmerged) found two acceptance blockers, both traced end-to-end
+before any fix — no guessing.
+
+1. **Root cause of "Python -> Məlumat məlum deyil (UNKNOWN)" on an
+   owner-created vacancy.** Reproduced live against the actual demo tenant
+   the owner used. The persisted criteria JSON for the owner's "Senior
+   Python Developer" vacancy was
+   `{"kind": "SKILL", "label": "Python", "value": "MUST_HAVE", ...}` — the
+   `value` field, which `meyar.evaluation.evaluators.evaluate_skill`
+   correctly and deterministically matches against candidate-profile
+   skill names, held the literal string `"MUST_HAVE"`, not `"Python"`.
+   The seeded candidate ("Tural Demo-Aliyev") genuinely has a verified
+   `"Python"` skill with evidence — confirmed directly from the database.
+   This was **not** a scoring/evaluator bug, a normalization mismatch, a
+   label/value swap in the persistence code, or a divergence between the
+   UI-creation and API-creation paths (all four were checked directly,
+   not assumed): the deterministic scorer did exactly the right thing
+   with the criterion it was given. The malformed criterion itself came
+   from the *previous* two-field form: it separated an internal "Ad"
+   (label) field from an internal "Dəyər" (value) field, and an HR tester
+   — with no way to know these needed to be the same text for a skill —
+   typed the requirement's *type* ("MUST_HAVE") into "Dəyər" instead of
+   repeating "Python". This is exactly the confusion Blocker B (below)
+   independently flagged about the same form.
+2. **Fix: collapse "Ad"/"Dəyər" into one "Tələb" field.**
+   `meyar.ui.service.CriterionRowInput` now carries a single
+   `requirement: str` instead of separate `label`/`value` strings; for
+   SKILL/CERTIFICATION/EDUCATION/LANGUAGE criteria `_parse_criterion_row`
+   sets **both** `CriterionIn.label` and `CriterionIn.value` from that one
+   HR-entered string, so the label shown on screen and the value the
+   deterministic scorer matches against evidence can no longer diverge —
+   not just harder to misuse, structurally incapable of it. For
+   EXPERIENCE criteria the same field becomes the descriptive label (e.g.
+   "Minimum təcrübə"), paired with the existing required numeric "illik
+   təcrübə" input. The criterion id remains fully server-generated
+   (`_slugify_criterion_label`, unchanged) — the HR user still never types
+   or sees a raw id/UUID. Row count reduced 6 → 4 per section (less
+   spreadsheet-like); the weight column, renamed "Əhəmiyyət", now
+   pre-fills a safe default of `1` instead of an empty box needing to be
+   filled every time. Column headers/help text rewritten in HR language
+   throughout (`Növ`/`Tələb`/`Təcrübə (il)`/`Əhəmiyyət`).
+3. **Regression coverage added, not just fixed.** A CRITICAL ACCEPTANCE
+   TEST (`test_ui_created_skill_criterion_matches_real_candidate_evidence`
+   in `backend/tests/test_ui_job_creation.py`) seeds a real candidate with
+   verified Python evidence and a second candidate without it, creates a
+   vacancy through the exact `/ui/jobs/new` -> `POST /ui/jobs` application
+   path used by HR, ranks it, and asserts the evidenced candidate resolves
+   to MATCH while the non-evidenced one still correctly resolves to
+   UNKNOWN — proving both that the fix works and that UNKNOWN was never
+   weakened into a false match. A second test
+   (`test_ui_created_criterion_is_structurally_equivalent_to_api_created`)
+   creates the same requirement through the UI form and directly through
+   `create_job`/`create_criteria_version` (the same services
+   `POST /api/v1/jobs` uses) and asserts the persisted criterion JSON is
+   byte-for-byte identical in shape — proving the two creation paths
+   cannot semantically diverge for scoring.
+4. **Search-outcome truthfulness (Blocker C).** Reproduced the owner's
+   exact query, `"pythonda 5 il tecrubesi olan"`, against the real local
+   Ollama available on this development machine (not simulated) and read
+   the actual persisted `AuditEvent` for that request. The internal
+   outcome was genuinely `UNSUPPORTED_SEMANTICS` with reason code
+   `LANGUAGE_PROFICIENCY_UNSUPPORTED` — **not** `PLANNER_PROVIDER_FAILURE`
+   (Ollama responded normally) and **not** a false positive in this
+   module's own deterministic precheck regex (verified directly:
+   `precheck_natural_language_request` returns cleanly for this exact
+   text). The reason code came from `PlannerDraft.unsupported_reason_codes`
+   — the small local planner model (`qwen3:0.6b`, chosen to fit the
+   owner's 8GB laptop) itself incorrectly self-flagged an ordinary
+   Python+experience request as involving language proficiency, even
+   though the request never mentions a language. `convert_planner_draft`
+   correctly, and by design, never second-guesses a model's own admission
+   that it can't safely interpret something — so the outcome itself was
+   not wrong to reject. What was misleading is that the exact same HR
+   message ("Tələb hazırda dəstəklənmir") was shown for this
+   model-quality-dependent self-decline as for a genuine, deterministic,
+   model-independent product-policy gap (e.g. salary/location filters are
+   really not supported, on any model). Added
+   `PlannerReasonCode.MODEL_DECLINED_INTERPRETATION`, an internal-only
+   marker `convert_planner_draft` attaches whenever
+   `draft.unsupported_reason_codes` is what triggered the rejection (never
+   for the module's own deterministic precheck/postcheck reasons —
+   regression-tested both ways). `meyar.ui.presentation.planner_outcome_view`
+   shows a distinct, honest message for that case ("AI tələbi tam anlaya
+   bilmədi" — explicitly notes this may be a limitation of the configured
+   local model, not of MEYAR) while every genuine deterministic
+   UNSUPPORTED_SEMANTICS rejection keeps the original message. Raw reason
+   codes are still never rendered (existing + new tests). Fail-closed
+   validation is unchanged — this is purely a presentation-layer
+   distinction, added generically (any draft self-decline, not this one
+   sentence) so it also improves every other case where a small local
+   model misjudges an ordinary request, not just this reported one. Real
+   semantic-model quality remains deferred to Target-Mac/capable-machine
+   acceptance, unchanged from D-023/D-024.
+
+**Why:** Both issues trace back to the same theme: MEYAR must not let an
+HR user believe "the product can't do this" when the real cause is either
+(a) a confusing form that silently produced a malformed criterion, or (b)
+a small local model's own misjudgment on this specific laptop — neither
+is a genuine, permanent product limitation.
+
+**Reversibility:** Fully reversible. No migration; no schema change. The
+form-field change only affects new vacancy creation going forward —
+existing criteria versions (created via the old form or the API) are
+untouched and continue to score exactly as before, since scoring reads
+only `CriterionIn.value`/`min_years`, never how a criterion was
+constructed. The `MODEL_DECLINED_INTERPRETATION` marker is additive and
+presentation-only; removing the `planner_outcome_view` branch instantly
+reverts to the single shared UNSUPPORTED_SEMANTICS message.

@@ -312,6 +312,33 @@ def test_known_unsupported_semantics_fail_closed(text: str, reason: PlannerReaso
         precheck_natural_language_request(text)
     assert exc_info.value.outcome == PlannerOutcome.UNSUPPORTED_SEMANTICS
     assert reason in exc_info.value.reason_codes
+    # A deterministic product-policy rejection (this precheck runs before
+    # any model call) must never carry the model-self-decline marker — see
+    # docs/DECISIONS.md D-025.
+    assert PlannerReasonCode.MODEL_DECLINED_INTERPRETATION not in exc_info.value.reason_codes
+
+
+def test_model_self_declined_interpretation_is_tagged_distinctly() -> None:
+    """When the planner MODEL itself populates
+    ``PlannerDraft.unsupported_reason_codes`` (as opposed to this module's
+    own deterministic precheck/postcheck), ``convert_planner_draft`` must
+    tag the failure with ``MODEL_DECLINED_INTERPRETATION`` so the HR
+    presentation layer can tell 'the AI couldn't interpret this' apart
+    from 'this concept is not part of the product'. Root-caused from a live
+    owner-reported case: an ordinary Python+experience query, on the small
+    local model configured for an 8GB laptop, self-flagged as
+    LANGUAGE_PROFICIENCY_UNSUPPORTED even though the request never
+    mentioned a language — a model-quality issue, not a policy-regex bug.
+    See docs/DECISIONS.md D-025."""
+    draft = PlannerDraft(
+        required_filters=RequiredFilters(skills=["Python"], min_total_experience_years=5),
+        unsupported_reason_codes=[PlannerReasonCode.LANGUAGE_PROFICIENCY_UNSUPPORTED],
+    )
+    with pytest.raises(PlannerPolicyError) as exc_info:
+        _convert("pythonda 5 il təcrübəsi olan", draft)
+    assert exc_info.value.outcome == PlannerOutcome.UNSUPPORTED_SEMANTICS
+    assert PlannerReasonCode.MODEL_DECLINED_INTERPRETATION in exc_info.value.reason_codes
+    assert PlannerReasonCode.LANGUAGE_PROFICIENCY_UNSUPPORTED in exc_info.value.reason_codes
 
 
 @pytest.mark.parametrize(
