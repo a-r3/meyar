@@ -57,10 +57,13 @@ identity/embedding data, 2 jobs with criteria, and real evaluations computed
 by MEYAR's actual deterministic scoring engine. **No live Ollama connection
 is required** — see §9/§10 for exactly what that means.
 
-The command prints the demo tenant id and, on first run, an API key
-**shown once** — copy it now. Safe to re-run: `seed-demo` is idempotent and
-reuses the same tenant/data if it already exists (it will only mint you a
-fresh API key, since a previous run's plaintext can never be recovered).
+The command prints the demo tenant id and an API key **shown once** — copy
+it now. Safe to re-run: `seed-demo` is idempotent and reuses the same
+tenant/data if it already exists. Every run — first or repeat — always
+hands you a usable key: a repeat run **rotates** the demo credential
+(revokes any previously-active demo API key and mints exactly one fresh
+one), since a previous run's plaintext can never be recovered. There is
+never more than one active demo API key at a time.
 
 To wipe and regenerate the demo dataset from scratch:
 
@@ -95,6 +98,7 @@ Open `http://127.0.0.1:8000/ui/login` and paste the API key from step 5.
 | Search / chat home | `http://127.0.0.1:8000/ui` |
 | Candidate Library | `http://127.0.0.1:8000/ui/library` |
 | Candidate detail | linked from the Library — `http://127.0.0.1:8000/ui/candidates/{id}` |
+| CV preview (in-app readable view) | linked from candidate detail — `http://127.0.0.1:8000/ui/candidates/{id}/documents/{document_id}/preview` |
 | Jobs | `http://127.0.0.1:8000/ui/jobs` |
 | Health (liveness only) | `http://127.0.0.1:8000/api/v1/health` |
 | Swagger UI (fully offline) | `http://127.0.0.1:8000/docs` |
@@ -158,7 +162,18 @@ from a model that didn't run.
 
 ## 12. Cleanup
 
-The demo tenant is isolated and harmless to leave in place. To remove it:
+After a demo/presentation session, rotate the demo credential so the key
+that was visible on screen (or in terminal scrollback) stops working:
+
+```bash
+uv run meyar seed-demo
+```
+
+This revokes the previously-active demo API key and mints a fresh one —
+copy the new key if you'll need it again, or just leave it unused since
+the demo tenant is isolated and harmless to leave in place.
+
+To remove the demo tenant entirely:
 
 ```bash
 uv run meyar seed-demo --reset

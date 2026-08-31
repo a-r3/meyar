@@ -398,13 +398,13 @@ async def _seed_demo(reset: bool) -> None:
         print(f"Jobs created: {summary.jobs_created}")
         print(f"Evaluations created (real deterministic evaluator): {summary.evaluations_created}")
     print(f"API key prefix (safe to log/display): {summary.api_key_prefix}")
-    if summary.api_key_plaintext:
-        print(f"API key (shown once, store it now): {summary.api_key_plaintext}")
-    else:
+    if summary.already_seeded:
         print(
-            "A fresh API key was minted for this run — a previous run's plaintext "
-            "can never be recovered."
+            "Demo tenant already seeded — any previous demo API key has been "
+            "revoked and a fresh one was minted (a previous run's plaintext "
+            "can never be recovered)."
         )
+    print(f"API key (shown once, store it now): {summary.api_key_plaintext}")
 
 
 async def _extract_identity(tenant_id: str, candidate_id: str, document_id: str) -> None:

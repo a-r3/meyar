@@ -47,7 +47,7 @@ from meyar.schemas.candidate_profile import (
 )
 from meyar.schemas.criteria import CriterionIn, CriterionKind, CriterionType
 from meyar.search.planner_schemas import PlannerDraft
-from meyar.services.api_key_repo import create_api_key
+from meyar.services.api_key_repo import create_api_key, revoke_active_api_keys_for_tenant
 from meyar.services.audit_repo import record_event
 from meyar.services.candidate_document_service import ingest_candidate_document
 from meyar.services.candidate_embedding_service import embed_candidate_profile
@@ -736,7 +736,7 @@ def _demo_jobs() -> list[dict]:
 class DemoSeedSummary:
     tenant_id: uuid.UUID
     api_key_prefix: str
-    api_key_plaintext: str | None  # None when reusing an already-seeded tenant
+    api_key_plaintext: str | None  # a fresh key is always minted and shown; see seed_demo
     already_seeded: bool
     candidates_created: int
     documents_created: int
@@ -834,8 +834,12 @@ async def seed_demo(
     max_embedding_input_chars: int,
 ) -> DemoSeedSummary:
     """Idempotent: if the demo tenant already has seeded candidates, this
-    is a safe no-op that only mints a fresh API key (the previous key's
-    plaintext can never be recovered) — never a duplicate dataset. Every
+    is a safe no-op that rotates the demo login credential — every
+    currently-active API key on the (positively-identified) demo tenant is
+    revoked and exactly one fresh key is minted and returned, since a
+    previous run's plaintext can never be recovered and an operator must
+    always come away from `seed-demo` with a usable credential — never a
+    duplicate dataset. Every
     candidate/document/profile/identity/embedding/job/criteria/evaluation
     row is created through the same real service functions the rest of
     the application uses; only the LLM/embedding *inputs* are synthetic,
@@ -859,11 +863,18 @@ async def seed_demo(
 
     existing_candidate_count = await count_candidates_for_tenant(db, tenant_id=tenant.id)
     if existing_candidate_count > 0:
-        api_key, _plaintext = await create_api_key(db, tenant_id=tenant.id, env="test")
+        # Rotate: revoke every currently-active key on this positively-
+        # identified demo tenant before minting the replacement, so a
+        # re-run never leaves an unusable orphaned key behind and never
+        # accumulates indefinitely many valid demo credentials. Scoped
+        # strictly to tenant.id — never a generic cross-tenant operation.
+        await revoke_active_api_keys_for_tenant(db, tenant_id=tenant.id)
+        api_key, plaintext = await create_api_key(db, tenant_id=tenant.id, env="test")
+        await db.flush()
         return DemoSeedSummary(
             tenant_id=tenant.id,
             api_key_prefix=api_key.prefix,
-            api_key_plaintext=None,
+            api_key_plaintext=plaintext,
             already_seeded=True,
             candidates_created=0,
             documents_created=0,

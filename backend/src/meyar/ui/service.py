@@ -5,6 +5,7 @@ from pydantic import ValidationError
 from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meyar.ingestion.parser import CanonicalDocumentContent
 from meyar.models.candidate import Candidate
 from meyar.models.candidate_document import (
     PARSER_STATUS_PARSE_FAILED,
@@ -32,7 +33,11 @@ from meyar.schemas.candidate_identity import CandidateIdentityExtraction
 from meyar.schemas.candidate_profile import CandidateProfileExtraction, EvidenceRef
 from meyar.scoring.schemas import BatchRankingResult
 from meyar.search.schemas import CandidateSearchResponse
-from meyar.services.candidate_document_repo import list_candidate_documents
+from meyar.services.candidate_document_repo import (
+    get_candidate_document,
+    get_latest_canonical_document,
+    list_candidate_documents,
+)
 from meyar.services.candidate_identity_repo import get_current_identity_version
 from meyar.services.candidate_profile_repo import (
     get_current_profile_version,
@@ -42,10 +47,12 @@ from meyar.services.candidate_repo import get_candidate
 from meyar.ui.presentation import join_nonempty
 from meyar.ui.view_models import (
     CandidateDetailView,
+    CandidateDocumentPreviewView,
     CandidateDocumentView,
     CandidateLibraryItemView,
     CandidateLibraryPageView,
     CandidateSearchResultView,
+    DocumentPreviewPageView,
     EvaluationHistoryView,
     EvidenceLocationView,
     JobView,
@@ -160,6 +167,30 @@ def _facts(profile: CandidateProfileExtraction) -> dict[str, list[ProfileFactVie
             for item in profile.projects
         ],
     }
+
+
+def _current_role_and_skills(
+    profile: CandidateProfileExtraction, *, skill_limit: int = 5
+) -> tuple[str | None, list[str]]:
+    current_role = profile.employment_history[0].title if profile.employment_history else None
+    top_skills = [item.name for item in profile.skills[:skill_limit]]
+    return current_role, top_skills
+
+
+def _library_profile_summary(
+    profile_version: CandidateProfileVersion | None,
+) -> tuple[str | None, list[str], list[str]]:
+    """HR-facing summary derived from already-fetched profile_content — no
+    extra query. Returns (current_role, top_skills, languages)."""
+    if profile_version is None or profile_version.profile_content is None:
+        return None, [], []
+    try:
+        profile = CandidateProfileExtraction.model_validate(profile_version.profile_content)
+    except ValidationError:
+        return None, [], []
+    current_role, top_skills = _current_role_and_skills(profile)
+    languages = [item.language for item in profile.languages]
+    return current_role, top_skills, languages
 
 
 async def list_candidate_library(
@@ -326,11 +357,15 @@ async def list_candidate_library(
     for candidate in candidates:
         profile = profiles_by_candidate.get(candidate.id)
         full_name, _email, _phone = _identity_values(identities_by_candidate.get(candidate.id))
+        current_role, top_skills, languages = _library_profile_summary(profile)
         items.append(
             CandidateLibraryItemView(
                 candidate_id=candidate.id,
                 created_at=candidate.created_at,
                 full_name=full_name,
+                current_role=current_role,
+                top_skills=top_skills,
+                languages=languages,
                 current_profile_version=profile.version_number if profile else None,
                 current_profile_status=profile.status if profile else None,
                 parser_statuses=sorted(parser_states[candidate.id]),
@@ -371,11 +406,14 @@ async def get_candidate_detail_view(
             "projects",
         )
     }
+    current_role: str | None = None
+    professional_summary: str | None = None
     if profile_version and profile_version.profile_content is not None:
         try:
-            facts = _facts(
-                CandidateProfileExtraction.model_validate(profile_version.profile_content)
-            )
+            profile = CandidateProfileExtraction.model_validate(profile_version.profile_content)
+            facts = _facts(profile)
+            current_role, top_skills = _current_role_and_skills(profile)
+            professional_summary = join_nonempty([current_role, ", ".join(top_skills) or None])
         except ValidationError:
             pass
     documents = await list_candidate_documents(
@@ -393,12 +431,17 @@ async def get_candidate_detail_view(
         .scalars()
         .all()
     )
+    job_titles = await _job_titles_by_id(
+        db, tenant_id=tenant_id, job_ids=[evaluation.job_id for evaluation in evaluations]
+    )
     return CandidateDetailView(
         candidate_id=candidate.id,
         created_at=candidate.created_at,
         full_name=full_name,
         email=email,
         phone=phone,
+        current_role=current_role,
+        professional_summary=professional_summary,
         identity_status=identity.status if identity else None,
         identity_version=identity.version_number if identity else None,
         profile_status=profile_version.status if profile_version else None,
@@ -421,6 +464,7 @@ async def get_candidate_detail_view(
             EvaluationHistoryView(
                 evaluation_id=evaluation.id,
                 job_id=evaluation.job_id,
+                job_title=job_titles.get(evaluation.job_id),
                 job_criteria_version_id=evaluation.job_criteria_version_id,
                 evaluation_as_of_date=evaluation.evaluation_as_of_date,
                 numeric_score=evaluation.numeric_score,
@@ -431,6 +475,19 @@ async def get_candidate_detail_view(
             for evaluation in evaluations
         ],
     )
+
+
+async def _job_titles_by_id(
+    db: AsyncSession, *, tenant_id: uuid.UUID, job_ids: list[uuid.UUID]
+) -> dict[uuid.UUID, str]:
+    if not job_ids:
+        return {}
+    rows = (
+        await db.execute(
+            select(Job.id, Job.title).where(Job.tenant_id == tenant_id, Job.id.in_(job_ids))
+        )
+    ).all()
+    return {job_id: title for job_id, title in rows}
 
 
 async def build_search_result_views(
@@ -451,13 +508,8 @@ async def build_search_result_views(
         if profile_row and profile_row.profile_content is not None:
             try:
                 profile = CandidateProfileExtraction.model_validate(profile_row.profile_content)
-                current_role = (
-                    profile.employment_history[0].title
-                    if profile.employment_history
-                    else None
-                )
-                skill_names = ", ".join(item.name for item in profile.skills[:5]) or None
-                summary = join_nonempty([current_role, skill_names])
+                current_role, top_skills = _current_role_and_skills(profile)
+                summary = join_nonempty([current_role, ", ".join(top_skills) or None])
                 all_evidence = [
                     reference
                     for group in (
@@ -520,17 +572,32 @@ async def list_job_views(db: AsyncSession, *, tenant_id: uuid.UUID) -> list[JobV
             .order_by(Job.created_at.desc(), Job.id.asc())
         )
     ).all()
-    return [
-        JobView(
-            job_id=job.id,
-            title=job.title,
-            created_at=job.created_at,
-            current_criteria_version_id=criteria.id if criteria else None,
-            current_criteria_version=criteria.version_number if criteria else None,
-            criteria_count=len(criteria.criteria) if criteria else 0,
+    views: list[JobView] = []
+    for job, criteria in rows:
+        must_have_labels: list[str] = []
+        preferred_labels: list[str] = []
+        if criteria:
+            for item in criteria.criteria:
+                label = item.get("label")
+                if not label:
+                    continue
+                if item.get("type") == "MUST_HAVE":
+                    must_have_labels.append(label)
+                elif item.get("type") == "PREFERRED":
+                    preferred_labels.append(label)
+        views.append(
+            JobView(
+                job_id=job.id,
+                title=job.title,
+                created_at=job.created_at,
+                current_criteria_version_id=criteria.id if criteria else None,
+                current_criteria_version=criteria.version_number if criteria else None,
+                criteria_count=len(criteria.criteria) if criteria else 0,
+                must_have_labels=must_have_labels,
+                preferred_labels=preferred_labels,
+            )
         )
-        for job, criteria in rows
-    ]
+    return views
 
 
 async def build_ranked_candidate_views(
@@ -575,3 +642,61 @@ async def build_ranked_candidate_views(
             )
         )
     return views
+
+
+async def get_candidate_document_preview(
+    db: AsyncSession, *, tenant_id: uuid.UUID, candidate_id: uuid.UUID, document_id: uuid.UUID
+) -> CandidateDocumentPreviewView | None:
+    """The truthful in-app 'CV-yə bax' surface: safe, already-parsed text
+    (CanonicalDocument), never the original bytes and never a live-model
+    call. Returns None only when the document itself doesn't belong to
+    this tenant/candidate (caller renders 404); a document that parsed
+    successfully but has no canonical text yet renders `available=False`
+    instead of raising."""
+    document = await get_candidate_document(
+        db, tenant_id=tenant_id, candidate_id=candidate_id, document_id=document_id
+    )
+    if document is None:
+        return None
+    canonical = await get_latest_canonical_document(
+        db, tenant_id=tenant_id, candidate_document_id=document_id
+    )
+    if canonical is None:
+        return CandidateDocumentPreviewView(
+            document_id=document.id,
+            candidate_id=candidate_id,
+            mime_type=document.mime_type,
+            available=False,
+        )
+    content = CanonicalDocumentContent.model_validate(canonical.content)
+    pages = [
+        DocumentPreviewPageView(
+            page=page.page,
+            text="\n\n".join(block.text for block in page.blocks if block.text.strip()),
+        )
+        for page in content.pages
+    ]
+    return CandidateDocumentPreviewView(
+        document_id=document.id,
+        candidate_id=candidate_id,
+        mime_type=document.mime_type,
+        available=True,
+        pages=pages,
+    )
+
+
+async def get_job_title_for_criteria_version(
+    db: AsyncSession, *, tenant_id: uuid.UUID, job_criteria_version_id: uuid.UUID
+) -> str | None:
+    row = (
+        await db.execute(
+            select(Job.title)
+            .join(JobCriteriaVersion, JobCriteriaVersion.job_id == Job.id)
+            .where(
+                JobCriteriaVersion.id == job_criteria_version_id,
+                JobCriteriaVersion.tenant_id == tenant_id,
+                Job.tenant_id == tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    return row

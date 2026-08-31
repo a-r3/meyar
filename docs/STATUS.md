@@ -23,16 +23,17 @@ closed). Slice 12 PR #19 squash-merged at `93fa567` (issue #18 closed;
 **M4 — Internal Product Interface & API CLOSED**). Slice 13 PR #22
 squash-merged at `a709ce1` (`Refs #20`, issue #20 deliberately left open —
 see above). Slice 14 PR #24 squash-merged at `f6e31ff` (`Closes #23`, issue
-#23 closed; D-021) — see below. Local `main` and `origin/main` currently
-sit at `f6e31ff`.
+#23 closed; D-021). Chore PR #26 (pre-presentation readiness/local demo
+bootstrap, issue #25, D-022) squash-merged at `a539e34`. Local `main` and
+`origin/main` currently sit at `a539e34`.
 **M5 — Security, Target-Mac Validation & MVP Acceptance is OPEN**,
 containing only issue #20 (Slice 13 — Security + Official
 Definition-of-Done Acceptance) pending the Target-Mac benchmark gate.
-**M6 — Operational CV Intake & Reconciliation** has no remaining open
-issues (issue #23 closed by PR #24) but is deliberately left open pending
-explicit owner milestone-closure approval, per the governance rule against
-closing milestones without an approved roadmap decision
-(`.claude/rules/git-workflow.md`).
+**M6 — Operational CV Intake & Reconciliation is CLOSED** (owner-approved
+closure; issue #23 closed by PR #24, no remaining open issues).
+**M7 — HR UI & Presentation Readiness is OPEN** (issue #27; owner-driven
+HR UI productization pass following visual inspection of the running
+local UI — see D-023 and "In progress" below).
 
 GitHub remote established (`https://github.com/a-r3/meyar.git`, private,
 temporary development remote — see D-012, `docs/DECISIONS.md`). `main`
@@ -276,6 +277,14 @@ remains disabled.
   schema. See D-019. Slice 13 final security/DoD acceptance was not started.
 
 ## Tests
+**582/582 passing** as of the M7 HR UI productization pass (branch
+`feat/hr-ui-productization`, not yet merged): 537 prior (Slice 14 merge
+baseline, see below) + regression coverage added for D-023 — the
+control-character normalization fix (`test_search_planner_policy.py`),
+the demo-key rotation fix (`test_demo_seed.py`), the new CV-preview route
+(`test_ui_candidate_preview.py`), and the UI date-boundary/information-
+boundary changes (`test_ui_routes.py`).
+
 **537/537 passing** as of Slice 14 merge (PR #24, squash `f6e31ff`): 511 prior
 (post-Slice-13-merge baseline) + 26 Slice 14 regressions across two passes —
 `test_folder_indexer.py` (8 new: file-stability skip/later-processing,
@@ -516,19 +525,25 @@ Evaluation's persisted `candidate_profile_version_id`/
 `job_criteria_version_id` verified to equal the exact input versions.
 
 ## In progress
-No product Slice is currently in progress. Slice 14 (below) is the most
-recently merged Slice work.
+No product Slice is currently in progress. Slice 14 is the most recently
+merged Slice work.
 
 **Chore (issue #25, not a Slice):** pre-presentation readiness and local
-demo bootstrap, on `chore/pre-presentation-readiness`, pending independent
-acceptance/owner merge. `meyar seed-demo` bootstraps one isolated,
-clearly-marked synthetic demo tenant through the real service layers (see
-D-022) so the UI can be inspected locally without a live Ollama connection
-for most screens. Also fixes stale test-count/status wording, completes
-`backend/.env.example`, and narrows `.claude/hooks/guard.sh`'s env-file
-block to match the exception `.githooks/pre-commit`/
-`scripts/scan-tracked-tree.sh` already had. No search/matching/scoring
-behavior changed; no migration; no new runtime dependency.
+demo bootstrap — **MERGED as PR #26 at squash SHA `a539e34`** (see D-022).
+
+**Chore (issue #27, not a Slice, M7):** HR UI productization and
+presentation readiness, on `feat/hr-ui-productization`, pending PR/review.
+Following owner visual inspection of the running local `/ui/*` surfaces,
+reworked navigation/copy into HR language, removed the manual
+evaluation-date inputs (current date now injected explicitly at the UI
+boundary), root-caused and fixed the `REQUEST_CONTROL_CHARACTERS`
+false-positive on ordinary textarea input, decluttered candidate/vacancy/
+ranking screens (raw UUIDs and pipeline-status internals no longer shown
+on the primary HR pages), added a truthful in-app CV preview route
+alongside the original-file download, resolved job titles into evaluation
+history, and fixed the `meyar seed-demo` key-rotation gap (idempotent
+reseed now always returns a usable, single active credential). See D-023.
+No search/matching/scoring behavior changed; no migration.
 
 Slice 14 (`feat/folder-reconciliation`, **MERGED as PR #24 at squash SHA
 `f6e31ff`, closes issue #23**, associated with
@@ -609,7 +624,8 @@ due date because the official timeline has not been supplied.
 | M3 — JD Matching & Ranking | Slice 10 | CLOSED — PR #15 merged at `1c9dbbd`, issue #14 closed |
 | M4 — Internal Product Interface & API | Slices 11–12 | CLOSED — Slice 11 merged (PR #17, issue #16 closed); Slice 12 merged (PR #19 at `93fa567`, issue #18 closed) |
 | M5 — Security, Target-Mac Validation & MVP Acceptance | Slice 13 + target-Mac benchmark | OPEN — issue #20 open; PR #22 merged at `a709ce1` implementing Pass 1 (original CV, no-exfiltration, backup/restore, audit guard, multilingual evidence) with `Refs #20`; Mac Mini benchmark execution on the now owner-confirmed target hardware remains the sole open mandatory gate |
-| M6 — Operational CV Intake & Reconciliation | Slice 14 | OPEN (no remaining open issues) — Slice 14 merged (PR #24 at `f6e31ff`), issue #23 closed; milestone left open pending explicit owner closure decision |
+| M6 — Operational CV Intake & Reconciliation | Slice 14 | CLOSED — Slice 14 merged (PR #24 at `f6e31ff`), issue #23 closed; owner-approved closure |
+| M7 — HR UI & Presentation Readiness | HR UI productization (chore, issue #27) | OPEN — branch `feat/hr-ui-productization`, pending PR/review; see D-023 |
 
 ## Official requirement gap matrix
 

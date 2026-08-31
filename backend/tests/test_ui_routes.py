@@ -57,6 +57,13 @@ def _profile(*skills: str, quote: str = "Synthetic evidence") -> dict:
     }
 
 
+def _visible_text(html: str) -> str:
+    """Strips href/action/value URL-ish attribute contents so assertions
+    about 'not shown in visible content' aren't defeated by an id that
+    necessarily appears inside a link's href for navigation to work."""
+    return re.sub(r'(?:href|action)="[^"]*"', "", html)
+
+
 async def _login_and_csrf(client: AsyncClient, plaintext: str) -> str:
     response = await client.post(
         "/ui/login", data={"api_key": plaintext}, follow_redirects=False
@@ -141,7 +148,7 @@ async def test_actual_ui_chat_delegates_and_preserves_backend_order_with_escaped
     query = f"Python bilən namizədləri göstər. {payload}"
     response = await client.post(
         "/ui/search",
-        data={"query": query, "as_of_date": "2026-01-01", "csrf_token": csrf},
+        data={"query": query, "csrf_token": csrf},
     )
     assert response.status_code == 200
     assert fake.call_count == 1
@@ -175,7 +182,6 @@ async def test_executable_zero_result_is_not_presented_as_infrastructure_error(
         "/ui/search",
         data={
             "query": "Python bilən namizədləri göstər.",
-            "as_of_date": "2026-01-01",
             "csrf_token": csrf,
         },
     )
@@ -203,13 +209,13 @@ async def test_executable_zero_result_is_not_presented_as_infrastructure_error(
                     PlannerReasonCode.SKILL_SPECIFIC_EXPERIENCE_DURATION_UNSUPPORTED
                 ],
             ),
-            "Sorğunun mənası dəstəklənmir",
+            "Tələb hazırda dəstəklənmir",
             0,
         ),
         (
             "Uyğun namizəd tap.",
             PlannerDraft(),
-            "Sorğu qeyri-müəyyəndir",
+            "Tələbi daha aydın yazın",
             1,
         ),
     ],
@@ -238,7 +244,7 @@ async def test_non_executable_ui_plans_never_search(
     csrf = await _login_and_csrf(client, plaintext)
     response = await client.post(
         "/ui/search",
-        data={"query": query, "as_of_date": "2026-01-01", "csrf_token": csrf},
+        data={"query": query, "csrf_token": csrf},
     )
     assert response.status_code == 200
     assert expected in response.text
@@ -268,12 +274,11 @@ async def test_malformed_planner_output_has_no_fallback_search(
         "/ui/search",
         data={
             "query": "Python bilən namizədləri göstər.",
-            "as_of_date": "2026-01-01",
             "csrf_token": csrf,
         },
     )
     assert response.status_code == 200
-    assert "Plan yaradıla bilmədi" in response.text
+    assert "Sorğu emal edilə bilmədi" in response.text
     assert fake.call_count == 2
     assert search_calls == 0
 
@@ -296,12 +301,11 @@ async def test_local_planner_outage_is_safe_and_library_remains_independent(
         "/ui/search",
         data={
             "query": "Python bilən namizədləri göstər.",
-            "as_of_date": "2026-01-01",
             "csrf_token": csrf,
         },
     )
     assert response.status_code == 200
-    assert "Yerli AI xidməti hazırda əlçatan deyil" in response.text
+    assert "AI axtarış xidməti hazırda əlçatan deyil" in response.text
     assert "private provider detail" not in response.text
     assert (await client.get("/ui/library")).status_code == 200
     assert (await client.get(f"/ui/candidates/{candidate.id}")).status_code == 200
@@ -513,7 +517,7 @@ async def test_ranking_ui_preserves_slice10_order_not_identity_order(
     csrf = await _login_and_csrf(client, plaintext)
     response = await client.post(
         f"/ui/jobs/{criteria.id}/rank",
-        data={"evaluation_as_of_date": "2026-01-01", "csrf_token": csrf},
+        data={"csrf_token": csrf},
     )
     assert response.status_code == 200
     assert response.text.index("Zulu B") < response.text.index("Alpha A")
@@ -558,7 +562,7 @@ async def test_manual_review_fit_is_presented_as_human_review_not_decision(
     csrf = await _login_and_csrf(client, plaintext)
     response = await client.post(
         f"/ui/jobs/{criteria.id}/rank",
-        data={"evaluation_as_of_date": "2026-01-01", "csrf_token": csrf},
+        data={"csrf_token": csrf},
     )
     assert response.status_code == 200
     assert "İnsan baxışı tələb olunur" in response.text
@@ -593,7 +597,243 @@ async def test_cross_tenant_criteria_direct_post_is_safe_404(
     csrf = await _login_and_csrf(client, plaintext)
     response = await client.post(
         f"/ui/jobs/{criteria.id}/rank",
-        data={"evaluation_as_of_date": date(2026, 1, 1).isoformat(), "csrf_token": csrf},
+        data={"csrf_token": csrf},
     )
     assert response.status_code == 404
     assert "Foreign JD" not in response.text
+
+
+async def test_search_form_has_no_manual_date_input(
+    client: AsyncClient, tenant_and_key, local_ui_settings: Settings
+) -> None:
+    _tenant, _key, plaintext = tenant_and_key
+    await _login_and_csrf(client, plaintext)
+    response = await client.get("/ui")
+    assert 'type="date"' not in response.text
+    assert "as_of_date" not in response.text
+    assert "Məlumatın qiymətləndirildiyi tarix" not in response.text
+
+
+async def test_ranking_form_has_no_manual_date_input(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_key,
+    local_ui_settings: Settings,
+) -> None:
+    tenant, _key, plaintext = tenant_and_key
+    job = await create_job(db_session, tenant_id=tenant.id, title="No Date Input JD")
+    await create_criteria_version(
+        db_session,
+        tenant_id=tenant.id,
+        job_id=job.id,
+        criteria=[
+            CriterionIn(
+                id="python",
+                kind=CriterionKind.SKILL,
+                type=CriterionType.MUST_HAVE,
+                label="Python",
+                value="Python",
+            ).model_dump(mode="json")
+        ],
+        created_by_api_key_id=None,
+    )
+    await db_session.commit()
+    await _login_and_csrf(client, plaintext)
+    response = await client.get("/ui/jobs")
+    assert 'type="date"' not in response.text
+    assert "evaluation_as_of_date" not in response.text
+
+
+async def test_search_injects_current_date_and_displays_effective_date(
+    client: AsyncClient,
+    tenant_and_key,
+    local_ui_settings: Settings,
+) -> None:
+    _tenant, _key, plaintext = tenant_and_key
+    fake = FakeLLMProvider(
+        planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"]))
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake
+    csrf = await _login_and_csrf(client, plaintext)
+    response = await client.post(
+        "/ui/search",
+        data={"query": "Python bilən namizədləri göstər.", "csrf_token": csrf},
+    )
+    assert response.status_code == 200
+    assert f"Qiymətləndirmə tarixi: {date.today().isoformat()}" in response.text
+
+
+async def test_ranking_injects_current_date_and_displays_effective_date(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_key,
+    local_ui_settings: Settings,
+) -> None:
+    tenant, _key, plaintext = tenant_and_key
+    job = await create_job(db_session, tenant_id=tenant.id, title="Effective Date JD")
+    criteria = await create_criteria_version(
+        db_session,
+        tenant_id=tenant.id,
+        job_id=job.id,
+        criteria=[
+            CriterionIn(
+                id="python",
+                kind=CriterionKind.SKILL,
+                type=CriterionType.MUST_HAVE,
+                label="Python",
+                value="Python",
+            ).model_dump(mode="json")
+        ],
+        created_by_api_key_id=None,
+    )
+    await db_session.commit()
+    csrf = await _login_and_csrf(client, plaintext)
+    response = await client.post(
+        f"/ui/jobs/{criteria.id}/rank",
+        data={"csrf_token": csrf},
+    )
+    assert response.status_code == 200
+    assert f"Qiymətləndirmə tarixi: {date.today().isoformat()}" in response.text
+
+
+async def test_library_card_does_not_expose_raw_candidate_uuid(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_key,
+    local_ui_settings: Settings,
+) -> None:
+    tenant, _key, plaintext = tenant_and_key
+    candidate, profile = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=_profile("Python")
+    )
+    await _identity(
+        db_session, tenant_id=tenant.id, candidate=candidate, profile=profile, name="Synthetic"
+    )
+    await db_session.commit()
+    await _login_and_csrf(client, plaintext)
+    response = await client.get("/ui/library")
+    assert response.status_code == 200
+    assert str(candidate.id) in response.text  # still reachable via the detail link href
+    assert str(candidate.id) not in _visible_text(response.text)
+
+
+async def test_jobs_page_does_not_expose_criteria_version_uuid(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_key,
+    local_ui_settings: Settings,
+) -> None:
+    tenant, _key, plaintext = tenant_and_key
+    job = await create_job(db_session, tenant_id=tenant.id, title="Hidden UUID JD")
+    criteria = await create_criteria_version(
+        db_session,
+        tenant_id=tenant.id,
+        job_id=job.id,
+        criteria=[
+            CriterionIn(
+                id="python",
+                kind=CriterionKind.SKILL,
+                type=CriterionType.MUST_HAVE,
+                label="Python",
+                value="Python",
+            ).model_dump(mode="json")
+        ],
+        created_by_api_key_id=None,
+    )
+    await db_session.commit()
+    await _login_and_csrf(client, plaintext)
+    response = await client.get("/ui/jobs")
+    assert response.status_code == 200
+    assert str(job.id) not in response.text
+    assert str(criteria.id) not in _visible_text(response.text)
+
+
+async def test_candidate_detail_does_not_expose_version_identifiers(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_key,
+    local_ui_settings: Settings,
+) -> None:
+    tenant, _key, plaintext = tenant_and_key
+    candidate, profile = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=_profile("Python")
+    )
+    await _identity(
+        db_session, tenant_id=tenant.id, candidate=candidate, profile=profile, name="Synthetic"
+    )
+    await db_session.commit()
+    await _login_and_csrf(client, plaintext)
+    response = await client.get(f"/ui/candidates/{candidate.id}")
+    assert response.status_code == 200
+    assert "Cari identiklik" not in response.text
+    assert "Cari peşəkar profil" not in response.text
+    assert "Hazır" in response.text  # readiness badge, derived from profile_status
+
+
+async def test_evaluation_history_resolves_human_readable_job_title(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_key,
+    local_ui_settings: Settings,
+) -> None:
+    tenant, _key, plaintext = tenant_and_key
+    candidate, _profile_row = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=_profile("Python")
+    )
+    job = await create_job(db_session, tenant_id=tenant.id, title="Backend Engineer JD")
+    criteria = await create_criteria_version(
+        db_session,
+        tenant_id=tenant.id,
+        job_id=job.id,
+        criteria=[
+            CriterionIn(
+                id="python",
+                kind=CriterionKind.SKILL,
+                type=CriterionType.MUST_HAVE,
+                label="Python",
+                value="Python",
+            ).model_dump(mode="json")
+        ],
+        created_by_api_key_id=None,
+    )
+    await db_session.commit()
+    csrf = await _login_and_csrf(client, plaintext)
+    ranked = await client.post(
+        f"/ui/jobs/{criteria.id}/rank",
+        data={"csrf_token": csrf},
+    )
+    assert ranked.status_code == 200
+
+    response = await client.get(f"/ui/candidates/{candidate.id}")
+    assert response.status_code == 200
+    assert "Backend Engineer JD" in response.text
+    assert str(criteria.id) not in _visible_text(response.text)
+
+
+async def test_reason_codes_and_search_mode_not_shown_in_search_results(
+    client: AsyncClient,
+    tenant_and_key,
+    local_ui_settings: Settings,
+) -> None:
+    _tenant, _key, plaintext = tenant_and_key
+    fake = FakeLLMProvider(
+        planner_draft=PlannerDraft(
+            required_filters=RequiredFilters(skills=["Java"], min_total_experience_years=5),
+            unsupported_reason_codes=[
+                PlannerReasonCode.SKILL_SPECIFIC_EXPERIENCE_DURATION_UNSUPPORTED
+            ],
+        )
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake
+    csrf = await _login_and_csrf(client, plaintext)
+    response = await client.post(
+        "/ui/search",
+        data={
+            "query": "5 il Java təcrübəsi olan namizədləri göstər.",
+            "csrf_token": csrf,
+        },
+    )
+    assert response.status_code == 200
+    assert "SKILL_SPECIFIC_EXPERIENCE_DURATION_UNSUPPORTED" not in response.text
+    assert "Səbəb kodları" not in response.text
+    assert "Rejim" not in response.text

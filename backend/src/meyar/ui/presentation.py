@@ -6,33 +6,56 @@ from meyar.ui.view_models import PlannerOutcomeView
 PLANNER_OUTCOME_TEXT: dict[PlannerOutcome, tuple[str, str]] = {
     PlannerOutcome.EXECUTABLE: (
         "Sorğu icra edildi",
-        "Axtarış qəbul edilmiş plan və axtarış xidmətləri ilə icra olundu.",
+        "Tələbiniz uğurla başa düşüldü və axtarış aparıldı.",
     ),
     PlannerOutcome.PROHIBITED_REQUEST: (
         "Sorğu qəbul edilmədi",
-        "Sorğuda istifadəsi qadağan edilmiş meyar aşkarlandı. Axtarış aparılmadı.",
+        "Tələbdə istifadəsinə icazə verilməyən meyar aşkarlandı. Axtarış aparılmadı.",
     ),
     PlannerOutcome.UNSUPPORTED_SEMANTICS: (
-        "Sorğunun mənası dəstəklənmir",
-        "Bu tələb hazırkı axtarış imkanları ilə mənası zəiflədilmədən icra edilə bilmir.",
+        "Tələb hazırda dəstəklənmir",
+        "Bu tələbi mənasını zəiflətmədən icra etmək mümkün olmadı. Tələbi sadələşdirib "
+        "yenidən cəhd edin.",
     ),
     PlannerOutcome.AMBIGUOUS_REQUEST: (
-        "Sorğu qeyri-müəyyəndir",
-        "Tələbi daha dəqiq yazın. Sistem məhdudiyyətləri özü təxmin etmədi.",
+        "Tələbi daha aydın yazın",
+        "Axtarış meyarları müəyyən edilə bilmədi. Nə axtardığınızı daha konkret təsvir edin.",
     ),
     PlannerOutcome.MALFORMED_MODEL_OUTPUT: (
-        "Plan yaradıla bilmədi",
-        "Yerli AI cavabı etibarlı plan sxeminə uyğun olmadı. Axtarış aparılmadı.",
+        "Sorğu emal edilə bilmədi",
+        "AI xidmətinin cavabını təhlükəsiz axtarış planına çevirmək mümkün olmadı. "
+        "Tələbi daha konkret ifadə edib yenidən cəhd edin.",
     ),
     PlannerOutcome.PLANNER_PROVIDER_FAILURE: (
-        "Yerli AI xidməti əlçatan deyil",
-        "Yerli AI xidməti hazırda əlçatan deyil. Daha sonra yenidən cəhd edin.",
+        "AI xidməti əlçatan deyil",
+        "AI axtarış xidməti hazırda əlçatan deyil. Bir qədər sonra yenidən cəhd edin.",
     ),
     PlannerOutcome.VALIDATION_FAILURE: (
-        "Plan yoxlamadan keçmədi",
-        "Yaradılmış plan təhlükəsiz icra tələblərinə uyğun olmadı. Axtarış aparılmadı.",
+        "Sorğu təhlükəsiz icra edilə bilmədi",
+        "Sorğunu təhlükəsiz axtarış planına çevirmək mümkün olmadı. Tələbi daha konkret "
+        "ifadə edib yenidən cəhd edin.",
     ),
 }
+
+READINESS_LABELS: dict[str | None, str] = {
+    "COMPLETED": "Hazır",
+    "MANUAL_REVIEW_REQUIRED": "Diqqət tələb edir",
+    "FAILED": "Diqqət tələb edir",
+    None: "Emal olunur",
+}
+
+
+def readiness_label(profile_status: str | None) -> str:
+    """Coarse, HR-facing readiness for a candidate's current profile —
+    collapses the underlying pipeline status into the three states the
+    owner asked the candidate card/detail to communicate."""
+    return READINESS_LABELS.get(profile_status, "Emal olunur")
+
+
+def readiness_state(profile_status: str | None) -> str:
+    """The data-state value used to color the readiness badge — reuses
+    the existing status-badge CSS instead of adding new rules."""
+    return profile_status or "PENDING"
 
 FIT_BAND_LABELS = {
     "STRONG_MATCH": "Güclü uyğunluq",

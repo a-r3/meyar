@@ -1405,3 +1405,103 @@ removed at any time with `meyar seed-demo --reset` and affects nothing
 else. The guard-hook change only narrows what was already blocked for one
 specific, non-secret, already-tracked filename pattern — every other
 `.env`-shaped path remains blocked exactly as before.
+
+## D-023 — HR UI productization and presentation readiness (M7)
+
+**Date:** 2026-08-31
+**Decision:** Following owner visual inspection of the running local UI
+(issue #27, milestone M7), the primary `/ui/*` surfaces were reworked to
+speak HR/product language rather than database/developer language. Backend
+architecture, deterministic scoring, and the API/CLI contracts are
+untouched — this is a UI-layer and two narrowly-scoped bug fixes only.
+
+1. **Evaluation date is no longer a manual UI input.** The `as_of_date`
+   field on `/ui/search` and `evaluation_as_of_date` on `/ui/jobs/*/rank`
+   are removed from the HTML forms. `meyar.ui.router` now computes
+   `date.today()` once, at the request boundary, in the `search` and
+   `rank_job` handlers, and threads it explicitly into the same
+   `plan_and_search_candidates`/`rank_candidates_for_job` calls as before
+   — the deterministic services still receive an explicit date argument,
+   never `datetime.today()` reached internally, and the effective date is
+   still shown on the results page. The `/api/v1/*` and CLI contracts,
+   which need an explicit, possibly-backdated date for reproducible
+   evaluation, are entirely unchanged.
+2. **Root-caused the owner-reported `Plan yoxlamadan keçmədi /
+   REQUEST_CONTROL_CHARACTERS` failure on an ordinary query.** Reproduced
+   with `"pythonda 5 il tecrubesi olan\n".isprintable()` → `False`: Python's
+   `str.isprintable()` treats `\t`/`\n`/`\r`/`\v`/`\f` as non-printable
+   control characters, and a `<textarea>` normalizes embedded line breaks
+   to CRLF on submission — so a completely ordinary query (the owner
+   pressing Enter while composing, or pasting text with a trailing
+   newline) tripped the same guard meant to catch actual control-character
+   injection. Fixed in `meyar.search.planner_policy
+   .precheck_natural_language_request` by folding exactly those five
+   benign whitespace control characters to a space before the
+   `isprintable()` check — every other non-printable character (NUL, ANSI
+   escapes, RTL overrides, etc.) is still rejected exactly as before; nothing
+   about the injection guard was weakened. This function is the single
+   shared precheck for the UI, API, and CLI, so the fix applies everywhere
+   without new call-site logic. Regression tests cover both the benign
+   whitespace cases and that genuine control characters still fail closed
+   (`backend/tests/test_search_planner_policy.py`). Reproduced live against
+   a running local Ollama after the fix: the same query now proceeds to a
+   real (friendly, truthful) plan-validation outcome instead of surfacing
+   a raw reason code.
+3. **`meyar seed-demo` key-rotation fix (owner-reported operational gap,
+   §20 of the M7 task brief).** The idempotent reseed path previously
+   minted a brand-new API key on every re-run but discarded its plaintext
+   (`api_key_plaintext=None`), leaving the operator with no usable
+   credential and an ever-growing set of orphaned, never-shown keys.
+   `meyar.services.api_key_repo.revoke_active_api_keys_for_tenant` now
+   revokes every currently-active key for a tenant; `seed_demo`'s
+   idempotent branch calls it (scoped to the positively-identified demo
+   tenant only, via the existing `_find_demo_tenant` marker check) before
+   minting and returning the new key's plaintext. Net effect: every
+   `seed-demo` run — first or repeat — always ends with exactly one active,
+   usable demo credential, never key sprawl. Not exposed as a generic
+   cross-tenant rotation capability anywhere; the repo function requires an
+   explicit `tenant_id` and is only ever called from this demo-scoped path.
+4. **HR-facing information boundary.** Raw UUIDs (candidate, document,
+   job-criteria-version), planner reason codes, and pipeline internals
+   (parser name/status, folder-indexer status) are removed from the
+   primary HR screens — never from the API/OpenAPI/logs. Candidate
+   library/detail collapsed the separate parser/profile/folder-index
+   status axes into one HR-relevant readiness signal (Hazır / Diqqət
+   tələb edir / Emal olunur), derived from the existing `profile_status`
+   field (`meyar.ui.presentation.readiness_label`) — no new column, no
+   invented data. The parser/folder-index filters are dropped from the
+   `/ui/library` form (the repository function `list_candidate_library`
+   still accepts them; nothing was removed from the backend). Document
+   metadata (MIME, bytes, parser name/status, `parse_error_code`) moved
+   into a collapsed "Texniki məlumat" disclosure on the candidate detail
+   page rather than being removed, since an operator can still need it.
+5. **Truthful two-level CV access.** The previous single "Aç" link opened
+   PDFs inline but silently downloaded DOCX with no explanation. Added a
+   new authenticated, tenant-scoped route,
+   `GET /ui/candidates/{candidate_id}/documents/{document_id}/preview`,
+   that renders the existing `CanonicalDocument` (already-parsed, safe
+   text — the same data source Slice 4 evidence citations use) as an
+   in-app "CV-yə bax" view; it never touches the original bytes and never
+   calls a model. The original-bytes route is kept unchanged and
+   relabeled "Originalı yüklə" — still inline for PDF, still an attachment
+   for DOCX, but now truthfully described as a download either way.
+6. **Evaluation history resolves job titles.** `EvaluationHistoryView`
+   gained `job_title`, resolved via a small batched `Job.id -> Job.title`
+   lookup in `meyar.ui.service`, replacing the raw
+   `job_criteria_version_id` column on the candidate detail page. The
+   ranking-results page resolves and shows the job title the same way
+   instead of the raw criteria-version id in the header.
+
+**Why:** MEYAR is an internal HR product; the owner's inspection found the
+running UI reading as an engineering console (raw ids, pipeline status
+enums, a manual date field, a misleading download link) rather than an HR
+tool, plus the two genuine operational bugs above. None of this touches
+scoring, matching, tenant isolation, or the LLM/embedding boundary.
+
+**Reversibility:** Fully reversible. No migration; no schema change. The
+date-injection change is UI-layer only — API/CLI callers pass their own
+explicit date exactly as before. The control-character fix only widens
+what the guard treats as benign formatting; reverting the five-character
+translate table restores the previous (overly strict) behavior instantly.
+The demo-key rotation only affects the already demo-scoped, chore-level
+`seed-demo` command.

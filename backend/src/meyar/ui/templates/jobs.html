@@ -1,9 +1,24 @@
 {% extends "base.html" %}
-{% block title %}Vakansiya uyğunluğu — MEYAR{% endblock %}
+{% block title %}Vakansiyalar — MEYAR{% endblock %}
 {% block content %}
-<div class="page-heading"><div><p class="eyebrow">Vakansiya/JD uyğunluğu</p><h1>Mövcud vakansiyalar</h1><p class="lede">Reytinq cari, dəqiq meyar-versiyası UUID-si ilə başladılır.</p></div></div>
+<div class="page-heading"><div><p class="eyebrow">Vakansiyalar</p><h1>Vakansiyalar</h1><p class="lede">Cari meyarlarla namizədləri deterministik şəkildə sıralayın.</p></div></div>
 {% if not jobs %}<div class="empty-state"><h2>Vakansiya yoxdur</h2><p>Vakansiyalar mövcud API/CLI axını ilə yaradılır; bu UI yalnız oxuyur və reytinqi işə salır.</p></div>{% endif %}
 <div class="card-grid">
-  {% for job in jobs %}<article class="candidate-card"><h2>{{ job.title }}</h2><p class="mono">{{ job.job_id }}</p>{% if job.current_criteria_version_id %}<p>Cari meyar versiyası: v{{ job.current_criteria_version }}</p><p class="mono">{{ job.current_criteria_version_id }}</p><p>{{ job.criteria_count }} meyar</p><form method="post" action="/ui/jobs/{{ job.current_criteria_version_id }}/rank" class="stack-form"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><label for="date-{{ job.job_id }}">Qiymətləndirmə tarixi</label><input id="date-{{ job.job_id }}" name="evaluation_as_of_date" type="date" required><button class="button" type="submit">Namizədləri sırala</button></form>{% else %}<p class="alert alert-warning">Cari meyar versiyası yoxdur.</p>{% endif %}</article>{% endfor %}
+  {% for job in jobs %}
+  <article class="candidate-card">
+    <h2>{{ job.title }}</h2>
+    {% if job.current_criteria_version_id %}
+    <p class="meta">{{ job.criteria_count }} meyar</p>
+    {% if job.must_have_labels %}<p><strong>Mütləq:</strong> {{ job.must_have_labels|join(", ") }}</p>{% endif %}
+    {% if job.preferred_labels %}<p><strong>Üstünlük:</strong> {{ job.preferred_labels|join(", ") }}</p>{% endif %}
+    <form method="post" action="/ui/jobs/{{ job.current_criteria_version_id }}/rank" class="stack-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button class="button" type="submit">Namizədləri sırala</button>
+    </form>
+    {% else %}
+    <p class="alert alert-warning">Cari meyar versiyası yoxdur.</p>
+    {% endif %}
+  </article>
+  {% endfor %}
 </div>
 {% endblock %}

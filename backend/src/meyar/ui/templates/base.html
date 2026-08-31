@@ -11,9 +11,9 @@
     <a class="brand" href="/ui">MEYAR</a>
     {% if authenticated %}
     <nav aria-label="Əsas naviqasiya">
-      <a href="/ui">Axtarış</a>
-      <a href="/ui/library">CV kitabxanası</a>
-      <a href="/ui/jobs">Vakansiya uyğunluğu</a>
+      <a href="/ui">Namizəd axtarışı</a>
+      <a href="/ui/library">Namizədlər</a>
+      <a href="/ui/jobs">Vakansiyalar</a>
     </nav>
     <form method="post" action="/ui/logout" class="logout-form">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">

@@ -21,6 +21,9 @@ class CandidateLibraryItemView(BaseModel):
     candidate_id: uuid.UUID
     created_at: datetime
     full_name: str | None
+    current_role: str | None = None
+    top_skills: list[str] = Field(default_factory=list)
+    languages: list[str] = Field(default_factory=list)
     current_profile_version: int | None
     current_profile_status: str | None
     parser_statuses: list[str]
@@ -50,6 +53,7 @@ class CandidateDocumentView(BaseModel):
 class EvaluationHistoryView(BaseModel):
     evaluation_id: uuid.UUID
     job_id: uuid.UUID
+    job_title: str | None
     job_criteria_version_id: uuid.UUID
     evaluation_as_of_date: date | None
     numeric_score: Decimal | None
@@ -64,6 +68,8 @@ class CandidateDetailView(BaseModel):
     full_name: str | None
     email: str | None
     phone: str | None
+    current_role: str | None = None
+    professional_summary: str | None = None
     identity_status: str | None
     identity_version: int | None
     profile_status: str | None
@@ -110,6 +116,21 @@ class JobView(BaseModel):
     current_criteria_version_id: uuid.UUID | None
     current_criteria_version: int | None
     criteria_count: int
+    must_have_labels: list[str] = Field(default_factory=list)
+    preferred_labels: list[str] = Field(default_factory=list)
+
+
+class DocumentPreviewPageView(BaseModel):
+    page: int
+    text: str
+
+
+class CandidateDocumentPreviewView(BaseModel):
+    document_id: uuid.UUID
+    candidate_id: uuid.UUID
+    mime_type: str
+    available: bool
+    pages: list[DocumentPreviewPageView] = Field(default_factory=list)
 
 
 class ScoreContributionView(BaseModel):

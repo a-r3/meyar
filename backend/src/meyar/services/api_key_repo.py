@@ -65,3 +65,18 @@ async def touch_last_used(db: AsyncSession, api_key_id: uuid.UUID) -> None:
     await db.execute(
         update(ApiKey).where(ApiKey.id == api_key_id).values(last_used_at=datetime.now(UTC))
     )
+
+
+async def revoke_active_api_keys_for_tenant(db: AsyncSession, *, tenant_id: uuid.UUID) -> int:
+    """Revoke every currently-active (non-revoked) API key for tenant_id.
+    Returns the count revoked. Callers are responsible for only ever
+    passing a positively-identified, trusted tenant_id — this performs
+    no tenant verification itself and is not exposed through any route."""
+    now = datetime.now(UTC)
+    result = await db.execute(
+        update(ApiKey)
+        .where(ApiKey.tenant_id == tenant_id, ApiKey.revoked_at.is_(None))
+        .values(revoked_at=now)
+        .returning(ApiKey.id)
+    )
+    return len(result.all())

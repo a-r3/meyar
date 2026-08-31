@@ -37,6 +37,17 @@ PLANNER_POLICY_VERSION = "meyar-search-planner-v1"
 DEFAULT_NL_SEARCH_LIMIT = 20
 MAX_NATURAL_LANGUAGE_REQUEST_LENGTH = 4000
 
+# Browsers normalize <textarea> line breaks to CRLF, and a user composing a
+# multi-line request routinely produces \t/\n/\r/\v/\f — these are ordinary
+# formatting, not a control-character attack. Only these five benign
+# whitespace controls are folded to a space before the printable-text safety
+# check below; every other non-printable character (ANSI escapes, NUL, RTL
+# overrides, zero-width characters, etc.) still fails the guard exactly as
+# before. See docs/DECISIONS.md D-023.
+_BENIGN_WHITESPACE_CONTROL_CHARS = str.maketrans(
+    {"\t": " ", "\n": " ", "\r": " ", "\v": " ", "\f": " "}
+)
+
 _WORD = r"A-Za-z0-9_+#.ƏəĞğİıÖöÜüÇçŞşА-Яа-яЁё"
 _BOUNDARY_WORD = r"A-Za-z0-9_ƏəĞğİıÖöÜüÇçŞşА-Яа-яЁё"
 _REQUIRED_MARKERS = (
@@ -240,7 +251,7 @@ def precheck_natural_language_request(text: str) -> None:
         raise PlannerPolicyError(
             PlannerOutcome.VALIDATION_FAILURE, PlannerReasonCode.REQUEST_TOO_LONG
         )
-    if not text.isprintable():
+    if not text.translate(_BENIGN_WHITESPACE_CONTROL_CHARS).isprintable():
         raise PlannerPolicyError(
             PlannerOutcome.VALIDATION_FAILURE,
             PlannerReasonCode.REQUEST_CONTROL_CHARACTERS,

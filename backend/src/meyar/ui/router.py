@@ -43,7 +43,13 @@ from meyar.ui.auth import (
     require_ui_scopes,
     verify_csrf,
 )
-from meyar.ui.presentation import CRITERION_STATUS_LABELS, FIT_BAND_LABELS, STATE_LABELS
+from meyar.ui.presentation import (
+    CRITERION_STATUS_LABELS,
+    FIT_BAND_LABELS,
+    STATE_LABELS,
+    readiness_label,
+    readiness_state,
+)
 from meyar.ui.service import (
     ALLOWED_FOLDER_STATUSES,
     ALLOWED_PARSER_STATUSES,
@@ -52,6 +58,8 @@ from meyar.ui.service import (
     build_ranked_candidate_views,
     build_search_result_views,
     get_candidate_detail_view,
+    get_candidate_document_preview,
+    get_job_title_for_criteria_version,
     list_candidate_library,
     list_job_views,
 )
@@ -74,6 +82,8 @@ templates.env.globals.update(
     state_label=lambda value: STATE_LABELS.get(value, value),
     fit_label=lambda value: FIT_BAND_LABELS.get(value, value),
     criterion_label=lambda value: CRITERION_STATUS_LABELS.get(value, value),
+    readiness_label=readiness_label,
+    readiness_state=readiness_state,
 )
 
 _CSP = (
@@ -191,7 +201,6 @@ async def home(
 async def search(
     request: Request,
     query: str = Form(..., min_length=1, max_length=4000),
-    as_of_date: date = Form(...),
     csrf_token: str = Form(...),
     ctx: UIContext = Depends(require_ui_scopes("candidates:read")),
     db: AsyncSession = Depends(get_db),
@@ -200,6 +209,11 @@ async def search(
     embedding_config: EmbeddingSearchConfig = Depends(get_embedding_search_config),
 ) -> HTMLResponse:
     verify_csrf(ctx.csrf_token, csrf_token)
+    # HR users never choose an evaluation date — the current date is
+    # injected here, once, at the UI boundary, and passed explicitly
+    # through the same deterministic API/CLI contract below. See
+    # docs/DECISIONS.md D-023.
+    as_of_date = date.today()
     try:
         planned = await plan_and_search_candidates(
             db,
@@ -224,7 +238,7 @@ async def search(
         outcome = PlannerOutcomeView(
             outcome="INFRASTRUCTURE_FAILURE",
             title="Axtarış xidməti əlçatan deyil",
-            message="Axtarış və ya verilənlər bazası xidməti hazırda əlçatan deyil.",
+            message="Axtarış xidməti hazırda əlçatan deyil. Bir qədər sonra yenidən cəhd edin.",
             executable=False,
             reason_codes=[],
             infrastructure_error=True,
@@ -356,6 +370,37 @@ async def candidate_document_original(
     )
 
 
+@router.get(
+    "/candidates/{candidate_id}/documents/{document_id}/preview",
+    response_class=HTMLResponse,
+)
+async def candidate_document_preview(
+    request: Request,
+    candidate_id: uuid.UUID,
+    document_id: uuid.UUID,
+    ctx: UIContext = Depends(require_ui_scopes("candidates:read")),
+    db: AsyncSession = Depends(get_db),
+) -> HTMLResponse:
+    """The truthful 'CV-yə bax' in-app view: already-parsed, safe text
+    (never the original bytes, never a live-model call). Same tenant
+    authorization as the original-document route."""
+    preview = await get_candidate_document_preview(
+        db, tenant_id=ctx.tenant_id, candidate_id=candidate_id, document_id=document_id
+    )
+    if preview is None:
+        return _render(
+            request,
+            "error.html",
+            _context(ctx, title="Tapılmadı", message="Sənəd tapılmadı."),
+            status_code=status.HTTP_404_NOT_FOUND,
+        )
+    return _render(
+        request,
+        "candidate_document_preview.html",
+        _context(ctx, preview=preview),
+    )
+
+
 @router.get("/jobs", response_class=HTMLResponse)
 async def jobs(
     request: Request,
@@ -373,7 +418,6 @@ async def jobs(
 async def rank_job(
     request: Request,
     job_criteria_version_id: uuid.UUID,
-    evaluation_as_of_date: date = Form(...),
     csrf_token: str = Form(...),
     ctx: UIContext = Depends(
         require_ui_scopes("jobs:read", "candidates:read", "evaluations:write")
@@ -381,6 +425,10 @@ async def rank_job(
     db: AsyncSession = Depends(get_db),
 ) -> HTMLResponse:
     verify_csrf(ctx.csrf_token, csrf_token)
+    # Same UI-boundary rule as /search — no manual date input; today's
+    # date is injected here and threaded explicitly into the deterministic
+    # ranking service. See docs/DECISIONS.md D-023.
+    evaluation_as_of_date = date.today()
     try:
         ranking = await rank_candidates_for_job(
             db,
@@ -421,10 +469,13 @@ async def rank_job(
             ),
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
+    job_title = await get_job_title_for_criteria_version(
+        db, tenant_id=ctx.tenant_id, job_criteria_version_id=job_criteria_version_id
+    )
     return _render(
         request,
         "ranking_results.html",
-        _context(ctx, ranking=ranking, results=results),
+        _context(ctx, ranking=ranking, results=results, job_title=job_title),
     )
 
 

@@ -255,6 +255,46 @@ def test_known_unsupported_semantics_fail_closed(text: str, reason: PlannerReaso
     assert reason in exc_info.value.reason_codes
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "pythonda 5 il tecrubesi olan\n",  # <textarea> trailing Enter
+        "pythonda 5 il tecrubesi olan\r\n",  # browser CRLF normalization
+        "pythonda 5 il\ntecrubesi olan",  # internal newline
+        "pythonda 5 il\ttecrubesi olan",  # pasted tab
+        "\n\npythonda 5 il tecrubesi olan\n",  # leading + trailing
+    ],
+)
+def test_benign_textarea_whitespace_does_not_trigger_control_character_guard(
+    text: str,
+) -> None:
+    """Regression for the owner-reported 'Plan yoxlamadan keçmədi /
+    REQUEST_CONTROL_CHARACTERS' failure on an ordinary query: a <textarea>
+    normalizes embedded line breaks to CRLF, and str.isprintable() treats
+    \\t/\\n/\\r as non-printable control characters. This must not reject
+    an otherwise-safe request."""
+    precheck_natural_language_request(text)  # must not raise
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "pythonda 5 il\x00tecrubesi olan",  # NUL byte
+        "pythonda 5 il\x1btecrubesi olan",  # ANSI escape
+        "pythonda 5 il\x07tecrubesi olan",  # bell
+        "pythonda 5 il\x08tecrubesi olan",  # backspace
+    ],
+)
+def test_genuine_control_characters_still_rejected(text: str) -> None:
+    """The whitespace-normalization fix must not weaken the guard against
+    actual control-character injection — only \\t/\\n/\\r/\\v/\\f are
+    treated as benign formatting."""
+    with pytest.raises(PlannerPolicyError) as exc_info:
+        precheck_natural_language_request(text)
+    assert exc_info.value.outcome == PlannerOutcome.VALIDATION_FAILURE
+    assert PlannerReasonCode.REQUEST_CONTROL_CHARACTERS in exc_info.value.reason_codes
+
+
 def test_no_invented_numeric_experience() -> None:
     with pytest.raises(PlannerPolicyError) as exc_info:
         _convert(

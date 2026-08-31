@@ -13,9 +13,10 @@
 <section class="alert outcome-alert" data-outcome="{{ outcome.outcome }}" role="status">
   <h2>{{ outcome.title }}</h2>
   <p>{{ outcome.message }}</p>
-  {% if outcome.mode %}<p class="meta">Rejim: {{ outcome.mode }}</p>{% endif %}
-  {% if outcome.reason_codes %}<p class="meta">Səbəb kodları: {{ outcome.reason_codes|join(", ") }}</p>{% endif %}
 </section>
+{% if outcome.executable %}
+<p class="result-count">{{ results|length }} namizəd tapıldı</p>
+{% endif %}
 {% if outcome.executable and not results %}
 <div class="empty-state"><h2>Nəticə tapılmadı</h2><p>Sorğu etibarlı şəkildə icra olundu, lakin uyğun namizəd yoxdur.</p></div>
 {% endif %}
@@ -25,13 +26,12 @@
     <div class="rank">{{ item.rank }}</div>
     <div class="result-body">
       <div class="card-heading">
-        <div><h2>{{ item.full_name or "Ad məlumatı yoxdur" }}</h2><p class="mono">{{ item.candidate_id }}</p></div>
-        <span class="score-pill">Uyğunluq {{ "%.3f"|format(item.relevance_score) }}</span>
+        <div><h2>{{ item.full_name or "Ad məlumatı yoxdur" }}</h2></div>
+        <span class="score-pill">Uyğunluq {{ "%.0f"|format(item.relevance_score * 100) }}%</span>
       </div>
       {% if item.professional_summary %}<p>{{ item.professional_summary }}</p>{% endif %}
       {% if item.required_matches %}<p><strong>Məcburi uyğunluqlar:</strong> {{ item.required_matches|join(", ") }}</p>{% endif %}
       {% if item.preferred_matches %}<p><strong>Üstünlük uyğunluqları:</strong> {{ item.preferred_matches|join(", ") }}</p>{% endif %}
-      <p class="meta">Profil versiyası: {{ item.profile_version_id }}</p>
       {% if item.evidence %}
       <details><summary>Sübut yerləri</summary><ul class="evidence-list">
         {% for evidence in item.evidence %}<li>Səhifə {{ evidence.page }}, blok {{ evidence.block_index }}{% if evidence.snippet %}: “{{ evidence.snippet }}”{% endif %}</li>{% endfor %}

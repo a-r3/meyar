@@ -3,22 +3,19 @@
 {% block content %}
 <section class="hero">
   <p class="eyebrow">Namizəd axtarışı</p>
-  <h1>Peşəkar tələbi Azərbaycan dilində yazın</h1>
-  <p class="lede">MEYAR sorğunu təhlükəsiz plana çevirir; qəbul edilmiş axtarış xidməti nəticələrin sırasını müəyyən edir.</p>
+  <h1>Namizədə dair tələbinizi yazın</h1>
+  <p class="lede">Nə axtardığınızı öz sözlərinizlə təsvir edin — MEYAR uyğun namizədləri tapıb sıralayacaq.</p>
 </section>
 <section class="panel search-panel">
   <form method="post" action="/ui/search" class="stack-form">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <label for="query">Axtarış sorğusu</label>
-    <textarea id="query" name="query" rows="5" maxlength="4000" required placeholder="Məsələn: Python və SQL mütləq, bank təcrübəsi üstünlükdür"></textarea>
-    <label for="as_of_date">Məlumatın qiymətləndirildiyi tarix</label>
-    <input id="as_of_date" name="as_of_date" type="date" required>
-    <p class="field-help">Tarix açıq şəkildə tələb olunur; sistem bugünkü tarixi özü seçmir.</p>
+    <label for="query">Namizəd tələbi</label>
+    <textarea id="query" name="query" rows="5" maxlength="4000" required placeholder="Məsələn: Python və SQL üzrə ən azı 5 il təcrübəsi olan, bank təcrübəsi üstünlük sayılan namizədlər"></textarea>
     <button class="button" type="submit">Axtar</button>
   </form>
 </section>
 <section class="quick-links" aria-label="Əsas bölmələr">
-  <a class="feature-card" href="/ui/library"><strong>CV kitabxanası</strong><span>Namizədlərə baxın və profil detalları açın.</span></a>
-  <a class="feature-card" href="/ui/jobs"><strong>Vakansiya/JD uyğunluğu</strong><span>Mövcud meyar versiyası ilə deterministik reytinq yaradın.</span></a>
+  <a class="feature-card" href="/ui/library"><strong>Namizədlər</strong><span>Namizədlərə baxın və profil detalları açın.</span></a>
+  <a class="feature-card" href="/ui/jobs"><strong>Vakansiyalar</strong><span>Vakansiya üzrə namizədləri sıralayın.</span></a>
 </section>
 {% endblock %}
