@@ -33,7 +33,7 @@ Definition-of-Done Acceptance) pending the Target-Mac benchmark gate.
 closure; issue #23 closed by PR #24, no remaining open issues).
 **M7 — HR UI & Presentation Readiness is OPEN** (issue #27; owner-driven
 HR UI productization pass following visual inspection of the running
-local UI — see D-023 through D-027, and "In progress" below). PR
+local UI — see D-023 through D-028, and "In progress" below). PR
 #29 (same branch) received a second owner visual inspection that found
 seven further blockers (NL search still generically failing on ordinary
 Azerbaijani phrasing, no vacancy-creation UI, raw criterion ids on the
@@ -59,8 +59,17 @@ honesty issue — fixed at the shared precheck (so no consumer can produce
 that combination without an explicit HR confirmation via a new
 clarification screen); also fixed a previously-unimplemented vacancy
 kind-aware validation gap and reported (not yet fixed) a Job duplicate-
-title/no-lifecycle gap; see D-027. PR #29 still **NOT merged** — awaiting
-owner re-inspection.
+title/no-lifecycle gap; see D-027. That reported gap is now closed: Job
+gained a persisted ACTIVE/ARCHIVED lifecycle (migration `db7e4523f491`,
+existing rows deterministically backfilled ACTIVE, no hard delete
+anywhere), a default-active `/ui/jobs` listing with an explicit archive
+view and a CSRF/tenant-scoped "Arxivlə" action, and canonical-signature
+duplicate-creation protection (titles remain non-unique; an identical
+normalized title+criteria combination is rejected for a second ACTIVE
+job, enforced by a real partial-unique-index DB constraint against
+concurrent double-submits, not just an application-level check) — scoped
+to the `/ui/jobs` form path only, `POST /api/v1/jobs` unchanged; see
+D-028. PR #29 still **NOT merged** — awaiting owner re-inspection.
 
 GitHub remote established (`https://github.com/a-r3/meyar.git`, private,
 temporary development remote — see D-012, `docs/DECISIONS.md`). `main`
@@ -304,6 +313,19 @@ remains disabled.
   schema. See D-019. Slice 13 final security/DoD acceptance was not started.
 
 ## Tests
+**673/673 passing** as of the Job lifecycle pass (branch
+`feat/hr-ui-productization`, still not merged): 659 prior (D-027 pass,
+see below) + 14 new for D-028 — the migration backfill-to-ACTIVE test
+(fresh throwaway DB, pre-migration schema, `test_ui_migration_packaging.py`),
+and `test_ui_job_lifecycle.py`'s full coverage: default-active/archive
+listing, archive route auth/CSRF/tenant-isolation/cross-tenant-denial, no
+hard delete, archived-job evaluation-history title resolution, identical-
+active-duplicate rejection, same-title-different-criteria allowed,
+archived duplicate not blocking a new active job, a genuine concurrent-
+double-submit test against the real partial-unique-index DB constraint
+(not just the application-level pre-check), and an API-path regression
+proving `POST /api/v1/jobs` is unaffected.
+
 **659/659 passing** as of the semantic-correctness audit pass (branch
 `feat/hr-ui-productization`, still not merged): 639 prior (D-026 pass,
 see below) + 20 new/changed for D-027 — the skill-specific-duration
@@ -717,6 +739,34 @@ genuine open product gap for a future slice, not a scoring/tenant-
 isolation issue. No search/matching/scoring behavior changed beyond the
 precheck rejection scope; no migration.
 
+That reported Job lifecycle gap is now closed (see D-028). `Job` gained
+`status` (`ACTIVE`/`ARCHIVED`) and `archived_at` via migration
+`db7e4523f491` — every existing row backfills to `ACTIVE` deterministically
+in the same `ALTER TABLE` (verified against the real dev DB with
+upgrade/downgrade/re-upgrade, and against a from-scratch throwaway
+database through the entire `base`→`head` chain); no hard delete
+anywhere, no `JobCriteriaVersion`/`Evaluation` row is ever touched by
+archiving. `/ui/jobs` defaults to active vacancies with a new
+`?status=archived` view ("Aktiv vakansiyalar"/"Arxiv" tabs); a new
+CSRF-protected, tenant-scoped `POST /ui/jobs/{job_id}/archive` (existing
+`jobs:write` scope) is the only transition, with no reopen/edit/delete in
+this pass. Titles remain deliberately non-unique — instead, a canonical
+signature (normalized title + sorted, normalized criteria — never the
+free-text label or the id) is compared, and creating a second `ACTIVE`
+job with an identical signature is rejected with an HR-safe message; an
+`ARCHIVED` duplicate never blocks a new `ACTIVE` one. The real
+concurrency guard is a partial unique index on
+`(tenant_id, duplicate_signature) WHERE status='ACTIVE' AND
+duplicate_signature IS NOT NULL`, declared on both the model (so the test
+suite's `Base.metadata.create_all` schema gets it too — a genuine gap the
+concurrency test itself caught on the first pass, when the index existed
+only in the migration) and the migration; a race that slips past the
+application-level pre-check hits this constraint and gets the identical
+friendly rejection. `POST /api/v1/jobs` is completely unaffected — no
+duplicate check, no lifecycle field required or returned; verified with a
+regression test creating two identical jobs via the API successfully.
+Ranking/scoring untouched.
+
 Slice 14 (`feat/folder-reconciliation`, **MERGED as PR #24 at squash SHA
 `f6e31ff`, closes issue #23**, associated with
 **M6 — Operational CV Intake & Reconciliation**). Closes the gap left after Slice 6: a
@@ -797,7 +847,7 @@ due date because the official timeline has not been supplied.
 | M4 — Internal Product Interface & API | Slices 11–12 | CLOSED — Slice 11 merged (PR #17, issue #16 closed); Slice 12 merged (PR #19 at `93fa567`, issue #18 closed) |
 | M5 — Security, Target-Mac Validation & MVP Acceptance | Slice 13 + target-Mac benchmark | OPEN — issue #20 open; PR #22 merged at `a709ce1` implementing Pass 1 (original CV, no-exfiltration, backup/restore, audit guard, multilingual evidence) with `Refs #20`; Mac Mini benchmark execution on the now owner-confirmed target hardware remains the sole open mandatory gate |
 | M6 — Operational CV Intake & Reconciliation | Slice 14 | CLOSED — Slice 14 merged (PR #24 at `f6e31ff`), issue #23 closed; owner-approved closure |
-| M7 — HR UI & Presentation Readiness | HR UI productization (chore, issue #27) | OPEN — branch `feat/hr-ui-productization`, PR #29 open, pending owner re-inspection (fifth round); Job duplicate-title/lifecycle gap open; see D-023 through D-027 |
+| M7 — HR UI & Presentation Readiness | HR UI productization (chore, issue #27) | OPEN — branch `feat/hr-ui-productization`, PR #29 open, pending final owner visual check; Job lifecycle implemented; see D-023 through D-028 |
 
 ## Official requirement gap matrix
 

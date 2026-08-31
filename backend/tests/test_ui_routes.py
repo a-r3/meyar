@@ -889,7 +889,12 @@ async def test_jobs_page_does_not_expose_criteria_version_uuid(
     await _login_and_csrf(client, plaintext)
     response = await client.get("/ui/jobs")
     assert response.status_code == 200
-    assert str(job.id) not in response.text
+    # job.id is now a legitimate, necessary part of the "Arxivlə" form's
+    # POST action (same pattern as criteria.id in the rank form below) —
+    # never presented as visible HR-facing text, which is what "no raw
+    # UUID exposure" actually means (see the analogous
+    # test_library_card_does_not_expose_raw_candidate_uuid).
+    assert str(job.id) not in _visible_text(response.text)
     assert str(criteria.id) not in _visible_text(response.text)
 
 

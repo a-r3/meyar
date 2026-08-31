@@ -112,6 +112,8 @@ class PlannerOutcomeView(BaseModel):
 class JobView(BaseModel):
     job_id: uuid.UUID
     title: str
+    status: str
+    archived_at: datetime | None
     created_at: datetime
     current_criteria_version_id: uuid.UUID | None
     current_criteria_version: int | None

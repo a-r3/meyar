@@ -101,6 +101,11 @@ CRITERION_KIND_LABELS = {
     "LANGUAGE": "Dil",
 }
 
+JOB_STATUS_LABELS = {
+    "ACTIVE": "Aktiv",
+    "ARCHIVED": "Arxivləşdirilib",
+}
+
 STATE_LABELS = {
     "PENDING": "Gözləyir",
     "PARSED": "Emal olunub",

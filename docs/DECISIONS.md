@@ -1979,3 +1979,118 @@ the clarification branch in `meyar.ui.router.search` restores the
 generic outcome page for this reason code. The kind-aware validation
 addition only rejects input that was previously silently dropped —
 no previously-accepted request is now rejected.
+
+## D-028 — Job/vacancy lifecycle: ACTIVE/ARCHIVED, no hard delete, duplicate-creation safety
+
+**Date:** 2026-08-31
+**Decision:** `Job` previously had no lifecycle at all — no status, no
+way to close a filled/cancelled vacancy, and no protection against an HR
+tester accidentally re-submitting an identical vacancy (a real event
+already observed in this repository's own demo tenant during prior
+sessions' testing). Implemented the smallest production-defensible
+lifecycle model, explicit soft states only — no hard delete anywhere.
+
+1. **Persisted lifecycle.** `Job` gained `status` (`ACTIVE` | `ARCHIVED`,
+   default `ACTIVE`) and `archived_at` (nullable). Migration
+   `db7e4523f491` (`add_job_lifecycle_status_and_duplicate_signature`,
+   `Revises: e3b1f7a9c2d4`) adds both columns with `nullable=False,
+   server_default='ACTIVE'` on `status`, so every existing `Job` row
+   backfills to `ACTIVE` deterministically in the same `ALTER TABLE` — no
+   separate `UPDATE`, no data loss. Verified three ways, not assumed:
+   (a) `alembic upgrade head` / `downgrade -1` / `upgrade head` again
+   against the real dev DB, (b) a from-scratch throwaway database run
+   through the *entire* migration chain (`base` → `head`, all 10
+   revisions) confirming a single head and no ordering conflicts, and
+   (c) a new automated test,
+   `test_job_lifecycle_migration_backfills_existing_jobs_as_active`
+   (`test_ui_migration_packaging.py`), that inserts a raw `Job` row
+   against the pre-migration schema and asserts it becomes
+   `status='ACTIVE'`, `archived_at IS NULL` after upgrading. No
+   `JobCriteriaVersion` or `Evaluation` row is ever touched by archiving
+   — `archive_job` (`meyar.services.job_repo`) only ever sets
+   `status`/`archived_at` on the `Job` row itself.
+2. **HR UX.** `/ui/jobs` defaults to `status=ACTIVE`; a new
+   `?status=archived` view (linked as "Aktiv vakansiyalar" / "Arxiv" tabs)
+   shows archived vacancies with a visible "Arxivləşdirilib" badge and
+   deliberately **no** rank action — archived vacancies are never
+   presented as open. A new `POST /ui/jobs/{job_id}/archive` (auth via
+   the existing `jobs:write` scope, CSRF-verified, tenant-scoped —
+   `archive_job` returns `None` and the route renders a safe 404 for a
+   foreign-tenant `job_id`) is the only lifecycle transition; there is no
+   "reopen" and no edit/delete in this pass, matching the requested
+   scope. No raw UUID is shown as visible text — `job.id` appears only
+   inside the archive form's `action` attribute, the same established
+   pattern as `criteria.id` in the rank form
+   (`test_jobs_page_does_not_expose_criteria_version_uuid` extended to
+   cover it).
+3. **Duplicate-creation safety — canonical signature, not title
+   uniqueness.** Job titles remain deliberately non-unique (two vacancies
+   may legitimately share a title — explicitly required). Instead,
+   `meyar.ui.service.compute_job_duplicate_signature` hashes a canonical,
+   order-independent, display-text-independent signature of
+   (normalized title, sorted list of (kind, MUST_HAVE/PREFERRED type,
+   normalized value, min_years, weight) per criterion) — never the
+   free-text label or the server-generated criterion id, so two
+   vacancies with the same underlying requirements are recognized as
+   duplicates regardless of incidental label wording. `POST /ui/jobs`
+   pre-checks for an existing `ACTIVE` job with the same signature
+   (`find_active_duplicate_job`) and rejects with "Eyni tələblərlə aktiv
+   vakansiya artıq mövcuddur." — no id, no hash, no internal detail
+   exposed. Same title with materially different criteria is allowed (a
+   different signature); an `ARCHIVED` job with an identical signature
+   never blocks a new `ACTIVE` one.
+4. **Concurrency — a real DB constraint, not just a pre-check.** The
+   pre-check alone cannot close a genuine double-submit race (two
+   requests can both pass it before either commits). The actual guard is
+   a **partial unique index**,
+   `uq_jobs_active_duplicate_signature` on `(tenant_id,
+   duplicate_signature)` `WHERE status = 'ACTIVE' AND duplicate_signature
+   IS NOT NULL` — declared identically in both the `Job` model's
+   `__table_args__` (so `Base.metadata.create_all`, what the test suite
+   actually builds its schema from, creates it too — the first version of
+   this fix silently had *no* real constraint in tests because the index
+   existed only in the Alembic migration, and the concurrency test
+   correctly caught this) and the migration (so real deployments get it
+   via `alembic upgrade`). A concurrent double-submit that races past the
+   pre-check hits `IntegrityError` at `flush()`/`commit()`, caught in the
+   router and converted to the identical friendly message. NULL
+   `duplicate_signature` values are never constrained (Postgres allows
+   multiple NULLs in a unique index, matching the design), so this never
+   affects existing or future `POST /api/v1/jobs`-created rows.
+5. **API compatibility.** `POST /api/v1/jobs` is completely untouched —
+   no duplicate check, no lifecycle field accepted or required, `Job`
+   rows it creates simply carry `status='ACTIVE'` (the column default)
+   and `duplicate_signature=NULL` (never populated, never constrained).
+   Verified explicitly with a new regression test asserting two
+   API-created jobs with identical title+criteria both succeed. No
+   existing schema (`JobOut`, `JobCriteriaVersionOut`,
+   `ApiCandidateSearchResponse`, etc.) gained a lifecycle field in this
+   pass — deliberately out of scope, since nothing requested API-visible
+   lifecycle yet and every additive field is a contract decision of its
+   own.
+6. **Ranking/scoring untouched.** `rank_candidates_for_job` and the
+   deterministic scoring engine were not modified — an archived job's
+   criteria version can still technically be ranked via the existing
+   route if directly invoked (e.g. a stale link), since nothing in the
+   requested scope asked for a backend-level ranking block, only that the
+   *normal HR UI* not invite it; the archive view simply never renders
+   the rank action. `JobCriteriaVersion` rows are never deleted or
+   modified by archiving, so historical `Evaluation` rows keep resolving
+   correctly (`_job_titles_by_id` has no status filter, verified by a new
+   end-to-end test: rank against a job, archive it, then confirm the
+   candidate's evaluation history still shows the job title).
+
+**Why:** A real HR tool needs to close vacancies without losing their
+history, and needs protection against the exact accidental-duplicate
+scenario already observed firsthand in this project's own demo tenant —
+without over-constraining a legitimate case (the same title reused for a
+genuinely different role).
+
+**Reversibility:** Fully reversible. Migration `db7e4523f491` has a
+tested `downgrade()` (columns and indexes dropped, verified by upgrade →
+downgrade → re-upgrade against the real dev DB). No existing data is
+deleted by either direction. Removing the `find_active_duplicate_job`
+pre-check call and the partial unique index (via a follow-up migration)
+would restore unrestricted duplicate creation; removing the archive route
+and the `?status=` branch restores the single unfiltered listing —
+neither touches scoring, evidence, or tenant isolation.

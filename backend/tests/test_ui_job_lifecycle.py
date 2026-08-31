@@ -1,0 +1,546 @@
+"""Job/vacancy lifecycle (D-028): ACTIVE/ARCHIVED status (no hard delete),
+default-active /ui/jobs listing with an explicit archive view, a
+CSRF-protected/tenant-scoped/auth-required "Arxivlə" action, and
+canonical-signature duplicate-creation protection scoped to the /ui/jobs
+form path (POST /api/v1/jobs is unaffected).
+
+Covers: default-active listing, archived jobs excluded from the default
+list but visible in the archive view, archive route auth/CSRF/tenant
+isolation, no hard delete, archived-job evaluation-history title
+resolution, identical-active-duplicate rejection, same-title-different-
+criteria allowed, archived duplicates not blocking a new active job, a
+real concurrent-double-submit DB-constraint test (not just the
+application-level pre-check), and an API-path regression check.
+"""
+
+import re
+import uuid
+
+import pytest
+from httpx import AsyncClient
+from search_helpers import seed_candidate_with_profile
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from meyar.config import Settings, get_settings
+from meyar.main import app
+from meyar.models.job import Job
+from meyar.models.job_criteria_version import JobCriteriaVersion
+from meyar.schemas.criteria import CriterionIn, CriterionKind, CriterionType
+from meyar.services.api_key_repo import create_api_key
+from meyar.services.candidate_identity_repo import create_identity_version
+from meyar.services.job_criteria_repo import create_criteria_version
+from meyar.services.job_repo import archive_job, create_job
+from meyar.services.tenant_repo import create_tenant
+from meyar.ui.service import compute_job_duplicate_signature
+
+
+@pytest.fixture
+def local_ui_settings() -> Settings:
+    settings = Settings(ui_cookie_secure=False)
+    app.dependency_overrides[get_settings] = lambda: settings
+    return settings
+
+
+async def _login_and_csrf(client: AsyncClient, plaintext: str) -> str:
+    response = await client.post(
+        "/ui/login", data={"api_key": plaintext}, follow_redirects=False
+    )
+    assert response.status_code == 303
+    home = await client.get("/ui")
+    match = re.search(r'name="csrf_token" value="([0-9a-f]{64})"', home.text)
+    assert match is not None
+    return match.group(1)
+
+
+def _row(
+    prefix: str,
+    index: int,
+    *,
+    kind: str,
+    requirement: str,
+    min_years: str = "",
+    weight: str = "",
+) -> dict[str, str]:
+    return {
+        f"{prefix}_kind_{index}": kind,
+        f"{prefix}_requirement_{index}": requirement,
+        f"{prefix}_min_years_{index}": min_years,
+        f"{prefix}_weight_{index}": weight,
+    }
+
+
+def _blank_rows(
+    prefix: str, *, count: int = 4, filled: dict[str, str] | None = None
+) -> dict[str, str]:
+    data: dict[str, str] = {}
+    for i in range(count):
+        data.update(_row(prefix, i, kind="SKILL", requirement=""))
+    if filled:
+        data.update(filled)
+    return data
+
+
+def _create_job_form_data(csrf: str, title: str, skill: str) -> dict[str, str]:
+    data = {"title": title, "csrf_token": csrf}
+    data.update(_blank_rows("must", filled=_row("must", 0, kind="SKILL", requirement=skill)))
+    data.update(_blank_rows("pref"))
+    return data
+
+
+async def _job_by_title(db_session: AsyncSession, *, tenant_id: uuid.UUID, title: str) -> Job:
+    return (
+        await db_session.execute(
+            select(Job).where(Job.tenant_id == tenant_id, Job.title == title)
+        )
+    ).scalar_one()
+
+
+# ---------------------------------------------------------------------------
+# Active/archive listing
+# ---------------------------------------------------------------------------
+
+
+async def test_active_jobs_shown_by_default(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_key,
+    local_ui_settings: Settings,
+) -> None:
+    tenant, _key, plaintext = tenant_and_key
+    job = await create_job(db_session, tenant_id=tenant.id, title="Default Active JD")
+    await create_criteria_version(
+        db_session,
+        tenant_id=tenant.id,
+        job_id=job.id,
+        criteria=[
+            CriterionIn(
+                id="python",
+                kind=CriterionKind.SKILL,
+                type=CriterionType.MUST_HAVE,
+                label="Python",
+                value="Python",
+            ).model_dump(mode="json")
+        ],
+        created_by_api_key_id=None,
+    )
+    await db_session.commit()
+    await _login_and_csrf(client, plaintext)
+
+    response = await client.get("/ui/jobs")
+
+    assert response.status_code == 200
+    assert "Default Active JD" in response.text
+    assert "Aktiv" in response.text
+
+
+async def test_archived_jobs_absent_from_default_list_but_visible_in_archive(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_key,
+    local_ui_settings: Settings,
+) -> None:
+    tenant, _key, plaintext = tenant_and_key
+    job = await create_job(db_session, tenant_id=tenant.id, title="Archive View JD")
+    await db_session.commit()
+    await archive_job(db_session, tenant_id=tenant.id, job_id=job.id)
+    await db_session.commit()
+    await _login_and_csrf(client, plaintext)
+
+    active_page = await client.get("/ui/jobs")
+    archived_page = await client.get("/ui/jobs?status=archived")
+
+    assert active_page.status_code == 200
+    assert "Archive View JD" not in active_page.text
+    assert archived_page.status_code == 200
+    assert "Archive View JD" in archived_page.text
+    assert "Arxivləşdirilib" in archived_page.text
+    # archived jobs must not present a rank action, as if still open
+    assert "Namizədləri sırala" not in archived_page.text
+
+
+# ---------------------------------------------------------------------------
+# Archive action: auth, CSRF, tenant isolation, no hard delete
+# ---------------------------------------------------------------------------
+
+
+async def test_archive_unauthenticated_is_redirected(client: AsyncClient) -> None:
+    response = await client.post(
+        f"/ui/jobs/{uuid.uuid4()}/archive",
+        data={"csrf_token": "irrelevant"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == "/ui/login"
+
+
+async def test_archive_requires_csrf_token(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_key,
+    local_ui_settings: Settings,
+) -> None:
+    tenant, _key, plaintext = tenant_and_key
+    job = await create_job(db_session, tenant_id=tenant.id, title="CSRF Archive JD")
+    await db_session.commit()
+    await _login_and_csrf(client, plaintext)
+
+    response = await client.post(
+        f"/ui/jobs/{job.id}/archive", data={"csrf_token": "wrong"}
+    )
+
+    assert response.status_code == 403
+    await db_session.refresh(job)
+    assert job.status == "ACTIVE"
+
+
+async def test_archive_requires_jobs_write_scope(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_key,
+    local_ui_settings: Settings,
+) -> None:
+    tenant, _key, _plaintext = tenant_and_key
+    job = await create_job(db_session, tenant_id=tenant.id, title="Scope Archive JD")
+    _read_only_key, read_only_plaintext = await create_api_key(
+        db_session, tenant_id=tenant.id, env="test", scopes=["jobs:read"]
+    )
+    await db_session.commit()
+    csrf = await _login_and_csrf(client, read_only_plaintext)
+
+    response = await client.post(
+        f"/ui/jobs/{job.id}/archive", data={"csrf_token": csrf}
+    )
+
+    assert response.status_code == 403
+    await db_session.refresh(job)
+    assert job.status == "ACTIVE"
+
+
+async def test_archive_is_tenant_scoped_and_cross_tenant_denied(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_key,
+    local_ui_settings: Settings,
+) -> None:
+    tenant, _key, plaintext = tenant_and_key
+    foreign = await create_tenant(db_session, name="Foreign archive tenant")
+    foreign_job = await create_job(db_session, tenant_id=foreign.id, title="Foreign JD")
+    await db_session.commit()
+    csrf = await _login_and_csrf(client, plaintext)
+
+    response = await client.post(
+        f"/ui/jobs/{foreign_job.id}/archive", data={"csrf_token": csrf}
+    )
+
+    assert response.status_code == 404
+    assert "Foreign JD" not in response.text
+    await db_session.refresh(foreign_job)
+    assert foreign_job.status == "ACTIVE"
+
+
+async def test_archive_succeeds_and_never_hard_deletes(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_key,
+    local_ui_settings: Settings,
+) -> None:
+    tenant, _key, plaintext = tenant_and_key
+    job = await create_job(db_session, tenant_id=tenant.id, title="Soft Archive JD")
+    version = await create_criteria_version(
+        db_session,
+        tenant_id=tenant.id,
+        job_id=job.id,
+        criteria=[
+            CriterionIn(
+                id="python",
+                kind=CriterionKind.SKILL,
+                type=CriterionType.MUST_HAVE,
+                label="Python",
+                value="Python",
+            ).model_dump(mode="json")
+        ],
+        created_by_api_key_id=None,
+    )
+    await db_session.commit()
+    csrf = await _login_and_csrf(client, plaintext)
+
+    response = await client.post(
+        f"/ui/jobs/{job.id}/archive", data={"csrf_token": csrf}, follow_redirects=False
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/ui/jobs"
+    reloaded_job = (
+        await db_session.execute(select(Job).where(Job.id == job.id))
+    ).scalar_one()
+    assert reloaded_job.status == "ARCHIVED"
+    assert reloaded_job.archived_at is not None
+    reloaded_version = (
+        await db_session.execute(
+            select(JobCriteriaVersion).where(JobCriteriaVersion.id == version.id)
+        )
+    ).scalar_one()
+    assert reloaded_version.criteria[0]["label"] == "Python"
+
+
+async def test_archived_job_evaluation_history_still_resolves_title(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_key,
+    local_ui_settings: Settings,
+) -> None:
+    tenant, _key, plaintext = tenant_and_key
+    candidate, profile = await seed_candidate_with_profile(
+        db_session,
+        tenant_id=tenant.id,
+        profile_content={
+            "skills": [
+                {
+                    "name": "Python",
+                    "category": None,
+                    "evidence": [{"page": 1, "block_index": 0, "quote": "Python"}],
+                }
+            ],
+            "employment_history": [],
+            "education": [],
+            "certifications": [],
+            "languages": [],
+            "projects": [],
+        },
+    )
+    await create_identity_version(
+        db_session,
+        tenant_id=tenant.id,
+        candidate_id=candidate.id,
+        candidate_document_id=profile.candidate_document_id,
+        canonical_document_id=profile.canonical_document_id,
+        source_sha256=profile.source_sha256,
+        schema_version="candidate-identity-v1",
+        prompt_version="test",
+        model_provider="fake",
+        model_name="fake",
+        status="COMPLETED",
+        identity_content={
+            "full_name": {"value": "History Candidate", "evidence": []},
+            "email": None,
+            "phone": None,
+        },
+    )
+    job = await create_job(db_session, tenant_id=tenant.id, title="History JD")
+    version = await create_criteria_version(
+        db_session,
+        tenant_id=tenant.id,
+        job_id=job.id,
+        criteria=[
+            CriterionIn(
+                id="python",
+                kind=CriterionKind.SKILL,
+                type=CriterionType.MUST_HAVE,
+                label="Python",
+                value="Python",
+            ).model_dump(mode="json")
+        ],
+        created_by_api_key_id=None,
+    )
+    await db_session.commit()
+    csrf = await _login_and_csrf(client, plaintext)
+
+    rank_response = await client.post(
+        f"/ui/jobs/{version.id}/rank", data={"csrf_token": csrf}
+    )
+    assert rank_response.status_code == 200
+
+    archive_response = await client.post(
+        f"/ui/jobs/{job.id}/archive", data={"csrf_token": csrf}, follow_redirects=False
+    )
+    assert archive_response.status_code == 303
+
+    detail_response = await client.get(f"/ui/candidates/{candidate.id}")
+    assert detail_response.status_code == 200
+    assert "History JD" in detail_response.text
+
+
+# ---------------------------------------------------------------------------
+# Duplicate-creation safety
+# ---------------------------------------------------------------------------
+
+
+async def test_identical_active_duplicate_is_rejected(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_key,
+    local_ui_settings: Settings,
+) -> None:
+    tenant, _key, plaintext = tenant_and_key
+    csrf = await _login_and_csrf(client, plaintext)
+    first = await client.post(
+        "/ui/jobs",
+        data=_create_job_form_data(csrf, "Duplicate Guard JD", "Python"),
+        follow_redirects=False,
+    )
+    assert first.status_code == 303
+
+    second = await client.post(
+        "/ui/jobs", data=_create_job_form_data(csrf, "Duplicate Guard JD", "Python")
+    )
+
+    assert second.status_code == 409
+    assert "Eyni tələblərlə aktiv vakansiya artıq mövcuddur." in second.text
+    jobs = (
+        await db_session.execute(
+            select(Job).where(
+                Job.tenant_id == tenant.id, Job.title == "Duplicate Guard JD"
+            )
+        )
+    ).scalars().all()
+    assert len(jobs) == 1
+
+
+async def test_same_title_different_criteria_is_allowed(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_key,
+    local_ui_settings: Settings,
+) -> None:
+    tenant, _key, plaintext = tenant_and_key
+    csrf = await _login_and_csrf(client, plaintext)
+    first = await client.post(
+        "/ui/jobs",
+        data=_create_job_form_data(csrf, "Shared Title JD", "Python"),
+        follow_redirects=False,
+    )
+    assert first.status_code == 303
+
+    second = await client.post(
+        "/ui/jobs",
+        data=_create_job_form_data(csrf, "Shared Title JD", "Java"),
+        follow_redirects=False,
+    )
+
+    assert second.status_code == 303
+    jobs = (
+        await db_session.execute(
+            select(Job).where(Job.tenant_id == tenant.id, Job.title == "Shared Title JD")
+        )
+    ).scalars().all()
+    assert len(jobs) == 2
+
+
+async def test_archived_duplicate_does_not_block_new_active_job(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_key,
+    local_ui_settings: Settings,
+) -> None:
+    tenant, _key, plaintext = tenant_and_key
+    csrf = await _login_and_csrf(client, plaintext)
+    first = await client.post(
+        "/ui/jobs",
+        data=_create_job_form_data(csrf, "Reopen JD", "Python"),
+        follow_redirects=False,
+    )
+    assert first.status_code == 303
+    original = await _job_by_title(db_session, tenant_id=tenant.id, title="Reopen JD")
+    await client.post(f"/ui/jobs/{original.id}/archive", data={"csrf_token": csrf})
+
+    second = await client.post(
+        "/ui/jobs",
+        data=_create_job_form_data(csrf, "Reopen JD", "Python"),
+        follow_redirects=False,
+    )
+
+    assert second.status_code == 303
+    jobs = (
+        await db_session.execute(
+            select(Job).where(Job.tenant_id == tenant.id, Job.title == "Reopen JD")
+        )
+    ).scalars().all()
+    assert len(jobs) == 2
+    statuses = sorted(job.status for job in jobs)
+    assert statuses == ["ACTIVE", "ARCHIVED"]
+
+
+async def test_concurrent_double_submit_is_rejected_by_db_constraint_not_only_precheck(
+    db_session: AsyncSession, tenant_and_key
+) -> None:
+    """The real concurrency guard: two requests that both pass the
+    application-level pre-check (because neither has committed yet) must
+    still not both succeed — the partial unique index on
+    (tenant_id, duplicate_signature) WHERE status='ACTIVE' is what
+    actually prevents the race, not the pre-check alone."""
+    tenant, _key, _plaintext = tenant_and_key
+    criteria = [
+        CriterionIn(
+            id="python",
+            kind=CriterionKind.SKILL,
+            type=CriterionType.MUST_HAVE,
+            label="Python",
+            value="Python",
+        )
+    ]
+    signature = compute_job_duplicate_signature("Race JD", criteria)
+
+    first_job = await create_job(
+        db_session, tenant_id=tenant.id, title="Race JD", duplicate_signature=signature
+    )
+    await create_criteria_version(
+        db_session,
+        tenant_id=tenant.id,
+        job_id=first_job.id,
+        criteria=[c.model_dump(mode="json") for c in criteria],
+        created_by_api_key_id=None,
+    )
+    await db_session.commit()
+
+    with pytest.raises(IntegrityError):
+        second_job = await create_job(
+            db_session, tenant_id=tenant.id, title="Race JD", duplicate_signature=signature
+        )
+        await create_criteria_version(
+            db_session,
+            tenant_id=tenant.id,
+            job_id=second_job.id,
+            criteria=[c.model_dump(mode="json") for c in criteria],
+            created_by_api_key_id=None,
+        )
+        await db_session.commit()
+    await db_session.rollback()
+
+
+# ---------------------------------------------------------------------------
+# API compatibility regression
+# ---------------------------------------------------------------------------
+
+
+async def test_api_job_creation_is_unaffected_by_ui_duplicate_guard(
+    client: AsyncClient, db_session: AsyncSession, tenant_and_key
+) -> None:
+    """POST /api/v1/jobs has no duplicate-signature check — API/CLI
+    behavior is unchanged by this UI-only lifecycle/duplicate-safety
+    pass. Two API-created jobs with identical title+criteria must both
+    succeed exactly as before."""
+    _tenant, _key, plaintext = tenant_and_key
+    body = {
+        "title": "API Regression JD",
+        "criteria": [
+            {
+                "id": "python",
+                "kind": "SKILL",
+                "type": "MUST_HAVE",
+                "label": "Python",
+                "value": "Python",
+            }
+        ],
+    }
+    first = await client.post(
+        "/api/v1/jobs", json=body, headers={"Authorization": f"Bearer {plaintext}"}
+    )
+    second = await client.post(
+        "/api/v1/jobs", json=body, headers={"Authorization": f"Bearer {plaintext}"}
+    )
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert first.json()["id"] != second.json()["id"]

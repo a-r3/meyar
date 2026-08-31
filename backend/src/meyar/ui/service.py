@@ -1,3 +1,5 @@
+import hashlib
+import json
 import re
 import uuid
 from collections import defaultdict
@@ -7,7 +9,7 @@ from pydantic import ValidationError
 from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meyar.core.text import fold_az_ascii
+from meyar.core.text import fold_az_ascii, normalize_azerbaijani_case
 from meyar.ingestion.parser import CanonicalDocumentContent
 from meyar.models.candidate import Candidate
 from meyar.models.candidate_document import (
@@ -30,7 +32,7 @@ from meyar.models.folder_indexed_file import (
     INDEX_STATUS_MISSING,
     FolderIndexedFile,
 )
-from meyar.models.job import Job
+from meyar.models.job import JOB_STATUS_ACTIVE, Job
 from meyar.models.job_criteria_version import JobCriteriaVersion
 from meyar.schemas.candidate_identity import CandidateIdentityExtraction
 from meyar.schemas.candidate_profile import CandidateProfileExtraction, EvidenceRef
@@ -551,7 +553,9 @@ async def build_search_result_views(
     return views
 
 
-async def list_job_views(db: AsyncSession, *, tenant_id: uuid.UUID) -> list[JobView]:
+async def list_job_views(
+    db: AsyncSession, *, tenant_id: uuid.UUID, status: str = JOB_STATUS_ACTIVE
+) -> list[JobView]:
     latest = (
         select(
             JobCriteriaVersion.job_id,
@@ -571,7 +575,7 @@ async def list_job_views(db: AsyncSession, *, tenant_id: uuid.UUID) -> list[JobV
                 & (JobCriteriaVersion.job_id == Job.id)
                 & (JobCriteriaVersion.version_number == latest.c.max_version),
             )
-            .where(Job.tenant_id == tenant_id)
+            .where(Job.tenant_id == tenant_id, Job.status == status)
             .order_by(Job.created_at.desc(), Job.id.asc())
         )
     ).all()
@@ -592,6 +596,8 @@ async def list_job_views(db: AsyncSession, *, tenant_id: uuid.UUID) -> list[JobV
             JobView(
                 job_id=job.id,
                 title=job.title,
+                status=job.status,
+                archived_at=job.archived_at,
                 created_at=job.created_at,
                 current_criteria_version_id=criteria.id if criteria else None,
                 current_criteria_version=criteria.version_number if criteria else None,
@@ -886,3 +892,43 @@ def build_job_create_request(
         return JobCreateRequest(title=stripped_title, criteria=criteria)
     except ValidationError as exc:
         raise UIServiceInputError(_first_pydantic_message(exc)) from exc
+
+
+# Owner visual-inspection follow-up — Job lifecycle/duplicate-safety
+# (D-028). Job titles are deliberately NOT unique (two vacancies may
+# legitimately share a title), so accidental-duplicate protection instead
+# compares a CANONICAL signature of (normalized title, normalized
+# criteria) — never raw display text, never exposed to HR. Scoped to the
+# /ui/jobs creation path only; POST /api/v1/jobs is unchanged.
+JOB_DUPLICATE_MESSAGE = "Eyni tələblərlə aktiv vakansiya artıq mövcuddur."
+
+
+def compute_job_duplicate_signature(title: str, criteria: list[CriterionIn]) -> str:
+    """SHA-256 hex digest of a canonical (title, criteria) signature —
+    order-independent (criteria are sorted before hashing) and
+    display-text-independent (case/whitespace-normalized, and only the
+    fields that actually affect matching — kind, MUST_HAVE/PREFERRED
+    type, value, min_years, weight — participate; the free-text label and
+    the server-generated id never do, so two vacancies with the same
+    underlying requirements are recognized as duplicates regardless of
+    how their criteria happen to be labeled)."""
+
+    def _normalized(text: str | None) -> str:
+        return " ".join(normalize_azerbaijani_case(text or "").split())
+
+    canonical_criteria = sorted(
+        (
+            criterion.kind.value,
+            criterion.type.value,
+            _normalized(criterion.value),
+            round(criterion.min_years, 2) if criterion.min_years is not None else None,
+            round(criterion.weight, 2),
+        )
+        for criterion in criteria
+    )
+    payload = json.dumps(
+        {"title": _normalized(title), "criteria": canonical_criteria},
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()

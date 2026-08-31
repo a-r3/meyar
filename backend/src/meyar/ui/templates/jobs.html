@@ -2,19 +2,42 @@
 {% block title %}Vakansiyalar — MEYAR{% endblock %}
 {% block content %}
 <div class="page-heading"><div><p class="eyebrow">Vakansiyalar</p><h1>Vakansiyalar</h1><p class="lede">Namizədləri vakansiya meyarlarına əsasən sıralayın.</p></div><a class="button" href="/ui/jobs/new">Yeni vakansiya</a></div>
-{% if not jobs %}<div class="empty-state"><h2>Vakansiya yoxdur</h2><p>Aşağıdakı düymə ilə ilk vakansiyanı yaradın.</p></div>{% endif %}
+<nav class="pagination" aria-label="Vakansiya görünüşü">
+  <a class="button{% if status_filter == 'ACTIVE' %} button-secondary{% endif %}" href="/ui/jobs">Aktiv vakansiyalar</a>
+  <a class="button{% if status_filter == 'ARCHIVED' %} button-secondary{% endif %}" href="/ui/jobs?status=archived">Arxiv</a>
+</nav>
+{% if not jobs %}
+<div class="empty-state">
+  {% if status_filter == 'ARCHIVED' %}
+  <h2>Arxiv boşdur</h2><p>Arxivləşdirilmiş vakansiya yoxdur.</p>
+  {% else %}
+  <h2>Vakansiya yoxdur</h2><p>Yuxarıdakı düymə ilə ilk vakansiyanı yaradın.</p>
+  {% endif %}
+</div>
+{% endif %}
 <div class="card-grid">
   {% for job in jobs %}
   <article class="candidate-card">
-    <h2>{{ job.title }}</h2>
+    <div class="card-heading">
+      <h2>{{ job.title }}</h2>
+      {% if job.status == 'ARCHIVED' %}<span class="status-badge" data-state="FAILED">{{ job_status_label(job.status) }}</span>{% endif %}
+    </div>
     {% if job.current_criteria_version_id %}
     <p class="meta">{{ job.criteria_count }} meyar</p>
     {% if job.must_have_labels %}<p><strong>Mütləq:</strong> {{ job.must_have_labels|join(", ") }}</p>{% endif %}
     {% if job.preferred_labels %}<p><strong>Üstünlük:</strong> {{ job.preferred_labels|join(", ") }}</p>{% endif %}
+    {% if job.status == 'ACTIVE' %}
     <form method="post" action="/ui/jobs/{{ job.current_criteria_version_id }}/rank" class="stack-form">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <button class="button" type="submit">Namizədləri sırala</button>
     </form>
+    <form method="post" action="/ui/jobs/{{ job.job_id }}/archive" class="stack-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button class="button button-secondary" type="submit">Arxivlə</button>
+    </form>
+    {% else %}
+    <p class="field-help">Bu vakansiya arxivləşdirilib və cari/açıq vakansiya kimi göstərilmir. Keçmiş qiymətləndirmələr namizəd profilində əlçatandır.</p>
+    {% endif %}
     {% else %}
     <p class="alert alert-warning">Cari meyar versiyası yoxdur.</p>
     {% endif %}

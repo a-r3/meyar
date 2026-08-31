@@ -15,6 +15,11 @@ BASE_URL = ADMIN_DATABASE_URL.rsplit("/", 1)[0]
 ADMIN_URL = f"{BASE_URL}/postgres"
 PRE_SLICE11_REVISION = "c0a4f2d8e317"
 SLICE11_REVISION = "e3b1f7a9c2d4"
+# The expected result of `alembic upgrade head` right now — bump this
+# alongside alembic/versions whenever a new migration becomes the head
+# (most recently: db7e4523f491, add job lifecycle status and duplicate
+# signature — see docs/DECISIONS.md D-028).
+CURRENT_HEAD_REVISION = "db7e4523f491"
 
 
 async def _create_database(name: str) -> None:
@@ -67,7 +72,7 @@ async def _assert_upgraded(database_url: str) -> None:
         "revoked_at",
     } == columns
     assert raw_columns == 0
-    assert revision == SLICE11_REVISION
+    assert revision == CURRENT_HEAD_REVISION
 
 
 async def _assert_downgraded(database_url: str) -> None:
@@ -95,6 +100,65 @@ def test_slice11_postgresql_migration_upgrade_downgrade_reupgrade(monkeypatch) -
         asyncio.run(_assert_downgraded(database_url))
         command.upgrade(alembic_config, "head")
         asyncio.run(_assert_upgraded(database_url))
+    finally:
+        get_settings.cache_clear()
+        asyncio.run(_drop_database(database_name))
+
+
+async def _insert_pre_lifecycle_job(database_url: str) -> uuid.UUID:
+    """Inserts a tenant + job row against the schema exactly as it stood
+    immediately before the add_job_lifecycle migration (no status/
+    archived_at/duplicate_signature columns yet), simulating a real
+    pre-existing production row."""
+    engine = create_async_engine(database_url)
+    tenant_id = uuid.uuid4()
+    job_id = uuid.uuid4()
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("INSERT INTO tenants (id, name, is_active) VALUES (:id, :name, true)"),
+            {"id": tenant_id, "name": "Pre-lifecycle tenant"},
+        )
+        await connection.execute(
+            text("INSERT INTO jobs (id, tenant_id, title) VALUES (:id, :tenant_id, :title)"),
+            {"id": job_id, "tenant_id": tenant_id, "title": "Pre-lifecycle JD"},
+        )
+    await engine.dispose()
+    return job_id
+
+
+async def _assert_job_backfilled_active(database_url: str, job_id: uuid.UUID) -> None:
+    engine = create_async_engine(database_url)
+    async with engine.connect() as connection:
+        row = (
+            await connection.execute(
+                text(
+                    "SELECT status, archived_at, duplicate_signature FROM jobs WHERE id = :id"
+                ),
+                {"id": job_id},
+            )
+        ).one()
+    await engine.dispose()
+    status_value, archived_at, duplicate_signature = row
+    assert status_value == "ACTIVE"
+    assert archived_at is None
+    assert duplicate_signature is None
+
+
+def test_job_lifecycle_migration_backfills_existing_jobs_as_active(monkeypatch) -> None:
+    """A Job row created before the add_job_lifecycle migration must
+    deterministically become status='ACTIVE' (never archived, never
+    dropped) on upgrade — no data loss, no manual backfill step."""
+    database_name = f"meyar_job_lifecycle_{uuid.uuid4().hex}"
+    database_url = f"{BASE_URL}/{database_name}"
+    alembic_config = Config(str(Path(__file__).resolve().parent.parent / "alembic.ini"))
+    asyncio.run(_create_database(database_name))
+    monkeypatch.setenv("MEYAR_DATABASE_URL", database_url)
+    get_settings.cache_clear()
+    try:
+        command.upgrade(alembic_config, SLICE11_REVISION)
+        job_id = asyncio.run(_insert_pre_lifecycle_job(database_url))
+        command.upgrade(alembic_config, "head")
+        asyncio.run(_assert_job_backfilled_active(database_url, job_id))
     finally:
         get_settings.cache_clear()
         asyncio.run(_drop_database(database_name))

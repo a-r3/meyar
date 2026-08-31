@@ -9,7 +9,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader, select_autoescape
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
@@ -24,6 +24,7 @@ from meyar.embedding.provider import EmbeddingProvider, EmbeddingProviderError
 from meyar.ingestion.validation import PDF_MIME
 from meyar.llm.dependency import get_llm_provider
 from meyar.llm.provider import LLMProvider
+from meyar.models.job import JOB_STATUS_ACTIVE, JOB_STATUS_ARCHIVED
 from meyar.scoring.batch import BatchRankingError, rank_candidates_for_job
 from meyar.scoring.policy import ScoringPolicyError
 from meyar.search.planner_policy import find_skill_specific_duration_mention
@@ -38,7 +39,7 @@ from meyar.services.browser_session_repo import (
 )
 from meyar.services.candidate_document_repo import get_candidate_document
 from meyar.services.job_criteria_repo import create_criteria_version
-from meyar.services.job_repo import create_job
+from meyar.services.job_repo import archive_job, create_job, find_active_duplicate_job
 from meyar.storage.base import DocumentStorage
 from meyar.storage.dependency import get_document_storage
 from meyar.ui.auth import (
@@ -52,6 +53,7 @@ from meyar.ui.presentation import (
     CRITERION_KIND_LABELS,
     CRITERION_STATUS_LABELS,
     FIT_BAND_LABELS,
+    JOB_STATUS_LABELS,
     STATE_LABELS,
     readiness_label,
     readiness_state,
@@ -63,11 +65,13 @@ from meyar.ui.service import (
     CRITERION_KIND_OPTIONS,
     CRITERION_ROW_COUNT,
     DEFAULT_CRITERION_WEIGHT,
+    JOB_DUPLICATE_MESSAGE,
     CriterionRowInput,
     UIServiceInputError,
     build_job_create_request,
     build_ranked_candidate_views,
     build_search_result_views,
+    compute_job_duplicate_signature,
     get_candidate_detail_view,
     get_candidate_document_preview,
     get_job_title_for_criteria_version,
@@ -94,6 +98,7 @@ templates.env.globals.update(
     fit_label=lambda value: FIT_BAND_LABELS.get(value, value),
     criterion_label=lambda value: CRITERION_STATUS_LABELS.get(value, value),
     criterion_kind_label=lambda value: CRITERION_KIND_LABELS.get(value, value),
+    job_status_label=lambda value: JOB_STATUS_LABELS.get(value, value),
     readiness_label=readiness_label,
     readiness_state=readiness_state,
 )
@@ -443,14 +448,71 @@ async def candidate_document_preview(
 @router.get("/jobs", response_class=HTMLResponse)
 async def jobs(
     request: Request,
+    status_filter: str = Query(default=JOB_STATUS_ACTIVE, alias="status"),
     ctx: UIContext = Depends(require_ui_scopes("jobs:read")),
     db: AsyncSession = Depends(get_db),
 ) -> HTMLResponse:
+    normalized_status = status_filter.strip().upper()
+    if normalized_status not in (JOB_STATUS_ACTIVE, JOB_STATUS_ARCHIVED):
+        return _render(
+            request,
+            "error.html",
+            _context(ctx, title="Yanlış filtr", message="Vakansiya filtri dəstəklənmir."),
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        )
     return _render(
         request,
         "jobs.html",
-        _context(ctx, jobs=await list_job_views(db, tenant_id=ctx.tenant_id)),
+        _context(
+            ctx,
+            jobs=await list_job_views(db, tenant_id=ctx.tenant_id, status=normalized_status),
+            status_filter=normalized_status,
+        ),
     )
+
+
+@router.post("/jobs/{job_id}/archive", response_class=HTMLResponse)
+async def archive_job_route(
+    request: Request,
+    job_id: uuid.UUID,
+    csrf_token: str = Form(...),
+    ctx: UIContext = Depends(require_ui_scopes("jobs:write")),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    verify_csrf(ctx.csrf_token, csrf_token)
+    try:
+        job = await archive_job(db, tenant_id=ctx.tenant_id, job_id=job_id)
+        if job is None:
+            await db.rollback()
+            return _render(
+                request,
+                "error.html",
+                _context(ctx, title="Tapılmadı", message="Vakansiya tapılmadı."),
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+        await record_event(
+            db,
+            tenant_id=ctx.tenant_id,
+            event_type="job.archived",
+            metadata={"job_id": str(job.id)},
+        )
+        await db.commit()
+    except SQLAlchemyError:
+        await db.rollback()
+        return _render(
+            request,
+            "error.html",
+            _context(
+                ctx,
+                title="Vakansiya arxivləşdirilmədi",
+                message=(
+                    "Verilənlər bazası hazırda əlçatan deyil. "
+                    "Bir qədər sonra yenidən cəhd edin."
+                ),
+            ),
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    return RedirectResponse("/ui/jobs", status_code=status.HTTP_303_SEE_OTHER)
 
 
 def _job_form_row(form: object, prefix: str, index: int) -> CriterionRowInput:
@@ -538,11 +600,41 @@ async def create_job_route(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         )
 
+    duplicate_signature = compute_job_duplicate_signature(
+        job_request.title, job_request.criteria
+    )
+    # Fast, friendly pre-check for the common (non-racing) case — the
+    # actual concurrency-safe guard against a double-submit race is the
+    # partial unique index on (tenant_id, duplicate_signature) WHERE
+    # status='ACTIVE' (see the IntegrityError handling below), not this
+    # check alone. See docs/DECISIONS.md D-028.
+    existing_duplicate = await find_active_duplicate_job(
+        db, tenant_id=ctx.tenant_id, duplicate_signature=duplicate_signature
+    )
+    if existing_duplicate is not None:
+        return _render(
+            request,
+            "job_new.html",
+            _job_new_context(
+                ctx,
+                title=title,
+                must_have_rows=must_have_rows,
+                preferred_rows=preferred_rows,
+                error=JOB_DUPLICATE_MESSAGE,
+            ),
+            status_code=status.HTTP_409_CONFLICT,
+        )
+
     try:
         # Reuses the exact same domain services as the internal REST API's
         # POST /api/v1/jobs (meyar.api.v1.jobs.post_job) — one job/criteria
         # creation path for both surfaces, one deterministic scoring model.
-        job = await create_job(db, tenant_id=ctx.tenant_id, title=job_request.title)
+        job = await create_job(
+            db,
+            tenant_id=ctx.tenant_id,
+            title=job_request.title,
+            duplicate_signature=duplicate_signature,
+        )
         version = await create_criteria_version(
             db,
             tenant_id=ctx.tenant_id,
@@ -557,6 +649,23 @@ async def create_job_route(
             metadata={"job_id": str(job.id), "criteria_version": version.version_number},
         )
         await db.commit()
+    except IntegrityError:
+        # A concurrent double-submit raced past the pre-check above and
+        # hit the DB-level partial unique index — the actual guard, not
+        # just this application-level check. Same friendly message.
+        await db.rollback()
+        return _render(
+            request,
+            "job_new.html",
+            _job_new_context(
+                ctx,
+                title=title,
+                must_have_rows=must_have_rows,
+                preferred_rows=preferred_rows,
+                error=JOB_DUPLICATE_MESSAGE,
+            ),
+            status_code=status.HTTP_409_CONFLICT,
+        )
     except SQLAlchemyError:
         await db.rollback()
         return _render(
