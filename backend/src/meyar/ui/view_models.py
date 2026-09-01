@@ -149,6 +149,56 @@ class ScoreContributionView(BaseModel):
     evidence: list[EvidenceLocationView]
 
 
+class AgentTurnLogView(BaseModel):
+    role: str
+    text: str
+
+
+class AgentCandidateProfileView(BaseModel):
+    candidate_id: uuid.UUID
+    full_name: str | None
+    current_role: str | None = None
+    skills: list[ProfileFactView] = Field(default_factory=list)
+    experience: list[ProfileFactView] = Field(default_factory=list)
+    education: list[ProfileFactView] = Field(default_factory=list)
+    languages: list[ProfileFactView] = Field(default_factory=list)
+    certifications: list[ProfileFactView] = Field(default_factory=list)
+    projects: list[ProfileFactView] = Field(default_factory=list)
+
+
+class AgentEvidenceMatchView(BaseModel):
+    category_label: str
+    title: str
+    evidence: list[EvidenceLocationView] = Field(default_factory=list)
+
+
+class AgentEvidenceView(BaseModel):
+    candidate_id: uuid.UUID
+    full_name: str | None
+    topic: str | None
+    matches: list[AgentEvidenceMatchView] = Field(default_factory=list)
+
+
+class AgentToolResultView(BaseModel):
+    tool_name: str
+    search_outcome: PlannerOutcomeView | None = None
+    search_results: list[CandidateSearchResultView] = Field(default_factory=list)
+    profile: AgentCandidateProfileView | None = None
+    evidence: AgentEvidenceView | None = None
+    not_found_ref: int | None = None
+
+
+class AgentTurnView(BaseModel):
+    outcome: str
+    message: str | None
+    tool_results: list[AgentToolResultView] = Field(default_factory=list)
+
+
+class AgentPageView(BaseModel):
+    turns: list[AgentTurnLogView] = Field(default_factory=list)
+    latest: AgentTurnView | None = None
+
+
 class RankedCandidateView(BaseModel):
     candidate_id: uuid.UUID
     full_name: str | None

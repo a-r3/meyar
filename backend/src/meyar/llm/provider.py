@@ -1,7 +1,8 @@
-from typing import Protocol
+from typing import Any, Protocol
 
 from pydantic import BaseModel, Field
 
+from meyar.agent.schemas import AgentDecision
 from meyar.extraction.view import ProfessionalDocumentView
 from meyar.schemas.candidate_identity import CandidateIdentityExtraction
 from meyar.schemas.candidate_profile import CandidateProfileExtraction
@@ -69,6 +70,20 @@ class LLMProvider(Protocol):
         ``repair`` selects the single bounded repair prompt. Raw invalid
         output and validation detail never cross this provider boundary.
         """
+        ...
+
+    async def decide_agent_action(
+        self,
+        *,
+        recent_turns: list[tuple[str, str]],
+        last_tool_result_summary: dict[str, Any] | None,
+        available_candidate_refs: list[int],
+        repair: bool = False,
+    ) -> tuple[AgentDecision, "LLMResultProvenance"]:
+        """One bounded orchestration step for Slice 2's read-only agent
+        (meyar.agent.service). Returns a strict AgentDecision and actual
+        call provenance — never raw model output. ``repair`` selects the
+        single bounded repair prompt, mirroring plan_candidate_search."""
         ...
 
     async def health(self) -> dict:

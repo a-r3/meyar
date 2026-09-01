@@ -2557,3 +2557,78 @@ data, so this only forces re-login, not data loss). `User`/
 `TenantMembership`/the `AuditEvent` actor columns can all be dropped by
 the migration's `downgrade()`. The machine API-key path
 (`meyar.core.auth`) was not modified by this decision at all.
+
+## D-035 — Slice 2: Read-Only Local AI Agent Foundation — tool-result
+evidence grounding, and a real Ollama `format`-schema `maxLength` limit
+
+**Date:** 2026-09-01
+**Decision:** Implements M8 Slice 2 (issue #31, per D-030/D-031). A
+bounded orchestration loop (`meyar.agent.service.run_agent_turn`) with
+exactly three read-only tools — `search_candidates`,
+`get_candidate_profile`, `get_candidate_evidence` — dispatched from one
+strict, `extra="forbid"` model-output schema (`AgentDecision`, mirroring
+`PlannerDraft`'s discipline). Two design points and one real bug, found
+and fixed during this slice's own manual real-Ollama verification:
+
+1. **Evidence grounding is structural, not a prompt instruction.** The
+   model's `message` field (used only by `FINAL_ANSWER`/`CLARIFY`) is
+   framing/clarifying text alone; every factual claim about a candidate
+   comes from a separate, typed, deterministic tool-result payload
+   (`AgentToolResult`) that the UI layer renders independently — the
+   model's own words are never the record a fact is checked against.
+   `search_candidates` forwards the model's restated query, unmodified,
+   into the existing frozen `plan_and_search_candidates` pipeline
+   (D-026/D-027/D-031 guarantees reused as-is). `get_candidate_profile`/
+   `get_candidate_evidence` resolve a model-produced ordinal
+   `candidate_ref` only against the conversation's own server-held
+   `last_search_candidate_ids` — the model is never shown or trusted
+   with a real `candidate_id` — and both always finalize the turn
+   immediately, found or not, so a small local model never gets a second
+   inference pass to freelance about an answer that is already complete.
+2. **Real bug: Ollama's JSON-schema `format`-constrained decoding fails
+   outright above a `maxLength` of roughly 2000.** `AgentDecision.
+   search_query` was originally capped at 4000 (matching the raw HR
+   message field). Every real call to the new
+   `OllamaLLMProvider.decide_agent_action` against a real local Ollama
+   daemon (`qwen3:0.6b`) failed with HTTP 500
+   (`"failed to load model vocabulary required for format"`) — a
+   request-time provider failure, never a validation-time symptom, so no
+   `FakeLLMProvider`-based test could have caught it. Bisected precisely
+   (isolated to the single `search_query` field, then to its `maxLength`
+   value specifically) by posting hand-built schema variants directly to
+   the real Ollama `/api/chat` endpoint outside the application. Fixed by
+   capping `search_query` at a new `MAX_AGENT_SEARCH_QUERY_LENGTH = 2000`
+   — the same bound already proven safe in production on
+   `PlannerDraft.semantic_query` (`meyar.search.policy.
+   MAX_SEMANTIC_QUERY_LENGTH`). Verified fixed both directly (repeated
+   real-Ollama calls) and through a real authenticated browser session
+   end to end. A regression test
+   (`test_search_query_max_length_stays_within_the_ollama_grammar_safe_bound`)
+   pins the bound itself, since no functional test can otherwise detect
+   a future regression here.
+3. **Ollama inference concurrency guard.** `Settings.inference_concurrency`
+   existed since an earlier slice but was never wired to anything. Added
+   `meyar.llm.concurrency`: one process-wide (module-level, not
+   per-instance) `asyncio.Semaphore`, sized from that setting, shared by
+   every `OllamaLLMProvider._chat` call — extraction, identity
+   extraction, NL search planning, and the new agent loop alike — so no
+   combination of concurrent browser sessions can exceed the configured
+   local-inference budget.
+
+**Why:** A tiny local model (the only kind this project can assume on
+constrained target hardware — see the still-open Mac Mini benchmark,
+issue #20/M5) cannot be trusted to narrate candidate facts reliably;
+structural grounding removes that trust requirement entirely rather than
+asking the prompt to enforce it. The `maxLength` limit is genuinely
+non-obvious, hardware/model-dependent, and would silently break any
+future agent-facing Pydantic schema that adds a long free-text field
+without re-testing against a real Ollama daemon — recording it here is
+the only way a future slice avoids re-discovering it the same way.
+
+**Reversibility:** Fully additive — new package (`meyar.agent`), new
+table (migration `a1c5e9f2b6d3`, cleanly dropped by `downgrade()`), new
+`LLMProvider.decide_agent_action` protocol method. No existing search,
+scoring, or evaluation behavior changed. The `MAX_AGENT_SEARCH_QUERY_LENGTH`
+bound and the concurrency guard are both simple constant/wiring changes,
+trivially adjustable if re-verified against different hardware or a
+different local model.

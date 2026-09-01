@@ -1,6 +1,9 @@
 """Deterministic test doubles. Automated tests must never depend on a
 real running LLM or embedding model — see Slice 4 spec §21."""
 
+from typing import Any
+
+from meyar.agent.schemas import AgentDecision
 from meyar.embedding.provider import EmbeddingProviderError, EmbeddingResult
 from meyar.extraction.view import ProfessionalDocumentView
 from meyar.llm.provider import LLMProviderError, LLMResultProvenance
@@ -24,6 +27,10 @@ class FakeLLMProvider:
         planner_drafts: list[PlannerDraft] | None = None,
         model_revision: str = "",
         planner_provenance: LLMResultProvenance | None = None,
+        agent_decision: AgentDecision | None = None,
+        agent_decisions: list[AgentDecision] | None = None,
+        agent_error: LLMProviderError | None = None,
+        agent_fail_first_n_calls: int = 0,
     ) -> None:
         self._extraction = extraction
         self._identity_extraction = identity_extraction
@@ -34,6 +41,10 @@ class FakeLLMProvider:
         self._planner_drafts = planner_drafts or ([planner_draft] if planner_draft else [])
         self._planner_provenance = planner_provenance
         self.call_count = 0
+        self._agent_decisions = agent_decisions or ([agent_decision] if agent_decision else [])
+        self._agent_error = agent_error
+        self._agent_fail_first_n_calls = agent_fail_first_n_calls
+        self.agent_call_count = 0
 
     async def extract_candidate_profile(
         self, view: ProfessionalDocumentView
@@ -83,6 +94,31 @@ class FakeLLMProvider:
             model_revision=self.model_revision,
         )
         return draft, provenance
+
+    async def decide_agent_action(
+        self,
+        *,
+        recent_turns: list[tuple[str, str]],
+        last_tool_result_summary: dict[str, Any] | None,
+        available_candidate_refs: list[int],
+        repair: bool = False,
+    ) -> tuple[AgentDecision, LLMResultProvenance]:
+        self.agent_call_count += 1
+        if self.agent_call_count <= self._agent_fail_first_n_calls:
+            from meyar.llm.provider import ModelSchemaInvalidError
+
+            raise ModelSchemaInvalidError("Simulated schema-invalid agent output.")
+        if self._agent_error is not None:
+            raise self._agent_error
+        success_index = self.agent_call_count - self._agent_fail_first_n_calls - 1
+        assert self._agent_decisions
+        decision = self._agent_decisions[min(success_index, len(self._agent_decisions) - 1)]
+        provenance = self._planner_provenance or LLMResultProvenance(
+            provider=self.provider_name,
+            model_name=self.model_name,
+            model_revision=self.model_revision,
+        )
+        return decision, provenance
 
 
 class FakeEmbeddingProvider:

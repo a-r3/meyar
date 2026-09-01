@@ -126,8 +126,45 @@ independent, not a shared credential bridge. Quality gates: `ruff` clean,
 `mypy src` clean (127 files), `alembic heads` = one head, full `pytest`
 suite 716 passed / 0 failed. See D-034 (`docs/DECISIONS.md`) for the
 design decisions and two bugs found and fixed during this slice's own
-testing. **Not yet merged — PR pending owner review; issue #30 and M8
-remain open.**
+testing. **Squash-merged as PR #39 (`d13ddb9`, `Closes #30`); issue #30
+closed.** Local `main`/`origin/main` at `d13ddb9`.
+
+**M8 Slice 2 — Read-Only Local AI Agent Foundation (#31) implementation
+complete, PR not yet opened (2026-09-01).** Branch
+`feat/read-only-ai-agent-foundation` from synced `main` (`d13ddb9`). Adds
+a bounded local-AI agent: new `meyar.agent` package (`schemas.py` —
+`AgentDecision`, the model's only output shape, `extra="forbid"`, mirrors
+`PlannerDraft`'s discipline; `prompts.py`; `service.py` — the bounded
+orchestration loop) plus a new `LLMProvider.decide_agent_action` method on
+the existing `OllamaLLMProvider`. Exactly three read-only tools:
+`search_candidates` forwards the model's own restated query, unmodified,
+into the existing frozen `plan_and_search_candidates` pipeline (D-026/
+D-027/D-031 guarantees reused as-is, not re-implemented) and loops back
+for one more decision; `get_candidate_profile`/`get_candidate_evidence`
+resolve a model-produced ordinal `candidate_ref` — never a raw
+candidate_id — against the conversation's own server-held
+`last_search_candidate_ids`, and always finalize the turn immediately
+(found or not), so a small local model never gets a second, riskier
+chance to freelance about an answer that's already complete. The model's
+own `message` field is closing/clarifying framing text only — every
+factual claim is rendered separately and deterministically from typed
+tool-result data, never from model free text (D-035). New
+`AgentConversation` model/table (migration `a1c5e9f2b6d3`), 1:1 with
+`BrowserSession` (unique FK, cascade), so two human sessions never share
+state and a fresh login always starts empty. New
+`meyar.llm.concurrency` gives the previously-declared-but-unused
+`Settings.inference_concurrency` its first real enforcement: one
+process-wide semaphore shared by every `OllamaLLMProvider._chat` call
+(extraction, identity, NL search planning, and the agent loop alike).
+New `GET`/`POST /ui/agent` routes + `agent.html` template + "MEYAR AI"
+nav entry (classic Search/Vacancies untouched). Candidate identity
+(full name) is resolved only in the UI presentation layer, from
+already-tenant-scoped tool results — never sent into the model's prompt.
+A real, non-obvious bug was found and fixed during manual real-Ollama
+verification — see D-035. Quality gates: `ruff` clean, `mypy src` clean
+(134 files), `alembic heads` = one head, full `pytest` suite 756 passed
+/ 0 failed, `scripts/scan-tracked-tree.sh` clean. **Not yet
+committed/opened as a PR — issue #31 and M8 remain open.**
 
 GitHub remote established (`https://github.com/a-r3/meyar.git`, private,
 temporary development remote — see D-012, `docs/DECISIONS.md`). `main`
@@ -689,8 +726,10 @@ Evaluation's persisted `candidate_profile_version_id`/
 `job_criteria_version_id` verified to equal the exact input versions.
 
 ## In progress
-No product Slice is currently in progress. Slice 14 is the most recently
-merged Slice work.
+**M8 Slice 2 — Read-Only Local AI Agent Foundation (#31)**: implementation
+complete on `feat/read-only-ai-agent-foundation`, PR not yet opened — see
+"Current phase" above. M8 Slice 1 (#30) merged as PR #39. Slice 14 remains
+the most recently merged product-Slice work before the M8 pivot.
 
 **Chore (issue #25, not a Slice):** pre-presentation readiness and local
 demo bootstrap — **MERGED as PR #26 at squash SHA `a539e34`** (see D-022).

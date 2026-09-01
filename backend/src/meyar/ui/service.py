@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meyar.agent.schemas import AgentActionType, AgentTurnResult
 from meyar.core.text import fold_az_ascii, normalize_azerbaijani_case
 from meyar.ingestion.parser import CanonicalDocumentContent
 from meyar.models.candidate import Candidate
@@ -51,8 +52,17 @@ from meyar.services.candidate_profile_repo import (
     get_profile_version_by_id,
 )
 from meyar.services.candidate_repo import get_candidate
-from meyar.ui.presentation import join_nonempty
+from meyar.ui.presentation import (
+    AGENT_EVIDENCE_CATEGORY_LABELS,
+    join_nonempty,
+    planner_outcome_view,
+)
 from meyar.ui.view_models import (
+    AgentCandidateProfileView,
+    AgentEvidenceMatchView,
+    AgentEvidenceView,
+    AgentToolResultView,
+    AgentTurnView,
     CandidateDetailView,
     CandidateDocumentPreviewView,
     CandidateDocumentView,
@@ -551,6 +561,118 @@ async def build_search_result_views(
             )
         )
     return views
+
+
+async def _agent_candidate_profile_view(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    candidate_id: uuid.UUID,
+    profile: CandidateProfileExtraction,
+) -> AgentCandidateProfileView:
+    identity = await get_current_identity_version(
+        db, tenant_id=tenant_id, candidate_id=candidate_id
+    )
+    full_name, _email, _phone = _identity_values(identity)
+    current_role, _top_skills = _current_role_and_skills(profile)
+    facts = _facts(profile)
+    return AgentCandidateProfileView(
+        candidate_id=candidate_id,
+        full_name=full_name,
+        current_role=current_role,
+        **facts,
+    )
+
+
+async def build_agent_turn_view(
+    db: AsyncSession, *, tenant_id: uuid.UUID, result: AgentTurnResult
+) -> AgentTurnView:
+    """Composes the Slice 2 agent's typed, non-identity tool results
+    (meyar.agent.schemas.AgentTurnResult) with HR-facing display identity
+    — the ONLY place CandidateIdentity is resolved for agent output,
+    strictly after the agent's own tenant-scoped tool dispatch has
+    already run; this function never feeds anything back into a model
+    prompt. See docs/DECISIONS.md D-035."""
+    tool_result_views: list[AgentToolResultView] = []
+    for tool_result in result.tool_results:
+        if tool_result.tool_name == AgentActionType.SEARCH_CANDIDATES:
+            assert tool_result.search is not None
+            search_response = tool_result.search.response.search_response
+            search_results = (
+                await build_search_result_views(db, tenant_id=tenant_id, response=search_response)
+                if search_response is not None
+                else []
+            )
+            tool_result_views.append(
+                AgentToolResultView(
+                    tool_name=tool_result.tool_name.value,
+                    search_outcome=planner_outcome_view(
+                        tool_result.search.response.plan,
+                        result_count=search_response.result_count if search_response else None,
+                    ),
+                    search_results=search_results,
+                )
+            )
+        elif tool_result.tool_name == AgentActionType.GET_CANDIDATE_PROFILE:
+            assert tool_result.profile is not None
+            profile_result = tool_result.profile
+            if not profile_result.found or profile_result.candidate_id is None:
+                tool_result_views.append(
+                    AgentToolResultView(
+                        tool_name=tool_result.tool_name.value,
+                        not_found_ref=profile_result.candidate_ref,
+                    )
+                )
+                continue
+            assert profile_result.profile is not None
+            profile_view = await _agent_candidate_profile_view(
+                db,
+                tenant_id=tenant_id,
+                candidate_id=profile_result.candidate_id,
+                profile=profile_result.profile,
+            )
+            tool_result_views.append(
+                AgentToolResultView(tool_name=tool_result.tool_name.value, profile=profile_view)
+            )
+        else:
+            assert tool_result.evidence is not None
+            evidence_result = tool_result.evidence
+            if not evidence_result.found or evidence_result.candidate_id is None:
+                tool_result_views.append(
+                    AgentToolResultView(
+                        tool_name=tool_result.tool_name.value,
+                        not_found_ref=evidence_result.candidate_ref,
+                    )
+                )
+                continue
+            identity = await get_current_identity_version(
+                db, tenant_id=tenant_id, candidate_id=evidence_result.candidate_id
+            )
+            full_name, _email, _phone = _identity_values(identity)
+            match_views = [
+                AgentEvidenceMatchView(
+                    category_label=AGENT_EVIDENCE_CATEGORY_LABELS.get(
+                        match.category, match.category
+                    ),
+                    title=match.title,
+                    evidence=_evidence_views(match.evidence, snippets=True),
+                )
+                for match in evidence_result.matches
+            ]
+            tool_result_views.append(
+                AgentToolResultView(
+                    tool_name=tool_result.tool_name.value,
+                    evidence=AgentEvidenceView(
+                        candidate_id=evidence_result.candidate_id,
+                        full_name=full_name,
+                        topic=evidence_result.topic,
+                        matches=match_views,
+                    ),
+                )
+            )
+    return AgentTurnView(
+        outcome=result.outcome.value, message=result.message, tool_results=tool_result_views
+    )
 
 
 async def list_job_views(

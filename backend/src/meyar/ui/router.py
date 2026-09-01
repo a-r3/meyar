@@ -62,6 +62,7 @@ from meyar.ui.presentation import (
     FIT_BAND_LABELS,
     JOB_STATUS_LABELS,
     STATE_LABELS,
+    agent_turn_outcome_message,
     readiness_label,
     readiness_state,
 )
@@ -118,6 +119,7 @@ templates.env.globals.update(
     job_status_label=lambda value: JOB_STATUS_LABELS.get(value, value),
     readiness_label=readiness_label,
     readiness_state=readiness_state,
+    agent_turn_outcome_message=agent_turn_outcome_message,
 )
 
 _CSP = (
@@ -460,6 +462,97 @@ async def search(
             outcome=outcome,
             results=result_views,
         ),
+    )
+
+
+def _agent_turn_log_views(conversation) -> list:
+    from meyar.ui.view_models import AgentTurnLogView
+
+    return [
+        AgentTurnLogView(role=turn.get("role", "user"), text=turn.get("text", ""))
+        for turn in conversation.turns
+    ]
+
+
+@router.get("/agent", response_class=HTMLResponse)
+async def agent_workspace(
+    request: Request,
+    ctx: UIContext = Depends(require_ui_scopes("candidates:read")),
+    db: AsyncSession = Depends(get_db),
+) -> HTMLResponse:
+    from meyar.services.agent_conversation_repo import get_or_create_conversation
+
+    conversation = await get_or_create_conversation(
+        db, tenant_id=ctx.tenant_id, browser_session_id=ctx.session_id
+    )
+    await db.commit()
+    return _render(
+        request,
+        "agent.html",
+        _context(ctx, turns=_agent_turn_log_views(conversation), latest=None),
+    )
+
+
+@router.post("/agent", response_class=HTMLResponse)
+async def agent_turn(
+    request: Request,
+    message: str = Form(..., min_length=1, max_length=4000),
+    csrf_token: str = Form(...),
+    ctx: UIContext = Depends(require_ui_scopes("candidates:read")),
+    db: AsyncSession = Depends(get_db),
+    llm: LLMProvider = Depends(get_llm_provider),
+    embedding_provider: EmbeddingProvider = Depends(get_embedding_provider),
+    embedding_config: EmbeddingSearchConfig = Depends(get_embedding_search_config),
+    settings: Settings = Depends(get_settings),
+) -> HTMLResponse:
+    verify_csrf(ctx.csrf_token, csrf_token)
+    from meyar.agent.service import run_agent_turn
+    from meyar.services.agent_conversation_repo import get_or_create_conversation
+    from meyar.ui.service import build_agent_turn_view
+
+    conversation = await get_or_create_conversation(
+        db, tenant_id=ctx.tenant_id, browser_session_id=ctx.session_id
+    )
+    # Same "current date is a trusted-runtime value, never user/model
+    # supplied" boundary as /ui/search (docs/DECISIONS.md D-023).
+    as_of_date = date.today()
+    try:
+        result = await run_agent_turn(
+            db,
+            llm,
+            tenant_id=ctx.tenant_id,
+            conversation=conversation,
+            user_message=message,
+            as_of_date=as_of_date,
+            embedding_config=embedding_config,
+            embedding_provider=embedding_provider,
+            max_tool_calls=settings.agent_max_tool_calls,
+            max_context_turns=settings.agent_max_context_turns,
+        )
+        latest = await build_agent_turn_view(db, tenant_id=ctx.tenant_id, result=result)
+        await db.commit()
+    except (EmbeddingProviderError, SearchRequestError, SQLAlchemyError):
+        await db.rollback()
+        from meyar.ui.view_models import AgentTurnView
+
+        latest = AgentTurnView(
+            outcome="AGENT_PROVIDER_FAILURE",
+            message="MEYAR AI xidməti hazırda əlçatan deyil. Bir qədər sonra yenidən cəhd edin.",
+        )
+        conversation = await get_or_create_conversation(
+            db, tenant_id=ctx.tenant_id, browser_session_id=ctx.session_id
+        )
+        return _render(
+            request,
+            "agent.html",
+            _context(ctx, turns=_agent_turn_log_views(conversation), latest=latest),
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+
+    return _render(
+        request,
+        "agent.html",
+        _context(ctx, turns=_agent_turn_log_views(conversation), latest=latest),
     )
 
 

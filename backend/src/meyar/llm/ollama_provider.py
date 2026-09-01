@@ -1,11 +1,15 @@
 import json
+from typing import Any
 
 import httpx
 from pydantic import ValidationError
 
+from meyar.agent.prompts import AGENT_SYSTEM_PROMPT, build_agent_user_prompt
+from meyar.agent.schemas import AgentDecision
 from meyar.extraction.identity_prompts import IDENTITY_SYSTEM_PROMPT
 from meyar.extraction.prompts import SYSTEM_PROMPT, build_user_prompt
 from meyar.extraction.view import ProfessionalDocumentView
+from meyar.llm.concurrency import get_inference_semaphore
 from meyar.llm.loopback import require_loopback_url
 from meyar.llm.provider import (
     LLMResultProvenance,
@@ -37,6 +41,7 @@ class OllamaLLMProvider:
         model: str,
         timeout_seconds: float,
         transport: httpx.AsyncBaseTransport | None = None,
+        max_concurrency: int = 1,
     ) -> None:
         require_loopback_url(base_url, setting_name="MEYAR_OLLAMA_BASE_URL")
         self._base_url = base_url.rstrip("/")
@@ -44,6 +49,7 @@ class OllamaLLMProvider:
         self.model_revision = ""
         self._timeout_seconds = timeout_seconds
         self._transport = transport
+        self._max_concurrency = max_concurrency
 
     async def health(self) -> dict:
         try:
@@ -109,6 +115,32 @@ class OllamaLLMProvider:
             ) from exc
         return draft, provenance
 
+    async def decide_agent_action(
+        self,
+        *,
+        recent_turns: list[tuple[str, str]],
+        last_tool_result_summary: dict[str, Any] | None,
+        available_candidate_refs: list[int],
+        repair: bool = False,
+    ) -> tuple[AgentDecision, LLMResultProvenance]:
+        content, provenance = await self._chat(
+            system_prompt=AGENT_SYSTEM_PROMPT,
+            user_prompt=build_agent_user_prompt(
+                recent_turns=recent_turns,
+                last_tool_result_summary=last_tool_result_summary,
+                available_candidate_refs=available_candidate_refs,
+                repair=repair,
+            ),
+            schema=AgentDecision.model_json_schema(),
+        )
+        try:
+            decision = AgentDecision.model_validate(json.loads(content))
+        except (json.JSONDecodeError, ValidationError) as exc:
+            raise ModelSchemaInvalidError(
+                "Model output failed AgentDecision structured-schema validation."
+            ) from exc
+        return decision, provenance
+
     async def _chat(
         self, *, system_prompt: str, user_prompt: str, schema: dict
     ) -> tuple[str, LLMResultProvenance]:
@@ -122,11 +154,13 @@ class OllamaLLMProvider:
             "stream": False,
             "options": {"temperature": 0.0},
         }
+        semaphore = get_inference_semaphore(self._max_concurrency)
         try:
-            async with httpx.AsyncClient(
-                timeout=self._timeout_seconds, transport=self._transport
-            ) as client:
-                resp = await client.post(f"{self._base_url}/api/chat", json=payload)
+            async with semaphore:
+                async with httpx.AsyncClient(
+                    timeout=self._timeout_seconds, transport=self._transport
+                ) as client:
+                    resp = await client.post(f"{self._base_url}/api/chat", json=payload)
         except httpx.TimeoutException as exc:
             raise ModelTimeoutError(
                 f"Ollama request timed out after {self._timeout_seconds}s."
