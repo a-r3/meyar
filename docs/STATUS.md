@@ -234,10 +234,10 @@ proving the vulnerability class is closed, 3 HTTP-level). Quality gates:
 autonomous acceptance run of the real 3-turn flow against a real local
 `qwen3:1.7b` daemon then found two more real bugs neither visible to
 `FakeLLMProvider`-based tests — see D-039: qwen3's default hidden-
-thinking mode made every call ~5x slower, turning Turn 1's very first
-decision into an outright `AGENT_PROVIDER_FAILURE` (fixed: `think: false`
-on every `OllamaLLMProvider._chat` call, ~34s cold-load latency measured
-down to ~6.5s); and, once fast enough to reliably reach a second
+thinking mode made every agent call ~5x slower, turning Turn 1's very
+first decision into an outright `AGENT_PROVIDER_FAILURE` (fixed:
+`think: false` on the agent decision/synthesis calls, ~34s cold-load
+latency measured down to ~6.5s); and, once fast enough to reliably reach a second
 "what next" decision, the loop had no guard against the model re-issuing
 an identical `SEARCH_CANDIDATES` call, eventually co-rendering
 `TOOL_CALL_LIMIT_EXCEEDED` above duplicated result blocks (fixed
@@ -253,11 +253,26 @@ single coherent grounded result each, and Turn 3 correctly states the
 evidence does not prove a specific Python duration without ever deriving
 "2021–2025 = 4 years" or substituting total experience for it. 2 new
 regression tests for the thinking-disabled payload, 1 new + 1 rewritten
-for the redundant-search guard. Quality gates re-verified: `ruff` clean,
-`mypy src` clean, full `pytest` suite 781 passed / 0 failed (up from
-778), `alembic heads` unchanged (no migration),
-`scripts/scan-tracked-tree.sh` clean. Pushed to PR #40. **Still not
-merged — awaiting owner retest.**
+for the redundant-search guard. Owner scope-corrected: D-039's
+`think: false` had been applied to every `OllamaLLMProvider._chat` call,
+which reaches previously-accepted extraction/identity/planner AI
+behavior (Slices 4/7/9) outside Slice 2. Fixed — see D-040:
+`OllamaLLMProvider._chat` now takes an optional `think` parameter, sent
+only by the two agent call sites (`decide_agent_action`,
+`select_grounded_facts`); extraction/identity/planner calls omit the
+`think` key entirely, byte-identical to their pre-D-039 request shape.
+The target-hardware benchmark that would formally back a real-model
+generation-parameter change like this is issue #36 (Slice 7, M9,
+"Agent understanding" dimension) — not #20, whose current scope is the
+broader Slice 13/M5 security + DoD acceptance issue (a target-hardware
+benchmark execution is one gate inside it, not its whole purpose). 3 new
+regression tests proving extraction/identity/planner requests omit
+`think`. Re-verified end to end again: the real 3-turn flow is unaffected
+by the narrowing (both prior fixes live only in the agent call sites).
+Quality gates re-verified: `ruff` clean, `mypy src` clean, full `pytest`
+suite 784 passed / 0 failed (up from 781), `alembic heads` unchanged (no
+migration), `scripts/scan-tracked-tree.sh` clean. Pushed to PR #40.
+**Still not merged — awaiting owner retest.**
 
 GitHub remote established (`https://github.com/a-r3/meyar.git`, private,
 temporary development remote — see D-012, `docs/DECISIONS.md`). `main`

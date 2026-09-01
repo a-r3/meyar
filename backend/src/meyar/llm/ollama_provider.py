@@ -135,6 +135,7 @@ class OllamaLLMProvider:
                 repair=repair,
             ),
             schema=AgentDecision.model_json_schema(),
+            think=False,
         )
         try:
             decision = AgentDecision.model_validate(json.loads(content))
@@ -159,6 +160,7 @@ class OllamaLLMProvider:
                 repair=repair,
             ),
             schema=GroundedSelection.model_json_schema(),
+            think=False,
         )
         try:
             selection = GroundedSelection.model_validate(json.loads(content))
@@ -169,9 +171,14 @@ class OllamaLLMProvider:
         return selection, provenance
 
     async def _chat(
-        self, *, system_prompt: str, user_prompt: str, schema: dict
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        schema: dict,
+        think: bool | None = None,
     ) -> tuple[str, LLMResultProvenance]:
-        payload = {
+        payload: dict[str, Any] = {
             "model": self.model_name,
             "messages": [
                 {"role": "system", "content": system_prompt},
@@ -179,13 +186,16 @@ class OllamaLLMProvider:
             ],
             "format": schema,
             "stream": False,
-            # Hybrid-thinking models (qwen3) default to emitting a hidden
-            # chain-of-thought before the schema-constrained JSON, multiplying
-            # real latency ~5x for no benefit here — every prompt in this
-            # module already forbids chain-of-thought output. See D-039.
-            "think": False,
             "options": {"temperature": 0.0},
         }
+        # think is omitted (Ollama/model default) unless a call site opts in
+        # explicitly — see decide_agent_action/select_grounded_facts (D-039).
+        # Every other call site (extraction, identity, planner) must keep
+        # its exact pre-D-039 request shape: accepted, previously-verified
+        # AI behavior outside Slice 2's scope, never altered as a side
+        # effect of an agent-only fix (D-040).
+        if think is not None:
+            payload["think"] = think
         semaphore = get_inference_semaphore(self._max_concurrency)
         try:
             async with semaphore:

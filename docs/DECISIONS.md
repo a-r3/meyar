@@ -2922,3 +2922,61 @@ migration impact. The redundant-search guard is pure orchestration-loop
 logic (`meyar.agent.service`), no schema/migration change. The prompt
 edit only affects `AGENT_SYSTEM_PROMPT` text and its version constant. No
 scoring, planner regex, Search/Vacancies UI, or mutation path touched.
+
+## D-040 — Scope correction: `think: false` narrowed to agent-only calls,
+never applied to extraction/identity/planner
+
+**Date:** 2026-09-02
+**Decision:** D-039 disabled Ollama's hidden-thinking mode on every
+`OllamaLLMProvider._chat` call — correct for the two agent call sites
+(`decide_agent_action`, `select_grounded_facts`), which is what Slice 2's
+own acceptance run actually exercised, but out of scope for
+`extract_candidate_profile`/`extract_candidate_identity`/
+`plan_candidate_search`: those are previously-accepted AI behavior on
+`main` from earlier slices (4, 7, 9), and changing their real-model
+generation behavior — even to make it faster — is a model-behavior change
+with no dedicated extraction/planner quality benchmark backing it, not a
+Slice 2 bug fix.
+
+Narrowed: `OllamaLLMProvider._chat` gained a `think: bool | None = None`
+parameter. When omitted, the request payload has **no** `think` key at
+all — byte-identical to every pre-D-039 call, the exact previously-
+accepted request shape. Only `decide_agent_action`/`select_grounded_facts`
+now pass `think=False` explicitly; `extract_candidate_profile`,
+`extract_candidate_identity`, and `plan_candidate_search` pass nothing and
+so keep relying on the Ollama/model default exactly as before D-039. Two
+new regression tests assert the two agent call sites still send
+`think: false`; three new regression tests assert extraction, identity,
+and planner requests never carry a `think` key at all.
+
+Re-verified end to end after the narrowing: the real 3-turn qwen3:1.7b
+flow (Slice 2 acceptance) still produces the same coherent, grounded,
+non-contradictory result each turn as under D-039 — narrowing the change
+to the two agent call sites that actually needed it does not reintroduce
+the cold-start timeout or the redundant-search loop, both of which were
+never touched by this correction.
+
+**Benchmark issue-reference correction:** the target-hardware benchmark
+that would formally validate real-model generation-parameter changes like
+this is issue #36 ("Slice 7 — Real Target-Mac Model Selection &
+Benchmark", M9) — its matrix explicitly covers "Agent understanding
+(tool-call accuracy/reliability)" as a dimension distinct from #20's
+original scope. Issue #20 ("Slice 13 — Security + Official
+Definition-of-Done Acceptance", M5) is the broader MVP-acceptance/DoD
+issue that happens to include a target-hardware benchmark execution gate
+among many unrelated gates (security, backup/restore, the original-CV
+route) — it is not itself "the benchmark issue" and should not be cited
+as such going forward; #36 is. Both remain open and neither supersedes
+the other (per #36's own text).
+
+**Why:** the owner's Slice 2 acceptance framing was explicit that a
+real-Ollama fix must stay inside Slice 2's own bounded scope — a shared
+provider file makes it easy to over-apply a fix meant for one call site
+to every call site, and doing so here would have silently changed
+extraction/identity/planner behavior that Slices 4/7/9 already accepted,
+without the benchmark evidence (#36) that a change like that should be
+backed by.
+
+**Reversibility:** Pure narrowing of D-039 — one new optional parameter
+on `_chat`, two call sites opt in, three call sites unchanged. No schema,
+migration, scoring, or navigation impact.
