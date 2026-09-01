@@ -25,10 +25,11 @@ from meyar.main import app
 from meyar.models.job import Job
 from meyar.models.job_criteria_version import JobCriteriaVersion
 from meyar.schemas.criteria import CriterionIn, CriterionKind, CriterionType
-from meyar.services.api_key_repo import create_api_key
 from meyar.services.job_criteria_repo import create_criteria_version
 from meyar.services.job_repo import create_job
+from meyar.services.tenant_membership_repo import create_membership
 from meyar.services.tenant_repo import create_tenant
+from meyar.services.user_repo import create_user
 
 
 @pytest.fixture
@@ -38,15 +39,34 @@ def local_ui_settings() -> Settings:
     return settings
 
 
-async def _login_and_csrf(client: AsyncClient, plaintext: str) -> str:
+async def _login_and_csrf(client: AsyncClient, username: str, password: str) -> str:
     response = await client.post(
-        "/ui/login", data={"api_key": plaintext}, follow_redirects=False
+        "/ui/login",
+        data={"username": username, "password": password},
+        follow_redirects=False,
     )
     assert response.status_code == 303
     home = await client.get("/ui")
     match = re.search(r'name="csrf_token" value="([0-9a-f]{64})"', home.text)
     assert match is not None
     return match.group(1)
+
+
+async def _create_restricted_user(db: AsyncSession, *, tenant_id) -> tuple[str, str]:
+    """A user with an active membership carrying an unrecognized role —
+    meyar.core.roles.permissions_for_role fails closed on any role it
+    doesn't recognize, so this deterministically has zero UI permissions.
+    Exercises the exact same require_ui_scopes enforcement path a
+    genuinely reduced-permission role would, without inventing a fake
+    product role that doesn't otherwise exist (see docs/DECISIONS.md)."""
+    import uuid
+
+    password = "restricted-password-1"
+    username = f"restricted-{uuid.uuid4().hex[:8]}"
+    user = await create_user(db, username=username, plaintext_password=password)
+    await create_membership(db, user_id=user.id, tenant_id=tenant_id, role="NO_PERMISSIONS")
+    await db.commit()
+    return username, password
 
 
 def _row(
@@ -80,15 +100,14 @@ def _blank_rows(
 async def test_new_job_form_requires_jobs_write_scope(
     client: AsyncClient,
     db_session: AsyncSession,
-    tenant_and_key,
+    tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
-    tenant, _key, _plaintext = tenant_and_key
-    _read_only_key, read_only_plaintext = await create_api_key(
-        db_session, tenant_id=tenant.id, env="test", scopes=["jobs:read"]
+    tenant, _user, _password, _membership = tenant_and_user
+    restricted_username, restricted_password = await _create_restricted_user(
+        db_session, tenant_id=tenant.id
     )
-    await db_session.commit()
-    await _login_and_csrf(client, read_only_plaintext)
+    await _login_and_csrf(client, restricted_username, restricted_password)
 
     response = await client.get("/ui/jobs/new")
 
@@ -103,12 +122,12 @@ async def test_new_job_form_unauthenticated_is_redirected(client: AsyncClient) -
 
 
 async def test_new_job_form_has_no_raw_id_input(
-    client: AsyncClient, tenant_and_key, local_ui_settings: Settings
+    client: AsyncClient, tenant_and_user, local_ui_settings: Settings
 ) -> None:
     """The HR user must never type or see a raw criterion/job id — it is
     generated server-side from the entered requirement text."""
-    _tenant, _key, plaintext = tenant_and_key
-    await _login_and_csrf(client, plaintext)
+    _tenant, user, password, _membership = tenant_and_user
+    await _login_and_csrf(client, user.username, password)
 
     response = await client.get("/ui/jobs/new")
 
@@ -119,15 +138,15 @@ async def test_new_job_form_has_no_raw_id_input(
 
 
 async def test_new_job_form_has_a_single_requirement_field_not_ad_deyer(
-    client: AsyncClient, tenant_and_key, local_ui_settings: Settings
+    client: AsyncClient, tenant_and_user, local_ui_settings: Settings
 ) -> None:
     """Regression for owner visual-inspection Blocker B: the previous form
     exposed separate internal 'Ad'/'Dəyər' (label/value) fields, which
     caused Blocker A (an HR tester typed the requirement TYPE into the
     value field). There must be exactly one HR-facing text field per row
     now."""
-    _tenant, _key, plaintext = tenant_and_key
-    await _login_and_csrf(client, plaintext)
+    _tenant, user, password, _membership = tenant_and_user
+    await _login_and_csrf(client, user.username, password)
 
     response = await client.get("/ui/jobs/new")
 
@@ -141,10 +160,10 @@ async def test_new_job_form_has_a_single_requirement_field_not_ad_deyer(
 
 
 async def test_create_job_requires_csrf_token(
-    client: AsyncClient, tenant_and_key, local_ui_settings: Settings
+    client: AsyncClient, tenant_and_user, local_ui_settings: Settings
 ) -> None:
-    _tenant, _key, plaintext = tenant_and_key
-    await _login_and_csrf(client, plaintext)
+    _tenant, user, password, _membership = tenant_and_user
+    await _login_and_csrf(client, user.username, password)
     data = {"title": "No CSRF JD", "csrf_token": "wrong"}
     data.update(_blank_rows("must"))
     data.update(_blank_rows("pref"))
@@ -157,15 +176,14 @@ async def test_create_job_requires_csrf_token(
 async def test_create_job_requires_jobs_write_scope(
     client: AsyncClient,
     db_session: AsyncSession,
-    tenant_and_key,
+    tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
-    tenant, _key, _plaintext = tenant_and_key
-    _read_only_key, read_only_plaintext = await create_api_key(
-        db_session, tenant_id=tenant.id, env="test", scopes=["jobs:read"]
+    tenant, _user, _password, _membership = tenant_and_user
+    restricted_username, restricted_password = await _create_restricted_user(
+        db_session, tenant_id=tenant.id
     )
-    await db_session.commit()
-    csrf = await _login_and_csrf(client, read_only_plaintext)
+    csrf = await _login_and_csrf(client, restricted_username, restricted_password)
     data = {"title": "Forbidden JD", "csrf_token": csrf}
     data.update(_blank_rows("must", filled=_row("must", 0, kind="SKILL", requirement="Python")))
     data.update(_blank_rows("pref"))
@@ -176,10 +194,10 @@ async def test_create_job_requires_jobs_write_scope(
 
 
 async def test_empty_title_is_rejected_with_friendly_error(
-    client: AsyncClient, tenant_and_key, local_ui_settings: Settings
+    client: AsyncClient, tenant_and_user, local_ui_settings: Settings
 ) -> None:
-    _tenant, _key, plaintext = tenant_and_key
-    csrf = await _login_and_csrf(client, plaintext)
+    _tenant, user, password, _membership = tenant_and_user
+    csrf = await _login_and_csrf(client, user.username, password)
     data = {"title": "   ", "csrf_token": csrf}
     data.update(_blank_rows("must", filled=_row("must", 0, kind="SKILL", requirement="Python")))
     data.update(_blank_rows("pref"))
@@ -191,10 +209,10 @@ async def test_empty_title_is_rejected_with_friendly_error(
 
 
 async def test_experience_criterion_without_min_years_is_rejected_and_input_preserved(
-    client: AsyncClient, tenant_and_key, local_ui_settings: Settings
+    client: AsyncClient, tenant_and_user, local_ui_settings: Settings
 ) -> None:
-    _tenant, _key, plaintext = tenant_and_key
-    csrf = await _login_and_csrf(client, plaintext)
+    _tenant, user, password, _membership = tenant_and_user
+    csrf = await _login_and_csrf(client, user.username, password)
     data = {"title": "AML JD", "csrf_token": csrf}
     data.update(
         _blank_rows(
@@ -213,14 +231,14 @@ async def test_experience_criterion_without_min_years_is_rejected_and_input_pres
 
 
 async def test_non_experience_criterion_rejects_stray_min_years_input(
-    client: AsyncClient, tenant_and_key, local_ui_settings: Settings
+    client: AsyncClient, tenant_and_user, local_ui_settings: Settings
 ) -> None:
     """Kind-aware validation (semantic-correctness audit): a value typed
     into the 'Təcrübə (il)' field for a SKILL/CERTIFICATION/EDUCATION/
     LANGUAGE row must never be silently ignored — the form must reject
     it with a clear error rather than accept-then-drop the input."""
-    _tenant, _key, plaintext = tenant_and_key
-    csrf = await _login_and_csrf(client, plaintext)
+    _tenant, user, password, _membership = tenant_and_user
+    csrf = await _login_and_csrf(client, user.username, password)
     data = {"title": "Kind Mismatch JD", "csrf_token": csrf}
     data.update(
         _blank_rows(
@@ -248,15 +266,15 @@ def _years_input_tag(html: str, name: str) -> str:
 
 
 async def test_years_control_is_disabled_for_skill_criterion_rendered_ui(
-    client: AsyncClient, tenant_and_key, local_ui_settings: Settings
+    client: AsyncClient, tenant_and_user, local_ui_settings: Settings
 ) -> None:
     """Owner follow-up: the client-side presentation must match the
     server-side kind-aware rule. A row whose kind is not EXPERIENCE
     (default new-form rows are SKILL) must render the 'Minimum müddət
     (il)' control disabled and not user-editable, never implying it can
     be filled in for a SKILL/CERTIFICATION/EDUCATION/LANGUAGE row."""
-    _tenant, _key, plaintext = tenant_and_key
-    await _login_and_csrf(client, plaintext)
+    _tenant, user, password, _membership = tenant_and_user
+    await _login_and_csrf(client, user.username, password)
 
     response = await client.get("/ui/jobs/new")
 
@@ -272,14 +290,14 @@ async def test_years_control_is_disabled_for_skill_criterion_rendered_ui(
 
 
 async def test_years_control_is_enabled_for_experience_criterion_rendered_ui(
-    client: AsyncClient, tenant_and_key, local_ui_settings: Settings
+    client: AsyncClient, tenant_and_user, local_ui_settings: Settings
 ) -> None:
     """A row whose kind is EXPERIENCE must render the duration control
     enabled with HR-facing 'Minimum müddət (il)' wording — verified via a
     form re-render (a second, invalid row forces re-render while
     preserving the first, valid EXPERIENCE row's posted values)."""
-    _tenant, _key, plaintext = tenant_and_key
-    csrf = await _login_and_csrf(client, plaintext)
+    _tenant, user, password, _membership = tenant_and_user
+    csrf = await _login_and_csrf(client, user.username, password)
     data = {"title": "Mixed Rows JD", "csrf_token": csrf}
     data.update(
         _blank_rows(
@@ -309,7 +327,7 @@ async def test_years_control_is_enabled_for_experience_criterion_rendered_ui(
 async def test_stale_experience_years_value_is_cleared_when_kind_switches_to_skill(
     client: AsyncClient,
     db_session: AsyncSession,
-    tenant_and_key,
+    tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
     """Simulates: HR selected 'Təcrübə', typed 4, then changed the kind to
@@ -318,8 +336,8 @@ async def test_stale_experience_years_value_is_cleared_when_kind_switches_to_ski
     kind-switched submission would look). The stale duration must never
     reach a persisted criterion and the re-rendered control must not echo
     it back as an editable value."""
-    tenant, _key, plaintext = tenant_and_key
-    csrf = await _login_and_csrf(client, plaintext)
+    tenant, user, password, _membership = tenant_and_user
+    csrf = await _login_and_csrf(client, user.username, password)
     data = {"title": "Kind Switch JD", "csrf_token": csrf}
     data.update(
         _blank_rows(
@@ -348,7 +366,7 @@ async def test_stale_experience_years_value_is_cleared_when_kind_switches_to_ski
 async def test_direct_manual_post_of_skill_kind_with_years_rejected_server_side(
     client: AsyncClient,
     db_session: AsyncSession,
-    tenant_and_key,
+    tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
     """Defense-in-depth: httpx never executes the client-side script, so
@@ -356,8 +374,8 @@ async def test_direct_manual_post_of_skill_kind_with_years_rejected_server_side(
     enhancement entirely (equivalent to JavaScript disabled). The
     deterministic server-side rule in _parse_criterion_row must still be
     the one rejecting SKILL + min_years, independent of any UI affordance."""
-    tenant, _key, plaintext = tenant_and_key
-    csrf = await _login_and_csrf(client, plaintext)
+    tenant, user, password, _membership = tenant_and_user
+    csrf = await _login_and_csrf(client, user.username, password)
     data = {"title": "Manual Bypass JD", "csrf_token": csrf}
     data.update(
         _blank_rows(
@@ -381,10 +399,10 @@ async def test_direct_manual_post_of_skill_kind_with_years_rejected_server_side(
 
 
 async def test_sensitive_criterion_term_is_rejected(
-    client: AsyncClient, tenant_and_key, local_ui_settings: Settings
+    client: AsyncClient, tenant_and_user, local_ui_settings: Settings
 ) -> None:
-    _tenant, _key, plaintext = tenant_and_key
-    csrf = await _login_and_csrf(client, plaintext)
+    _tenant, user, password, _membership = tenant_and_user
+    csrf = await _login_and_csrf(client, user.username, password)
     data = {"title": "Sensitive JD", "csrf_token": csrf}
     data.update(
         _blank_rows("must", filled=_row("must", 0, kind="SKILL", requirement="Yaş"))
@@ -402,11 +420,11 @@ async def test_sensitive_criterion_term_is_rejected(
 async def test_blank_rows_are_silently_skipped(
     client: AsyncClient,
     db_session: AsyncSession,
-    tenant_and_key,
+    tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
-    tenant, _key, plaintext = tenant_and_key
-    csrf = await _login_and_csrf(client, plaintext)
+    tenant, user, password, _membership = tenant_and_user
+    csrf = await _login_and_csrf(client, user.username, password)
     data = {"title": "Sparse JD", "csrf_token": csrf}
     data.update(_blank_rows("must", filled=_row("must", 0, kind="SKILL", requirement="Python")))
     data.update(_blank_rows("pref"))
@@ -433,13 +451,13 @@ async def test_blank_rows_are_silently_skipped(
 async def test_default_weight_is_one_when_left_untouched(
     client: AsyncClient,
     db_session: AsyncSession,
-    tenant_and_key,
+    tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
     """The 'Əhəmiyyət' (weight) field pre-fills with a safe default so HR
     does not have to think about it for an ordinary criterion."""
-    tenant, _key, plaintext = tenant_and_key
-    await _login_and_csrf(client, plaintext)
+    tenant, user, password, _membership = tenant_and_user
+    await _login_and_csrf(client, user.username, password)
     form_page = await client.get("/ui/jobs/new")
     assert re.search(r'name="must_weight_0" value="1(\.0)?"', form_page.text)
 
@@ -447,11 +465,11 @@ async def test_default_weight_is_one_when_left_untouched(
 async def test_create_job_with_must_have_and_preferred_criteria_is_immediately_rankable(
     client: AsyncClient,
     db_session: AsyncSession,
-    tenant_and_key,
+    tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
-    tenant, _key, plaintext = tenant_and_key
-    csrf = await _login_and_csrf(client, plaintext)
+    tenant, user, password, _membership = tenant_and_user
+    csrf = await _login_and_csrf(client, user.username, password)
     data = {"title": "Senior AML Analyst", "csrf_token": csrf}
     data.update(
         _blank_rows(
@@ -511,11 +529,11 @@ async def test_create_job_with_must_have_and_preferred_criteria_is_immediately_r
 async def test_created_job_is_not_visible_to_a_foreign_tenant(
     client: AsyncClient,
     db_session: AsyncSession,
-    tenant_and_key,
+    tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
-    tenant, _key, plaintext = tenant_and_key
-    csrf = await _login_and_csrf(client, plaintext)
+    tenant, user, password, _membership = tenant_and_user
+    csrf = await _login_and_csrf(client, user.username, password)
     data = {"title": "Tenant-Scoped JD", "csrf_token": csrf}
     data.update(_blank_rows("must", filled=_row("must", 0, kind="SKILL", requirement="Python")))
     data.update(_blank_rows("pref"))
@@ -523,12 +541,16 @@ async def test_created_job_is_not_visible_to_a_foreign_tenant(
     assert create_response.status_code == 303
 
     foreign = await create_tenant(db_session, name="Foreign HR tenant")
-    _foreign_key, foreign_plaintext = await create_api_key(
-        db_session, tenant_id=foreign.id, env="test"
+    foreign_username, foreign_password = "foreign-hr", "foreign-password-1"
+    foreign_user = await create_user(
+        db_session, username=foreign_username, plaintext_password=foreign_password
+    )
+    await create_membership(
+        db_session, user_id=foreign_user.id, tenant_id=foreign.id, role="HR_USER"
     )
     await db_session.commit()
     await client.post("/ui/logout", data={"csrf_token": csrf})
-    await _login_and_csrf(client, foreign_plaintext)
+    await _login_and_csrf(client, foreign_username, foreign_password)
 
     foreign_jobs_page = await client.get("/ui/jobs")
 
@@ -571,7 +593,7 @@ def _skill_profile(skill: str) -> dict:
 async def test_ui_created_skill_criterion_matches_real_candidate_evidence(
     client: AsyncClient,
     db_session: AsyncSession,
-    tenant_and_key,
+    tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
     """CRITICAL ACCEPTANCE TEST (Blocker A). A candidate with verified
@@ -581,7 +603,7 @@ async def test_ui_created_skill_criterion_matches_real_candidate_evidence(
     evidence genuinely exists. Also proves the converse is preserved:
     missing evidence still correctly resolves to UNKNOWN, so this is not
     weakening UNKNOWN into a false match."""
-    tenant, _key, plaintext = tenant_and_key
+    tenant, user, password, _membership = tenant_and_user
     matching_candidate, _profile = await seed_candidate_with_profile(
         db_session, tenant_id=tenant.id, profile_content=_skill_profile("Python")
     )
@@ -590,7 +612,7 @@ async def test_ui_created_skill_criterion_matches_real_candidate_evidence(
     )
     await db_session.commit()
 
-    csrf = await _login_and_csrf(client, plaintext)
+    csrf = await _login_and_csrf(client, user.username, password)
     data = {"title": "Senior Python Developer", "csrf_token": csrf}
     data.update(_blank_rows("must", filled=_row("must", 0, kind="SKILL", requirement="Python")))
     data.update(_blank_rows("pref"))
@@ -633,15 +655,15 @@ async def test_ui_created_skill_criterion_matches_real_candidate_evidence(
 async def test_ui_created_criterion_is_structurally_equivalent_to_api_created(
     client: AsyncClient,
     db_session: AsyncSession,
-    tenant_and_key,
+    tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
     """A criterion created via /ui/jobs must be structurally identical
     (same kind/type/label/value/min_years shape) to one created directly
     through the domain services the internal REST API uses — proving the
     two creation paths cannot semantically diverge for scoring."""
-    tenant, _key, plaintext = tenant_and_key
-    csrf = await _login_and_csrf(client, plaintext)
+    tenant, user, password, _membership = tenant_and_user
+    csrf = await _login_and_csrf(client, user.username, password)
     data = {"title": "Equivalence JD", "csrf_token": csrf}
     data.update(
         _blank_rows("must", filled=_row("must", 0, kind="SKILL", requirement="Kubernetes"))

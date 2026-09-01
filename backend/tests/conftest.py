@@ -8,12 +8,17 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from meyar.core.roles import ROLE_HR_USER
 from meyar.db import Base, get_db
 from meyar.main import app
 from meyar.services.api_key_repo import create_api_key
+from meyar.services.tenant_membership_repo import create_membership
 from meyar.services.tenant_repo import create_tenant
+from meyar.services.user_repo import create_user
 from meyar.storage.dependency import get_document_storage
 from meyar.storage.local import LocalFilesystemStorage
+
+DEFAULT_TEST_PASSWORD = "correct-horse-battery-staple-1"
 
 ADMIN_DATABASE_URL = "postgresql+asyncpg://meyar:meyar_dev_password@localhost:55719/meyar"
 TEST_DATABASE_URL = "postgresql+asyncpg://meyar:meyar_dev_password@localhost:55719/meyar_test"
@@ -85,3 +90,40 @@ async def tenant_and_key(db_session: AsyncSession):
     api_key, plaintext = await create_api_key(db_session, tenant_id=tenant.id, env="test")
     await db_session.commit()
     return tenant, api_key, plaintext
+
+
+@pytest.fixture
+async def tenant_and_user(db_session: AsyncSession):
+    """A human identity with an active HR_USER membership on a fresh
+    tenant — the standard fixture for /ui/login-based tests. Returns
+    (tenant, user, plaintext_password, membership)."""
+    tenant = await create_tenant(db_session, name=f"Tenant-{uuid.uuid4().hex[:8]}")
+    username = f"hr-{uuid.uuid4().hex[:8]}"
+    user = await create_user(
+        db_session, username=username, plaintext_password=DEFAULT_TEST_PASSWORD
+    )
+    membership = await create_membership(
+        db_session, user_id=user.id, tenant_id=tenant.id, role=ROLE_HR_USER
+    )
+    await db_session.commit()
+    return tenant, user, DEFAULT_TEST_PASSWORD, membership
+
+
+@pytest.fixture
+async def tenant_key_and_user(db_session: AsyncSession):
+    """Both dual-access principals on the SAME tenant: an API key for
+    seeding data through the machine REST path (e.g. document upload) and
+    a human user/membership for exercising the /ui/login-authenticated
+    surface against that same data. Returns
+    (tenant, api_key, plaintext_key, user, plaintext_password, membership)."""
+    tenant = await create_tenant(db_session, name=f"Tenant-{uuid.uuid4().hex[:8]}")
+    api_key, plaintext_key = await create_api_key(db_session, tenant_id=tenant.id, env="test")
+    username = f"hr-{uuid.uuid4().hex[:8]}"
+    user = await create_user(
+        db_session, username=username, plaintext_password=DEFAULT_TEST_PASSWORD
+    )
+    membership = await create_membership(
+        db_session, user_id=user.id, tenant_id=tenant.id, role=ROLE_HR_USER
+    )
+    await db_session.commit()
+    return tenant, api_key, plaintext_key, user, DEFAULT_TEST_PASSWORD, membership

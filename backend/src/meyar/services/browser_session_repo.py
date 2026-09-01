@@ -14,14 +14,19 @@ def hash_session_token(raw_token: str) -> str:
 
 
 async def create_browser_session(
-    db: AsyncSession, *, api_key_id: uuid.UUID, ttl_hours: int
+    db: AsyncSession, *, user_id: uuid.UUID, tenant_membership_id: uuid.UUID, ttl_hours: int
 ) -> tuple[BrowserSession, str]:
+    """Session fixation prevention: called only after a fresh successful
+    login (see meyar.ui.router.login) — a new random token is issued and
+    the caller is responsible for setting it on a fresh cookie, never
+    reusing a client-presented value."""
     if ttl_hours <= 0:
         raise ValueError("Browser-session TTL must be positive.")
     raw_token = secrets.token_urlsafe(32)
     now = datetime.now(UTC)
     session = BrowserSession(
-        api_key_id=api_key_id,
+        user_id=user_id,
+        tenant_membership_id=tenant_membership_id,
         session_token_hash=hash_session_token(raw_token),
         csrf_secret=secrets.token_hex(32),
         created_at=now,

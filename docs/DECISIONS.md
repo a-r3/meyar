@@ -2458,3 +2458,102 @@ call paths simultaneously.
 duplicate-signature consistency, concurrency-test hardening, and small
 UI/test cleanup findings from the same acceptance audit are tracked
 separately — see issue #38.
+
+## D-034 — Slice 1: Human Identity & Dual Access — schema, hashing, and session-principal design
+
+**Date:** 2026-09-01
+**Decision:** Implements M8 Slice 1 (issue #30, per D-030). A human
+identity/session layer is added alongside the unchanged machine API-key
+path, per the following design choices:
+
+1. **`User`/`TenantMembership` shape.** `User` (id, username, password_hash,
+   is_active, timestamps) carries no tenant reference — a user may belong
+   to more than one tenant (spec requirement). `TenantMembership` (user_id,
+   tenant_id, role, is_active) is the sole authorization join; it is
+   unique on `(user_id, tenant_id)`. Neither table stores or derives from
+   `CandidateIdentity` — `username` is a login identifier, never a
+   matching/ranking signal.
+2. **Password hashing: Argon2id via `argon2-cffi`.** The only new runtime
+   dependency this slice adds. Chosen over a zero-dependency
+   `hashlib.pbkdf2_hmac` scheme because Argon2id is OWASP's first
+   recommendation and the encoded hash string self-describes its
+   parameters, so a future tuning change never invalidates already-stored
+   hashes (`meyar.core.password.needs_rehash` silently upgrades on next
+   successful login). Pure local computation, no network call — compatible
+   with the local-only boundary the rest of the platform already enforces.
+3. **`BrowserSession` becomes a human-only principal.** `api_key_id` is
+   replaced with `(user_id, tenant_membership_id)`, both `NOT NULL` — a
+   clean break, not a nullable/polymorphic dual-shape column, because no
+   route creates an API-key-bridged UI session anymore after this slice
+   (the old exchange this replaced, D-018 point 2, is retired) and keeping
+   the old shape "just in case" would be dead, untested surface area. Every
+   authenticated request re-derives `User.is_active`/
+   `TenantMembership.is_active` live from the database (same pattern as
+   the existing `ApiKey` live-recheck, D-018 point 4) — a disabled user or
+   a revoked membership takes effect immediately, no re-login required.
+4. **Role model: intentionally minimal.** `meyar.core.roles` defines
+   `HR_USER`/`ADMIN` with an identical permission set today — repository
+   evidence showed no existing UI action that is actually admin-only, so
+   inventing a differentiated permission set now would be speculative. The
+   mapping is centralized (`permissions_for_role`) and fails closed: an
+   unrecognized role resolves to zero permissions, never full access.
+5. **Multi-tenant-membership login: a stateless signed token, not a new
+   session table.** A user with more than one active membership is shown a
+   server-rendered tenant-selection screen; the bridge between "password
+   verified" and "tenant chosen" is a short-lived (5 min) HMAC-signed
+   token (`meyar.ui.pending_login`, new `MEYAR_PENDING_LOGIN_SECRET`
+   setting) carrying only the authenticated `user_id` — never a
+   client-supplied tenant/membership id trusted directly. The selected
+   `membership_id` is always re-validated live against the database
+   (belongs to this user, is active) before a real `BrowserSession` is
+   minted. Chosen over a persisted pending-login row because it requires
+   no schema addition and the token proves nothing except "this user's
+   password was already verified" — the authorization decision itself is
+   still made from live data on every use.
+6. **Structured audit actor identity, not metadata.** `AuditEvent` gains
+   nullable `actor_type`/`actor_id` columns (`ACTOR_HUMAN_USER`/
+   `ACTOR_API_KEY`/`ACTOR_SYSTEM`) rather than writing an actor reference
+   into the existing PII-guarded `metadata` JSON — first-class columns
+   keep the existing `_FORBIDDEN_METADATA_KEYS` guard's intent intact
+   while giving Slice 5 (confirmed actions) the accountable-actor field it
+   will need. Both columns are nullable so every pre-existing event, and
+   every call site this slice didn't touch, remains valid and unclaimed
+   — never silently coerced into a human or machine attribution. Wired
+   into UI login/logout/job-create/job-archive and the two REST mutation
+   routes that already had a `TenantContext` in scope
+   (`POST/DELETE /api/v1/candidates`, `POST /api/v1/jobs`); other existing
+   `record_event` call sites are left unattributed (`NULL`) rather than
+   expanding this slice's blast radius to every mutation in the codebase.
+7. **Two bugs found and fixed by this slice's own test suite, before
+   merge:**
+   - `reset_demo` deleted the demo tenant but not the demo `User` row
+     (`User` is not tenant-owned, so no `ondelete=CASCADE` covers it) —
+     orphaning the demo human login across a reset→reseed cycle and
+     causing the next `seed_demo` to misidentify the orphaned user as an
+     unrelated name collision. Fixed: `reset_demo` also deletes the demo
+     `User` row, but only when it is positively confirmed to hold a
+     membership on the exact tenant being deleted — the same
+     collision-safety discipline as the existing tenant-identification
+     guard (D-022), never a blind delete-by-username.
+   - `get_user_by_username`/`get_membership_for_user_and_tenant` lacked
+     `execution_options(populate_existing=True)`, so a row already in a
+     session's identity map could return stale `is_active` data after a
+     same-session update — exactly the failure mode `get_api_key_by_id`
+     already guards against (D-018). Fixed by applying the same option.
+     No production request is affected (each request gets its own fresh
+     session with an empty identity map), but the fix keeps the codebase's
+     "live recheck" repository functions consistent and closes a latent
+     footgun for any future same-session reuse.
+
+**Why:** Slice 5 (Confirmed Actions Framework, #34) requires that every
+human confirmation of an agent-proposed mutation be attributable to a
+specific accountable person — this slice is the identity/session
+prerequisite, not a parallel nice-to-have (see issue #30's own framing).
+
+**Reversibility:** Additive with one narrowing change: `BrowserSession`
+downgrade discards any live session rows (documented in the migration
+itself — sessions are short-lived, revocable, and never durable identity
+data, so this only forces re-login, not data loss). `User`/
+`TenantMembership`/the `AuditEvent` actor columns can all be dropped by
+the migration's `downgrade()`. The machine API-key path
+(`meyar.core.auth`) was not modified by this decision at all.

@@ -92,8 +92,42 @@ branch — no source code changed, no PR #29 functionality removed. Roadmap
 recorded in `docs/MVP_PLAN.md`; tracked via new GitHub milestones **M8 —
 Bounded Local-AI HR Agent Platform** and **M9 — Deployment, Benchmark &
 Integration Readiness** (issues #30–#37), without closing M5/#20 or any
-other existing milestone/issue. Implementation of these slices has **not**
-started.
+other existing milestone/issue.
+
+**M8 Slice 1 — Human Identity & Dual Access (#30) implementation complete,
+PR not yet opened (2026-09-01).** Branch `feat/human-identity-dual-access`
+from synced `main` (`1f8bd12`). Adds `User`/`TenantMembership` (Argon2id
+password hashing, `argon2-cffi`), a centralized minimal role model
+(`meyar.core.roles`: `HR_USER`/`ADMIN`, currently identical permissions —
+no admin-only UI action exists yet to differentiate them), and replaces
+`/ui/login`'s API-key-paste form with username/password authentication —
+generic/timing-safe failure message, session-fixation-safe fresh cookie,
+a server-rendered tenant-selection screen (stateless HMAC-signed
+pending-login token) for a user with more than one active membership.
+`BrowserSession` now carries `(user_id, tenant_membership_id)` instead of
+`api_key_id`; every request live-rechecks `User.is_active`/
+`TenantMembership.is_active`. `AuditEvent` gained structured
+`actor_type`/`actor_id` (`ACTOR_HUMAN_USER`/`ACTOR_API_KEY`/
+`ACTOR_SYSTEM`), wired into UI login/logout/job-create/job-archive and
+REST job/candidate create/delete — both a human and a machine action are
+now individually attributable without ever storing a name/email/password/
+API-key secret. New CLI provisioning (`create-user`, `add-membership`,
+`set-password`, `disable-user`/`enable-user`,
+`disable-membership`/`enable-membership`; secrets are interactive-only via
+`getpass`, never a CLI argument). `seed-demo` now also bootstraps/rotates
+a synthetic human login (`demo.hr`) alongside the existing API key, with
+the same positive-identification collision guards as the existing tenant
+logic. One Alembic migration `f4a91c2e6b7d` (`db7e4523f491` → head):
+upgrade/downgrade/re-upgrade proven against the real dev DB and by a new
+automated migration test that preserves pre-existing `Tenant`/`ApiKey`
+rows. The machine REST path (`meyar.core.auth`, `TenantContext`,
+`require_scope`) is completely untouched — dual access is real and
+independent, not a shared credential bridge. Quality gates: `ruff` clean,
+`mypy src` clean (127 files), `alembic heads` = one head, full `pytest`
+suite 716 passed / 0 failed. See D-034 (`docs/DECISIONS.md`) for the
+design decisions and two bugs found and fixed during this slice's own
+testing. **Not yet merged — PR pending owner review; issue #30 and M8
+remain open.**
 
 GitHub remote established (`https://github.com/a-r3/meyar.git`, private,
 temporary development remote — see D-012, `docs/DECISIONS.md`). `main`

@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.core.auth import authenticate_raw_api_key
+from meyar.core.password import verify_password
 from meyar.ingestion.parsers.local_text_parser import LocalTextParser
 from meyar.models.candidate import Candidate
 from meyar.models.evaluation import Evaluation
@@ -26,13 +27,16 @@ from meyar.services.candidate_repo import create_candidate
 from meyar.services.demo_seed_service import (
     DEMO_TENANT_MARKER_EVENT,
     DEMO_TENANT_NAME,
+    DEMO_USER_USERNAME,
     DemoTenantAmbiguousError,
     _demo_candidates,
     reset_demo,
     seed_demo,
 )
 from meyar.services.job_criteria_repo import get_current_criteria_version
+from meyar.services.tenant_membership_repo import get_membership_for_user_and_tenant
 from meyar.services.tenant_repo import create_tenant
+from meyar.services.user_repo import create_user, get_user_by_username
 from meyar.storage.local import LocalFilesystemStorage
 from meyar.ui.service import list_candidate_library
 
@@ -515,3 +519,72 @@ async def test_repeated_seed_reset_cycle_remains_idempotent(
         select(Tenant).where(Tenant.name == DEMO_TENANT_NAME)
     )
     assert tenants_after.scalars().first() is None
+
+
+# ---------------------------------------------------------------------------
+# Slice 1 — synthetic demo HUMAN login (issue #30). Distinct from, and in
+# addition to, the machine API-key credential exercised above.
+# ---------------------------------------------------------------------------
+
+
+async def test_seed_demo_creates_a_working_human_login(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    summary = await _seed(db_session, tmp_path)
+    await db_session.commit()
+
+    assert summary.human_username == DEMO_USER_USERNAME
+    assert summary.human_temp_password
+
+    user = await get_user_by_username(db_session, DEMO_USER_USERNAME)
+    assert user is not None
+    assert user.is_active
+    assert verify_password(user.password_hash, summary.human_temp_password)
+    assert user.password_hash != summary.human_temp_password  # never stored in plaintext
+
+    membership = await get_membership_for_user_and_tenant(
+        db_session, user_id=user.id, tenant_id=summary.tenant_id
+    )
+    assert membership is not None
+    assert membership.is_active
+    assert membership.role == "HR_USER"
+
+
+async def test_reseed_rotates_demo_human_password_and_invalidates_the_old_one(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    first = await _seed(db_session, tmp_path)
+    await db_session.commit()
+
+    second = await _seed(db_session, tmp_path)
+    await db_session.commit()
+
+    assert second.human_username == first.human_username
+    assert second.human_temp_password != first.human_temp_password
+
+    user = await get_user_by_username(db_session, DEMO_USER_USERNAME)
+    assert user is not None
+    assert not verify_password(user.password_hash, first.human_temp_password)
+    assert verify_password(user.password_hash, second.human_temp_password)
+
+
+async def test_demo_human_login_never_touches_an_unrelated_same_named_user(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    """A real operator account that happens to share DEMO_USER_USERNAME
+    (e.g. a name collision on a shared dev DB) must never have its
+    password silently rotated by seed-demo — the same positive-
+    identification discipline as the tenant-name-collision protections
+    above, applied to the human login."""
+    unrelated = await create_user(
+        db_session, username=DEMO_USER_USERNAME, plaintext_password="unrelated-real-password-1"
+    )
+    await db_session.commit()
+
+    with pytest.raises(DemoTenantAmbiguousError):
+        await _seed(db_session, tmp_path)
+
+    survivor = await get_user_by_username(db_session, DEMO_USER_USERNAME)
+    assert survivor is not None
+    assert survivor.id == unrelated.id
+    assert verify_password(survivor.password_hash, "unrelated-real-password-1")

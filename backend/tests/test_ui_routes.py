@@ -64,9 +64,11 @@ def _visible_text(html: str) -> str:
     return re.sub(r'(?:href|action)="[^"]*"', "", html)
 
 
-async def _login_and_csrf(client: AsyncClient, plaintext: str) -> str:
+async def _login_and_csrf(client: AsyncClient, username: str, password: str) -> str:
     response = await client.post(
-        "/ui/login", data={"api_key": plaintext}, follow_redirects=False
+        "/ui/login",
+        data={"username": username, "password": password},
+        follow_redirects=False,
     )
     assert response.status_code == 303
     home = await client.get("/ui")
@@ -107,10 +109,10 @@ async def _identity(
 async def test_actual_ui_chat_delegates_and_preserves_backend_order_with_escaped_text(
     client: AsyncClient,
     db_session: AsyncSession,
-    tenant_and_key,
+    tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
-    tenant, _key, plaintext = tenant_and_key
+    tenant, user, password, _membership = tenant_and_user
     payload = "<script>alert(1)</script>"
     first, first_profile = await seed_candidate_with_profile(
         db_session,
@@ -144,7 +146,7 @@ async def test_actual_ui_chat_delegates_and_preserves_backend_order_with_escaped
         planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"]))
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake
-    csrf = await _login_and_csrf(client, plaintext)
+    csrf = await _login_and_csrf(client, user.username, password)
     query = f"Python bilən namizədləri göstər. {payload}"
     response = await client.post(
         "/ui/search",
@@ -169,15 +171,15 @@ def test_every_planner_outcome_has_distinct_azerbaijani_presentation() -> None:
 
 async def test_executable_zero_result_is_not_presented_as_infrastructure_error(
     client: AsyncClient,
-    tenant_and_key,
+    tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
-    _tenant, _key, plaintext = tenant_and_key
+    _tenant, user, password, _membership = tenant_and_user
     fake = FakeLLMProvider(
         planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"]))
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake
-    csrf = await _login_and_csrf(client, plaintext)
+    csrf = await _login_and_csrf(client, user.username, password)
     response = await client.post(
         "/ui/search",
         data={
@@ -192,7 +194,7 @@ async def test_executable_zero_result_is_not_presented_as_infrastructure_error(
 
 async def test_skill_specific_duration_shows_clarification_not_silent_weakening(
     client: AsyncClient,
-    tenant_and_key,
+    tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
     """Semantic-correctness audit regression (docs/DECISIONS.md D-027):
@@ -206,10 +208,10 @@ async def test_skill_specific_duration_shows_clarification_not_silent_weakening(
     after the HR user explicitly confirms it. Zero LLM calls throughout —
     both the initial precheck rejection and the confirmed alternative
     (an explicit-separation phrasing) are fully deterministic."""
-    _tenant, _key, plaintext = tenant_and_key
+    _tenant, user, password, _membership = tenant_and_user
     never_called = FakeLLMProvider(error=ModelUnavailableError("must not be called"))
     app.dependency_overrides[get_llm_provider] = lambda: never_called
-    csrf = await _login_and_csrf(client, plaintext)
+    csrf = await _login_and_csrf(client, user.username, password)
 
     response = await client.post(
         "/ui/search",
@@ -308,7 +310,7 @@ async def test_skill_specific_duration_shows_clarification_not_silent_weakening(
 )
 async def test_non_executable_ui_plans_never_search(
     client: AsyncClient,
-    tenant_and_key,
+    tenant_and_user,
     local_ui_settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
     query: str,
@@ -316,7 +318,7 @@ async def test_non_executable_ui_plans_never_search(
     expected: str,
     expected_calls: int,
 ) -> None:
-    _tenant, _key, plaintext = tenant_and_key
+    _tenant, user, password, _membership = tenant_and_user
     search_calls = 0
 
     async def forbidden_search(*args, **kwargs):
@@ -327,7 +329,7 @@ async def test_non_executable_ui_plans_never_search(
     monkeypatch.setattr(planner_service, "search_candidates", forbidden_search)
     fake = FakeLLMProvider(planner_draft=draft)
     app.dependency_overrides[get_llm_provider] = lambda: fake
-    csrf = await _login_and_csrf(client, plaintext)
+    csrf = await _login_and_csrf(client, user.username, password)
     response = await client.post(
         "/ui/search",
         data={"query": query, "csrf_token": csrf},
@@ -340,11 +342,11 @@ async def test_non_executable_ui_plans_never_search(
 
 async def test_malformed_planner_output_has_no_fallback_search(
     client: AsyncClient,
-    tenant_and_key,
+    tenant_and_user,
     local_ui_settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _tenant, _key, plaintext = tenant_and_key
+    _tenant, user, password, _membership = tenant_and_user
     search_calls = 0
 
     async def forbidden_search(*args, **kwargs):
@@ -355,7 +357,7 @@ async def test_malformed_planner_output_has_no_fallback_search(
     monkeypatch.setattr(planner_service, "search_candidates", forbidden_search)
     fake = FakeLLMProvider(fail_first_n_calls=2)
     app.dependency_overrides[get_llm_provider] = lambda: fake
-    csrf = await _login_and_csrf(client, plaintext)
+    csrf = await _login_and_csrf(client, user.username, password)
     # Semantic/free-text — outside the deterministic fast path's bounded
     # structured intents (D-026) — so this genuinely reaches the LLM
     # planner call this test is verifying malformed-output handling for.
@@ -375,17 +377,17 @@ async def test_malformed_planner_output_has_no_fallback_search(
 async def test_local_planner_outage_is_safe_and_library_remains_independent(
     client: AsyncClient,
     db_session: AsyncSession,
-    tenant_and_key,
+    tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
-    tenant, _key, plaintext = tenant_and_key
+    tenant, user, password, _membership = tenant_and_user
     candidate, _profile_row = await seed_candidate_with_profile(
         db_session, tenant_id=tenant.id, profile_content=_profile("Python")
     )
     await db_session.commit()
     fake = FakeLLMProvider(error=ModelUnavailableError("private provider detail"))
     app.dependency_overrides[get_llm_provider] = lambda: fake
-    csrf = await _login_and_csrf(client, plaintext)
+    csrf = await _login_and_csrf(client, user.username, password)
     # Semantic/free-text — outside the deterministic fast path's bounded
     # structured intents (D-026) — so this genuinely reaches the LLM
     # planner call this test is verifying outage handling for.
@@ -404,9 +406,9 @@ async def test_local_planner_outage_is_safe_and_library_remains_independent(
 
 
 async def test_library_pagination_order_filters_and_current_profile_authority(
-    db_session: AsyncSession, tenant_and_key
+    db_session: AsyncSession, tenant_and_user
 ) -> None:
-    tenant, _key, _plaintext = tenant_and_key
+    tenant, user, _password, _membership = tenant_and_user
     base = datetime(2026, 1, 1, tzinfo=UTC)
     seeded: list[Candidate] = []
     for index in range(55):
@@ -477,16 +479,16 @@ async def test_library_pagination_order_filters_and_current_profile_authority(
 async def test_cross_tenant_candidate_direct_access_is_safe_404(
     client: AsyncClient,
     db_session: AsyncSession,
-    tenant_and_key,
+    tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
-    _tenant, _key, plaintext = tenant_and_key
+    _tenant, user, password, _membership = tenant_and_user
     foreign = await create_tenant(db_session, name="Foreign")
     candidate, _profile_row = await seed_candidate_with_profile(
         db_session, tenant_id=foreign.id, profile_content=_profile("Python")
     )
     await db_session.commit()
-    await _login_and_csrf(client, plaintext)
+    await _login_and_csrf(client, user.username, password)
     response = await client.get(f"/ui/candidates/{candidate.id}")
     assert response.status_code == 404
     assert "Namizəd tapılmadı" in response.text
@@ -496,10 +498,10 @@ async def test_cross_tenant_candidate_direct_access_is_safe_404(
 async def test_candidate_detail_escapes_identity_profile_and_evidence(
     client: AsyncClient,
     db_session: AsyncSession,
-    tenant_and_key,
+    tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
-    tenant, _key, plaintext = tenant_and_key
+    tenant, user, password, _membership = tenant_and_user
     payload = "<script>alert(1)</script>"
     candidate, profile = await seed_candidate_with_profile(
         db_session,
@@ -515,7 +517,7 @@ async def test_candidate_detail_escapes_identity_profile_and_evidence(
         email=payload,
     )
     await db_session.commit()
-    await _login_and_csrf(client, plaintext)
+    await _login_and_csrf(client, user.username, password)
     response = await client.get(f"/ui/candidates/{candidate.id}")
     assert response.status_code == 200
     assert payload not in response.text
@@ -526,10 +528,10 @@ async def test_candidate_detail_escapes_identity_profile_and_evidence(
 async def test_job_title_xss_is_escaped(
     client: AsyncClient,
     db_session: AsyncSession,
-    tenant_and_key,
+    tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
-    tenant, _key, plaintext = tenant_and_key
+    tenant, user, password, _membership = tenant_and_user
     payload = "<script>alert(1)</script>"
     job = await create_job(db_session, tenant_id=tenant.id, title=payload)
     await create_criteria_version(
@@ -548,7 +550,7 @@ async def test_job_title_xss_is_escaped(
         created_by_api_key_id=None,
     )
     await db_session.commit()
-    await _login_and_csrf(client, plaintext)
+    await _login_and_csrf(client, user.username, password)
     response = await client.get("/ui/jobs")
     assert payload not in response.text
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in response.text
@@ -557,10 +559,10 @@ async def test_job_title_xss_is_escaped(
 async def test_ranking_ui_preserves_slice10_order_not_identity_order(
     client: AsyncClient,
     db_session: AsyncSession,
-    tenant_and_key,
+    tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
-    tenant, _key, plaintext = tenant_and_key
+    tenant, user, password, _membership = tenant_and_user
     candidates = []
     for name, skills in [
         ("Zulu B", ("Python", "AWS")),
@@ -606,7 +608,7 @@ async def test_ranking_ui_preserves_slice10_order_not_identity_order(
     await db_session.commit()
     unavailable = FakeLLMProvider(error=ModelUnavailableError("must not be called"))
     app.dependency_overrides[get_llm_provider] = lambda: unavailable
-    csrf = await _login_and_csrf(client, plaintext)
+    csrf = await _login_and_csrf(client, user.username, password)
     response = await client.post(
         f"/ui/jobs/{criteria.id}/rank",
         data={"csrf_token": csrf},
@@ -626,7 +628,7 @@ async def test_ranking_ui_preserves_slice10_order_not_identity_order(
 async def test_ranking_contribution_shows_human_label_not_raw_criterion_id(
     client: AsyncClient,
     db_session: AsyncSession,
-    tenant_and_key,
+    tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
     """Regression for owner visual-inspection Blockers 3/4: the per-criterion
@@ -635,7 +637,7 @@ async def test_ranking_contribution_shows_human_label_not_raw_criterion_id(
     criterion id/enum (e.g. 'aml_skill (SKILL)') the deterministic policy
     engine keys on internally, and must not use developer-oriented page
     wording ('deterministik')."""
-    tenant, _key, plaintext = tenant_and_key
+    tenant, user, password, _membership = tenant_and_user
     candidate, profile = await seed_candidate_with_profile(
         db_session, tenant_id=tenant.id, profile_content=_profile("Python")
     )
@@ -660,7 +662,7 @@ async def test_ranking_contribution_shows_human_label_not_raw_criterion_id(
         created_by_api_key_id=None,
     )
     await db_session.commit()
-    csrf = await _login_and_csrf(client, plaintext)
+    csrf = await _login_and_csrf(client, user.username, password)
     response = await client.post(
         f"/ui/jobs/{criteria.id}/rank",
         data={"csrf_token": csrf},
@@ -679,10 +681,10 @@ async def test_ranking_contribution_shows_human_label_not_raw_criterion_id(
 async def test_manual_review_fit_is_presented_as_human_review_not_decision(
     client: AsyncClient,
     db_session: AsyncSession,
-    tenant_and_key,
+    tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
-    tenant, _key, plaintext = tenant_and_key
+    tenant, user, password, _membership = tenant_and_user
     await seed_candidate_with_profile(
         db_session, tenant_id=tenant.id, profile_content=_profile("Python")
     )
@@ -704,7 +706,7 @@ async def test_manual_review_fit_is_presented_as_human_review_not_decision(
         created_by_api_key_id=None,
     )
     await db_session.commit()
-    csrf = await _login_and_csrf(client, plaintext)
+    csrf = await _login_and_csrf(client, user.username, password)
     response = await client.post(
         f"/ui/jobs/{criteria.id}/rank",
         data={"csrf_token": csrf},
@@ -717,10 +719,10 @@ async def test_manual_review_fit_is_presented_as_human_review_not_decision(
 async def test_cross_tenant_criteria_direct_post_is_safe_404(
     client: AsyncClient,
     db_session: AsyncSession,
-    tenant_and_key,
+    tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
-    _tenant, _key, plaintext = tenant_and_key
+    _tenant, user, password, _membership = tenant_and_user
     foreign = await create_tenant(db_session, name="Foreign")
     job = await create_job(db_session, tenant_id=foreign.id, title="Foreign JD")
     criteria = await create_criteria_version(
@@ -739,7 +741,7 @@ async def test_cross_tenant_criteria_direct_post_is_safe_404(
         created_by_api_key_id=None,
     )
     await db_session.commit()
-    csrf = await _login_and_csrf(client, plaintext)
+    csrf = await _login_and_csrf(client, user.username, password)
     response = await client.post(
         f"/ui/jobs/{criteria.id}/rank",
         data={"csrf_token": csrf},
@@ -749,10 +751,10 @@ async def test_cross_tenant_criteria_direct_post_is_safe_404(
 
 
 async def test_search_form_has_no_manual_date_input(
-    client: AsyncClient, tenant_and_key, local_ui_settings: Settings
+    client: AsyncClient, tenant_and_user, local_ui_settings: Settings
 ) -> None:
-    _tenant, _key, plaintext = tenant_and_key
-    await _login_and_csrf(client, plaintext)
+    _tenant, user, password, _membership = tenant_and_user
+    await _login_and_csrf(client, user.username, password)
     response = await client.get("/ui")
     assert 'type="date"' not in response.text
     assert "as_of_date" not in response.text
@@ -762,10 +764,10 @@ async def test_search_form_has_no_manual_date_input(
 async def test_ranking_form_has_no_manual_date_input(
     client: AsyncClient,
     db_session: AsyncSession,
-    tenant_and_key,
+    tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
-    tenant, _key, plaintext = tenant_and_key
+    tenant, user, password, _membership = tenant_and_user
     job = await create_job(db_session, tenant_id=tenant.id, title="No Date Input JD")
     await create_criteria_version(
         db_session,
@@ -783,7 +785,7 @@ async def test_ranking_form_has_no_manual_date_input(
         created_by_api_key_id=None,
     )
     await db_session.commit()
-    await _login_and_csrf(client, plaintext)
+    await _login_and_csrf(client, user.username, password)
     response = await client.get("/ui/jobs")
     assert 'type="date"' not in response.text
     assert "evaluation_as_of_date" not in response.text
@@ -791,15 +793,15 @@ async def test_ranking_form_has_no_manual_date_input(
 
 async def test_search_injects_current_date_and_displays_effective_date(
     client: AsyncClient,
-    tenant_and_key,
+    tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
-    _tenant, _key, plaintext = tenant_and_key
+    _tenant, user, password, _membership = tenant_and_user
     fake = FakeLLMProvider(
         planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"]))
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake
-    csrf = await _login_and_csrf(client, plaintext)
+    csrf = await _login_and_csrf(client, user.username, password)
     response = await client.post(
         "/ui/search",
         data={"query": "Python bilən namizədləri göstər.", "csrf_token": csrf},
@@ -811,10 +813,10 @@ async def test_search_injects_current_date_and_displays_effective_date(
 async def test_ranking_injects_current_date_and_displays_effective_date(
     client: AsyncClient,
     db_session: AsyncSession,
-    tenant_and_key,
+    tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
-    tenant, _key, plaintext = tenant_and_key
+    tenant, user, password, _membership = tenant_and_user
     job = await create_job(db_session, tenant_id=tenant.id, title="Effective Date JD")
     criteria = await create_criteria_version(
         db_session,
@@ -832,7 +834,7 @@ async def test_ranking_injects_current_date_and_displays_effective_date(
         created_by_api_key_id=None,
     )
     await db_session.commit()
-    csrf = await _login_and_csrf(client, plaintext)
+    csrf = await _login_and_csrf(client, user.username, password)
     response = await client.post(
         f"/ui/jobs/{criteria.id}/rank",
         data={"csrf_token": csrf},
@@ -844,10 +846,10 @@ async def test_ranking_injects_current_date_and_displays_effective_date(
 async def test_library_card_does_not_expose_raw_candidate_uuid(
     client: AsyncClient,
     db_session: AsyncSession,
-    tenant_and_key,
+    tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
-    tenant, _key, plaintext = tenant_and_key
+    tenant, user, password, _membership = tenant_and_user
     candidate, profile = await seed_candidate_with_profile(
         db_session, tenant_id=tenant.id, profile_content=_profile("Python")
     )
@@ -855,7 +857,7 @@ async def test_library_card_does_not_expose_raw_candidate_uuid(
         db_session, tenant_id=tenant.id, candidate=candidate, profile=profile, name="Synthetic"
     )
     await db_session.commit()
-    await _login_and_csrf(client, plaintext)
+    await _login_and_csrf(client, user.username, password)
     response = await client.get("/ui/library")
     assert response.status_code == 200
     assert str(candidate.id) in response.text  # still reachable via the detail link href
@@ -865,10 +867,10 @@ async def test_library_card_does_not_expose_raw_candidate_uuid(
 async def test_jobs_page_does_not_expose_criteria_version_uuid(
     client: AsyncClient,
     db_session: AsyncSession,
-    tenant_and_key,
+    tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
-    tenant, _key, plaintext = tenant_and_key
+    tenant, user, password, _membership = tenant_and_user
     job = await create_job(db_session, tenant_id=tenant.id, title="Hidden UUID JD")
     criteria = await create_criteria_version(
         db_session,
@@ -886,7 +888,7 @@ async def test_jobs_page_does_not_expose_criteria_version_uuid(
         created_by_api_key_id=None,
     )
     await db_session.commit()
-    await _login_and_csrf(client, plaintext)
+    await _login_and_csrf(client, user.username, password)
     response = await client.get("/ui/jobs")
     assert response.status_code == 200
     # job.id is now a legitimate, necessary part of the "Arxivlə" form's
@@ -901,10 +903,10 @@ async def test_jobs_page_does_not_expose_criteria_version_uuid(
 async def test_candidate_detail_does_not_expose_version_identifiers(
     client: AsyncClient,
     db_session: AsyncSession,
-    tenant_and_key,
+    tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
-    tenant, _key, plaintext = tenant_and_key
+    tenant, user, password, _membership = tenant_and_user
     candidate, profile = await seed_candidate_with_profile(
         db_session, tenant_id=tenant.id, profile_content=_profile("Python")
     )
@@ -912,7 +914,7 @@ async def test_candidate_detail_does_not_expose_version_identifiers(
         db_session, tenant_id=tenant.id, candidate=candidate, profile=profile, name="Synthetic"
     )
     await db_session.commit()
-    await _login_and_csrf(client, plaintext)
+    await _login_and_csrf(client, user.username, password)
     response = await client.get(f"/ui/candidates/{candidate.id}")
     assert response.status_code == 200
     assert "Cari identiklik" not in response.text
@@ -923,10 +925,10 @@ async def test_candidate_detail_does_not_expose_version_identifiers(
 async def test_evaluation_history_resolves_human_readable_job_title(
     client: AsyncClient,
     db_session: AsyncSession,
-    tenant_and_key,
+    tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
-    tenant, _key, plaintext = tenant_and_key
+    tenant, user, password, _membership = tenant_and_user
     candidate, _profile_row = await seed_candidate_with_profile(
         db_session, tenant_id=tenant.id, profile_content=_profile("Python")
     )
@@ -947,7 +949,7 @@ async def test_evaluation_history_resolves_human_readable_job_title(
         created_by_api_key_id=None,
     )
     await db_session.commit()
-    csrf = await _login_and_csrf(client, plaintext)
+    csrf = await _login_and_csrf(client, user.username, password)
     ranked = await client.post(
         f"/ui/jobs/{criteria.id}/rank",
         data={"csrf_token": csrf},
@@ -962,10 +964,10 @@ async def test_evaluation_history_resolves_human_readable_job_title(
 
 async def test_reason_codes_and_search_mode_not_shown_in_search_results(
     client: AsyncClient,
-    tenant_and_key,
+    tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
-    _tenant, _key, plaintext = tenant_and_key
+    _tenant, user, password, _membership = tenant_and_user
     fake = FakeLLMProvider(
         planner_draft=PlannerDraft(
             required_filters=RequiredFilters(skills=["Java"], min_total_experience_years=5),
@@ -975,7 +977,7 @@ async def test_reason_codes_and_search_mode_not_shown_in_search_results(
         )
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake
-    csrf = await _login_and_csrf(client, plaintext)
+    csrf = await _login_and_csrf(client, user.username, password)
     response = await client.post(
         "/ui/search",
         data={

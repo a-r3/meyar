@@ -88,7 +88,13 @@ uv run uvicorn meyar.main:app --reload
 
 ## 7. Log in
 
-Open `http://127.0.0.1:8000/ui/login` and paste the API key from step 5.
+Open `http://127.0.0.1:8000/ui/login` and sign in with the demo **human**
+username/password printed by `seed-demo` (Slice 1 — Human Identity & Dual
+Access, issue #30): username `demo.hr`, plus the temporary password shown
+once under "Human/UI login" in the command's output. The normal `/ui/login`
+screen no longer accepts an API key — that machine credential (also printed
+by `seed-demo`, under "Machine/API credential") is for REST API/Swagger
+testing only, via `Authorization: Bearer <key>`.
 
 ## 8. Browser URLs
 
@@ -133,7 +139,7 @@ from a model that didn't run.
 
 ## 11. Recommended 8–10 minute technical walkthrough
 
-1. **Login** — `/ui/login`, the demo API key.
+1. **Login** — `/ui/login`, the demo human username/password.
 2. **Candidate Library** — `/ui/library`. Point out the variety: Java/Python/
    AML/DevOps/frontend/business-analyst candidates, all synthetic.
 3. **Candidate detail** — open one candidate (e.g. a Java backend profile).
@@ -162,16 +168,17 @@ from a model that didn't run.
 
 ## 12. Cleanup
 
-After a demo/presentation session, rotate the demo credential so the key
-that was visible on screen (or in terminal scrollback) stops working:
+After a demo/presentation session, rotate both demo credentials so
+whatever was visible on screen (or in terminal scrollback) stops working:
 
 ```bash
 uv run meyar seed-demo
 ```
 
-This revokes the previously-active demo API key and mints a fresh one —
-copy the new key if you'll need it again, or just leave it unused since
-the demo tenant is isolated and harmless to leave in place.
+This revokes the previously-active demo API key and mints a fresh one, and
+sets a fresh temporary password for the demo human login (`demo.hr`) —
+copy whichever you'll need again, or just leave them unused since the demo
+tenant is isolated and harmless to leave in place.
 
 To remove the demo tenant entirely:
 

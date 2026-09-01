@@ -145,6 +145,16 @@ h3 { font-size: 1rem; }
   box-shadow: var(--shadow-subtle);
 }
 .stack-form { display: grid; gap: 12px; }
+.radio-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 500;
+  padding: 10px 12px;
+  border: 1px solid var(--border, #ddd);
+  border-radius: 8px;
+}
+.radio-option input[type="radio"] { width: auto; }
 label { color: var(--text); font-size: .93rem; font-weight: 700; }
 input, textarea, select {
   width: 100%;

@@ -82,10 +82,14 @@ Implemented and tested:
   planner outcomes, tenant-scoped CV Library and candidate detail, current
   presentation-only identity, existing-job deterministic ranking, canonical
   score/fit/contribution display, and safe internal error states;
-- server-side browser-session bridge: API key is posted once to login and
-  exchanged for a fresh eight-hour opaque session cookie; only its SHA-256
-  digest is persisted, and every request derives tenant/scopes from the live
-  API-key row. Authenticated POSTs are CSRF-protected;
+- accountable human identity & dual access (Slice 1, issue #30): `/ui/login`
+  authenticates a human with a username/Argon2id-hashed password, never an
+  API key, and issues a fresh eight-hour opaque server-side session cookie
+  (only its SHA-256 digest is persisted); every request re-derives the
+  authenticated user, active tenant membership, and role live from the
+  database. Machine REST clients keep authenticating with an API key exactly
+  as before — the two paths are fully independent. Authenticated POSTs are
+  CSRF-protected;
 - repository-packaged Jinja2 templates and local CSS with no Node build,
   frontend package manager, remote asset, analytics, or telemetry dependency;
 - synthetic-only automated tests and repository governance.
@@ -258,11 +262,26 @@ Local endpoints:
 - Swagger UI: `http://127.0.0.1:8000/docs`
 - OpenAPI JSON: `http://127.0.0.1:8000/openapi.json`
 
-Protected API routes require a locally issued API key. The browser login accepts
-that key only in the `/ui/login` POST body, validates it through the same API-key
-authority, then stores only a session cookie in the browser—never the API key,
-identity, query, or result data in JavaScript or browser storage. Do not place
-keys in this README, source files, shell history, logs, URLs, or Git.
+Protected API routes require a locally issued API key. `/ui/login` is a
+separate, human-only path: a username and password, never an API key —
+Argon2id-verified against a `User` row, then exchanged for a session cookie
+scoped to one active `TenantMembership`. Neither path ever places the API
+key, a password, identity, query, or result data in JavaScript or browser
+storage. Do not place keys or passwords in this README, source files, shell
+history, logs, URLs, or Git.
+
+### Creating a human login
+
+```bash
+cd backend
+uv run meyar create-user --username "hr.analyst"
+uv run meyar add-membership --username "hr.analyst" --tenant-id "<tenant UUID>" --role HR_USER
+```
+
+Both commands prompt interactively (never a CLI argument, so a password never
+lands in shell history). `set-password`, `disable-user`/`enable-user`, and
+`disable-membership`/`enable-membership` round out provisioning — see
+`uv run meyar --help`.
 
 ## Internal REST API
 

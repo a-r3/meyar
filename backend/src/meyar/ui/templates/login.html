@@ -4,11 +4,13 @@
 <section class="auth-card">
   <p class="eyebrow">Daxili HR sistemi</p>
   <h1>MEYAR — namizəd axtarışı</h1>
-  <p class="lede">Sizə verilmiş giriş açarını yalnız bu təhlükəsiz forma ilə təqdim edin.</p>
+  <p class="lede">İstifadəçi adınız və parolunuzla daxil olun.</p>
   {% if error %}<div class="alert alert-error" role="alert">{{ error }}</div>{% endif %}
   <form method="post" action="/ui/login" autocomplete="off" class="stack-form">
-    <label for="api_key">Giriş açarı</label>
-    <input id="api_key" name="api_key" type="password" required autocomplete="new-password" spellcheck="false">
+    <label for="username">İstifadəçi adı</label>
+    <input id="username" name="username" type="text" required autocomplete="username" spellcheck="false">
+    <label for="password">Parol</label>
+    <input id="password" name="password" type="password" required autocomplete="current-password">
     <button class="button" type="submit">Daxil ol</button>
   </form>
 </section>

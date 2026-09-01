@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Təşkilat seçin — MEYAR{% endblock %}
+{% block content %}
+<section class="auth-card">
+  <p class="eyebrow">Daxili HR sistemi</p>
+  <h1>Təşkilat seçin</h1>
+  <p class="lede">Hesabınız birdən çox təşkilata bağlıdır. Davam etmək üçün birini seçin.</p>
+  <form method="post" action="/ui/login/select-tenant" autocomplete="off" class="stack-form">
+    <input type="hidden" name="token" value="{{ token }}">
+    {% for membership_id, tenant_name in tenant_options %}
+    <label class="radio-option">
+      <input type="radio" name="membership_id" value="{{ membership_id }}" required>
+      {{ tenant_name }}
+    </label>
+    {% endfor %}
+    <button class="button" type="submit">Davam et</button>
+  </form>
+</section>
+{% endblock %}
