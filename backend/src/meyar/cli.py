@@ -68,7 +68,10 @@ async def _create_tenant(name: str) -> None:
         await db.commit()
 
     print(f"Created tenant: {tenant.id} ({name})")
-    print(f"API key (shown once, store it now): {plaintext}")
+    # Secret alone on its own line — see the seed-demo output below for why
+    # (terminal soft-wrap can corrupt a copy-pasted label+secret line).
+    print("API key (shown once, store it now):")
+    print(plaintext)
     print(f"Key prefix (safe to log/display): {api_key.prefix}")
 
 
@@ -545,13 +548,17 @@ async def _seed_demo(reset: bool) -> None:
             "revoked and a fresh one was minted (a previous run's plaintext "
             "can never be recovered)."
         )
-    print(f"API key (shown once, store it now): {summary.api_key_plaintext}")
+    # The secret is printed alone on its own line, with no prefix text
+    # sharing that line — a long label + secret on one line is prone to
+    # terminal soft-wrap, and copying a wrapped line in some terminals
+    # inserts a real line break or trailing whitespace into the clipboard,
+    # silently corrupting the value a human then pastes elsewhere.
+    print("API key (shown once, store it now):")
+    print(summary.api_key_plaintext)
     print("--- Human/UI login (for the normal /ui/login screen) ---")
     print(f"Username: {summary.human_username}")
-    print(
-        "Temporary password (shown once, never persisted in plaintext — "
-        f"log in and it works immediately): {summary.human_temp_password}"
-    )
+    print("Temporary password (shown once, never persisted in plaintext):")
+    print(summary.human_temp_password)
 
 
 async def _extract_identity(tenant_id: str, candidate_id: str, document_id: str) -> None:
