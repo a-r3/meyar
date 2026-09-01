@@ -2632,3 +2632,74 @@ scoring, or evaluation behavior changed. The `MAX_AGENT_SEARCH_QUERY_LENGTH`
 bound and the concurrency guard are both simple constant/wiring changes,
 trivially adjustable if re-verified against different hardware or a
 different local model.
+
+## D-036 — Slice 2 correctness fix: a successful tool result must never
+co-render with a fatal-looking outcome, and an assistant turn must never
+be stored/shown blank
+
+**Date:** 2026-09-01
+**Decision:** Owner live inspection of PR #40 found `/ui/agent` rendering
+an empty assistant bubble, a red "AI response could not be safely
+processed" error, a simultaneous green "query executed" banner, and a
+valid candidate card with a misleading "Uyğunluq 0%" badge — all for one
+turn. Root-caused (not guessed) with a real-DB repro test before any fix:
+`meyar.agent.service.run_agent_turn`'s loop always asks the model a
+second "what next" decision after a successful `SEARCH_CANDIDATES` call;
+when that second call failed (repeated schema-invalid output, or a
+provider timeout/outage), the returned `AgentTurnResult` carried
+`outcome=MALFORMED_MODEL_OUTPUT` (red, by name-collision with the
+existing `PlannerOutcome.MALFORMED_MODEL_OUTPUT` CSS rule) while still
+carrying the FIRST call's successful `tool_results` — the search's own
+outcome banner (green, `EXECUTABLE`) and candidate card rendered
+underneath the red one. The stored assistant turn was `""`, redisplayed
+verbatim as an empty bubble.
+
+1. **A follow-up decision failure is never fatal once a tool already
+   succeeded.** New `AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT`: used
+   whenever the loop's second-or-later `decide_agent_action` call fails
+   (schema-invalid, timeout, unavailable) but `tool_results` is
+   non-empty, and whenever `GET_CANDIDATE_PROFILE`/`GET_CANDIDATE_EVIDENCE`
+   succeeds (neither ever carries a model message — there is no
+   "framing" to fail). Plain `ANSWERED` is now reserved for a real
+   model-authored `FINAL_ANSWER`, which `AgentDecision`'s own shape
+   validator already guarantees always carries a non-empty `message` — so
+   `ANSWERED` with `message=None` is unreachable, and grounded tool
+   results never again co-occur with `MALFORMED_MODEL_OUTPUT`/
+   `AGENT_PROVIDER_FAILURE` (both now only ever returned with
+   `tool_results == []`).
+2. **No fabricated fallback text in the service layer.** AZ-language text
+   continues to live only in `meyar.ui.presentation`
+   (`AGENT_TURN_OUTCOME_TEXT["ANSWERED_FROM_TOOL_RESULT"] = "Nəticələr
+   aşağıdadır."`) — `meyar.agent.service` stays UI-agnostic, matching
+   `meyar.search.planner_service`'s existing precedent.
+3. **A stored assistant turn is never blank.** `conversation.turns` now
+   persists `(outcome, message)` per assistant turn instead of
+   pre-rendered text; `meyar.ui.router._agent_turn_log_views` redisplays
+   past turns through the exact same `agent_turn_outcome_message`
+   function the live turn's banner uses, so a past turn is exactly as
+   informative on reload as it was live, and is never empty (every
+   `AgentTurnOutcome` has a non-empty deterministic fallback, verified by
+   a regression test that loops over the whole enum).
+4. **No misleading relevance percentage on unscored discovery.** The
+   agent's search-result card (`agent.html` only — the classic
+   `/ui/search` page is unchanged) now shows the "Uyğunluq X%" pill only
+   for `SEMANTIC_ONLY`/`HYBRID` search modes, where `relevance_score` is a
+   real similarity signal. A plain `STRUCTURED_ONLY` discovery query with
+   no `preferred_filters` always produces `relevance_score == 0.0` by
+   construction (no preferred criteria are being scored) — that is not a
+   deficiency to hide, it is simply not a percentage, so the card shows
+   matched required/preferred criteria instead (already rendered).
+
+**Why:** A contradictory red-error/green-success render is a trust-safety
+defect for an HR-facing decision-support tool, independent of local-model
+quality — the owner's framing ("model parse/timeout/failure states MUST
+produce coherent UI") is the correct bar regardless of what hardware or
+model MEYAR eventually runs on.
+
+**Reversibility:** Fully additive to the Slice 2 (D-035) design — one new
+`AgentTurnOutcome` member, one new `AGENT_TURN_OUTCOME_TEXT` entry, a
+`conversation.turns` shape change (`text` + `outcome` instead of
+pre-rendered `text` alone; no migration, JSON column, old rows still
+readable via `.get()` defaults), and a template-only conditional for the
+relevance pill. No scoring/evaluation math changed, no planner regex
+changed, no navigation removed.

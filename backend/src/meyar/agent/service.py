@@ -350,9 +350,16 @@ async def _finish_turn(
     last_search_candidate_ids: list[str],
     max_context_turns: int,
     result: AgentTurnResult,
-    assistant_text: str,
 ) -> AgentTurnResult:
-    turns = [*turns, {"role": "assistant", "text": assistant_text}][-max_context_turns:]
+    """Persists this turn's own (outcome, message) — never pre-rendered
+    display text — so a past turn can always be redisplayed later through
+    the exact same deterministic outcome->text mapping the live turn uses
+    (meyar.ui.presentation.agent_turn_outcome_message), and is therefore
+    never blank even when ``result.message`` is None (see D-036)."""
+    turns = [
+        *turns,
+        {"role": "assistant", "text": result.message or "", "outcome": result.outcome.value},
+    ][-max_context_turns:]
     await save_conversation_state(
         db,
         conversation,
@@ -413,8 +420,17 @@ async def run_agent_turn(
             except ModelSchemaInvalidError:
                 continue
             except (ModelTimeoutError, ModelUnavailableError, LLMProviderError):
+                # A follow-up "what next" decision failing after a tool
+                # already returned a real, grounded result is never a
+                # fatal turn failure — only the optional closing framing
+                # is missing (see D-036). A failure on the FIRST decision
+                # (tool_results still empty) remains a genuine failure.
                 result = _build_result(
-                    outcome=AgentTurnOutcome.AGENT_PROVIDER_FAILURE,
+                    outcome=(
+                        AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
+                        if tool_results
+                        else AgentTurnOutcome.AGENT_PROVIDER_FAILURE
+                    ),
                     message=None,
                     tool_results=tool_results,
                     tool_call_count=tool_calls_made,
@@ -428,12 +444,15 @@ async def run_agent_turn(
                     last_search_candidate_ids=last_search_candidate_ids,
                     max_context_turns=max_context_turns,
                     result=result,
-                    assistant_text="",
                 )
 
         if decision is None:
             result = _build_result(
-                outcome=AgentTurnOutcome.MALFORMED_MODEL_OUTPUT,
+                outcome=(
+                    AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
+                    if tool_results
+                    else AgentTurnOutcome.MALFORMED_MODEL_OUTPUT
+                ),
                 message=None,
                 tool_results=tool_results,
                 tool_call_count=tool_calls_made,
@@ -447,7 +466,6 @@ async def run_agent_turn(
                 last_search_candidate_ids=last_search_candidate_ids,
                 max_context_turns=max_context_turns,
                 result=result,
-                assistant_text="",
             )
 
         if decision.action in (AgentActionType.FINAL_ANSWER, AgentActionType.CLARIFY):
@@ -471,7 +489,6 @@ async def run_agent_turn(
                 last_search_candidate_ids=last_search_candidate_ids,
                 max_context_turns=max_context_turns,
                 result=result,
-                assistant_text=decision.message or "",
             )
 
         if tool_calls_made >= max_tool_calls:
@@ -490,7 +507,6 @@ async def run_agent_turn(
                 last_search_candidate_ids=last_search_candidate_ids,
                 max_context_turns=max_context_turns,
                 result=result,
-                assistant_text="",
             )
 
         if decision.action == AgentActionType.SEARCH_CANDIDATES:
@@ -546,9 +562,17 @@ async def run_agent_turn(
                 if tool_result.profile is not None
                 else tool_result.evidence.found  # type: ignore[union-attr]
             )
+            # Never plain ANSWERED here — that outcome is reserved for a
+            # real model-authored FINAL_ANSWER message (guaranteed
+            # non-None by AgentDecision's own shape validator). A
+            # successful profile/evidence lookup has no model framing at
+            # all, so it uses the same "grounded result, no framing"
+            # outcome as the search-loop case (D-036).
             result = _build_result(
                 outcome=(
-                    AgentTurnOutcome.ANSWERED if found else AgentTurnOutcome.CANDIDATE_REF_NOT_FOUND
+                    AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
+                    if found
+                    else AgentTurnOutcome.CANDIDATE_REF_NOT_FOUND
                 ),
                 message=None,
                 tool_results=tool_results,
@@ -563,5 +587,4 @@ async def run_agent_turn(
                 last_search_candidate_ids=last_search_candidate_ids,
                 max_context_turns=max_context_turns,
                 result=result,
-                assistant_text="",
             )

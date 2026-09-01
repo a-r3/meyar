@@ -31,6 +31,7 @@ class FakeLLMProvider:
         agent_decisions: list[AgentDecision] | None = None,
         agent_error: LLMProviderError | None = None,
         agent_fail_first_n_calls: int = 0,
+        agent_fail_after_n_calls: int | None = None,
     ) -> None:
         self._extraction = extraction
         self._identity_extraction = identity_extraction
@@ -44,6 +45,7 @@ class FakeLLMProvider:
         self._agent_decisions = agent_decisions or ([agent_decision] if agent_decision else [])
         self._agent_error = agent_error
         self._agent_fail_first_n_calls = agent_fail_first_n_calls
+        self._agent_fail_after_n_calls = agent_fail_after_n_calls
         self.agent_call_count = 0
 
     async def extract_candidate_profile(
@@ -108,7 +110,16 @@ class FakeLLMProvider:
             from meyar.llm.provider import ModelSchemaInvalidError
 
             raise ModelSchemaInvalidError("Simulated schema-invalid agent output.")
-        if self._agent_error is not None:
+        if (
+            self._agent_fail_after_n_calls is not None
+            and self.agent_call_count > self._agent_fail_after_n_calls
+        ):
+            from meyar.llm.provider import ModelSchemaInvalidError
+
+            raise self._agent_error or ModelSchemaInvalidError(
+                "Simulated schema-invalid agent output (post-success failure)."
+            )
+        if self._agent_error is not None and self._agent_fail_after_n_calls is None:
             raise self._agent_error
         success_index = self.agent_call_count - self._agent_fail_first_n_calls - 1
         assert self._agent_decisions

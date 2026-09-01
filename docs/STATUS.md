@@ -163,8 +163,30 @@ already-tenant-scoped tool results — never sent into the model's prompt.
 A real, non-obvious bug was found and fixed during manual real-Ollama
 verification — see D-035. Quality gates: `ruff` clean, `mypy src` clean
 (134 files), `alembic heads` = one head, full `pytest` suite 756 passed
-/ 0 failed, `scripts/scan-tracked-tree.sh` clean. **Not yet
-committed/opened as a PR — issue #31 and M8 remain open.**
+/ 0 failed, `scripts/scan-tracked-tree.sh` clean. **Opened as PR #40**
+(CI green). Owner live inspection of PR #40 then found a contradictory
+render — an empty assistant bubble, a red "AI response could not be
+safely processed" error, a simultaneous green "query executed" banner,
+and a misleading "Uyğunluq 0%" badge, all for one turn. Root-caused via a
+real-DB repro test: the loop's follow-up "what next" decision failing
+after `SEARCH_CANDIDATES` already succeeded was returned as
+`MALFORMED_MODEL_OUTPUT` while still carrying the successful
+`tool_results`. Fixed — see D-036: a new `ANSWERED_FROM_TOOL_RESULT`
+outcome means a follow-up framing failure (or a successful
+profile/evidence lookup, which never has model framing at all) is never
+treated as fatal; `MALFORMED_MODEL_OUTPUT`/`AGENT_PROVIDER_FAILURE` are
+now only ever returned with an empty `tool_results`; every stored
+assistant turn is redisplayed through the same deterministic
+outcome-\>text mapping the live turn uses, so it is never blank; the
+agent's relevance-percentage pill is now shown only for
+`SEMANTIC_ONLY`/`HYBRID` search modes (a plain `STRUCTURED_ONLY`
+discovery query has no real score to show). 9 new regression tests (6
+service-level, 3 HTTP-level rendering assertions). Quality gates
+re-verified: `ruff` clean, `mypy src` clean, full `pytest` suite 765
+passed / 0 failed (up from 756),
+`alembic heads` unchanged (no migration — additive JSON turn shape only),
+`scripts/scan-tracked-tree.sh` clean. Pushed to PR #40, CI re-verified
+green. **Still not merged — awaiting owner retest.**
 
 GitHub remote established (`https://github.com/a-r3/meyar.git`, private,
 temporary development remote — see D-012, `docs/DECISIONS.md`). `main`

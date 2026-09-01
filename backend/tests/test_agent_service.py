@@ -567,3 +567,221 @@ async def test_agent_turn_never_writes_a_candidate_or_evaluation_row(
         "archive_job",
     ):
         assert forbidden not in source
+
+
+# --- D-036 regression tests: a successful tool result must never co-occur
+# with a fatal-looking outcome, and a stored assistant turn must never be
+# blank. See docs/DECISIONS.md D-036 for the live-inspection bug report
+# and root cause (a follow-up "what next" decision failing after
+# SEARCH_CANDIDATES already succeeded was returned as MALFORMED_MODEL_OUTPUT
+# while still carrying the successful tool_results). ---
+
+
+async def test_successful_search_with_failed_followup_framing_is_not_fatal(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    """The exact owner-reported repro: SEARCH_CANDIDATES succeeds, then the
+    loop's follow-up decision call fails (schema-invalid on both attempts).
+    Must be ANSWERED_FROM_TOOL_RESULT (never MALFORMED_MODEL_OUTPUT or
+    AGENT_PROVIDER_FAILURE) with the grounded search result intact and no
+    model message (a deterministic UI fallback covers it — see
+    test_ui_agent_routes.py for the rendered-page assertion)."""
+    tenant, user, _password, membership = tenant_and_user
+    candidate, _pv = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=_profile("Python")
+    )
+    await db_session.commit()
+
+    from meyar.search.planner_schemas import PlannerDraft
+    from meyar.search.schemas import RequiredFilters
+
+    llm = FakeLLMProvider(
+        planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
+        agent_decision=AgentDecision(
+            action=AgentActionType.SEARCH_CANDIDATES, search_query="Python bilən namizədləri göstər"
+        ),
+        agent_fail_after_n_calls=1,  # decision #1 (the search) succeeds; every call after fails
+    )
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    result = await _run(
+        db_session,
+        llm,
+        tenant_id=tenant.id,
+        conversation=conversation,
+        message="Python bilən namizədləri göstər",
+    )
+    assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
+    assert result.outcome not in (
+        AgentTurnOutcome.MALFORMED_MODEL_OUTPUT,
+        AgentTurnOutcome.AGENT_PROVIDER_FAILURE,
+    )
+    assert result.message is None
+    assert len(result.tool_results) == 1
+    search = result.tool_results[0].search
+    assert search is not None
+    assert search.response.plan.executable is True
+    assert search.response.search_response.result_count == 1
+    assert search.response.search_response.results[0].candidate_id == candidate.id
+
+
+async def test_successful_search_with_followup_provider_outage_is_not_fatal(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    """Same as above, but the follow-up call fails with a provider-level
+    error (timeout/unavailable) rather than repeated schema-invalid
+    output — must reach the same non-fatal ANSWERED_FROM_TOOL_RESULT."""
+    tenant, user, _password, membership = tenant_and_user
+    await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=_profile("Python")
+    )
+    await db_session.commit()
+
+    from meyar.search.planner_schemas import PlannerDraft
+    from meyar.search.schemas import RequiredFilters
+
+    llm = FakeLLMProvider(
+        planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
+        agent_decision=AgentDecision(
+            action=AgentActionType.SEARCH_CANDIDATES, search_query="Python bilən namizədləri göstər"
+        ),
+        agent_fail_after_n_calls=1,
+        agent_error=ModelTimeoutError("simulated follow-up timeout"),
+    )
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    result = await _run(
+        db_session,
+        llm,
+        tenant_id=tenant.id,
+        conversation=conversation,
+        message="Python bilən namizədləri göstər",
+    )
+    assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
+    assert len(result.tool_results) == 1
+    assert result.tool_results[0].search.response.search_response.result_count == 1
+
+
+async def test_no_result_model_failure_stays_a_safe_failure_with_no_tool_results(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    """The FIRST decision failing (no tool ever ran) must remain a genuine
+    fatal outcome with an empty tool_results list — never dressed up as a
+    success. Covers both the repeated-schema-invalid and provider-outage
+    shapes."""
+    tenant, user, _password, membership = tenant_and_user
+    await db_session.commit()
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+
+    llm_malformed = FakeLLMProvider(agent_fail_first_n_calls=99, agent_decision=None)
+    llm_malformed._agent_decisions = [
+        AgentDecision(action=AgentActionType.FINAL_ANSWER, message="unused")
+    ]
+    result = await _run(
+        db_session, llm_malformed, tenant_id=tenant.id, conversation=conversation, message="salam"
+    )
+    assert result.outcome == AgentTurnOutcome.MALFORMED_MODEL_OUTPUT
+    assert result.tool_results == []
+
+    conversation2 = await _new_conversation(db_session, tenant, user, membership)
+    llm_outage = FakeLLMProvider(agent_error=ModelUnavailableError("simulated outage"))
+    result2 = await _run(
+        db_session, llm_outage, tenant_id=tenant.id, conversation=conversation2, message="salam"
+    )
+    assert result2.outcome == AgentTurnOutcome.AGENT_PROVIDER_FAILURE
+    assert result2.tool_results == []
+
+
+async def test_stored_assistant_turn_is_never_blank_across_all_outcomes(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    """Every outcome that can leave ``message`` as None must still resolve
+    to non-empty display text when replayed through
+    meyar.ui.presentation.agent_turn_outcome_message — mirrors what
+    meyar.ui.router._agent_turn_log_views does for history rendering."""
+    from meyar.ui.presentation import agent_turn_outcome_message
+
+    for outcome in AgentTurnOutcome:
+        text = agent_turn_outcome_message(outcome.value, None)
+        if outcome == AgentTurnOutcome.ANSWERED:
+            # Unreachable in practice — AgentDecision guarantees a real
+            # FINAL_ANSWER always carries a non-empty message — but even
+            # this default must never be relied upon by a stored turn;
+            # confirmed separately by test_successful_search_with_* and
+            # test_get_candidate_profile_success_has_no_empty_turn below,
+            # which never produce plain ANSWERED with message=None.
+            continue
+        assert text, f"AgentTurnOutcome.{outcome.name} has no non-empty fallback text"
+
+
+async def test_get_candidate_profile_success_has_no_empty_turn_outcome(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    """A successful GET_CANDIDATE_PROFILE (no model framing at all) must
+    never be tagged plain ANSWERED with message=None — it must resolve to
+    ANSWERED_FROM_TOOL_RESULT, which has a real fallback string."""
+    tenant, user, _password, membership = tenant_and_user
+    candidate, _pv = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=_profile("Python")
+    )
+    await db_session.commit()
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation.last_search_candidate_ids = [str(candidate.id)]
+    await db_session.flush()
+
+    llm = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1)
+    )
+    result = await _run(
+        db_session, llm, tenant_id=tenant.id, conversation=conversation, message="birincini aç"
+    )
+    assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
+    assert result.message is None
+
+
+async def test_ordinal_reference_still_resolves_after_followup_framing_failure(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    """Rule E: last_search_candidate_ids must survive a turn whose
+    follow-up framing step failed, so a later 'birincini aç' still
+    resolves — the grounded search result is not undone by the framing
+    failure."""
+    tenant, user, _password, membership = tenant_and_user
+    candidate, _pv = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=_profile("Python")
+    )
+    await db_session.commit()
+
+    from meyar.search.planner_schemas import PlannerDraft
+    from meyar.search.schemas import RequiredFilters
+
+    llm_search = FakeLLMProvider(
+        planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
+        agent_decision=AgentDecision(
+            action=AgentActionType.SEARCH_CANDIDATES, search_query="Python bilən namizədləri göstər"
+        ),
+        agent_fail_after_n_calls=1,
+    )
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    first_result = await _run(
+        db_session,
+        llm_search,
+        tenant_id=tenant.id,
+        conversation=conversation,
+        message="Python bilən namizədləri göstər",
+    )
+    assert first_result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
+    await db_session.refresh(conversation)
+    assert conversation.last_search_candidate_ids == [str(candidate.id)]
+
+    llm_profile = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1)
+    )
+    second_result = await _run(
+        db_session,
+        llm_profile,
+        tenant_id=tenant.id,
+        conversation=conversation,
+        message="birincini aç",
+    )
+    assert second_result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
+    assert second_result.tool_results[0].profile.found is True
+    assert second_result.tool_results[0].profile.candidate_id == candidate.id

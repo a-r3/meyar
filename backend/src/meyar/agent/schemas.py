@@ -206,6 +206,15 @@ class AgentToolResult(BaseModel):
 
 class AgentTurnOutcome(StrEnum):
     ANSWERED = "ANSWERED"
+    # A tool (always SEARCH_CANDIDATES — the only tool that loops back for
+    # another decision) already produced a real, grounded result, but the
+    # SUBSEQUENT "what next" decision step failed (timeout/unavailable/
+    # repeated schema-invalid output). This is never treated as a fatal
+    # turn failure — the grounded tool_results are real and safe to show;
+    # only the optional closing framing is missing. Distinct from
+    # MALFORMED_MODEL_OUTPUT/AGENT_PROVIDER_FAILURE, which apply only when
+    # tool_results is empty. See D-036.
+    ANSWERED_FROM_TOOL_RESULT = "ANSWERED_FROM_TOOL_RESULT"
     CLARIFICATION_REQUESTED = "CLARIFICATION_REQUESTED"
     CANDIDATE_REF_NOT_FOUND = "CANDIDATE_REF_NOT_FOUND"
     TOOL_CALL_LIMIT_EXCEEDED = "TOOL_CALL_LIMIT_EXCEEDED"

@@ -466,12 +466,26 @@ async def search(
 
 
 def _agent_turn_log_views(conversation) -> list:
+    """User turns are the HR user's own (untrusted, shown verbatim) text.
+    Assistant turns are re-derived through the exact same deterministic
+    outcome->text mapping the live turn banner uses
+    (agent_turn_outcome_message) rather than the raw stored value — a
+    past turn's stored text can be empty/None (its outcome carried no
+    model framing), and this guarantees it is never redisplayed as a
+    blank bubble (D-036)."""
     from meyar.ui.view_models import AgentTurnLogView
 
-    return [
-        AgentTurnLogView(role=turn.get("role", "user"), text=turn.get("text", ""))
-        for turn in conversation.turns
-    ]
+    views = []
+    for turn in conversation.turns:
+        role = turn.get("role", "user")
+        if role == "assistant":
+            text = agent_turn_outcome_message(
+                turn.get("outcome", "ANSWERED"), turn.get("text") or None
+            )
+        else:
+            text = turn.get("text", "")
+        views.append(AgentTurnLogView(role=role, text=text))
+    return views
 
 
 @router.get("/agent", response_class=HTMLResponse)

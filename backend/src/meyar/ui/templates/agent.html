@@ -63,7 +63,9 @@
       <div class="result-body">
         <div class="card-heading">
           <div><h2>{{ item.full_name or "Ad məlumatı yoxdur" }}</h2></div>
+          {% if tool_result.search_outcome.mode in ("SEMANTIC_ONLY", "HYBRID") %}
           <span class="score-pill">Uyğunluq {{ "%.0f"|format(item.relevance_score * 100) }}%</span>
+          {% endif %}
         </div>
         {% if item.professional_summary %}<p>{{ item.professional_summary }}</p>{% endif %}
         {% if item.required_matches %}<p><strong>Məcburi uyğunluqlar:</strong> {{ item.required_matches|join(", ") }}</p>{% endif %}

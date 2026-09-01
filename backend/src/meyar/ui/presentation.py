@@ -108,8 +108,17 @@ JOB_STATUS_LABELS = {
 
 # Slice 2 (issue #31) — HR-facing text for meyar.agent.schemas.AgentTurnOutcome.
 # Deterministic, never model-authored, mirroring PLANNER_OUTCOME_TEXT above.
+# "ANSWERED" is intentionally "" — AgentDecision's own shape validator
+# guarantees a real FINAL_ANSWER always carries a non-empty model message,
+# so this default is never actually reached; it exists only as a safe
+# fallback, not a UI state any turn is expected to produce. A tool result
+# with no model framing (search-loop or profile/evidence success) uses
+# "ANSWERED_FROM_TOOL_RESULT" below instead — never plain "ANSWERED" with
+# no message (see D-036: this was the root cause of a real bug where a
+# fatal-looking outcome co-rendered with valid grounded results).
 AGENT_TURN_OUTCOME_TEXT: dict[str, str] = {
     "ANSWERED": "",
+    "ANSWERED_FROM_TOOL_RESULT": "Nəticələr aşağıdadır.",
     "CLARIFICATION_REQUESTED": "Aydınlaşdırma tələb olunur",
     "CANDIDATE_REF_NOT_FOUND": (
         "Göstərilən namizəd tapılmadı — əvvəlcə axtarış nəticələrindən birini seçin."

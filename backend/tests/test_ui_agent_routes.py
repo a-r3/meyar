@@ -247,3 +247,120 @@ async def test_existing_api_key_rest_search_unaffected_by_agent_slice(
     await db_session.commit()
     response = await client.get("/api/v1/usage", headers={"Authorization": f"Bearer {plaintext}"})
     assert response.status_code == 200
+
+
+# --- D-036 regression tests: rendered-page assertions for the live-inspection
+# bug report (empty assistant bubble + red "AI response could not be safely
+# processed" error co-rendered with a valid, green, executed-search result
+# and a misleading "Uyğunluq 0%" badge on an unscored discovery query). ---
+
+
+async def test_successful_search_with_failed_framing_renders_no_contradictory_error(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
+) -> None:
+    tenant, user, password, _membership = tenant_and_user
+    candidate, _pv = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=_profile("Python")
+    )
+    await db_session.commit()
+
+    fake = FakeLLMProvider(
+        planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
+        agent_decision=AgentDecision(
+            action=AgentActionType.SEARCH_CANDIDATES, search_query="Python bilən namizədləri göstər"
+        ),
+        agent_fail_after_n_calls=1,
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake
+    csrf = await _login_and_csrf(client, user.username, password)
+    response = await client.post(
+        "/ui/agent", data={"message": "Python bilən namizədləri göstər", "csrf_token": csrf}
+    )
+    assert response.status_code == 200
+    # The grounded result is present...
+    assert str(candidate.id) in response.text
+    # ...and there is no fatal "could not be safely processed" banner
+    # anywhere alongside it — a real result must never co-render with a
+    # scary top-level failure message.
+    assert "təhlükəsiz şəkildə emal etmək mümkün olmadı" not in response.text
+    assert 'data-outcome="MALFORMED_MODEL_OUTPUT"' not in response.text
+    assert 'data-outcome="AGENT_PROVIDER_FAILURE"' not in response.text
+    # No empty assistant bubble in the conversation history.
+    assert '<p class="untrusted-text"></p>' not in response.text
+
+
+async def test_unscored_structured_discovery_has_no_misleading_percentage(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
+) -> None:
+    """A plain required-skill discovery query (STRUCTURED_ONLY, no
+    preferred_filters) has no real relevance score to show — the card
+    must present matched criteria, never a fabricated 'Uyğunluq 0%'."""
+    tenant, user, password, _membership = tenant_and_user
+    candidate, _pv = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=_profile("Python")
+    )
+    await db_session.commit()
+
+    fake = FakeLLMProvider(
+        planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
+        agent_decisions=[
+            AgentDecision(
+                action=AgentActionType.SEARCH_CANDIDATES,
+                search_query="Python bilən namizədləri göstər",
+            ),
+            AgentDecision(action=AgentActionType.FINAL_ANSWER, message="Budur nəticələr."),
+        ],
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake
+    csrf = await _login_and_csrf(client, user.username, password)
+    response = await client.post(
+        "/ui/agent", data={"message": "Python bilən namizədləri göstər", "csrf_token": csrf}
+    )
+    assert response.status_code == 200
+    assert str(candidate.id) in response.text
+    assert "Uyğunluq" not in response.text
+    assert "Məcburi uyğunluqlar" in response.text
+
+
+async def test_get_candidate_profile_success_never_renders_empty_bubble(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
+) -> None:
+    tenant, user, password, _membership = tenant_and_user
+    candidate, _pv = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=_profile("Python")
+    )
+    await db_session.commit()
+
+    fake_search = FakeLLMProvider(
+        planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
+        agent_decisions=[
+            AgentDecision(
+                action=AgentActionType.SEARCH_CANDIDATES,
+                search_query="Python bilən namizədləri göstər",
+            ),
+            AgentDecision(action=AgentActionType.FINAL_ANSWER, message="Budur nəticələr."),
+        ],
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake_search
+    csrf = await _login_and_csrf(client, user.username, password)
+    await client.post(
+        "/ui/agent", data={"message": "Python bilən namizədləri göstər", "csrf_token": csrf}
+    )
+
+    fake_profile = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1)
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake_profile
+    response = await client.post("/ui/agent", data={"message": "birincini aç", "csrf_token": csrf})
+    assert response.status_code == 200
+    assert '<p class="untrusted-text"></p>' not in response.text
+    assert str(candidate.id) in response.text
