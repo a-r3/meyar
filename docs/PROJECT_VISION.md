@@ -36,9 +36,12 @@ public-facing surface exists or is planned.
    candidates with at least 5 years of banking experience who know
    Python, SQL, Russian and English") return the requested number of
    matching candidates (when enough exist) with evidence/reasons per
-   candidate, not just an ID list.
+   candidate, not just an ID list. **Future direction (D-030):** this
+   surface evolves into "MEYAR AI," a bounded local-AI agent workspace —
+   see "Future direction" below.
 2. **CV Library** — browse/search all indexed candidates; open a
-   candidate profile and the original CV, authorized-access only.
+   candidate profile and the original CV, authorized-access only. Remains
+   a first-class surface under the future agent direction.
 3. **Internal REST API** — documented (OpenAPI/Swagger), authenticated,
    powers the two UI surfaces above and any other approved internal
    system. Not a commercial product API.
@@ -157,3 +160,39 @@ embeddings/pgvector) → Slice 8 (Hybrid search) → Slice 9 (NL search
 planner) → Slice 10 (JD 0–100 scoring + batch ranking) → Slice 11 (Chat
 UI + CV Library UI) → Slice 12 (API/Swagger/README completion) → Slice 13
 (Security + official DoD acceptance). Full detail in `docs/MVP_PLAN.md`.
+
+## Future direction — bounded local-AI HR agent (D-030, D-031, D-032)
+
+Following the official-task MVP roadmap above, MEYAR's primary future user
+experience is a **bounded local-AI HR agent** ("MEYAR AI"), not indefinite
+growth of the natural-language search/filter surface. This does not change
+the permanent product principles, which now apply explicitly to every
+future agent tool call, not only the Slice 9 search planner:
+
+> AI understands. Database remembers. Search retrieves. Deterministic
+> policy evaluates. Evidence explains. Humans decide.
+
+The LLM/agent must never decide the final numeric score, decide a hiring
+outcome, silently weaken a requirement, fabricate an unsupported fact, use
+identity/PII secretly in ranking, or bypass tenant/auth/tool schemas.
+Candidate-content AI remains local-only via Ollama; no external AI API may
+ever receive candidate content, in the agent's tool-calling loop or
+anywhere else.
+
+Target primary product surface: **MEYAR AI + Candidate Library / Candidate
+Detail**. `SearchPlan` and the deterministic policy/validation machinery
+introduced in Slice 9 are retained as internal typed tool/policy
+boundaries — the agent invokes typed tools; it does not bypass schema
+validation, the prohibited-attribute policy, no-silent-weakening rules,
+tenant/auth boundaries, or evidence/provenance rules, which apply to
+LLM-produced tool arguments exactly as they apply to today's NL search
+path. The deterministic language fast-path added in Slice/M7 work is
+frozen and carries an explicit sunset condition tied to the agent reaching
+accepted functional parity. The existing Job/vacancy backend and
+deterministic evaluation engine are retained unchanged; the vacancy UI's
+role shifts toward reviewing/confirming agent-drafted criteria rather than
+growing as a hand-built CRUD surface. Full detail, rationale, and
+supersession of prior framing: `docs/DECISIONS.md` D-030, D-031, D-032.
+Roadmap slices and GitHub milestones/issues: `docs/MVP_PLAN.md` and GitHub
+milestones **M8 — Bounded Local-AI HR Agent Platform** / **M9 —
+Deployment, Benchmark & Integration Readiness** (issues #30–#37).

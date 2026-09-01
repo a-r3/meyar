@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}CV görünüşü — MEYAR{% endblock %}
+{% block content %}
+<a class="back-link" href="/ui/candidates/{{ preview.candidate_id }}">← Namizəd profilinə qayıt</a>
+<div class="page-heading">
+  <div><p class="eyebrow">MEYAR-ın oxunaqlı görünüşü</p><h1>CV-yə bax</h1></div>
+  <a class="button button-secondary" href="/ui/candidates/{{ preview.candidate_id }}/documents/{{ preview.document_id }}/original">Originalı yüklə</a>
+</div>
+{% if not preview.available %}
+<div class="empty-state"><h2>Görünüş hazır deyil</h2><p>Bu sənəd üçün oxunaqlı görünüş hələ hazır deyil. Orijinal sənədi yükləyə bilərsiniz.</p></div>
+{% else %}
+<p class="field-help">Bu, sənədin MEYAR tərəfindən emal edilmiş, oxunaqlı təqdimatıdır — orijinal fayl deyil.</p>
+<div class="document-preview">
+  {% for page in preview.pages %}
+  <section class="panel preview-page">
+    <h2>Səhifə {{ page.page }}</h2>
+    <pre class="preview-text">{{ page.text or "Bu səhifədə mətn tapılmadı." }}</pre>
+  </section>
+  {% endfor %}
+</div>
+{% endif %}
+{% endblock %}

@@ -11,6 +11,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meyar.core.auth import authenticate_raw_api_key
 from meyar.ingestion.parsers.local_text_parser import LocalTextParser
 from meyar.models.candidate import Candidate
 from meyar.models.evaluation import Evaluation
@@ -18,6 +19,7 @@ from meyar.models.job import Job
 from meyar.models.tenant import Tenant
 from meyar.search.schemas import CandidateSearchRequest, RequiredFilters, SearchMode
 from meyar.search.service import search_candidates
+from meyar.services.api_key_repo import create_api_key
 from meyar.services.audit_repo import record_event
 from meyar.services.candidate_document_repo import get_candidate_document
 from meyar.services.candidate_repo import create_candidate
@@ -87,7 +89,8 @@ async def test_seed_demo_idempotent_no_duplicates(db_session: AsyncSession, tmp_
     assert second.tenant_id == first.tenant_id
     assert second.already_seeded is True
     assert second.candidates_created == 0
-    assert second.api_key_plaintext is None  # never re-shown, only minted fresh
+    assert second.api_key_plaintext is not None
+    assert second.api_key_plaintext != first.api_key_plaintext
 
     result = await db_session.execute(
         select(Candidate).where(Candidate.tenant_id == first.tenant_id)
@@ -143,6 +146,52 @@ async def test_demo_tenant_isolation(db_session: AsyncSession, tmp_path: Path) -
         select(Candidate).where(Candidate.tenant_id == summary.tenant_id)
     )
     assert len(demo_candidates.scalars().all()) == len(_demo_candidates())
+
+
+async def test_reseed_rotates_demo_key_and_revokes_the_previous_one(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    """Section 20 gap: an idempotent reseed must always hand the operator
+    a usable plaintext credential, and must never leave key sprawl behind
+    — exactly one demo API key is active after a reseed."""
+    from meyar.models.api_key import ApiKey
+
+    first = await _seed(db_session, tmp_path)
+    await db_session.commit()
+
+    second = await _seed(db_session, tmp_path)
+    await db_session.commit()
+
+    assert second.api_key_plaintext is not None
+    login_with_old = await authenticate_raw_api_key(db_session, first.api_key_plaintext)
+    assert login_with_old is None  # revoked, no longer usable
+    login_with_new = await authenticate_raw_api_key(db_session, second.api_key_plaintext)
+    assert login_with_new is not None
+
+    keys = await db_session.execute(
+        select(ApiKey).where(ApiKey.tenant_id == second.tenant_id)
+    )
+    active_keys = [key for key in keys.scalars().all() if key.revoked_at is None]
+    assert len(active_keys) == 1
+    assert active_keys[0].id == login_with_new.id
+
+
+async def test_reseed_key_rotation_never_touches_another_tenant(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    other_tenant = await create_tenant(db_session, name="Unrelated-Tenant")
+    _other_key, other_plaintext = await create_api_key(
+        db_session, tenant_id=other_tenant.id, env="test"
+    )
+    await db_session.commit()
+
+    await _seed(db_session, tmp_path)
+    await db_session.commit()
+    await _seed(db_session, tmp_path)  # triggers the rotation path
+    await db_session.commit()
+
+    still_active = await authenticate_raw_api_key(db_session, other_plaintext)
+    assert still_active is not None
 
 
 async def test_seeded_candidates_visible_in_library(

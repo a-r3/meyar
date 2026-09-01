@@ -142,11 +142,12 @@ async def post_rank_job(
         await db.commit()
     except BatchRankingError as exc:
         await db.rollback()
-        code = (
-            status.HTTP_404_NOT_FOUND
-            if exc.code == "CRITERIA_VERSION_NOT_FOUND"
-            else status.HTTP_422_UNPROCESSABLE_CONTENT
-        )
+        if exc.code == "CRITERIA_VERSION_NOT_FOUND":
+            code = status.HTTP_404_NOT_FOUND
+        elif exc.code == "JOB_ARCHIVED":
+            code = status.HTTP_409_CONFLICT
+        else:
+            code = status.HTTP_422_UNPROCESSABLE_CONTENT
         raise HTTPException(status_code=code, detail=exc.code) from exc
 
     results = [

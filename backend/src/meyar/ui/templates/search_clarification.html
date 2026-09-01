@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Aydınlaşdırma tələb olunur — MEYAR{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div><p class="eyebrow">Axtarış aydınlaşdırması</p><h1>{{ skill }} üzrə təcrübə müddətini nəzərdə tutursunuz?</h1></div>
+  <a class="button button-secondary" href="/ui">Sorğunu dəyişdirin</a>
+</div>
+<section class="panel query-panel">
+  <h2>Təqdim edilmiş sorğu</h2>
+  <p class="untrusted-text">{{ query }}</p>
+</section>
+<section class="alert alert-info" role="status">
+  <p>MEYAR hazırda namizədin <strong>{{ skill }}</strong> bacarığına malik olub-olmadığını və namizədin <strong>ümumi iş təcrübəsini</strong> ayrı-ayrı yoxlaya bilir, lakin təcrübənin məhz {{ skill }} üzrə neçə il olduğunu sənəddən müəyyən edə bilmir. Ona görə tələbinizi avtomatik zəiflətmədən, əvvəlcə sizdən təsdiq istəyirik.</p>
+</section>
+<section class="panel">
+  <h2>Təklif olunan alternativ</h2>
+  <p class="field-help">Aşağıdakı düymə "{{ skill }} bacarığı + ümumi təcrübə minimum {{ years }} il" şərtilə axtarış aparacaq. Bu, "{{ skill }} üzrə {{ years }} il təcrübə" tələbindən fərqli ola bilər — yalnız təsdiqdən sonra icra olunur.</p>
+  <form method="post" action="/ui/search" class="stack-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="query" value="{{ confirmed_query }}">
+    <button class="button" type="submit">{{ skill }} bacarığı + ümumi təcrübə minimum {{ years }} il kimi axtar</button>
+  </form>
+</section>
+{% endblock %}

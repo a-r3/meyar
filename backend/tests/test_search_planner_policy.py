@@ -15,6 +15,7 @@ from meyar.search.planner_policy import (
     PlannerPolicyError,
     convert_planner_draft,
     derive_search_mode,
+    find_skill_specific_duration_mention,
     precheck_natural_language_request,
 )
 from meyar.search.planner_prompts import build_search_planner_user_prompt
@@ -161,6 +162,102 @@ def test_azerbaijani_required_plus_semantic_preference_is_hybrid() -> None:
 @pytest.mark.parametrize(
     "text",
     [
+        "pythonda 5 il tecrübesi olan",
+        "pythonda 5 il təcrübəsi olan",
+        "Python-da 5 il təcrübəsi olan",
+        "SQL-dan 3 il təcrübəsi olan",
+        "Python üzrə 5 il təcrübəsi olan",
+        "Python üzrə ən az 5 il təcrübəsi olan",
+    ],
+)
+def test_skill_specific_duration_is_never_silently_weakened_to_total_experience(
+    text: str,
+) -> None:
+    """Semantic-correctness audit regression (docs/DECISIONS.md D-027):
+    "N years of experience IN skill X" is a claim CandidateProfile cannot
+    prove — there is no evidence linking a SkillItem to a specific
+    EmploymentItem date range, only (a) "has skill X" and (b) "has N years
+    of TOTAL career experience" as independent facts. Every equivalent
+    phrasing of this skill-specific-duration intent — an agglutinated
+    locative/ablative case suffix directly on the skill ("Pythonda",
+    "SQL-dan") or an explicit "üzrə"/"ilə" connector — must be rejected
+    identically, never silently reinterpreted as "skill + total
+    experience >= N" (that combination was the exact bug this audit
+    found and fixed: it previously slipped through for the locative/
+    ablative-suffix phrasing only, while the connector phrasing was
+    already, and remains, correctly rejected)."""
+    with pytest.raises(PlannerPolicyError) as exc_info:
+        precheck_natural_language_request(text)
+    assert exc_info.value.outcome == PlannerOutcome.UNSUPPORTED_SEMANTICS
+    assert (
+        PlannerReasonCode.SKILL_SPECIFIC_EXPERIENCE_DURATION_UNSUPPORTED
+        in exc_info.value.reason_codes
+    )
+    # convert_planner_draft shares the same precheck, so even a
+    # (hypothetically) correctly-fidelity-matching draft cannot slip this
+    # shape through the LLM path either.
+    with pytest.raises(PlannerPolicyError):
+        _convert(
+            text,
+            PlannerDraft(
+                required_filters=RequiredFilters(
+                    skills=["Python"], min_total_experience_years=5.0
+                )
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_skill", "expected_years"),
+    [
+        ("pythonda 5 il tecrübesi olan", "python", 5.0),
+        ("pythonda 5 il təcrübəsi olan", "python", 5.0),
+        ("Python-da 5 il təcrübəsi olan", "Python", 5.0),
+        ("SQL-dan 3 il təcrübəsi olan", "SQL", 3.0),
+        ("Python üzrə 5 il təcrübəsi olan", "Python", 5.0),
+    ],
+)
+def test_skill_specific_duration_is_recoverable_for_clarification(
+    text: str, expected_skill: str, expected_years: float
+) -> None:
+    """The declined request's (skill, years) are still extractable — this
+    is what powers the HR-safe clarification screen (meyar.ui.router),
+    never a silent guess and never a raw internal reason code shown to
+    HR."""
+    assert find_skill_specific_duration_mention(text) == (expected_skill, expected_years)
+
+
+def test_skill_specific_duration_extraction_preserves_java_javascript_boundary() -> None:
+    """The new locative-suffix duration pattern must not resurrect the
+    "Java matches inside JavaScript" collision — captures the literal
+    typed token only."""
+    assert find_skill_specific_duration_mention("Javascript-da 5 il təcrübəsi olan") == (
+        "Javascript",
+        5.0,
+    )
+    assert find_skill_specific_duration_mention("Java-da 5 il təcrübəsi olan") == (
+        "Java",
+        5.0,
+    )
+
+
+def test_agglutinated_suffix_does_not_relax_whole_term_matching() -> None:
+    """The locative/ablative suffix tolerance must not resurrect the
+    "Java matches inside JavaScript" false-positive the strict word-boundary
+    check exists to prevent — "script" is not an Azerbaijani case suffix."""
+    with pytest.raises(PlannerPolicyError) as exc_info:
+        _convert(
+            "Javascript bilən namizədləri göstər.",
+            PlannerDraft(required_filters=RequiredFilters(skills=["Java"])),
+        )
+    assert PlannerReasonCode.STRUCTURED_FILTER_NOT_SUPPORTED_BY_REQUEST in (
+        exc_info.value.reason_codes
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
         "Java mütləqdir.",
         "Java tələb olunur.",
         "Java mütləq olmalıdır.",
@@ -253,6 +350,73 @@ def test_known_unsupported_semantics_fail_closed(text: str, reason: PlannerReaso
         precheck_natural_language_request(text)
     assert exc_info.value.outcome == PlannerOutcome.UNSUPPORTED_SEMANTICS
     assert reason in exc_info.value.reason_codes
+    # A deterministic product-policy rejection (this precheck runs before
+    # any model call) must never carry the model-self-decline marker — see
+    # docs/DECISIONS.md D-025.
+    assert PlannerReasonCode.MODEL_DECLINED_INTERPRETATION not in exc_info.value.reason_codes
+
+
+def test_model_self_declined_interpretation_is_tagged_distinctly() -> None:
+    """When the planner MODEL itself populates
+    ``PlannerDraft.unsupported_reason_codes`` (as opposed to this module's
+    own deterministic precheck/postcheck), ``convert_planner_draft`` must
+    tag the failure with ``MODEL_DECLINED_INTERPRETATION`` so the HR
+    presentation layer can tell 'the AI couldn't interpret this' apart
+    from 'this concept is not part of the product'. Root-caused from a live
+    owner-reported case: an ordinary Python+experience query, on the small
+    local model configured for an 8GB laptop, self-flagged as
+    LANGUAGE_PROFICIENCY_UNSUPPORTED even though the request never
+    mentioned a language — a model-quality issue, not a policy-regex bug.
+    See docs/DECISIONS.md D-025."""
+    draft = PlannerDraft(
+        required_filters=RequiredFilters(skills=["Python"]),
+        unsupported_reason_codes=[PlannerReasonCode.LANGUAGE_PROFICIENCY_UNSUPPORTED],
+    )
+    with pytest.raises(PlannerPolicyError) as exc_info:
+        _convert("Python bilən namizədləri göstər.", draft)
+    assert exc_info.value.outcome == PlannerOutcome.UNSUPPORTED_SEMANTICS
+    assert PlannerReasonCode.MODEL_DECLINED_INTERPRETATION in exc_info.value.reason_codes
+    assert PlannerReasonCode.LANGUAGE_PROFICIENCY_UNSUPPORTED in exc_info.value.reason_codes
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Java bilən namizədləri göstər\n",  # <textarea> trailing Enter
+        "Java bilən namizədləri göstər\r\n",  # browser CRLF normalization
+        "Java bilən\nnamizədləri göstər",  # internal newline
+        "Java bilən\tnamizədləri göstər",  # pasted tab
+        "\n\nJava bilən namizədləri göstər\n",  # leading + trailing
+    ],
+)
+def test_benign_textarea_whitespace_does_not_trigger_control_character_guard(
+    text: str,
+) -> None:
+    """Regression for the owner-reported 'Plan yoxlamadan keçmədi /
+    REQUEST_CONTROL_CHARACTERS' failure on an ordinary query: a <textarea>
+    normalizes embedded line breaks to CRLF, and str.isprintable() treats
+    \\t/\\n/\\r as non-printable control characters. This must not reject
+    an otherwise-safe request."""
+    precheck_natural_language_request(text)  # must not raise
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "pythonda 5 il\x00tecrubesi olan",  # NUL byte
+        "pythonda 5 il\x1btecrubesi olan",  # ANSI escape
+        "pythonda 5 il\x07tecrubesi olan",  # bell
+        "pythonda 5 il\x08tecrubesi olan",  # backspace
+    ],
+)
+def test_genuine_control_characters_still_rejected(text: str) -> None:
+    """The whitespace-normalization fix must not weaken the guard against
+    actual control-character injection — only \\t/\\n/\\r/\\v/\\f are
+    treated as benign formatting."""
+    with pytest.raises(PlannerPolicyError) as exc_info:
+        precheck_natural_language_request(text)
+    assert exc_info.value.outcome == PlannerOutcome.VALIDATION_FAILURE
+    assert PlannerReasonCode.REQUEST_CONTROL_CHARACTERS in exc_info.value.reason_codes
 
 
 def test_no_invented_numeric_experience() -> None:

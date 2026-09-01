@@ -3,11 +3,11 @@
 {% block content %}
 <section class="auth-card">
   <p class="eyebrow">Daxili HR sistemi</p>
-  <h1>MEYAR-a daxil olun</h1>
-  <p class="lede">Sizə verilmiş API açarını yalnız bu təhlükəsiz forma ilə təqdim edin.</p>
+  <h1>MEYAR — namizəd axtarışı</h1>
+  <p class="lede">Sizə verilmiş giriş açarını yalnız bu təhlükəsiz forma ilə təqdim edin.</p>
   {% if error %}<div class="alert alert-error" role="alert">{{ error }}</div>{% endif %}
   <form method="post" action="/ui/login" autocomplete="off" class="stack-form">
-    <label for="api_key">API açarı</label>
+    <label for="api_key">Giriş açarı</label>
     <input id="api_key" name="api_key" type="password" required autocomplete="new-password" spellcheck="false">
     <button class="button" type="submit">Daxil ol</button>
   </form>

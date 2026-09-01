@@ -1405,3 +1405,1056 @@ removed at any time with `meyar seed-demo --reset` and affects nothing
 else. The guard-hook change only narrows what was already blocked for one
 specific, non-secret, already-tracked filename pattern — every other
 `.env`-shaped path remains blocked exactly as before.
+
+## D-023 — HR UI productization and presentation readiness (M7)
+
+**Date:** 2026-08-31
+**Decision:** Following owner visual inspection of the running local UI
+(issue #27, milestone M7), the primary `/ui/*` surfaces were reworked to
+speak HR/product language rather than database/developer language. Backend
+architecture, deterministic scoring, and the API/CLI contracts are
+untouched — this is a UI-layer and two narrowly-scoped bug fixes only.
+
+1. **Evaluation date is no longer a manual UI input.** The `as_of_date`
+   field on `/ui/search` and `evaluation_as_of_date` on `/ui/jobs/*/rank`
+   are removed from the HTML forms. `meyar.ui.router` now computes
+   `date.today()` once, at the request boundary, in the `search` and
+   `rank_job` handlers, and threads it explicitly into the same
+   `plan_and_search_candidates`/`rank_candidates_for_job` calls as before
+   — the deterministic services still receive an explicit date argument,
+   never `datetime.today()` reached internally, and the effective date is
+   still shown on the results page. The `/api/v1/*` and CLI contracts,
+   which need an explicit, possibly-backdated date for reproducible
+   evaluation, are entirely unchanged.
+2. **Root-caused the owner-reported `Plan yoxlamadan keçmədi /
+   REQUEST_CONTROL_CHARACTERS` failure on an ordinary query.** Reproduced
+   with `"pythonda 5 il tecrubesi olan\n".isprintable()` → `False`: Python's
+   `str.isprintable()` treats `\t`/`\n`/`\r`/`\v`/`\f` as non-printable
+   control characters, and a `<textarea>` normalizes embedded line breaks
+   to CRLF on submission — so a completely ordinary query (the owner
+   pressing Enter while composing, or pasting text with a trailing
+   newline) tripped the same guard meant to catch actual control-character
+   injection. Fixed in `meyar.search.planner_policy
+   .precheck_natural_language_request` by folding exactly those five
+   benign whitespace control characters to a space before the
+   `isprintable()` check — every other non-printable character (NUL, ANSI
+   escapes, RTL overrides, etc.) is still rejected exactly as before; nothing
+   about the injection guard was weakened. This function is the single
+   shared precheck for the UI, API, and CLI, so the fix applies everywhere
+   without new call-site logic. Regression tests cover both the benign
+   whitespace cases and that genuine control characters still fail closed
+   (`backend/tests/test_search_planner_policy.py`). Reproduced live against
+   a running local Ollama after the fix: the same query now proceeds to a
+   real (friendly, truthful) plan-validation outcome instead of surfacing
+   a raw reason code.
+3. **`meyar seed-demo` key-rotation fix (owner-reported operational gap,
+   §20 of the M7 task brief).** The idempotent reseed path previously
+   minted a brand-new API key on every re-run but discarded its plaintext
+   (`api_key_plaintext=None`), leaving the operator with no usable
+   credential and an ever-growing set of orphaned, never-shown keys.
+   `meyar.services.api_key_repo.revoke_active_api_keys_for_tenant` now
+   revokes every currently-active key for a tenant; `seed_demo`'s
+   idempotent branch calls it (scoped to the positively-identified demo
+   tenant only, via the existing `_find_demo_tenant` marker check) before
+   minting and returning the new key's plaintext. Net effect: every
+   `seed-demo` run — first or repeat — always ends with exactly one active,
+   usable demo credential, never key sprawl. Not exposed as a generic
+   cross-tenant rotation capability anywhere; the repo function requires an
+   explicit `tenant_id` and is only ever called from this demo-scoped path.
+4. **HR-facing information boundary.** Raw UUIDs (candidate, document,
+   job-criteria-version), planner reason codes, and pipeline internals
+   (parser name/status, folder-indexer status) are removed from the
+   primary HR screens — never from the API/OpenAPI/logs. Candidate
+   library/detail collapsed the separate parser/profile/folder-index
+   status axes into one HR-relevant readiness signal (Hazır / Diqqət
+   tələb edir / Emal olunur), derived from the existing `profile_status`
+   field (`meyar.ui.presentation.readiness_label`) — no new column, no
+   invented data. The parser/folder-index filters are dropped from the
+   `/ui/library` form (the repository function `list_candidate_library`
+   still accepts them; nothing was removed from the backend). Document
+   metadata (MIME, bytes, parser name/status, `parse_error_code`) moved
+   into a collapsed "Texniki məlumat" disclosure on the candidate detail
+   page rather than being removed, since an operator can still need it.
+5. **Truthful two-level CV access.** The previous single "Aç" link opened
+   PDFs inline but silently downloaded DOCX with no explanation. Added a
+   new authenticated, tenant-scoped route,
+   `GET /ui/candidates/{candidate_id}/documents/{document_id}/preview`,
+   that renders the existing `CanonicalDocument` (already-parsed, safe
+   text — the same data source Slice 4 evidence citations use) as an
+   in-app "CV-yə bax" view; it never touches the original bytes and never
+   calls a model. The original-bytes route is kept unchanged and
+   relabeled "Originalı yüklə" — still inline for PDF, still an attachment
+   for DOCX, but now truthfully described as a download either way.
+6. **Evaluation history resolves job titles.** `EvaluationHistoryView`
+   gained `job_title`, resolved via a small batched `Job.id -> Job.title`
+   lookup in `meyar.ui.service`, replacing the raw
+   `job_criteria_version_id` column on the candidate detail page. The
+   ranking-results page resolves and shows the job title the same way
+   instead of the raw criteria-version id in the header.
+
+**Why:** MEYAR is an internal HR product; the owner's inspection found the
+running UI reading as an engineering console (raw ids, pipeline status
+enums, a manual date field, a misleading download link) rather than an HR
+tool, plus the two genuine operational bugs above. None of this touches
+scoring, matching, tenant isolation, or the LLM/embedding boundary.
+
+**Reversibility:** Fully reversible. No migration; no schema change. The
+date-injection change is UI-layer only — API/CLI callers pass their own
+explicit date exactly as before. The control-character fix only widens
+what the guard treats as benign formatting; reverting the five-character
+translate table restores the previous (overly strict) behavior instantly.
+The demo-key rotation only affects the already demo-scoped, chore-level
+`seed-demo` command.
+
+## D-024 — HR UI productization: second-round visual-inspection fixes (M7)
+
+**Date:** 2026-08-31
+**Decision:** A second owner visual inspection of PR #29 (same branch,
+`feat/hr-ui-productization`, still unmerged) found seven remaining
+blockers. All are UI-layer or safety-net-regex fixes; scoring, tenant
+isolation, and the LLM/embedding boundary are untouched. Real local Ollama
+inference was not made a required acceptance dependency, per the owner's
+8GB-laptop constraint — the natural-language pipeline fix was diagnosed
+and verified with the deterministic `FakeLLMProvider` test double and
+direct unit tests of the policy module, not a live model run.
+
+1. **Root-caused the still-generic outcome for `"pythonda 5 il tecrübesi
+   olan"`.** D-023 fixed the `REQUEST_CONTROL_CHARACTERS` false positive on
+   this exact query, but two separate, deeper problems in the deterministic
+   fidelity-check safety net (`meyar.search.planner_policy`) remained and
+   independently produced a generic `VALIDATION_FAILURE`/
+   `UNSUPPORTED_SEMANTICS` outcome for an entirely ordinary request — a
+   SearchPlan/domain-model limitation was ruled out; both are regex gaps in
+   the guard that verifies the model didn't invent/weaken a filter:
+   - The fixed keyword/marker regexes (`təcrüb`, `il`, `mütləq`, etc.) are
+     written with correct Azerbaijani spelling and require it literally;
+     most HR staff type on a plain Latin keyboard without the dedicated
+     diacritic keys and substitute the nearest ASCII letter (e.g.
+     "tecrübə" for "təcrübə"), so `explicit_total_experience_years` found
+     no explicit year in the request text and rejected the model's
+     (correct) `min_total_experience_years=5`. Fixed with a shared
+     `meyar.core.text.fold_az_ascii` diacritic-folding helper applied to
+     both the searched text and (at compile time) the fixed pattern
+     source/marker canonicalizers, so either spelling matches.
+   - Azerbaijani is agglutinative: a locative/ablative case suffix attaches
+     directly to a noun with no space ("Pythonda" = "in Python"), but
+     `_value_supported_by_request` required the exact word `python` at a
+     hard boundary, so a plainly-supported skill mention was rejected as
+     `STRUCTURED_FILTER_NOT_SUPPORTED_BY_REQUEST`. Fixed by adding a second,
+     narrowly-scoped match attempt that tolerates exactly the standard
+     locative/ablative suffixes (`da/də/ta/tə/dan/dən/tan/tən`, the regular
+     voiced/voiceless alternation), gated to values of 3+ characters so a
+     short acronym (e.g. "C") still cannot false-positive-match an unrelated
+     word — verified this does not resurrect the "Java matches inside
+     JavaScript" false positive the strict boundary exists to prevent.
+   Neither fix special-cases the reported sentence — both are general
+   typing/morphology accommodations, covered by parametrized regression
+   tests including the ASCII-only and fully-diacriticized spelling, an
+   ablative-case example, and an explicit non-regression case for the
+   Java/JavaScript boundary (`backend/tests/test_search_planner_policy.py`,
+   `backend/tests/test_ui_routes.py`).
+2. **New vacancy creation.** `/ui/jobs` previously had no create action —
+   vacancies could only be made via the API/CLI. Added
+   `GET /ui/jobs/new` (form) and `POST /ui/jobs` (create), both requiring
+   the existing `jobs:write` scope and CSRF token like every other
+   state-changing `/ui/*` route. The handler reuses the exact same
+   `create_job`/`create_criteria_version` repository functions as
+   `POST /api/v1/jobs` (`meyar.api.v1.jobs.post_job`) and the same
+   `CriterionIn`/`JobCreateRequest` Pydantic schemas — one job/criteria
+   creation path, one deterministic scoring model, for both surfaces. The
+   HR user never types a criterion id or job UUID: `meyar.ui.service
+   .build_job_create_request` derives a stable ASCII-only slug from the
+   HR-entered label (`meyar.core.text.fold_az_ascii` again, plus a
+   collision-safe numeric suffix) purely as the policy engine's internal
+   join key. The form is a fixed set of rows (no JS row-adding, consistent
+   with the rest of this JS-free `/ui` surface, and compatible with the
+   strict `script-src 'self'` CSP already in place); blank rows are
+   silently skipped, kind-specific validation (e.g. `EXPERIENCE` requires
+   `min_years`) and the existing sensitive/prohibited-term denylist both
+   fire through the same `CriterionIn` validators the API uses, and a
+   validation failure re-renders the form with the HR user's own input
+   preserved rather than discarding it.
+3. **Raw internal criterion ids/kind enums no longer reach the ranking
+   table.** `ranking_results.html` rendered
+   `{criterion_id} ({criterion_kind})` — e.g. `aml_skill (SKILL)` — because
+   `CriterionScoreContribution` (the deterministic scoring engine's own
+   output schema, intentionally unchanged — scoring semantics are
+   untouched) only carries the internal id, not the label. Fixed
+   presentation-side only: `meyar.ui.service.build_ranked_candidate_views`
+   now resolves each contribution's id against the same job criteria
+   version's stored `criteria` JSON (which already carries the HR-entered
+   `label`) and a new `meyar.ui.presentation.CRITERION_KIND_LABELS` maps
+   the kind enum to an Azerbaijani noun (`SKILL` → "Bacarıq", etc.) for
+   display only; the raw id/kind remain on `ScoreContributionView` for any
+   future API-parity use, just no longer rendered as the visible text.
+4. **Ranking-page wording.** Column headers softened
+   (`Status`→`Nəticə`, `Əmsal`→`Uyğunluq dərəcəsi`, "Meyar töhfələri"→
+   "Meyarlar üzrə təfərrüat"); `/ui/jobs`'s "sıralayın deterministik
+   şəkildə" replaced with the owner-suggested "Namizədləri vakansiya
+   meyarlarına əsasən sıralayın." No numeric calculation changed.
+5. **Candidate-detail "Texniki məlumat" reduced to genuinely HR-meaningful
+   facts.** Dropped `parser_name`/`parser_version` (implementation
+   identity) and the raw `parse_error_code` from the rendered table; kept
+   only file type (now shown as "PDF"/"DOCX" like the row above it, not
+   the raw MIME string), file size, and the existing friendly
+   `state_label(parser_status)` readiness badge. Nothing was deleted from
+   `CandidateDocumentView`/the database — this is a template-only
+   reduction of what's rendered, per the same pattern D-023 item 4 already
+   established for the rest of this page.
+6. **CV-preview XSS: confirmed, not newly introduced.** Jinja2 autoescaping
+   was already on for `.html` templates project-wide
+   (`select_autoescape(...)`) and no template uses `|safe`/`Markup`, so
+   candidate-controlled canonical-document text was already rendered as
+   inert text. Added a regression test that seeds a `CanonicalDocument`
+   block directly with `<script>alert(1)</script>`,
+   `<img src=x onerror=alert(1)>`, and `< > & " '`, and asserts the
+   response contains only the escaped form
+   (`backend/tests/test_ui_candidate_preview.py`) — this is now enforced,
+   not just believed true from reading the template.
+7. **"Originalı yüklə" now truthfully downloads.** The original-CV route
+   previously used `Content-Disposition: inline` for PDFs specifically
+   (D-023 item 5 kept this unchanged), so clicking the button labeled
+   "download" silently opened the PDF in the browser tab instead — a
+   truthfulness gap the owner's second inspection flagged directly. The
+   safe in-app text view already lives at the separate `/preview` route
+   introduced in D-023, so there is no remaining reason for `/original` to
+   ever be anything but a true download: it now always sends
+   `Content-Disposition: attachment` regardless of MIME type.
+
+**Why:** The owner's second pass found the natural-language search path
+still practically unusable for ordinary Azerbaijani phrasing/typing, no
+way for HR to create a vacancy at all (a core documented product
+capability), and several of the same "reads like an engineering console"
+symptoms D-023 addressed elsewhere on the page that had not yet been
+applied to the ranking table and candidate-detail technical section.
+
+**Reversibility:** Fully reversible. No migration; no schema change. The
+planner-policy fold/suffix-tolerance changes only widen what the
+safety-net regex accepts — reverting `meyar.core.text.fold_az_ascii` usage
+and the locative/ablative suffix branch in `_value_supported_by_request`
+restores the previous (stricter) behavior instantly. Vacancy creation is
+a net-new, additive route pair; disabling it (removing the two routes)
+does not affect existing jobs, criteria, or the API/CLI creation path,
+which is unchanged. The ranking-table/candidate-detail wording and the
+`/original` disposition change are presentation-only.
+
+## D-025 — Third-round visual inspection: vacancy-form correctness/UX, search-outcome truthfulness (M7)
+
+**Date:** 2026-08-31
+**Decision:** A third owner visual inspection of PR #29 (same branch,
+still unmerged) found two acceptance blockers, both traced end-to-end
+before any fix — no guessing.
+
+1. **Root cause of "Python -> Məlumat məlum deyil (UNKNOWN)" on an
+   owner-created vacancy.** Reproduced live against the actual demo tenant
+   the owner used. The persisted criteria JSON for the owner's "Senior
+   Python Developer" vacancy was
+   `{"kind": "SKILL", "label": "Python", "value": "MUST_HAVE", ...}` — the
+   `value` field, which `meyar.evaluation.evaluators.evaluate_skill`
+   correctly and deterministically matches against candidate-profile
+   skill names, held the literal string `"MUST_HAVE"`, not `"Python"`.
+   The seeded candidate ("Tural Demo-Aliyev") genuinely has a verified
+   `"Python"` skill with evidence — confirmed directly from the database.
+   This was **not** a scoring/evaluator bug, a normalization mismatch, a
+   label/value swap in the persistence code, or a divergence between the
+   UI-creation and API-creation paths (all four were checked directly,
+   not assumed): the deterministic scorer did exactly the right thing
+   with the criterion it was given. The malformed criterion itself came
+   from the *previous* two-field form: it separated an internal "Ad"
+   (label) field from an internal "Dəyər" (value) field, and an HR tester
+   — with no way to know these needed to be the same text for a skill —
+   typed the requirement's *type* ("MUST_HAVE") into "Dəyər" instead of
+   repeating "Python". This is exactly the confusion Blocker B (below)
+   independently flagged about the same form.
+2. **Fix: collapse "Ad"/"Dəyər" into one "Tələb" field.**
+   `meyar.ui.service.CriterionRowInput` now carries a single
+   `requirement: str` instead of separate `label`/`value` strings; for
+   SKILL/CERTIFICATION/EDUCATION/LANGUAGE criteria `_parse_criterion_row`
+   sets **both** `CriterionIn.label` and `CriterionIn.value` from that one
+   HR-entered string, so the label shown on screen and the value the
+   deterministic scorer matches against evidence can no longer diverge —
+   not just harder to misuse, structurally incapable of it. For
+   EXPERIENCE criteria the same field becomes the descriptive label (e.g.
+   "Minimum təcrübə"), paired with the existing required numeric "illik
+   təcrübə" input. The criterion id remains fully server-generated
+   (`_slugify_criterion_label`, unchanged) — the HR user still never types
+   or sees a raw id/UUID. Row count reduced 6 → 4 per section (less
+   spreadsheet-like); the weight column, renamed "Əhəmiyyət", now
+   pre-fills a safe default of `1` instead of an empty box needing to be
+   filled every time. Column headers/help text rewritten in HR language
+   throughout (`Növ`/`Tələb`/`Təcrübə (il)`/`Əhəmiyyət`).
+3. **Regression coverage added, not just fixed.** A CRITICAL ACCEPTANCE
+   TEST (`test_ui_created_skill_criterion_matches_real_candidate_evidence`
+   in `backend/tests/test_ui_job_creation.py`) seeds a real candidate with
+   verified Python evidence and a second candidate without it, creates a
+   vacancy through the exact `/ui/jobs/new` -> `POST /ui/jobs` application
+   path used by HR, ranks it, and asserts the evidenced candidate resolves
+   to MATCH while the non-evidenced one still correctly resolves to
+   UNKNOWN — proving both that the fix works and that UNKNOWN was never
+   weakened into a false match. A second test
+   (`test_ui_created_criterion_is_structurally_equivalent_to_api_created`)
+   creates the same requirement through the UI form and directly through
+   `create_job`/`create_criteria_version` (the same services
+   `POST /api/v1/jobs` uses) and asserts the persisted criterion JSON is
+   byte-for-byte identical in shape — proving the two creation paths
+   cannot semantically diverge for scoring.
+4. **Search-outcome truthfulness (Blocker C).** Reproduced the owner's
+   exact query, `"pythonda 5 il tecrubesi olan"`, against the real local
+   Ollama available on this development machine (not simulated) and read
+   the actual persisted `AuditEvent` for that request. The internal
+   outcome was genuinely `UNSUPPORTED_SEMANTICS` with reason code
+   `LANGUAGE_PROFICIENCY_UNSUPPORTED` — **not** `PLANNER_PROVIDER_FAILURE`
+   (Ollama responded normally) and **not** a false positive in this
+   module's own deterministic precheck regex (verified directly:
+   `precheck_natural_language_request` returns cleanly for this exact
+   text). The reason code came from `PlannerDraft.unsupported_reason_codes`
+   — the small local planner model (`qwen3:0.6b`, chosen to fit the
+   owner's 8GB laptop) itself incorrectly self-flagged an ordinary
+   Python+experience request as involving language proficiency, even
+   though the request never mentions a language. `convert_planner_draft`
+   correctly, and by design, never second-guesses a model's own admission
+   that it can't safely interpret something — so the outcome itself was
+   not wrong to reject. What was misleading is that the exact same HR
+   message ("Tələb hazırda dəstəklənmir") was shown for this
+   model-quality-dependent self-decline as for a genuine, deterministic,
+   model-independent product-policy gap (e.g. salary/location filters are
+   really not supported, on any model). Added
+   `PlannerReasonCode.MODEL_DECLINED_INTERPRETATION`, an internal-only
+   marker `convert_planner_draft` attaches whenever
+   `draft.unsupported_reason_codes` is what triggered the rejection (never
+   for the module's own deterministic precheck/postcheck reasons —
+   regression-tested both ways). `meyar.ui.presentation.planner_outcome_view`
+   shows a distinct, honest message for that case ("AI tələbi tam anlaya
+   bilmədi" — explicitly notes this may be a limitation of the configured
+   local model, not of MEYAR) while every genuine deterministic
+   UNSUPPORTED_SEMANTICS rejection keeps the original message. Raw reason
+   codes are still never rendered (existing + new tests). Fail-closed
+   validation is unchanged — this is purely a presentation-layer
+   distinction, added generically (any draft self-decline, not this one
+   sentence) so it also improves every other case where a small local
+   model misjudges an ordinary request, not just this reported one. Real
+   semantic-model quality remains deferred to Target-Mac/capable-machine
+   acceptance, unchanged from D-023/D-024.
+
+**Why:** Both issues trace back to the same theme: MEYAR must not let an
+HR user believe "the product can't do this" when the real cause is either
+(a) a confusing form that silently produced a malformed criterion, or (b)
+a small local model's own misjudgment on this specific laptop — neither
+is a genuine, permanent product limitation.
+
+**Reversibility:** Fully reversible. No migration; no schema change. The
+form-field change only affects new vacancy creation going forward —
+existing criteria versions (created via the old form or the API) are
+untouched and continue to score exactly as before, since scoring reads
+only `CriterionIn.value`/`min_years`, never how a criterion was
+constructed. The `MODEL_DECLINED_INTERPRETATION` marker is additive and
+presentation-only; removing the `planner_outcome_view` branch instantly
+reverts to the single shared UNSUPPORTED_SEMANTICS message.
+
+## D-026 — Conservative deterministic fast path for explicit NL search intents (M7)
+
+**Date:** 2026-08-31
+**Decision:** D-025 explained *why* `"pythonda 5 il tecrubesi olan"` could
+fail even with a working local Ollama (the small `qwen3:0.6b` planner
+model self-declining) but left the request still dependent on that
+model's judgment. The owner asked for a stronger guarantee: common,
+explicit, supported HR search intents must not depend on local-model
+quality at all. Added `meyar.search.planner_policy.try_deterministic_intent_parse`
+— a narrowly-scoped, whole-clause-anchored pattern set for exactly the
+concepts `CandidateSearchRequest` already represents (skills, languages,
+certifications, total experience years, and simple `"və"`-joined
+combinations of these) — invoked in `plan_candidate_search`
+(`meyar.search.planner_service`) between the existing security precheck
+and the LLM loop. When it returns a draft, that draft is run through the
+*exact same* `convert_planner_draft` fidelity/validation the LLM path
+uses (no second, weaker validation surface) and executes with zero LLM
+calls; when it declines, the existing LLM loop runs completely unchanged.
+
+**Why "conservative," not a general NLP engine:**
+- Every one of the five patterns (skill list + "bilən", "X dili
+  olan/bilən", "X sertifikatı olan", "N il təcrübəsi olan", and the
+  reported-bug shape "Xda N il təcrübəsi olan" for an agglutinated
+  locative/ablative skill suffix) is anchored `^...$` against the whole
+  clause — a request with anything not accounted for by a recognized
+  concept or one of a tiny, fixed set of glue words (`namizədləri`,
+  `göstər`, `tap`, leading `mənə`, etc.) never partially matches. This is
+  the direct implementation of "never discard the remainder and execute a
+  weaker search": the function returns `None` (defer to the LLM) rather
+  than a subset.
+- Multiple concepts combine only via a literal `" və "` split into up to
+  4 clauses, each independently required to fully match on its own — not
+  a general clause grammar.
+- Recognized languages are limited to the existing `_LANGUAGE_ALIASES`
+  catalog (canonicalized to `"English"`/`"Russian"`/`"Azerbaijani"`/
+  `"Turkish"`); an unlisted language (e.g. French) declines rather than
+  inventing support.
+- Any preferred-marker vocabulary (`üstünlükdür`, `preferred`, ...)
+  anywhere in the request declines immediately — the fast path only ever
+  produces `MUST_HAVE` filters, so a request that might need the
+  required/preferred nuance goes to the LLM.
+- Skill-*specific* duration ("N years experience IN skill X", e.g.
+  `"Python üzrə ən az 5 il təcrübəsi"` or `"5 il Java təcrübəsi"`) is
+  deliberately **not** reinterpreted as total experience — `SearchPlan`
+  has no field for it, and guessing would silently change what was
+  asked. These already fail the *existing* precheck
+  (`_skill_duration_is_unsupported`, unchanged) before the fast path is
+  even reached, so behavior here is identical to before this change.
+  Regression-tested explicitly so this boundary doesn't drift.
+- Java vs. JavaScript: the skill value captured is always the literal
+  token the user typed (`"Javascript bilən"` → `skills=["Javascript"]`,
+  never truncated to `"Java"`) — there is no catalog-substring matching
+  to collide in the first place. Explicitly regression-tested.
+- Reuses, not duplicates, D-023's machinery: `fold_az_ascii` for
+  ASCII/diacritic typing variance and the same bounded
+  `_AZ_LOCATIVE_ABLATIVE_SUFFIXES` set for the agglutinated-skill shape.
+
+**Provenance and auditability:** a fast-path result is tagged with a
+fixed synthetic provenance (`provider="meyar-deterministic"`,
+`model_name="meyar-deterministic-parser-v1"`, `attempt_count=0`) so audit
+events (`SEARCH_PLAN_CREATED`, same as the LLM path) and any future
+`/api/v1/search/natural-language` consumer can tell a deterministic
+result apart from a model-produced one at a glance — this is a bounded
+resilience layer, not a "fake AI" mode: it never fabricates an AI
+provenance, and it is not a replacement for the local semantic planner
+(semantic/free-text requests, and anything outside the five patterns,
+still require it exactly as before).
+
+**Confirmation/clarification-state investigation (requested, not
+implemented):** the owner asked whether a structured
+clarification/confirmation state could be represented for a partially
+understood request using the existing server-rendered architecture. By
+construction, this fast path never produces a "partially understood"
+state — it is binary (full match -> draft, anything else -> `None`,
+handled by the unchanged LLM/precheck outcomes) — so no such state exists
+for this feature to represent. A genuine future "I understood X but not
+Y, confirm?" flow is architecturally feasible on top of the existing
+`BrowserSession`/CSRF/server-rendered pattern (e.g. a short-lived signed
+pending-plan token or a session-scoped pending-plan row, plus a new
+confirm/reject route), but is a materially new feature — session-state
+lifetime, CSRF, and audit implications of its own — not a fix folded into
+this pass. Left as a candidate for a future slice if the owner wants it.
+
+**Tests:** `backend/tests/test_search_deterministic_parser.py` — the
+requested regression matrix (diacritics vs. ASCII typing, case, the
+agglutinated-suffix shape, whitespace/CRLF, multiple skills, experience
+years, language, certification, Java/JavaScript non-collision, ambiguous/
+unsupported declines) plus full-pipeline proof: zero LLM calls
+(`FakeLLMProvider` configured to error if invoked), the produced
+`CandidateSearchRequest` passes the same validation and executes with
+real structured-search results, tenant isolation holds, and the audit
+event carries the synthetic provenance with no raw request text. Existing
+tests that used a now-fast-path-eligible query specifically to exercise
+LLM failure/repair paths (`test_malformed_then_valid_uses_exactly_one_repair`,
+`test_malformed_twice_stops_after_two_attempts`,
+`test_malformed_model_output_outcome_never_searches`,
+`test_malformed_planner_output_has_no_fallback_search`,
+`test_local_planner_outage_is_safe_and_library_remains_independent`, and
+one D-025 parametrized case) were updated to use semantic/free-text
+requests that are genuinely outside the fast path's scope, so they keep
+testing what they always tested.
+
+**Reversibility:** Fully reversible and additive. No migration; no schema
+change. Deleting the single `try_deterministic_intent_parse` call site in
+`plan_candidate_search` restores 100% LLM-dependent behavior instantly;
+nothing else in the pipeline (precheck, `convert_planner_draft`,
+`search_candidates`, audit) was modified to accommodate it.
+
+## D-027 — Deterministic search-semantics audit: no silent skill-duration weakening
+
+**Date:** 2026-08-31
+**Decision:** A dedicated semantic-correctness audit of D-026's fast path
+found a real correctness bug, root-caused before any change (per the
+audit's own requirement): for `"pythonda 5 il tecrubesi olan"`
+("5 years of experience IN Python"), the fast path introduced in D-026
+was producing `RequiredFilters(skills=["python"],
+min_total_experience_years=5.0)` — i.e. "has the Python skill" AND
+"has >= 5 years of TOTAL career experience", **not** "has 5 years of
+experience specifically in Python". These are not equivalent: a
+candidate with 1 year of Python and 10 years of unrelated total
+experience would incorrectly satisfy the first, weaker reading. The
+identical connector phrasing (`"Python üzrə 5 il təcrübəsi"`) was already
+correctly rejected as unsupported — so the same HR intent was getting
+inconsistent treatment purely based on which grammatical form was typed.
+
+1. **Can MEYAR prove per-skill duration? Inspected, not assumed: no.**
+   `CandidateProfileExtraction` (`meyar/schemas/candidate_profile.py`)
+   holds `skills: list[SkillItem]` and
+   `employment_history: list[EmploymentItem]` as two independent flat
+   lists — `SkillItem` has no field referencing an `EmploymentItem`, and
+   `EmploymentItem` has no field listing which skills were used.
+   `meyar.evaluation.evaluators.evaluate_skill` only checks a skill NAME
+   is present; `evaluate_experience` only sums `EmploymentItem` date
+   ranges. There is no code path, schema field, or evidence relationship
+   anywhere that could substantiate "N years of experience with skill X"
+   as a single fact. Per the audit's own instruction, this means the
+   fast path must **not** invent that duration by combining a skill
+   mention with total career years — a missing capability stays UNKNOWN/
+   declined, never guessed.
+2. **Unified fix at the shared precheck, not two separate patches.**
+   `precheck_natural_language_request` (shared by the LLM path, the
+   deterministic fast path, the REST API, and the CLI — it is the very
+   first thing every one of them runs) already rejected the "üzrə"/"ilə"
+   connector phrasing as `SKILL_SPECIFIC_EXPERIENCE_DURATION_UNSUPPORTED`
+   via `_SKILL_DURATION_PATTERNS`. Added a fifth pattern there for the
+   agglutinated locative/ablative-suffix shape ("Pythonda", "SQL-dan",
+   reusing D-023's `_AZ_LOCATIVE_ABLATIVE_SUFFIXES`), so **every**
+   equivalent phrasing is now rejected identically, before either the
+   deterministic parser or the LLM ever sees the request — closing the
+   gap for all four consumers with one change. Also fixed a latent gap
+   surfaced while writing the regression matrix: the connector pattern's
+   optional marker only recognized `"ən azı"`, not the equally common
+   `"ən az"` (no trailing "ı") — `"Python üzrə ən az 5 il təcrübəsi"` was
+   silently passing precheck unrejected; now folds both spellings, same
+   as the deterministic total-experience pattern already did.
+   `try_deterministic_intent_parse`'s own skill+experience pattern is
+   removed (dead code — precheck rejects it first) with a comment
+   explaining why it is deliberately absent, not merely missing.
+3. **New: `find_skill_specific_duration_mention(text) ->
+   (skill, years) | None`.** Extracts what a rejected request named, for
+   two honest purposes only: powering an HR-safe clarification (never a
+   silent guess) and letting `_skill_duration_is_unsupported` reuse one
+   source of truth instead of duplicating the pattern list.
+4. **HR-safe clarification instead of a generic failure page.** When
+   `/ui/search`'s outcome is `UNSUPPORTED_SEMANTICS` with reason
+   `SKILL_SPECIFIC_EXPERIENCE_DURATION_UNSUPPORTED`, a new
+   `search_clarification.html` explains, in plain HR language and naming
+   the actual skill/years, that MEYAR can check "has this skill" and
+   "total experience" independently but not "N years with this skill",
+   and offers one explicit, CSRF-protected confirm action. Confirming
+   resubmits a reconstructed, unambiguous request
+   (`"{skill} bilən və ümumi iş təcrübəsi {years} il olan"`) through the
+   *normal* `/ui/search` flow — no bypass of precheck/fidelity
+   validation, no new outcome type, no REST API contract change (the
+   "exact 7-way" `PlannerOutcome` documented in
+   `ApiNaturalLanguageSearchResponse` is untouched; API/CLI clients keep
+   getting the existing typed `UNSUPPORTED_SEMANTICS` rejection and can
+   build their own handling from `reason_codes`, exactly as before). The
+   confirmed alternative only ever executes after this explicit click —
+   never automatically. Added a matching deterministic pattern
+   (`"[ümumi/peşəkar] iş təcrübəsi [ən az/minimum] N il olan"`, the
+   duration-second word order) and its `explicit_total_experience_years`
+   fidelity-check counterpart, so the confirmed alternative — and any
+   other request already phrased with skill and total-experience as two
+   distinct clauses — resolves deterministically with zero LLM calls.
+5. **Vacancy kind-aware validation (owner follow-up): was not
+   implemented, now is.** Investigated as requested rather than assumed:
+   `meyar.ui.service._parse_criterion_row` correctly required
+   `min_years` for EXPERIENCE and correctly kept SKILL/CERTIFICATION
+   distinct via `CriterionKind`, but a value typed into the "Təcrübə
+   (il)" field for any NON-EXPERIENCE row (SKILL/CERTIFICATION/
+   EDUCATION/LANGUAGE) was silently read and discarded — the form
+   accepted input it then ignored, exactly the "no silent ignoring of
+   incompatible form fields" failure mode the owner asked to check for.
+   Fixed: any non-empty `min_years` on a non-EXPERIENCE row now raises a
+   clear validation error instead.
+6. **Job duplicate/lifecycle finding (reported, not implemented this
+   pass).** `Job` (`meyar/models/job.py`) has no unique constraint on
+   `(tenant_id, title)` and no status/lifecycle field at all (no active/
+   closed/archived state, no soft-delete) — `create_job` inserts
+   unconditionally and neither `/ui/jobs` nor `POST /api/v1/jobs` checks
+   for an existing title. Two vacancies can be created with the
+   identical title, each independently rankable, and a filled/cancelled
+   vacancy has no way to be closed or hidden from the active listing —
+   it remains visible and rankable forever. This is a genuine product
+   gap for a real HR tool, not a scoring/tenant-isolation/security issue
+   (each `Job`/`JobCriteriaVersion` is still a distinct, correctly
+   tenant-scoped row; nothing cross-contaminates). Not fixed in this
+   pass — a full lifecycle (status field, close/reopen action, listing
+   filter) is a materially new feature, not a blocker fix, and no
+   concrete desired behavior was specified to implement against. Left as
+   an explicit open gap for a future slice.
+
+**Why:** The owner's core objection was structural, not cosmetic: a
+deterministic system that silently reinterprets "N years IN skill X" as
+"skill + N years of anything" produces a materially different (weaker)
+candidate pool than what was asked, with no way for HR to know. The fix
+keeps the guarantee "the system never invents what it cannot prove"
+intact while still giving HR an honest, one-click path to the weaker
+search when they genuinely want it.
+
+**Reversibility:** Fully reversible. No migration; no schema change.
+Removing the fifth `_SKILL_DURATION_PATTERNS` entry and the "ən az"
+fold restores the exact pre-audit (buggy) precheck behavior; removing
+the clarification branch in `meyar.ui.router.search` restores the
+generic outcome page for this reason code. The kind-aware validation
+addition only rejects input that was previously silently dropped —
+no previously-accepted request is now rejected.
+
+## D-028 — Job/vacancy lifecycle: ACTIVE/ARCHIVED, no hard delete, duplicate-creation safety
+
+**Date:** 2026-08-31
+**Decision:** `Job` previously had no lifecycle at all — no status, no
+way to close a filled/cancelled vacancy, and no protection against an HR
+tester accidentally re-submitting an identical vacancy (a real event
+already observed in this repository's own demo tenant during prior
+sessions' testing). Implemented the smallest production-defensible
+lifecycle model, explicit soft states only — no hard delete anywhere.
+
+1. **Persisted lifecycle.** `Job` gained `status` (`ACTIVE` | `ARCHIVED`,
+   default `ACTIVE`) and `archived_at` (nullable). Migration
+   `db7e4523f491` (`add_job_lifecycle_status_and_duplicate_signature`,
+   `Revises: e3b1f7a9c2d4`) adds both columns with `nullable=False,
+   server_default='ACTIVE'` on `status`, so every existing `Job` row
+   backfills to `ACTIVE` deterministically in the same `ALTER TABLE` — no
+   separate `UPDATE`, no data loss. Verified three ways, not assumed:
+   (a) `alembic upgrade head` / `downgrade -1` / `upgrade head` again
+   against the real dev DB, (b) a from-scratch throwaway database run
+   through the *entire* migration chain (`base` → `head`, all 10
+   revisions) confirming a single head and no ordering conflicts, and
+   (c) a new automated test,
+   `test_job_lifecycle_migration_backfills_existing_jobs_as_active`
+   (`test_ui_migration_packaging.py`), that inserts a raw `Job` row
+   against the pre-migration schema and asserts it becomes
+   `status='ACTIVE'`, `archived_at IS NULL` after upgrading. No
+   `JobCriteriaVersion` or `Evaluation` row is ever touched by archiving
+   — `archive_job` (`meyar.services.job_repo`) only ever sets
+   `status`/`archived_at` on the `Job` row itself.
+2. **HR UX.** `/ui/jobs` defaults to `status=ACTIVE`; a new
+   `?status=archived` view (linked as "Aktiv vakansiyalar" / "Arxiv" tabs)
+   shows archived vacancies with a visible "Arxivləşdirilib" badge and
+   deliberately **no** rank action — archived vacancies are never
+   presented as open. A new `POST /ui/jobs/{job_id}/archive` (auth via
+   the existing `jobs:write` scope, CSRF-verified, tenant-scoped —
+   `archive_job` returns `None` and the route renders a safe 404 for a
+   foreign-tenant `job_id`) is the only lifecycle transition; there is no
+   "reopen" and no edit/delete in this pass, matching the requested
+   scope. No raw UUID is shown as visible text — `job.id` appears only
+   inside the archive form's `action` attribute, the same established
+   pattern as `criteria.id` in the rank form
+   (`test_jobs_page_does_not_expose_criteria_version_uuid` extended to
+   cover it).
+3. **Duplicate-creation safety — canonical signature, not title
+   uniqueness.** Job titles remain deliberately non-unique (two vacancies
+   may legitimately share a title — explicitly required). Instead,
+   `meyar.ui.service.compute_job_duplicate_signature` hashes a canonical,
+   order-independent, display-text-independent signature of
+   (normalized title, sorted list of (kind, MUST_HAVE/PREFERRED type,
+   normalized value, min_years, weight) per criterion) — never the
+   free-text label or the server-generated criterion id, so two
+   vacancies with the same underlying requirements are recognized as
+   duplicates regardless of incidental label wording. `POST /ui/jobs`
+   pre-checks for an existing `ACTIVE` job with the same signature
+   (`find_active_duplicate_job`) and rejects with "Eyni tələblərlə aktiv
+   vakansiya artıq mövcuddur." — no id, no hash, no internal detail
+   exposed. Same title with materially different criteria is allowed (a
+   different signature); an `ARCHIVED` job with an identical signature
+   never blocks a new `ACTIVE` one.
+4. **Concurrency — a real DB constraint, not just a pre-check.** The
+   pre-check alone cannot close a genuine double-submit race (two
+   requests can both pass it before either commits). The actual guard is
+   a **partial unique index**,
+   `uq_jobs_active_duplicate_signature` on `(tenant_id,
+   duplicate_signature)` `WHERE status = 'ACTIVE' AND duplicate_signature
+   IS NOT NULL` — declared identically in both the `Job` model's
+   `__table_args__` (so `Base.metadata.create_all`, what the test suite
+   actually builds its schema from, creates it too — the first version of
+   this fix silently had *no* real constraint in tests because the index
+   existed only in the Alembic migration, and the concurrency test
+   correctly caught this) and the migration (so real deployments get it
+   via `alembic upgrade`). A concurrent double-submit that races past the
+   pre-check hits `IntegrityError` at `flush()`/`commit()`, caught in the
+   router and converted to the identical friendly message. NULL
+   `duplicate_signature` values are never constrained (Postgres allows
+   multiple NULLs in a unique index, matching the design), so this never
+   affects existing or future `POST /api/v1/jobs`-created rows.
+5. **API compatibility.** `POST /api/v1/jobs` is completely untouched —
+   no duplicate check, no lifecycle field accepted or required, `Job`
+   rows it creates simply carry `status='ACTIVE'` (the column default)
+   and `duplicate_signature=NULL` (never populated, never constrained).
+   Verified explicitly with a new regression test asserting two
+   API-created jobs with identical title+criteria both succeed. No
+   existing schema (`JobOut`, `JobCriteriaVersionOut`,
+   `ApiCandidateSearchResponse`, etc.) gained a lifecycle field in this
+   pass — deliberately out of scope, since nothing requested API-visible
+   lifecycle yet and every additive field is a contract decision of its
+   own.
+6. **Ranking/scoring untouched.** `rank_candidates_for_job` and the
+   deterministic scoring engine were not modified — an archived job's
+   criteria version can still technically be ranked via the existing
+   route if directly invoked (e.g. a stale link), since nothing in the
+   requested scope asked for a backend-level ranking block, only that the
+   *normal HR UI* not invite it; the archive view simply never renders
+   the rank action. `JobCriteriaVersion` rows are never deleted or
+   modified by archiving, so historical `Evaluation` rows keep resolving
+   correctly (`_job_titles_by_id` has no status filter, verified by a new
+   end-to-end test: rank against a job, archive it, then confirm the
+   candidate's evaluation history still shows the job title).
+
+**Why:** A real HR tool needs to close vacancies without losing their
+history, and needs protection against the exact accidental-duplicate
+scenario already observed firsthand in this project's own demo tenant —
+without over-constraining a legitimate case (the same title reused for a
+genuinely different role).
+
+**Reversibility:** Fully reversible. Migration `db7e4523f491` has a
+tested `downgrade()` (columns and indexes dropped, verified by upgrade →
+downgrade → re-upgrade against the real dev DB). No existing data is
+deleted by either direction. Removing the `find_active_duplicate_job`
+pre-check call and the partial unique index (via a follow-up migration)
+would restore unrestricted duplicate creation; removing the archive route
+and the `?status=` branch restores the single unfiltered listing —
+neither touches scoring, evidence, or tenant isolation.
+
+## D-029 — Vacancy-form kind-aware duration field: client-side presentation fix
+
+**Date:** 2026-08-31
+**Decision:** D-027 fixed the server-side rule (`_parse_criterion_row`
+rejects a "Minimum müddət (il)"/`min_years` value on any non-EXPERIENCE
+row) but never touched the form's presentation — a fourth owner visual
+check confirmed the input stayed visibly enabled for every criterion
+kind, inviting exactly the invalid combination the server then rejected
+(Növ=Bacarıq, Tələb=Python, Təcrübə=4 → correctly rejected, but the field
+never signaled that before submit).
+
+1. **Progressive enhancement, not a new source of truth.** Server-side
+   validation in `meyar.ui.service._parse_criterion_row` is unchanged and
+   remains the sole authority — this pass only changes what
+   `job_new.html`/`base.html` render and adds one static asset,
+   `backend/src/meyar/ui/static/job-form.js` (self-hosted, loaded via
+   `<script src="/ui/static/job-form.js" defer>`; no inline script, no
+   CDN — compliant with the existing `script-src 'self'` UI CSP, which
+   required no change).
+2. **Server-rendered initial/re-rendered state, not JS-only.** Each
+   criterion row's `min_years` `<input>` now carries the HTML `disabled`
+   attribute at render time whenever `row.kind != "EXPERIENCE"` (Jinja:
+   `{% if not is_experience %} disabled aria-disabled="true"{% endif %}`),
+   and its displayed value is blanked for a non-EXPERIENCE row
+   (`value="{{ row.min_years if is_experience else "" }}"`) — this holds
+   for the initial `GET /jobs/new` blank-row render *and* every
+   validation-error re-render, so the correct disabled/cleared state is
+   present even with JavaScript disabled, not just as a JS side effect.
+3. **JS enhancement handles the live, same-page case.** `job-form.js`
+   listens for `change` on each `.js-kind-select`; when a row's kind
+   differs from EXPERIENCE it disables the paired `.js-min-years` input,
+   clears its value, and swaps its placeholder to "Tətbiq olunmur" —
+   this is the only way to reproduce, without a server round-trip, "HR
+   selected Təcrübə, typed 4, then switched to Bacarıq" and see the
+   stale 4 disappear rather than sit in a disabled-but-still-populated
+   field. Verified live in a real browser session against the running
+   dev server (not just `pytest`, since `httpx` never executes page
+   JavaScript): initial load showed every default SKILL row's duration
+   field disabled with the "Tətbiq olunmur" placeholder; switching a
+   row's Növ to Təcrübə enabled it with the "Minimum müddət (il)"
+   placeholder; typing "4" then switching back to Bacarıq left the field
+   disabled and empty (confirmed via `element.value === ""` and
+   `element.disabled === true`, not just visual inspection); the only
+   `<script>` loaded was the same-origin `job-form.js`.
+4. **No-JS fallback is the pre-existing server-side rejection, not a
+   parallel client-side guarantee.** A disabled HTML input is never
+   submitted by the browser, so a JS-enabled client naturally can't
+   reproduce the invalid combination in the first place; a client with
+   JavaScript off (or a hand-crafted/malicious POST — added as an
+   explicit regression test) can still submit `kind=SKILL` with a
+   `min_years` value, and `_parse_criterion_row` rejects it exactly as
+   before D-029 — no weakening of server-side validation was made or
+   was needed.
+5. **Wording.** The shared table header changed from "Təcrübə (il)" to
+   "Minimum müddət (il) (yalnız Təcrübə üçün)" so the column itself no
+   longer implies every criterion kind accepts a duration; the per-row
+   placeholder further disambiguates "Minimum müddət (il)" (EXPERIENCE)
+   vs "Tətbiq olunmur" (every other kind).
+6. **Tests.** Four new cases in `test_ui_job_creation.py`: SKILL → years
+   control rendered disabled/cleared; EXPERIENCE → years control
+   rendered enabled with the new placeholder (via a mixed-row re-render
+   that preserves a valid EXPERIENCE row's posted values alongside a
+   second, invalid row); EXPERIENCE→SKILL kind-switch submission neither
+   echoes the stale value back as editable nor persists a `Job`; and a
+   direct manual POST of SKILL + `min_years` (the JS-disabled/malicious
+   case) is still rejected server-side with no `Job` row created.
+
+**Why:** A disabled-but-visible-anyway control is worse than either a
+truly disabled one or an honest error — the owner's objection was that
+the UI actively invited input the system already knew it would reject.
+The fix keeps the deterministic policy engine and its validator as the
+single source of truth (per project non-negotiables) while making the
+form itself stop lying about which fields apply to which criterion kind.
+
+**Reversibility:** Fully reversible, no migration, no schema change, no
+change to `_parse_criterion_row` or any Pydantic schema. Removing the
+`disabled`/blanked-value template logic and `job-form.js`'s `<script>`
+tag restores the exact pre-D-029 form (every field always enabled) while
+server-side rejection of the invalid combination is untouched either
+way — the two are fully decoupled.
+
+## D-030 — Product-direction pivot: bounded local-AI HR agent as primary future UX
+
+**Date:** 2026-09-01
+**Decision:** Following an independent full product/architecture audit
+(owner-requested, `feat/hr-ui-productization` @ `2296b6f`), MEYAR adopts a
+**bounded local-AI HR agent** as the primary future user experience, rather
+than continuing to grow the current natural-language search/filter surface
+indefinitely. This is a product-direction decision, not a code change —
+implementation proceeds only through the roadmap slices this decision
+authorizes (see GitHub milestones **M8 — Bounded Local-AI HR Agent
+Platform** and **M9 — Deployment, Benchmark & Integration Readiness**,
+issues #30–#37).
+
+1. **Permanent product principles (unchanged, now explicit as the agent's
+   operating constraint, not just the search planner's):**
+   AI understands. Database remembers. Search retrieves. Deterministic
+   policy evaluates. Evidence explains. Humans decide.
+2. **The LLM/agent must never:** decide the final numeric score; decide a
+   hiring outcome; silently weaken a requirement; fabricate an unsupported
+   fact; use identity/PII secretly in ranking; or bypass tenant/auth/tool
+   schemas. These are the same invariants D-016 and D-017 already enforce
+   for the search planner and scoring engine respectively — this decision
+   extends them to cover every future agent tool call, not just the NL
+   search path.
+3. **Local-only, unchanged.** Candidate-content AI remains local via Ollama
+   (`meyar.llm.LLMProvider`, no direct Ollama import outside `meyar/llm/`).
+   No external AI API may receive candidate content, at any point in an
+   agent's tool-calling loop, exactly as already required for extraction and
+   search.
+4. **Target primary product surface:** "MEYAR AI" (a conversational
+   workspace) + Candidate Library / Candidate Detail. Intended future
+   interactions include: finding candidates from natural HR requirements;
+   refining results conversationally; explaining candidate evidence;
+   comparing candidates; evaluating a JD; drafting structured criteria; and
+   proposing approved operational actions. Every consequential/mutating
+   action requires explicit human confirmation (see D-031 point 4 and the
+   Slice 5 / confirmed-actions issue, #34) — the agent proposes, it never
+   silently executes a mutation.
+5. **Supersedes/clarifies D-016 point 7's framing.** D-016 point 7 states
+   "No cloud fallback or agent framework exists" — that sentence described
+   the accurate Slice 9 baseline at the time and is **not** read retroactively
+   as a permanent prohibition on ever building a local agent. D-016's other
+   points (strict `PlannerDraft` boundary, deterministic mode selection,
+   meaning-preserved-or-rejected, protected-criteria enforcement,
+   trusted-runtime-owned execution configuration, local-LLM-only, bounded
+   provenance) remain fully in force and are generalized to typed tool
+   calls in general, not narrowed to the NL-search planner alone — see
+   D-031.
+6. **Vacancy/Job product direction** is a related but separate decision —
+   see D-032.
+7. **Audit scope note.** This decision was informed by, and does not
+   contradict, the independent audit's finding that the deterministic
+   scoring/evaluation engine (D-010, D-017) is already agent-safe
+   (UI/search-agnostic, reproducible, UNKNOWN-correct) and requires no
+   rework — the pivot is concentrated at the search/interaction layer
+   (D-031) and the vacancy-creation UX layer (D-032), not the core engine.
+
+**Why:** The owner's audit found the product had organically grown a
+traditional search/filter application with an increasingly complex
+deterministic NL-parsing layer, while the intended direction is a bounded
+local-AI agent operating typed MEYAR tools under unchanged deterministic
+guarantees. This decision records that direction as canonical product
+authority so implementation work (M8/M9) proceeds against an unambiguous
+target instead of being re-litigated per slice.
+
+**Reversibility:** Documentation/governance only — no source code changed
+by this decision. Fully reversible by a future superseding decision; no
+migration, no schema change, no removed functionality. PR #29's existing
+functionality is unaffected.
+
+## D-031 — Search architecture: SearchPlan/deterministic policy become internal tool boundaries; deterministic fast-path FROZEN
+
+**Date:** 2026-09-01
+**Decision:** `SearchPlan`, `PlannerDraft`, and the deterministic
+precheck/fidelity-validation machinery in
+`meyar.search.planner_policy`/`planner_schemas` (D-016) **remain** — their
+role is reframed, not removed:
+
+1. **New role: internal typed tool/policy boundary, not the user-facing
+   parse target.** Once Slice 2 (#31) ships, the intended shape is that a
+   local agent populates tool-call arguments directly (already close to
+   today's `PlannerDraft` shape — strict Pydantic, `extra="forbid"`) rather
+   than the current design of guessing intent from a whole free-text
+   sentence and reconciling the guess against the original text after the
+   fact. `SearchPlanResult`'s executable/outcome contract is retained as-is
+   — it is already the right shape for a typed tool result.
+2. **The deterministic language fast-path (D-026, `try_deterministic_intent_parse`)
+   is FROZEN effective immediately.** No new phrase/suffix/regex intent
+   pattern is to be added to it, and its scope is not to be widened, unless
+   the change is required to fix a genuine security or correctness bug in
+   already-shipped behavior before agent parity exists (in the spirit of
+   D-027's correctness fix, not new capability). This freeze applies to
+   `planner_policy.py`'s precheck/fidelity heuristics in general: no new
+   language-specific heuristic surface area is to be added there while the
+   agent foundation (#31) is being built.
+3. **Explicit sunset condition.** Once the read-only local agent (#31)
+   demonstrates accepted functional parity — evaluated and accepted by the
+   owner, not automatic — for the search intents the fast path currently
+   covers, the fast path (D-026) is to be removed or materially reduced.
+   D-026 already documents this as a one-line reversal: deleting the single
+   `try_deterministic_intent_parse` call site in `plan_candidate_search`
+   restores 100% LLM/agent-dependent behavior with no other pipeline change.
+   This sunset is tracked as part of Slice 4 (#33), which is the point at
+   which parity is evaluated and, if accepted, acted on.
+4. **Tool-calling does not eliminate deterministic validation — it is
+   subject to the same rules as today's NL path, with no exception.**
+   Every LLM/agent-produced tool argument remains **untrusted input** and
+   must pass, unchanged: typed schema validation (`extra="forbid"` Pydantic
+   boundaries, same discipline as `PlannerDraft`); the prohibited-attribute
+   policy (`find_prohibited_term`, D-006, checked before and after any model
+   call); the no-silent-weakening rule (a mandatory requirement can be
+   preserved or rejected, never quietly downgraded to a soft/preferred
+   signal, and vice versa); tenant/auth boundaries (`tenant_id` is always an
+   explicit trusted-runtime parameter, never model- or client-supplied); and
+   evidence/provenance rules (no claim without a traceable `EvidenceRef` or
+   persisted score/criterion result; a schema-incapable claim — e.g.
+   per-skill duration until Slice 3/#32 closes that gap — is `UNKNOWN`,
+   never fabricated, exactly as D-027 already established for the NL path).
+   An agent tool-dispatch layer is a new *producer* of these arguments; it
+   is never a new *validator* of them, and it does not get a weaker or
+   parallel validation surface.
+5. **Conversation/multi-turn state.** As D-026 already noted but left
+   unimplemented, a server-held, tenant-scoped, short-TTL pending-action/
+   plan mechanism (extending `BrowserSession`, not a new auth system) is the
+   intended shape for multi-turn clarification and for the propose→confirm
+   pipeline (Slice 5, #34) — the LLM proposes each turn, but the persisted
+   pending-action row, not the model's own memory, is authoritative for
+   what actually executes on confirmation.
+
+**Why:** The audit found `planner_policy.py` had grown three overlapping
+NL-understanding subsystems (precheck rejection patterns, the D-026 fast
+path, and post-hoc fidelity re-parsing) totaling 992 lines, +451 in the
+`feat/hr-ui-productization` slice alone — a trajectory that, left
+unacknowledged, risks becoming a permanent pseudo-NLP engine parallel to,
+rather than replaced by, a future agent. Freezing new heuristic growth now
+and recording an explicit, evaluatable sunset condition prevents that
+outcome without discarding anything already shipped and verified.
+
+**Reversibility:** Documentation/governance only — no source code changed
+by this decision. The freeze and sunset condition are policy, not a code
+change; D-026's own fast path remains merged and functional until the
+sunset condition is met and acted on in a future slice. Fully reversible by
+a future superseding decision.
+
+## D-032 — Job/Vacancy product direction: backend retained, primary UX deferred to agent-drafted criteria flow
+
+**Date:** 2026-09-01
+**Decision:** The existing `Job` / `JobCriteriaVersion` / deterministic
+evaluation backend (D-010, D-017, D-028) is **retained as-is** and requires
+no rework for the agent direction (D-030) — the audit confirmed
+`evaluation`/`scoring` import only `meyar.schemas`/`meyar.models`, with no
+`ui`/`search` coupling, and are already safe to wrap in an agent tool
+(`rank_candidates_for_job`) without modification.
+
+1. **No further vacancy-management CRUD growth.** The Job/vacancy lifecycle
+   work already merged (D-028: ACTIVE/ARCHIVED, duplicate-signature safety)
+   and the hand-built criteria form (D-023/D-024/D-025/D-029) are kept
+   as-is and are not to be extended with additional lifecycle states,
+   workflow steps, or form-UX polish beyond what already exists, ahead of
+   the agent-drafted-criteria decision below.
+2. **The current user-facing Vacancies section is supporting/deferred
+   functionality, not the intended primary product workflow.** It remains
+   fully functional and reachable; it is not being removed by this
+   decision. Its primary-navigation prominence is a Slice 4 (#33) UX
+   decision, gated on the agent-drafted-criteria replacement flow being
+   accepted by the owner — this decision does not itself change any
+   navigation or template.
+3. **Future primary workflow:**
+   ```
+   HR/JD request → local agent → structured criteria DRAFT
+     → human review/confirmation → deterministic evaluation
+   ```
+   The agent drafts (`draft_job_criteria`, Slice 4/#33); nothing is
+   persisted until an accountable human confirms
+   (`create_job_after_confirmation`, Slice 5/#34, gated on Slice 1/#30 for
+   accountable identity). The existing `CriterionKind`/`CriterionType`/
+   weight taxonomy and the prohibited-attribute denylist
+   (`schemas/criteria.py`, D-006) are the target shape the agent populates
+   — unchanged by this decision.
+4. **The current vacancy-creation form (`job_new.html`) may later be
+   repurposed as the human review/edit screen for an agent-drafted
+   criteria set**, per Slice 4 (#33). This decision authorizes that future
+   repurposing; it does not implement it.
+
+**Why:** The audit found vacancy criteria are entirely hand-built via form
+today — a real HR-usability gap — while the model/schema layer underneath
+is already exactly the right shape for an agent to populate as a reviewable
+draft. Recording this now prevents further investment in the hand-built
+form as a permanent primary path while the higher-leverage agent-drafting
+capability is unbuilt.
+
+**Reversibility:** Documentation/governance only — no source code changed
+by this decision, no existing functionality removed. Fully reversible by a
+future superseding decision.
+
+## D-033 — Ranking lifecycle enforcement: an ARCHIVED job can no longer be ranked, at the shared-service boundary
+
+**Date:** 2026-09-01
+**Decision:** The independent PR #29 acceptance audit confirmed a real gap
+disclosed by D-028 point 6: `rank_candidates_for_job`
+(`meyar.scoring.batch`) never checked the parent `Job.status`, so an
+`ARCHIVED` job's criteria version remained fully rankable via a direct or
+stale request even though the normal HR UI hid the "Reytinq et" action.
+Closed at the shared service every caller goes through, not only at a
+router/template layer:
+
+1. **Enforcement location.** `rank_candidates_for_job` now resolves the
+   parent `Job` immediately after resolving the `JobCriteriaVersion`
+   (`meyar.services.job_repo.get_job`, tenant-scoped) and raises
+   `BatchRankingError("JOB_ARCHIVED", ...)` unless `Job.status ==
+   JOB_STATUS_ACTIVE`, before any candidate/profile iteration or
+   `Evaluation` construction begins. Because this is the one shared
+   service the UI, the REST API, the CLI, and any future agent tool all
+   call, none of them can bypass the check by avoiding the UI — the exact
+   property the audit asked for.
+2. **API/CLI impact — deliberate, not incidental.** `POST
+   /api/v1/jobs/{job_id}/criteria/{version_number}/rank`
+   (`meyar.api.v1.evaluations.post_rank_job`) and `meyar rank-job` (CLI)
+   both call the same function and are therefore now also protected by
+   this invariant, closing the same latent gap on those paths — the API
+   route maps `JOB_ARCHIVED` to `409 Conflict` (distinct from the existing
+   `404`/`422` mapping for other `BatchRankingError` codes); the CLI
+   already prints any `BatchRankingError.code` generically, so no CLI
+   change was needed.
+3. **HR-safe UI wording, no raw code.** `meyar.ui.router.rank_job` renders
+   a dedicated, Azerbaijani, human-readable message ("Bu vakansiya
+   arxivləşdirilib və artıq yeni reytinq üçün istifadə edilə bilməz.") with
+   HTTP `409` for this specific code — the raw string `JOB_ARCHIVED` is
+   never rendered to the HR user (regression-tested).
+4. **Historical data is untouched.** The check only gates *new* ranking
+   execution; it does not read, modify, or gate access to any existing
+   `Evaluation` row. `archive_job` (unchanged by this decision) still only
+   ever sets `status`/`archived_at` on the `Job` row itself —
+   `JobCriteriaVersion` and `Evaluation` history remain fully intact and
+   readable (regression-tested: a candidate's evaluation history still
+   shows the job title, and shows exactly one entry, not two, after a
+   rejected re-rank attempt against the now-archived job).
+5. **No new lifecycle state.** Only the existing `ACTIVE`/`ARCHIVED`
+   values (D-028) are read; nothing new was added to the `Job` model or
+   migration chain.
+6. **Tenant isolation unaffected.** The new check runs only after
+   `get_criteria_version_by_id`'s existing tenant-scoped lookup already
+   succeeded, and `get_job` is itself tenant-scoped — a foreign tenant's
+   criteria-version id still resolves the pre-existing, unchanged
+   `CRITERIA_VERSION_NOT_FOUND`/404 outcome regardless of that foreign
+   job's status, so this change introduces no new cross-tenant
+   existence-leak surface (regression-tested).
+7. **Scoring mathematics unchanged.** No line in `meyar.scoring.policy` or
+   `meyar.evaluation.*` was touched.
+
+**Tests:** `backend/tests/test_ui_job_lifecycle.py` —
+`test_active_job_can_still_be_ranked`,
+`test_archived_job_direct_stale_rank_post_is_rejected_with_hr_safe_message`
+(rank while ACTIVE succeeds and is preserved; archiving; a stale/direct
+POST to the same rank URL is rejected with `409` and the HR-safe message,
+never the raw code; the candidate's evaluation-history view shows exactly
+one entry afterward, proving no second `Evaluation` was persisted by the
+rejected attempt), and
+`test_archived_job_rank_rejection_does_not_leak_cross_tenant`.
+`backend/tests/test_api_evaluations.py` —
+`test_rank_archived_job_is_rejected_via_shared_service` (API path returns
+`409` with `detail: "JOB_ARCHIVED"`, proving the shared-service enforcement
+reaches the REST API too).
+
+**Why:** ARCHIVED is meant to represent "not a current, evaluable
+vacancy" (D-028). Leaving ranking execution reachable via a stale URL
+undermined that invariant at exactly the point that matters most — new
+`Evaluation` rows being created against a closed vacancy — and would have
+become materially riskier once a future agent (Slice 2, #31) can invoke
+ranking as a typed tool with no lifecycle awareness of its own. Enforcing
+in the shared service, not the router, means that risk is closed
+structurally rather than by convention.
+
+**Reversibility:** Fully reversible and additive. No migration, no schema
+change, no new lifecycle state. Removing the `Job.status` check in
+`rank_candidates_for_job` restores the exact pre-fix behavior on all three
+call paths simultaneously.
+
+**Follow-up tracking (not fixed here, per audit scope):** UI/API
+duplicate-signature consistency, concurrency-test hardening, and small
+UI/test cleanup findings from the same acceptance audit are tracked
+separately — see issue #38.

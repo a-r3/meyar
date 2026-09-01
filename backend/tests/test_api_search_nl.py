@@ -128,7 +128,12 @@ async def test_malformed_model_output_outcome_never_searches(
     fake = FakeLLMProvider(fail_first_n_calls=2)
     app.dependency_overrides[get_llm_provider] = lambda: fake
 
-    body = await _post(client, plaintext, "Java bilən namizədləri göstər.")
+    # A semantic/free-text request — not one of the deterministic fast
+    # path's bounded structured intents (D-026) — so this genuinely
+    # exercises the LLM planner call being tested here.
+    body = await _post(
+        client, plaintext, "Find candidates experienced in modernizing legacy backend systems."
+    )
     assert body["outcome"] == PlannerOutcome.MALFORMED_MODEL_OUTPUT.value
     assert body["executable"] is False
     assert body["search"] is None

@@ -23,16 +23,77 @@ closed). Slice 12 PR #19 squash-merged at `93fa567` (issue #18 closed;
 **M4 — Internal Product Interface & API CLOSED**). Slice 13 PR #22
 squash-merged at `a709ce1` (`Refs #20`, issue #20 deliberately left open —
 see above). Slice 14 PR #24 squash-merged at `f6e31ff` (`Closes #23`, issue
-#23 closed; D-021) — see below. Local `main` and `origin/main` currently
-sit at `f6e31ff`.
+#23 closed; D-021). Chore PR #26 (pre-presentation readiness/local demo
+bootstrap, issue #25, D-022) squash-merged at `a539e34`. Local `main` and
+`origin/main` currently sit at `a539e34`.
 **M5 — Security, Target-Mac Validation & MVP Acceptance is OPEN**,
 containing only issue #20 (Slice 13 — Security + Official
 Definition-of-Done Acceptance) pending the Target-Mac benchmark gate.
-**M6 — Operational CV Intake & Reconciliation** has no remaining open
-issues (issue #23 closed by PR #24) but is deliberately left open pending
-explicit owner milestone-closure approval, per the governance rule against
-closing milestones without an approved roadmap decision
-(`.claude/rules/git-workflow.md`).
+**M6 — Operational CV Intake & Reconciliation is CLOSED** (owner-approved
+closure; issue #23 closed by PR #24, no remaining open issues).
+**M7 — HR UI & Presentation Readiness is OPEN** (issue #27; owner-driven
+HR UI productization pass following visual inspection of the running
+local UI — see D-023 through D-029, and "In progress" below). PR
+#29 (same branch) received a second owner visual inspection that found
+seven further blockers (NL search still generically failing on ordinary
+Azerbaijani phrasing, no vacancy-creation UI, raw criterion ids on the
+ranking table, developer wording, technical metadata on candidate detail,
+CV-preview XSS confirmation, and a mislabeled inline-vs-download original
+CV action) — all fixed in the same PR; see D-024. A third owner visual
+inspection found the new vacancy-creation form's "Ad"/"Dəyər" field split
+had produced a malformed criterion (root-caused, not a scoring bug —
+value held the criterion's TYPE instead of the requirement) and that the
+NL-search "unsupported" message didn't distinguish a genuine deterministic
+product-policy gap from the small local planner model simply misjudging
+an ordinary request — both fixed; see D-025. The owner then required a
+stronger guarantee: common explicit NL search intents must not depend on
+local-model quality at all, not just get a more honest failure message —
+addressed with a conservative deterministic fast-path parser (skills,
+languages, certifications, total experience, simple "və" combinations)
+that executes with zero LLM calls for exactly the concepts SearchPlan
+already represents, falling back to the LLM unchanged for everything
+else; see D-026. A dedicated semantic-correctness audit of that fast path
+then found it was silently converting "N years of experience IN skill X"
+into "skill + N years TOTAL experience" — a real weakening, not just an
+honesty issue — fixed at the shared precheck (so no consumer can produce
+that combination without an explicit HR confirmation via a new
+clarification screen); also fixed a previously-unimplemented vacancy
+kind-aware validation gap and reported (not yet fixed) a Job duplicate-
+title/no-lifecycle gap; see D-027. That reported gap is now closed: Job
+gained a persisted ACTIVE/ARCHIVED lifecycle (migration `db7e4523f491`,
+existing rows deterministically backfilled ACTIVE, no hard delete
+anywhere), a default-active `/ui/jobs` listing with an explicit archive
+view and a CSRF/tenant-scoped "Arxivlə" action, and canonical-signature
+duplicate-creation protection (titles remain non-unique; an identical
+normalized title+criteria combination is rejected for a second ACTIVE
+job, enforced by a real partial-unique-index DB constraint against
+concurrent double-submits, not just an application-level check) — scoped
+to the `/ui/jobs` form path only, `POST /api/v1/jobs` unchanged; see
+D-028. A fourth owner visual check then found the "Minimum müddət (il)"
+duration input still visibly enabled for non-EXPERIENCE rows even though
+`_parse_criterion_row` (D-027) already rejected it server-side — fixed
+with a self-hosted vanilla-JS presentation enhancement plus a matching
+server-rendered initial/re-rendered state, so the control is disabled
+and cleared for every kind but EXPERIENCE with or without JavaScript;
+server-side validation is unchanged and remains authoritative; see
+D-029. PR #29 still **NOT merged** — awaiting owner re-inspection.
+
+**Product-direction pivot recorded (2026-09-01).** Following an
+owner-requested independent full product/architecture audit, MEYAR adopts a
+bounded local-AI HR agent as the primary future UX; see D-030 (product
+direction), D-031 (search architecture — `SearchPlan`/deterministic policy
+become internal tool boundaries; the D-026 deterministic fast-path is now
+FROZEN with an explicit parity-based sunset condition; tool-calling does
+not weaken deterministic validation), and D-032 (Job/Vacancy backend
+retained as-is; primary UX shifts toward agent-drafted criteria + human
+confirmation; current Vacancies UI is supporting/deferred). This is a
+documentation/governance-only change on the `feat/hr-ui-productization`
+branch — no source code changed, no PR #29 functionality removed. Roadmap
+recorded in `docs/MVP_PLAN.md`; tracked via new GitHub milestones **M8 —
+Bounded Local-AI HR Agent Platform** and **M9 — Deployment, Benchmark &
+Integration Readiness** (issues #30–#37), without closing M5/#20 or any
+other existing milestone/issue. Implementation of these slices has **not**
+started.
 
 GitHub remote established (`https://github.com/a-r3/meyar.git`, private,
 temporary development remote — see D-012, `docs/DECISIONS.md`). `main`
@@ -276,6 +337,84 @@ remains disabled.
   schema. See D-019. Slice 13 final security/DoD acceptance was not started.
 
 ## Tests
+**677/677 passing** as of the kind-aware duration-field UI pass (branch
+`feat/hr-ui-productization`, still not merged): 673 prior (D-028 pass,
+see below) + 4 new for D-029 — rendered-form assertions that the
+"Minimum müddət (il)" control is disabled/cleared for a default SKILL
+row and enabled for an EXPERIENCE row, that a kind-switched EXPERIENCE→
+SKILL submission neither echoes the stale value back as editable nor
+persists a `Job`, and a direct manual POST of SKILL + `min_years`
+(bypassing the client script entirely, equivalent to JavaScript
+disabled) is still rejected server-side with no `Job` created.
+
+**673/673 passing** as of the Job lifecycle pass (branch
+`feat/hr-ui-productization`, still not merged): 659 prior (D-027 pass,
+see below) + 14 new for D-028 — the migration backfill-to-ACTIVE test
+(fresh throwaway DB, pre-migration schema, `test_ui_migration_packaging.py`),
+and `test_ui_job_lifecycle.py`'s full coverage: default-active/archive
+listing, archive route auth/CSRF/tenant-isolation/cross-tenant-denial, no
+hard delete, archived-job evaluation-history title resolution, identical-
+active-duplicate rejection, same-title-different-criteria allowed,
+archived duplicate not blocking a new active job, a genuine concurrent-
+double-submit test against the real partial-unique-index DB constraint
+(not just the application-level pre-check), and an API-path regression
+proving `POST /api/v1/jobs` is unaffected.
+
+**659/659 passing** as of the semantic-correctness audit pass (branch
+`feat/hr-ui-productization`, still not merged): 639 prior (D-026 pass,
+see below) + 20 new/changed for D-027 — the skill-specific-duration
+never-weakens-to-total-experience matrix (locative/ablative suffix,
+üzrə/ilə connector, ASCII vs diacritic, the "ən az" precheck gap),
+extraction-for-clarification and Java/JavaScript-boundary tests
+(`test_search_planner_policy.py`), the reversed "təcrübəsi ... N il"
+word-order fast-path pattern and its tenant-isolation/audit coverage for
+the confirmed clarification alternative (`test_search_deterministic_parser.py`),
+the end-to-end clarification-then-confirm UI flow with zero LLM calls
+(`test_ui_routes.py`), and the vacancy kind-aware min_years rejection
+(`test_ui_job_creation.py`).
+
+**639/639 passing** as of the deterministic-fast-path pass (branch
+`feat/hr-ui-productization`, still not merged): 607 prior (D-025 pass,
+see below) + 32 new for D-026 — the full parser regression matrix and
+full-pipeline (zero-LLM-call, valid-plan, real-execution, tenant-isolation,
+safe-audit) coverage in `test_search_deterministic_parser.py`, plus 6
+existing LLM-failure/repair-path tests updated to use query text that
+stays genuinely outside the new fast path's scope (their purpose —
+testing malformed/timeout/outage LLM handling — is otherwise now
+short-circuited by the fast path, which is the intended product
+improvement).
+
+**607/607 passing** as of the third-round PR #29 visual-inspection pass
+(branch `feat/hr-ui-productization`, still not merged): 600 prior (D-024
+pass, see below) + 7 new/changed for D-025 — the model-self-decline
+marker and its distinct HR message (`test_search_planner_policy.py`,
+`test_ui_routes.py`), the single-"Tələb"-field form regression
+(`test_ui_job_creation.py`), and the two Blocker-A root-cause acceptance
+tests: a UI-created SKILL criterion resolving against real candidate
+evidence, and UI-created vs. API-created criterion structural equivalence
+(`test_ui_job_creation.py`).
+
+**600/600 passing** as of the second-round PR #29 visual-inspection pass
+(branch `feat/hr-ui-productization`, still not merged): 582 prior (D-023
+pass, see below) + 18 new regressions for D-024 — the diacritic-fold and
+locative/ablative-suffix planner-policy fidelity fixes plus a
+Java/JavaScript non-regression case (`test_search_planner_policy.py`), an
+end-to-end ordinary-Azerbaijani-query executable-outcome test
+(`test_ui_routes.py`), the ranking-table human-label/kind test
+(`test_ui_routes.py`), the CV-preview XSS-escaping regression
+(`test_ui_candidate_preview.py`), the original-CV always-attachment
+disposition test (`test_ui_original_cv.py`), and 11 new vacancy-creation
+tests covering auth/CSRF/tenant-isolation/validation/successful-creation/
+rankability (`test_ui_job_creation.py`).
+
+**582/582 passing** as of the M7 HR UI productization pass (branch
+`feat/hr-ui-productization`, not yet merged): 537 prior (Slice 14 merge
+baseline, see below) + regression coverage added for D-023 — the
+control-character normalization fix (`test_search_planner_policy.py`),
+the demo-key rotation fix (`test_demo_seed.py`), the new CV-preview route
+(`test_ui_candidate_preview.py`), and the UI date-boundary/information-
+boundary changes (`test_ui_routes.py`).
+
 **537/537 passing** as of Slice 14 merge (PR #24, squash `f6e31ff`): 511 prior
 (post-Slice-13-merge baseline) + 26 Slice 14 regressions across two passes —
 `test_folder_indexer.py` (8 new: file-stability skip/later-processing,
@@ -516,19 +655,151 @@ Evaluation's persisted `candidate_profile_version_id`/
 `job_criteria_version_id` verified to equal the exact input versions.
 
 ## In progress
-No product Slice is currently in progress. Slice 14 (below) is the most
-recently merged Slice work.
+No product Slice is currently in progress. Slice 14 is the most recently
+merged Slice work.
 
 **Chore (issue #25, not a Slice):** pre-presentation readiness and local
-demo bootstrap, on `chore/pre-presentation-readiness`, pending independent
-acceptance/owner merge. `meyar seed-demo` bootstraps one isolated,
-clearly-marked synthetic demo tenant through the real service layers (see
-D-022) so the UI can be inspected locally without a live Ollama connection
-for most screens. Also fixes stale test-count/status wording, completes
-`backend/.env.example`, and narrows `.claude/hooks/guard.sh`'s env-file
-block to match the exception `.githooks/pre-commit`/
-`scripts/scan-tracked-tree.sh` already had. No search/matching/scoring
-behavior changed; no migration; no new runtime dependency.
+demo bootstrap — **MERGED as PR #26 at squash SHA `a539e34`** (see D-022).
+
+**Chore (issue #27, not a Slice, M7):** HR UI productization and
+presentation readiness, on `feat/hr-ui-productization`, PR #29 open,
+**pending owner re-inspection — not merged.**
+Following owner visual inspection of the running local `/ui/*` surfaces,
+reworked navigation/copy into HR language, removed the manual
+evaluation-date inputs (current date now injected explicitly at the UI
+boundary), root-caused and fixed the `REQUEST_CONTROL_CHARACTERS`
+false-positive on ordinary textarea input, decluttered candidate/vacancy/
+ranking screens (raw UUIDs and pipeline-status internals no longer shown
+on the primary HR pages), added a truthful in-app CV preview route
+alongside the original-file download, resolved job titles into evaluation
+history, and fixed the `meyar seed-demo` key-rotation gap (idempotent
+reseed now always returns a usable, single active credential). See D-023.
+
+A second owner visual inspection of PR #29 found seven further blockers,
+all fixed on the same branch/PR (see D-024): (1) root-caused and fixed —
+without requiring live Ollama as an acceptance dependency — two remaining
+deterministic-fidelity-check regex gaps (Azerbaijani ASCII/diacritic
+typing variance, and agglutinative locative/ablative case suffixes) that
+were still rejecting ordinary Azerbaijani skill+experience queries after
+D-023's control-character fix; (2) added `/ui/jobs/new` +
+`POST /ui/jobs` — HR can now create a vacancy (title, MUST_HAVE/PREFERRED
+criteria, no raw id/UUID entry) from the UI for the first time, reusing
+the exact `POST /api/v1/jobs` domain services; (3) ranking table now shows
+the criterion's HR label instead of its raw internal id/kind enum;
+(4) softened remaining developer-oriented ranking/jobs-page wording;
+(5) candidate-detail "Texniki məlumat" no longer exposes parser
+name/version/error code; (6) confirmed and regression-tested CV-preview
+XSS escaping; (7) "Originalı yüklə" now always sends a true download
+(`Content-Disposition: attachment`) instead of opening PDFs inline.
+No search/matching/scoring behavior changed; no migration.
+
+A third owner visual inspection found two further acceptance blockers,
+both fixed on the same branch/PR (see D-025). Root-caused, live, before
+any change — not guessed: (A) an owner-created vacancy's Python SKILL
+criterion resolved to UNKNOWN against a candidate with verified Python
+evidence; traced to the persisted criterion having `value: "MUST_HAVE"`
+instead of `value: "Python"` — the previous two-field ("Ad"/"Dəyər") form
+let an HR tester type the requirement's type into the value field, and
+the deterministic scorer correctly found no matching skill for that
+malformed value (not a scoring/evaluator bug). Fixed by collapsing
+"Ad"/"Dəyər" into a single HR-facing "Tələb" field that becomes both the
+label and the matched value, making the mistake structurally impossible;
+added a critical acceptance test proving a UI-created SKILL criterion now
+resolves correctly against real evidence (and that missing evidence still
+correctly resolves to UNKNOWN), plus a structural-equivalence test against
+an API-created criterion. (B) The natural-language search "unsupported"
+message didn't distinguish a genuine, model-independent product-policy
+gap from the small local planner model (`qwen3:0.6b`) simply misjudging
+an ordinary request — reproduced live against real local Ollama and
+confirmed via the persisted audit event that the actual outcome was the
+*model itself* self-declining (`PlannerDraft.unsupported_reason_codes`),
+not a policy-regex false positive and not a provider failure. Added an
+internal `MODEL_DECLINED_INTERPRETATION` marker and a distinct, honest HR
+message for that case only; genuine deterministic product-policy
+rejections keep the original message. No search/matching/scoring
+behavior changed; no migration.
+
+The owner then required a stronger guarantee than a more honest failure
+message: common, explicit, supported HR search intents must not depend
+on local-model interpretation quality at all (see D-026). Added
+`meyar.search.planner_policy.try_deterministic_intent_parse` — a
+conservative, whole-clause-anchored deterministic parser for exactly the
+concepts `CandidateSearchRequest` already represents (skills, languages,
+certifications, total experience years, simple "və" combinations),
+invoked between the existing security precheck and the LLM loop in
+`plan_candidate_search`. A match executes with zero LLM calls, through
+the *same* `convert_planner_draft` validation the LLM path uses; anything
+not fully, unambiguously accounted for declines and falls through to the
+LLM completely unchanged — never a partial/weaker search. Skill-specific
+duration (e.g. "Python üzrə 5 il təcrübəsi") is deliberately not
+reinterpreted as total experience (no SearchPlan field for it) and
+continues to fail the existing precheck exactly as before. Investigated
+(per the request) whether a structured clarification/confirmation state
+for a partially-understood request could be represented on the existing
+server-rendered architecture — concluded it's architecturally feasible
+(a session-scoped pending-plan + confirm/reject route) but is a
+materially new feature with its own session/CSRF/audit implications, not
+folded into this pass, since this parser never actually produces a
+partial state (binary: full match or decline). No search/matching/
+scoring behavior changed; no migration.
+
+A dedicated semantic-correctness audit of that fast path found the
+"continues to fail exactly as before" claim above was only half true
+(see D-027): the *connector* phrasing ("Python üzrə 5 il təcrübəsi") did
+still correctly decline, but the *locative/ablative-suffix* phrasing
+("Pythonda 5 il təcrübəsi", including the original owner-reported query)
+was in fact producing `skills=["python"], min_total_experience_years=5.0`
+— silently reading "5 years IN Python" as "Python skill + 5 years of
+ANY experience". Inspected the evidence model directly (not assumed):
+`CandidateProfileExtraction` has no field linking a `SkillItem` to an
+`EmploymentItem` date range, so MEYAR genuinely cannot prove per-skill
+duration — confirmed this must never be invented. Fixed at the shared
+`precheck_natural_language_request` (a fifth `_SKILL_DURATION_PATTERNS`
+entry for the suffix shape, plus an "ən az"-without-"ı" fold gap found
+while writing the regression matrix) so every equivalent phrasing is now
+rejected identically, for the deterministic fast path, the LLM path, the
+REST API, and the CLI alike — one fix, one source of truth, no new
+`PlannerOutcome`/API contract change. Added a genuinely honest
+alternative: a `/ui/search`-only clarification screen
+(`search_clarification.html`) naming the extracted skill/years, offering
+one explicit confirm action that resubmits an unambiguous
+explicit-separation rephrasing through the normal flow — never executed
+without that click. Also fixed, on the same audit pass: vacancy-creation
+kind-aware validation was previously incomplete (a stray "Təcrübə (il)"
+value on a non-EXPERIENCE row was silently dropped, not rejected — now
+rejected). Reported, not fixed: `Job` has no unique-title constraint and
+no lifecycle/status field at all (no close/archive/soft-delete) — a
+genuine open product gap for a future slice, not a scoring/tenant-
+isolation issue. No search/matching/scoring behavior changed beyond the
+precheck rejection scope; no migration.
+
+That reported Job lifecycle gap is now closed (see D-028). `Job` gained
+`status` (`ACTIVE`/`ARCHIVED`) and `archived_at` via migration
+`db7e4523f491` — every existing row backfills to `ACTIVE` deterministically
+in the same `ALTER TABLE` (verified against the real dev DB with
+upgrade/downgrade/re-upgrade, and against a from-scratch throwaway
+database through the entire `base`→`head` chain); no hard delete
+anywhere, no `JobCriteriaVersion`/`Evaluation` row is ever touched by
+archiving. `/ui/jobs` defaults to active vacancies with a new
+`?status=archived` view ("Aktiv vakansiyalar"/"Arxiv" tabs); a new
+CSRF-protected, tenant-scoped `POST /ui/jobs/{job_id}/archive` (existing
+`jobs:write` scope) is the only transition, with no reopen/edit/delete in
+this pass. Titles remain deliberately non-unique — instead, a canonical
+signature (normalized title + sorted, normalized criteria — never the
+free-text label or the id) is compared, and creating a second `ACTIVE`
+job with an identical signature is rejected with an HR-safe message; an
+`ARCHIVED` duplicate never blocks a new `ACTIVE` one. The real
+concurrency guard is a partial unique index on
+`(tenant_id, duplicate_signature) WHERE status='ACTIVE' AND
+duplicate_signature IS NOT NULL`, declared on both the model (so the test
+suite's `Base.metadata.create_all` schema gets it too — a genuine gap the
+concurrency test itself caught on the first pass, when the index existed
+only in the migration) and the migration; a race that slips past the
+application-level pre-check hits this constraint and gets the identical
+friendly rejection. `POST /api/v1/jobs` is completely unaffected — no
+duplicate check, no lifecycle field required or returned; verified with a
+regression test creating two identical jobs via the API successfully.
+Ranking/scoring untouched.
 
 Slice 14 (`feat/folder-reconciliation`, **MERGED as PR #24 at squash SHA
 `f6e31ff`, closes issue #23**, associated with
@@ -609,7 +880,10 @@ due date because the official timeline has not been supplied.
 | M3 — JD Matching & Ranking | Slice 10 | CLOSED — PR #15 merged at `1c9dbbd`, issue #14 closed |
 | M4 — Internal Product Interface & API | Slices 11–12 | CLOSED — Slice 11 merged (PR #17, issue #16 closed); Slice 12 merged (PR #19 at `93fa567`, issue #18 closed) |
 | M5 — Security, Target-Mac Validation & MVP Acceptance | Slice 13 + target-Mac benchmark | OPEN — issue #20 open; PR #22 merged at `a709ce1` implementing Pass 1 (original CV, no-exfiltration, backup/restore, audit guard, multilingual evidence) with `Refs #20`; Mac Mini benchmark execution on the now owner-confirmed target hardware remains the sole open mandatory gate |
-| M6 — Operational CV Intake & Reconciliation | Slice 14 | OPEN (no remaining open issues) — Slice 14 merged (PR #24 at `f6e31ff`), issue #23 closed; milestone left open pending explicit owner closure decision |
+| M6 — Operational CV Intake & Reconciliation | Slice 14 | CLOSED — Slice 14 merged (PR #24 at `f6e31ff`), issue #23 closed; owner-approved closure |
+| M7 — HR UI & Presentation Readiness | HR UI productization (chore, issue #27) | OPEN — branch `feat/hr-ui-productization`, PR #29 open, pending final owner visual check; Job lifecycle implemented; see D-023 through D-029 |
+| M8 — Bounded Local-AI HR Agent Platform | Slices 1–5 (issues #30–#34) | OPEN — created 2026-09-01 per D-030/D-031/D-032; no implementation started |
+| M9 — Deployment, Benchmark & Integration Readiness | Slices 6–8 (issues #35–#37) | OPEN — created 2026-09-01 per D-030/D-031/D-032; no implementation started; does not supersede or close M5/#20 |
 
 ## Official requirement gap matrix
 

@@ -1,10 +1,16 @@
+import hashlib
+import json
+import re
 import uuid
 from collections import defaultdict
+from dataclasses import dataclass
 
 from pydantic import ValidationError
 from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meyar.core.text import fold_az_ascii, normalize_azerbaijani_case
+from meyar.ingestion.parser import CanonicalDocumentContent
 from meyar.models.candidate import Candidate
 from meyar.models.candidate_document import (
     PARSER_STATUS_PARSE_FAILED,
@@ -26,13 +32,19 @@ from meyar.models.folder_indexed_file import (
     INDEX_STATUS_MISSING,
     FolderIndexedFile,
 )
-from meyar.models.job import Job
+from meyar.models.job import JOB_STATUS_ACTIVE, Job
 from meyar.models.job_criteria_version import JobCriteriaVersion
 from meyar.schemas.candidate_identity import CandidateIdentityExtraction
 from meyar.schemas.candidate_profile import CandidateProfileExtraction, EvidenceRef
+from meyar.schemas.criteria import CriterionIn, CriterionKind, CriterionType
+from meyar.schemas.job import JobCreateRequest
 from meyar.scoring.schemas import BatchRankingResult
 from meyar.search.schemas import CandidateSearchResponse
-from meyar.services.candidate_document_repo import list_candidate_documents
+from meyar.services.candidate_document_repo import (
+    get_candidate_document,
+    get_latest_canonical_document,
+    list_candidate_documents,
+)
 from meyar.services.candidate_identity_repo import get_current_identity_version
 from meyar.services.candidate_profile_repo import (
     get_current_profile_version,
@@ -42,10 +54,12 @@ from meyar.services.candidate_repo import get_candidate
 from meyar.ui.presentation import join_nonempty
 from meyar.ui.view_models import (
     CandidateDetailView,
+    CandidateDocumentPreviewView,
     CandidateDocumentView,
     CandidateLibraryItemView,
     CandidateLibraryPageView,
     CandidateSearchResultView,
+    DocumentPreviewPageView,
     EvaluationHistoryView,
     EvidenceLocationView,
     JobView,
@@ -160,6 +174,30 @@ def _facts(profile: CandidateProfileExtraction) -> dict[str, list[ProfileFactVie
             for item in profile.projects
         ],
     }
+
+
+def _current_role_and_skills(
+    profile: CandidateProfileExtraction, *, skill_limit: int = 5
+) -> tuple[str | None, list[str]]:
+    current_role = profile.employment_history[0].title if profile.employment_history else None
+    top_skills = [item.name for item in profile.skills[:skill_limit]]
+    return current_role, top_skills
+
+
+def _library_profile_summary(
+    profile_version: CandidateProfileVersion | None,
+) -> tuple[str | None, list[str], list[str]]:
+    """HR-facing summary derived from already-fetched profile_content — no
+    extra query. Returns (current_role, top_skills, languages)."""
+    if profile_version is None or profile_version.profile_content is None:
+        return None, [], []
+    try:
+        profile = CandidateProfileExtraction.model_validate(profile_version.profile_content)
+    except ValidationError:
+        return None, [], []
+    current_role, top_skills = _current_role_and_skills(profile)
+    languages = [item.language for item in profile.languages]
+    return current_role, top_skills, languages
 
 
 async def list_candidate_library(
@@ -326,11 +364,15 @@ async def list_candidate_library(
     for candidate in candidates:
         profile = profiles_by_candidate.get(candidate.id)
         full_name, _email, _phone = _identity_values(identities_by_candidate.get(candidate.id))
+        current_role, top_skills, languages = _library_profile_summary(profile)
         items.append(
             CandidateLibraryItemView(
                 candidate_id=candidate.id,
                 created_at=candidate.created_at,
                 full_name=full_name,
+                current_role=current_role,
+                top_skills=top_skills,
+                languages=languages,
                 current_profile_version=profile.version_number if profile else None,
                 current_profile_status=profile.status if profile else None,
                 parser_statuses=sorted(parser_states[candidate.id]),
@@ -371,16 +413,17 @@ async def get_candidate_detail_view(
             "projects",
         )
     }
+    current_role: str | None = None
+    professional_summary: str | None = None
     if profile_version and profile_version.profile_content is not None:
         try:
-            facts = _facts(
-                CandidateProfileExtraction.model_validate(profile_version.profile_content)
-            )
+            profile = CandidateProfileExtraction.model_validate(profile_version.profile_content)
+            facts = _facts(profile)
+            current_role, top_skills = _current_role_and_skills(profile)
+            professional_summary = join_nonempty([current_role, ", ".join(top_skills) or None])
         except ValidationError:
             pass
-    documents = await list_candidate_documents(
-        db, tenant_id=tenant_id, candidate_id=candidate_id
-    )
+    documents = await list_candidate_documents(db, tenant_id=tenant_id, candidate_id=candidate_id)
     evaluations = list(
         (
             await db.execute(
@@ -393,12 +436,17 @@ async def get_candidate_detail_view(
         .scalars()
         .all()
     )
+    job_titles = await _job_titles_by_id(
+        db, tenant_id=tenant_id, job_ids=[evaluation.job_id for evaluation in evaluations]
+    )
     return CandidateDetailView(
         candidate_id=candidate.id,
         created_at=candidate.created_at,
         full_name=full_name,
         email=email,
         phone=phone,
+        current_role=current_role,
+        professional_summary=professional_summary,
         identity_status=identity.status if identity else None,
         identity_version=identity.version_number if identity else None,
         profile_status=profile_version.status if profile_version else None,
@@ -421,6 +469,7 @@ async def get_candidate_detail_view(
             EvaluationHistoryView(
                 evaluation_id=evaluation.id,
                 job_id=evaluation.job_id,
+                job_title=job_titles.get(evaluation.job_id),
                 job_criteria_version_id=evaluation.job_criteria_version_id,
                 evaluation_as_of_date=evaluation.evaluation_as_of_date,
                 numeric_score=evaluation.numeric_score,
@@ -431,6 +480,19 @@ async def get_candidate_detail_view(
             for evaluation in evaluations
         ],
     )
+
+
+async def _job_titles_by_id(
+    db: AsyncSession, *, tenant_id: uuid.UUID, job_ids: list[uuid.UUID]
+) -> dict[uuid.UUID, str]:
+    if not job_ids:
+        return {}
+    rows = (
+        await db.execute(
+            select(Job.id, Job.title).where(Job.tenant_id == tenant_id, Job.id.in_(job_ids))
+        )
+    ).all()
+    return {job_id: title for job_id, title in rows}
 
 
 async def build_search_result_views(
@@ -451,13 +513,8 @@ async def build_search_result_views(
         if profile_row and profile_row.profile_content is not None:
             try:
                 profile = CandidateProfileExtraction.model_validate(profile_row.profile_content)
-                current_role = (
-                    profile.employment_history[0].title
-                    if profile.employment_history
-                    else None
-                )
-                skill_names = ", ".join(item.name for item in profile.skills[:5]) or None
-                summary = join_nonempty([current_role, skill_names])
+                current_role, top_skills = _current_role_and_skills(profile)
+                summary = join_nonempty([current_role, ", ".join(top_skills) or None])
                 all_evidence = [
                     reference
                     for group in (
@@ -496,7 +553,9 @@ async def build_search_result_views(
     return views
 
 
-async def list_job_views(db: AsyncSession, *, tenant_id: uuid.UUID) -> list[JobView]:
+async def list_job_views(
+    db: AsyncSession, *, tenant_id: uuid.UUID, status: str = JOB_STATUS_ACTIVE
+) -> list[JobView]:
     latest = (
         select(
             JobCriteriaVersion.job_id,
@@ -516,27 +575,72 @@ async def list_job_views(db: AsyncSession, *, tenant_id: uuid.UUID) -> list[JobV
                 & (JobCriteriaVersion.job_id == Job.id)
                 & (JobCriteriaVersion.version_number == latest.c.max_version),
             )
-            .where(Job.tenant_id == tenant_id)
+            .where(Job.tenant_id == tenant_id, Job.status == status)
             .order_by(Job.created_at.desc(), Job.id.asc())
         )
     ).all()
-    return [
-        JobView(
-            job_id=job.id,
-            title=job.title,
-            created_at=job.created_at,
-            current_criteria_version_id=criteria.id if criteria else None,
-            current_criteria_version=criteria.version_number if criteria else None,
-            criteria_count=len(criteria.criteria) if criteria else 0,
+    views: list[JobView] = []
+    for job, criteria in rows:
+        must_have_labels: list[str] = []
+        preferred_labels: list[str] = []
+        if criteria:
+            for item in criteria.criteria:
+                label = item.get("label")
+                if not label:
+                    continue
+                if item.get("type") == "MUST_HAVE":
+                    must_have_labels.append(label)
+                elif item.get("type") == "PREFERRED":
+                    preferred_labels.append(label)
+        views.append(
+            JobView(
+                job_id=job.id,
+                title=job.title,
+                status=job.status,
+                archived_at=job.archived_at,
+                created_at=job.created_at,
+                current_criteria_version_id=criteria.id if criteria else None,
+                current_criteria_version=criteria.version_number if criteria else None,
+                criteria_count=len(criteria.criteria) if criteria else 0,
+                must_have_labels=must_have_labels,
+                preferred_labels=preferred_labels,
+            )
         )
-        for job, criteria in rows
-    ]
+    return views
+
+
+async def _criterion_labels_by_id(
+    db: AsyncSession, *, tenant_id: uuid.UUID, job_criteria_version_id: uuid.UUID
+) -> dict[str, str]:
+    """HR-facing criterion label lookup for the ranking-contribution table
+    (owner visual-inspection Blocker 3): the deterministic scoring engine's
+    ``CriterionScoreContribution.criterion_id`` is an internal slug
+    (e.g. ``aml_skill``) never meant for HR display — the human label
+    lives only on the criteria version the job was ranked against."""
+    version = (
+        await db.execute(
+            select(JobCriteriaVersion).where(
+                JobCriteriaVersion.id == job_criteria_version_id,
+                JobCriteriaVersion.tenant_id == tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if version is None:
+        return {}
+    return {
+        item["id"]: item["label"]
+        for item in version.criteria
+        if item.get("id") and item.get("label")
+    }
 
 
 async def build_ranked_candidate_views(
     db: AsyncSession, *, tenant_id: uuid.UUID, ranking: BatchRankingResult
 ) -> list[RankedCandidateView]:
     """Add names only after Slice 10 has finalized rank and score."""
+    criterion_labels = await _criterion_labels_by_id(
+        db, tenant_id=tenant_id, job_criteria_version_id=ranking.job_criteria_version_id
+    )
     views: list[RankedCandidateView] = []
     for result in ranking.results:
         identity = await get_current_identity_version(
@@ -557,6 +661,7 @@ async def build_ranked_candidate_views(
                 contributions=[
                     ScoreContributionView(
                         criterion_id=item.criterion_id,
+                        label=criterion_labels.get(item.criterion_id, item.criterion_id),
                         criterion_kind=item.criterion_kind,
                         criterion_type=item.criterion_type,
                         weight=item.weight,
@@ -575,3 +680,255 @@ async def build_ranked_candidate_views(
             )
         )
     return views
+
+
+async def get_candidate_document_preview(
+    db: AsyncSession, *, tenant_id: uuid.UUID, candidate_id: uuid.UUID, document_id: uuid.UUID
+) -> CandidateDocumentPreviewView | None:
+    """The truthful in-app 'CV-yə bax' surface: safe, already-parsed text
+    (CanonicalDocument), never the original bytes and never a live-model
+    call. Returns None only when the document itself doesn't belong to
+    this tenant/candidate (caller renders 404); a document that parsed
+    successfully but has no canonical text yet renders `available=False`
+    instead of raising."""
+    document = await get_candidate_document(
+        db, tenant_id=tenant_id, candidate_id=candidate_id, document_id=document_id
+    )
+    if document is None:
+        return None
+    canonical = await get_latest_canonical_document(
+        db, tenant_id=tenant_id, candidate_document_id=document_id
+    )
+    if canonical is None:
+        return CandidateDocumentPreviewView(
+            document_id=document.id,
+            candidate_id=candidate_id,
+            mime_type=document.mime_type,
+            available=False,
+        )
+    content = CanonicalDocumentContent.model_validate(canonical.content)
+    pages = [
+        DocumentPreviewPageView(
+            page=page.page,
+            text="\n\n".join(block.text for block in page.blocks if block.text.strip()),
+        )
+        for page in content.pages
+    ]
+    return CandidateDocumentPreviewView(
+        document_id=document.id,
+        candidate_id=candidate_id,
+        mime_type=document.mime_type,
+        available=True,
+        pages=pages,
+    )
+
+
+async def get_job_title_for_criteria_version(
+    db: AsyncSession, *, tenant_id: uuid.UUID, job_criteria_version_id: uuid.UUID
+) -> str | None:
+    row = (
+        await db.execute(
+            select(Job.title)
+            .join(JobCriteriaVersion, JobCriteriaVersion.job_id == Job.id)
+            .where(
+                JobCriteriaVersion.id == job_criteria_version_id,
+                JobCriteriaVersion.tenant_id == tenant_id,
+                Job.tenant_id == tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    return row
+
+
+# Owner visual-inspection Blocker 2/B — new-vacancy creation. The HR-facing
+# form is a fixed set of rows (no JS row-adding, matching the rest of this
+# JS-free /ui surface); empty rows (blank requirement) are silently skipped
+# below, so HR only fills in as many criteria as the vacancy needs.
+#
+# One HR-facing "Tələb" (requirement) field per row, not separate internal
+# "Ad"/"Dəyər" (label/value) fields: for SKILL/CERTIFICATION/EDUCATION/
+# LANGUAGE criteria the same text the HR user types becomes BOTH the
+# display label and the exact term the deterministic scorer matches
+# against candidate-profile evidence — this makes it structurally
+# impossible to construct a criterion whose displayed name and matched
+# value disagree (the root cause of owner-reported Blocker A: a vacancy
+# created through the previous two-field form persisted
+# {"label": "Python", "value": "MUST_HAVE"} because the HR tester,
+# confused by the Ad/Dəyər distinction, typed the requirement type into
+# the wrong field — the deterministic scorer then correctly, and
+# deterministically, found no candidate profile skill literally named
+# "MUST_HAVE" and returned UNKNOWN; that was not a scoring bug). See
+# docs/DECISIONS.md D-025.
+CRITERION_ROW_COUNT = 4
+CRITERION_KIND_OPTIONS: tuple[tuple[str, str], ...] = (
+    (CriterionKind.SKILL.value, "Bacarıq"),
+    (CriterionKind.CERTIFICATION.value, "Sertifikat"),
+    (CriterionKind.EDUCATION.value, "Təhsil"),
+    (CriterionKind.LANGUAGE.value, "Dil"),
+    (CriterionKind.EXPERIENCE.value, "Təcrübə"),
+)
+DEFAULT_CRITERION_WEIGHT = "1"
+
+_CRITERION_ID_FALLBACK = "meyar"
+
+
+@dataclass(frozen=True)
+class CriterionRowInput:
+    kind: str
+    requirement: str
+    min_years: str
+    weight: str
+
+
+def _slugify_criterion_label(label: str, used_ids: set[str]) -> str:
+    """A stable, ASCII-only criterion id derived from the HR-entered
+    requirement text. The HR user never types or sees a raw id/UUID (owner
+    visual-inspection Blocker 2: 'no raw UUID entry by the HR user') — it
+    exists only as the deterministic policy engine's internal join key."""
+    ascii_text = fold_az_ascii(label).lower()
+    base = re.sub(r"[^a-z0-9]+", "_", ascii_text).strip("_")[:60] or _CRITERION_ID_FALLBACK
+    candidate = base
+    suffix = 2
+    while candidate in used_ids:
+        candidate = f"{base}_{suffix}"[:64]
+        suffix += 1
+    used_ids.add(candidate)
+    return candidate
+
+
+def _first_pydantic_message(exc: ValidationError) -> str:
+    errors = exc.errors()
+    if not errors:
+        return "Meyar məlumatları etibarsızdır."
+    raw = str(errors[0].get("msg", ""))
+    return raw.removeprefix("Value error, ") or "Meyar məlumatları etibarsızdır."
+
+
+def _parse_criterion_row(
+    row: CriterionRowInput, *, criterion_type: CriterionType, used_ids: set[str]
+) -> CriterionIn | None:
+    requirement = row.requirement.strip()
+    if not requirement:
+        return None
+    try:
+        kind = CriterionKind(row.kind)
+    except ValueError as exc:
+        raise UIServiceInputError(f"'{requirement}' üçün meyar növü tanınmadı.") from exc
+
+    min_years: float | None = None
+    value: str | None = requirement
+    if kind is CriterionKind.EXPERIENCE:
+        raw_years = row.min_years.strip()
+        if not raw_years:
+            raise UIServiceInputError(f"'{requirement}' meyarı üçün illik təcrübəni daxil edin.")
+        try:
+            min_years = float(raw_years.replace(",", "."))
+        except ValueError as exc:
+            raise UIServiceInputError(
+                f"'{requirement}' meyarı üçün illik təcrübə rəqəm olmalıdır."
+            ) from exc
+        value = None
+    elif row.min_years.strip():
+        # Kind-aware validation: "Təcrübə (il)" is only meaningful for an
+        # EXPERIENCE criterion — a value typed there for SKILL/
+        # CERTIFICATION/EDUCATION/LANGUAGE must never be silently dropped,
+        # since that would mean the form accepted input it then ignored.
+        raise UIServiceInputError(
+            f"'{requirement}' meyarı üçün illik təcrübə sahəsi yalnız "
+            "'Təcrübə' növü üçündür — bu sahəni boş buraxın və ya növü "
+            "'Təcrübə' olaraq dəyişin."
+        )
+
+    raw_weight = row.weight.strip()
+    try:
+        weight = float(raw_weight.replace(",", ".")) if raw_weight else 1.0
+    except ValueError as exc:
+        raise UIServiceInputError(
+            f"'{requirement}' meyarı üçün əhəmiyyət rəqəm olmalıdır."
+        ) from exc
+
+    try:
+        return CriterionIn(
+            id=_slugify_criterion_label(requirement, used_ids),
+            kind=kind,
+            type=criterion_type,
+            label=requirement,
+            value=value,
+            min_years=min_years,
+            weight=weight,
+        )
+    except ValidationError as exc:
+        raise UIServiceInputError(f"'{requirement}': {_first_pydantic_message(exc)}") from exc
+
+
+def build_job_create_request(
+    *,
+    title: str,
+    must_have_rows: list[CriterionRowInput],
+    preferred_rows: list[CriterionRowInput],
+) -> JobCreateRequest:
+    """Pure form-parsing + validation, reusing the exact same
+    ``CriterionIn``/``JobCreateRequest`` domain schemas the internal REST
+    API's ``POST /api/v1/jobs`` validates against (see
+    ``meyar.api.v1.jobs.post_job``) — no second criteria/scoring model."""
+    stripped_title = title.strip()
+    if not stripped_title:
+        raise UIServiceInputError("Vakansiya başlığı boş ola bilməz.")
+
+    used_ids: set[str] = set()
+    criteria: list[CriterionIn] = []
+    for criterion_type, rows in (
+        (CriterionType.MUST_HAVE, must_have_rows),
+        (CriterionType.PREFERRED, preferred_rows),
+    ):
+        for row in rows:
+            criterion = _parse_criterion_row(row, criterion_type=criterion_type, used_ids=used_ids)
+            if criterion is not None:
+                criteria.append(criterion)
+
+    if not criteria:
+        raise UIServiceInputError("Ən azı bir Mütləq və ya Üstünlük meyarı daxil edin.")
+    try:
+        return JobCreateRequest(title=stripped_title, criteria=criteria)
+    except ValidationError as exc:
+        raise UIServiceInputError(_first_pydantic_message(exc)) from exc
+
+
+# Owner visual-inspection follow-up — Job lifecycle/duplicate-safety
+# (D-028). Job titles are deliberately NOT unique (two vacancies may
+# legitimately share a title), so accidental-duplicate protection instead
+# compares a CANONICAL signature of (normalized title, normalized
+# criteria) — never raw display text, never exposed to HR. Scoped to the
+# /ui/jobs creation path only; POST /api/v1/jobs is unchanged.
+JOB_DUPLICATE_MESSAGE = "Eyni tələblərlə aktiv vakansiya artıq mövcuddur."
+
+
+def compute_job_duplicate_signature(title: str, criteria: list[CriterionIn]) -> str:
+    """SHA-256 hex digest of a canonical (title, criteria) signature —
+    order-independent (criteria are sorted before hashing) and
+    display-text-independent (case/whitespace-normalized, and only the
+    fields that actually affect matching — kind, MUST_HAVE/PREFERRED
+    type, value, min_years, weight — participate; the free-text label and
+    the server-generated id never do, so two vacancies with the same
+    underlying requirements are recognized as duplicates regardless of
+    how their criteria happen to be labeled)."""
+
+    def _normalized(text: str | None) -> str:
+        return " ".join(normalize_azerbaijani_case(text or "").split())
+
+    canonical_criteria = sorted(
+        (
+            criterion.kind.value,
+            criterion.type.value,
+            _normalized(criterion.value),
+            round(criterion.min_years, 2) if criterion.min_years is not None else None,
+            round(criterion.weight, 2),
+        )
+        for criterion in criteria
+    )
+    payload = json.dumps(
+        {"title": _normalized(title), "criteria": canonical_criteria},
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()

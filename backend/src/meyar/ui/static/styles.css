@@ -397,6 +397,34 @@ th {
   text-transform: uppercase;
 }
 tbody tr:hover { background: var(--surface-subtle); }
+.candidate-role { margin: -6px 0 10px; color: var(--text-muted); font-weight: 650; }
+.result-count { margin: 4px 0 0; color: var(--text-muted); font-weight: 700; }
+.document-list { display: grid; gap: 10px; }
+.document-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+}
+.document-actions { display: flex; align-items: center; gap: 16px; }
+.document-actions .text-link { margin-top: 0; }
+.tech-disclosure { margin-top: 16px; }
+.tech-disclosure summary { margin-bottom: 10px; }
+.document-preview { display: grid; gap: 14px; margin-top: 18px; }
+.preview-page { margin: 0; }
+.preview-text {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  font-family: inherit;
+  font-size: .95rem;
+  line-height: 1.6;
+}
 .error-state {
   max-width: 680px;
   margin: 12vh auto;

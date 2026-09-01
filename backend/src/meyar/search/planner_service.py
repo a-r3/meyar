@@ -21,6 +21,7 @@ from meyar.search.planner_policy import (
     build_interpretation_summary,
     convert_planner_draft,
     precheck_natural_language_request,
+    try_deterministic_intent_parse,
 )
 from meyar.search.planner_prompts import SEARCH_PLANNER_PROMPT_VERSION
 from meyar.search.planner_schemas import (
@@ -36,6 +37,16 @@ from meyar.search.service import search_candidates
 from meyar.services.audit_repo import record_event
 
 MAX_PLANNER_ATTEMPTS = 2
+
+# Provenance recorded for a plan produced by the deterministic fast path
+# (D-026) — clearly distinguishable from any configured LLM provider in
+# audit metadata, since no model call happened. Fixed, not read from
+# config: this identifies the parser code path itself, not a model.
+DETERMINISTIC_PLANNER_PROVENANCE = LLMResultProvenance(
+    provider="meyar-deterministic",
+    model_name="meyar-deterministic-parser-v1",
+    model_revision="",
+)
 
 
 def _request_sha256(natural_language_request: str) -> str:
@@ -153,6 +164,41 @@ async def plan_candidate_search(
         )
         await _audit_plan_result(db, tenant_id=tenant_id, result=result)
         return result
+
+    # Conservative deterministic fast path (D-026): explicit, unambiguous
+    # HR search intents (skills, languages, certifications, total
+    # experience — singly or "və"-combined) execute without ever calling
+    # the local LLM planner, so common supported queries do not depend on
+    # a small local model's interpretation quality. Only ever produces a
+    # result when the ENTIRE request is confidently accounted for;
+    # anything else falls through to the LLM loop below unchanged.
+    deterministic_draft = try_deterministic_intent_parse(natural_language_request)
+    if deterministic_draft is not None:
+        try:
+            deterministic_request = convert_planner_draft(
+                deterministic_draft,
+                natural_language_request=natural_language_request,
+                as_of_date=as_of_date,
+                embedding_config=embedding_config,
+            )
+        except PlannerPolicyError:
+            # The parser's own extraction did not survive the same
+            # fidelity validation the LLM path is held to — decline
+            # silently and fall through to the LLM rather than raise,
+            # since this is an internal safety net, not a user-facing
+            # rejection reason.
+            pass
+        else:
+            result = _result(
+                outcome=PlannerOutcome.EXECUTABLE,
+                request_sha256=request_hash,
+                provenance=DETERMINISTIC_PLANNER_PROVENANCE,
+                attempt_count=0,
+                draft=deterministic_draft,
+                search_request=deterministic_request,
+            )
+            await _audit_plan_result(db, tenant_id=tenant_id, result=result)
+            return result
 
     draft: PlannerDraft | None = None
     actual_provenance = configured_provenance

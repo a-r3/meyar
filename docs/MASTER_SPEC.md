@@ -289,3 +289,45 @@ AsyncClient. Quality: Ruff, mypy. Package/env: `uv`. Modular monolith,
 single deployable FastAPI app + one background worker process, both from
 the same codebase. The internal chat/CV-Library surface is server-rendered
 by that FastAPI app (Slice 11, D-018).
+
+## 22. Future direction — bounded local-AI agent (D-030, D-031, D-032)
+
+MEYAR's primary future UX is a bounded local-AI HR agent ("MEYAR AI")
+sitting in front of the domain services this spec already defines — it is
+additive to, not a replacement of, sections 1–21. Concretely:
+
+- **Section 1 (product flow)** gains a future orchestration step between
+  "internal chat UI" and the deterministic policy engine: a typed
+  tool-dispatch layer through which the agent invokes existing domain
+  services (search, evaluation, job/criteria) — the deterministic policy
+  engine (§4, §13, §14) remains the sole authority over criterion status
+  and score, unchanged.
+- **Section 3 (local AI)** is unchanged in its local-only boundary
+  (`meyar.llm.LLMProvider`, Ollama-only, no direct import elsewhere) — the
+  future agent orchestration layer is built on top of this same boundary,
+  not a new one.
+- **Section 15 (semantic search)**'s `SearchPlan`/planner boundary (D-016)
+  becomes the internal typed tool/policy contract an agent's tool calls are
+  validated against, rather than the user-facing NL-parse target it is
+  today (D-031). Every LLM/agent-produced tool argument remains untrusted
+  input, subject to the same schema validation, prohibited-attribute
+  policy, no-silent-weakening rule, tenant/auth boundary, and
+  evidence/provenance rule as today's NL search path — tool-calling does
+  not create a weaker or parallel validation surface.
+- **Section 17 (internal UI)** gains a future primary "MEYAR AI" workspace
+  surface, additive to the existing FastAPI/Jinja `ui/` sub-app; no SPA/Node
+  dependency is introduced by this direction.
+- **Section 13/14 (matching criteria/engine)** are unchanged; a future
+  agent may propose a structured criteria *draft* for human review, but
+  never bypasses `JobCriteriaVersion`'s existing validation or the
+  deterministic evaluation pipeline.
+- **Confirmed mutations.** Any future agent action that mutates data
+  requires: a validated server-side pending action, an accountable human
+  confirmation (extending §17's session model with real user identity, not
+  only an API-key-derived session), typed-tool execution through the
+  existing domain services, and an audit record — no silent mutation path
+  exists or is planned.
+
+Full rationale, scope, and roadmap: `docs/DECISIONS.md` D-030/D-031/D-032,
+`docs/PROJECT_VISION.md` "Future direction," `docs/MVP_PLAN.md`, and GitHub
+milestones **M8**/**M9** (issues #30–#37).
