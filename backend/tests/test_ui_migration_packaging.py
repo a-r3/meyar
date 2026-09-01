@@ -18,9 +18,9 @@ SLICE11_REVISION = "e3b1f7a9c2d4"
 PRE_SLICE1_HUMAN_IDENTITY_REVISION = "db7e4523f491"
 # The expected result of `alembic upgrade head` right now — bump this
 # alongside alembic/versions whenever a new migration becomes the head
-# (most recently: f4a91c2e6b7d, add human identity/dual access — see
-# docs/DECISIONS.md, Slice 1 / issue #30).
-CURRENT_HEAD_REVISION = "f4a91c2e6b7d"
+# (most recently: a1c5e9f2b6d3, add agent_conversations — see
+# docs/DECISIONS.md, Slice 2 / issue #31).
+CURRENT_HEAD_REVISION = "a1c5e9f2b6d3"
 
 
 async def _create_database(name: str) -> None:

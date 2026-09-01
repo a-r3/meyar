@@ -106,6 +106,59 @@ JOB_STATUS_LABELS = {
     "ARCHIVED": "Arxivləşdirilib",
 }
 
+# Slice 2 (issue #31) — HR-facing text for meyar.agent.schemas.AgentTurnOutcome.
+# Deterministic, never model-authored, mirroring PLANNER_OUTCOME_TEXT above.
+# "ANSWERED" is intentionally "" — AgentDecision's own shape validator
+# guarantees a real FINAL_ANSWER always carries a non-empty model message,
+# so this default is never actually reached; it exists only as a safe
+# fallback, not a UI state any turn is expected to produce. A tool result
+# with no model framing (search-loop or profile/evidence success) uses
+# "ANSWERED_FROM_TOOL_RESULT" below instead — never plain "ANSWERED" with
+# no message (see D-036: this was the root cause of a real bug where a
+# fatal-looking outcome co-rendered with valid grounded results).
+AGENT_TURN_OUTCOME_TEXT: dict[str, str] = {
+    "ANSWERED": "",
+    "ANSWERED_FROM_TOOL_RESULT": "Nəticələr aşağıdadır.",
+    "CLARIFICATION_REQUESTED": "Aydınlaşdırma tələb olunur",
+    "CANDIDATE_REF_NOT_FOUND": (
+        "Göstərilən namizəd tapılmadı — əvvəlcə axtarış nəticələrindən birini seçin."
+    ),
+    "TOOL_CALL_LIMIT_EXCEEDED": (
+        "Bu sorğu üçün icazə verilən addım sayı aşıldı. Sorğunu sadələşdirib yenidən cəhd edin."
+    ),
+    "AGENT_PROVIDER_FAILURE": (
+        "MEYAR AI xidməti hazırda əlçatan deyil. Bir qədər sonra yenidən cəhd edin."
+    ),
+    "MALFORMED_MODEL_OUTPUT": (
+        "AI xidmətinin cavabını təhlükəsiz şəkildə emal etmək mümkün olmadı. Sorğunu daha "
+        "konkret ifadə edib yenidən cəhd edin."
+    ),
+}
+
+
+def agent_turn_outcome_message(outcome: str, message: str | None) -> str:
+    """message is the model's own short framing text (FINAL_ANSWER/
+    CLARIFY only) — safe to show verbatim since it is never the sole
+    source of a factual claim (see docs/DECISIONS.md D-035). Every other
+    outcome gets a fixed, deterministic AZ explanation."""
+    if message:
+        return message
+    return AGENT_TURN_OUTCOME_TEXT.get(outcome, "")
+
+
+# CandidateProfileExtraction category key -> HR-facing label. Mirrors the
+# section titles candidate_detail.html already uses for the same six
+# categories — reused for the Slice 2 agent's GET_CANDIDATE_EVIDENCE
+# result presentation (meyar.ui.service.build_agent_turn_view).
+AGENT_EVIDENCE_CATEGORY_LABELS = {
+    "skills": "Bacarıq",
+    "employment_history": "İş təcrübəsi",
+    "education": "Təhsil",
+    "certifications": "Sertifikat",
+    "languages": "Dil",
+    "projects": "Layihə",
+}
+
 STATE_LABELS = {
     "PENDING": "Gözləyir",
     "PARSED": "Emal olunub",

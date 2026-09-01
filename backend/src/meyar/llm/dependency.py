@@ -8,4 +8,5 @@ def get_llm_provider() -> OllamaLLMProvider:
         base_url=settings.ollama_base_url,
         model=settings.ollama_model,
         timeout_seconds=settings.llm_timeout_seconds,
+        max_concurrency=settings.inference_concurrency,
     )

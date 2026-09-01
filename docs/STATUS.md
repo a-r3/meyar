@@ -126,8 +126,153 @@ independent, not a shared credential bridge. Quality gates: `ruff` clean,
 `mypy src` clean (127 files), `alembic heads` = one head, full `pytest`
 suite 716 passed / 0 failed. See D-034 (`docs/DECISIONS.md`) for the
 design decisions and two bugs found and fixed during this slice's own
-testing. **Not yet merged — PR pending owner review; issue #30 and M8
-remain open.**
+testing. **Squash-merged as PR #39 (`d13ddb9`, `Closes #30`); issue #30
+closed.** Local `main`/`origin/main` at `d13ddb9`.
+
+**M8 Slice 2 — Read-Only Local AI Agent Foundation (#31) implementation
+complete, PR not yet opened (2026-09-01).** Branch
+`feat/read-only-ai-agent-foundation` from synced `main` (`d13ddb9`). Adds
+a bounded local-AI agent: new `meyar.agent` package (`schemas.py` —
+`AgentDecision`, the model's only output shape, `extra="forbid"`, mirrors
+`PlannerDraft`'s discipline; `prompts.py`; `service.py` — the bounded
+orchestration loop) plus a new `LLMProvider.decide_agent_action` method on
+the existing `OllamaLLMProvider`. Exactly three read-only tools:
+`search_candidates` forwards the model's own restated query, unmodified,
+into the existing frozen `plan_and_search_candidates` pipeline (D-026/
+D-027/D-031 guarantees reused as-is, not re-implemented) and loops back
+for one more decision; `get_candidate_profile`/`get_candidate_evidence`
+resolve a model-produced ordinal `candidate_ref` — never a raw
+candidate_id — against the conversation's own server-held
+`last_search_candidate_ids`, and always finalize the turn immediately
+(found or not), so a small local model never gets a second, riskier
+chance to freelance about an answer that's already complete. The model's
+own `message` field is closing/clarifying framing text only — every
+factual claim is rendered separately and deterministically from typed
+tool-result data, never from model free text (D-035). New
+`AgentConversation` model/table (migration `a1c5e9f2b6d3`), 1:1 with
+`BrowserSession` (unique FK, cascade), so two human sessions never share
+state and a fresh login always starts empty. New
+`meyar.llm.concurrency` gives the previously-declared-but-unused
+`Settings.inference_concurrency` its first real enforcement: one
+process-wide semaphore shared by every `OllamaLLMProvider._chat` call
+(extraction, identity, NL search planning, and the agent loop alike).
+New `GET`/`POST /ui/agent` routes + `agent.html` template + "MEYAR AI"
+nav entry (classic Search/Vacancies untouched). Candidate identity
+(full name) is resolved only in the UI presentation layer, from
+already-tenant-scoped tool results — never sent into the model's prompt.
+A real, non-obvious bug was found and fixed during manual real-Ollama
+verification — see D-035. Quality gates: `ruff` clean, `mypy src` clean
+(134 files), `alembic heads` = one head, full `pytest` suite 756 passed
+/ 0 failed, `scripts/scan-tracked-tree.sh` clean. **Opened as PR #40**
+(CI green). Owner live inspection of PR #40 then found a contradictory
+render — an empty assistant bubble, a red "AI response could not be
+safely processed" error, a simultaneous green "query executed" banner,
+and a misleading "Uyğunluq 0%" badge, all for one turn. Root-caused via a
+real-DB repro test: the loop's follow-up "what next" decision failing
+after `SEARCH_CANDIDATES` already succeeded was returned as
+`MALFORMED_MODEL_OUTPUT` while still carrying the successful
+`tool_results`. Fixed — see D-036: a new `ANSWERED_FROM_TOOL_RESULT`
+outcome means a follow-up framing failure (or a successful
+profile/evidence lookup, which never has model framing at all) is never
+treated as fatal; `MALFORMED_MODEL_OUTPUT`/`AGENT_PROVIDER_FAILURE` are
+now only ever returned with an empty `tool_results`; every stored
+assistant turn is redisplayed through the same deterministic
+outcome-\>text mapping the live turn uses, so it is never blank; the
+agent's relevance-percentage pill is now shown only for
+`SEMANTIC_ONLY`/`HYBRID` search modes (a plain `STRUCTURED_ONLY`
+discovery query has no real score to show). 9 new regression tests (6
+service-level, 3 HTTP-level rendering assertions). Quality gates
+re-verified: `ruff` clean, `mypy src` clean, full `pytest` suite 765
+passed / 0 failed (up from 756),
+`alembic heads` unchanged (no migration — additive JSON turn shape only),
+`scripts/scan-tracked-tree.sh` clean. Pushed to PR #40, CI re-verified
+green. Owner conversational retest then found a product-level gap: a
+follow-up like "birincinin təcrübəsini izah et" correctly resolved the
+ordinal and fetched the right profile/evidence data, but the assistant
+only ever repeated the generic D-036 fallback sentence while the UI
+dumped the full structured profile below it — not a coherent
+explanation. Fixed — see D-037: a new, narrow
+`LLMProvider.synthesize_grounded_answer` call (used only after a
+successful `GET_CANDIDATE_PROFILE`/`GET_CANDIDATE_EVIDENCE`) lets the
+model produce natural-language prose from a small, bounded, indexed fact
+list built from the candidate's own already-validated profile fields
+(never raw CV text, never identity); the model's answer is independently
+re-validated server-side before ever being trusted — every cited fact id
+must have actually been supplied, and every number the answer states must
+appear verbatim in those facts (the concrete guard against an invented
+duration/skill-year count). A rejected or unavailable answer falls back
+to the existing D-036 deterministic message exactly as before — never a
+turn failure. `SEARCH_CANDIDATES` and all scoring/planner/navigation
+behavior unchanged. 10 new regression tests (8 service-level — including
+direct unit tests on the fact-builder and validator — 2 HTTP-level).
+Quality gates re-verified: `ruff` clean, `mypy src` clean, full `pytest`
+suite 775 passed / 0 failed (up from 765), `alembic heads` unchanged (no
+migration), `scripts/scan-tracked-tree.sh` clean; the new `GroundedAnswer`
+schema was independently spot-checked against a real local Ollama daemon
+to rule out a repeat of D-035's `maxLength` failure mode (none found — a
+slow response on this memory-constrained dev box, not a schema defect).
+Pushed to PR #40. Owner factuality review then found D-037's free-text
+`GroundedAnswer.answer` field could not prevent an unsupported
+NON-numeric claim (e.g. "he managed a team" from a fact that only states
+role/company/dates) — D-037's validation only checked cited fact ids and
+numbers, never qualitative content. Fixed — see D-038:
+`GroundedAnswer` is replaced by `GroundedSelection` (`used_facts` +
+a single closed-enum `caveat`, no free-text field at all — `extra=
+"forbid"` makes adding one a validation error); the model only selects/
+orders which already-supplied facts are relevant, and
+`render_grounded_answer` builds the entire displayed sentence
+server-side from fixed per-category AZ templates applied to those facts'
+own verbatim values — there is structurally no channel for an
+unsupported claim (numeric or not) to appear, not merely a check that
+usually catches one. Verified live against a real Ollama daemon (no
+schema-crash regression) and rendered exactly as expected. 11 new/rewritten
+regression tests (8 service-level including a structural schema test
+proving the vulnerability class is closed, 3 HTTP-level). Quality gates:
+`ruff` clean, `mypy src` clean, full `pytest` suite 778 passed / 0 failed
+(up from 765), `alembic heads` unchanged (no migration),
+`scripts/scan-tracked-tree.sh` clean. Pushed to PR #40. Owner-directed
+autonomous acceptance run of the real 3-turn flow against a real local
+`qwen3:1.7b` daemon then found two more real bugs neither visible to
+`FakeLLMProvider`-based tests — see D-039: qwen3's default hidden-
+thinking mode made every agent call ~5x slower, turning Turn 1's very
+first decision into an outright `AGENT_PROVIDER_FAILURE` (fixed:
+`think: false` on the agent decision/synthesis calls, ~34s cold-load
+latency measured down to ~6.5s); and, once fast enough to reliably reach a second
+"what next" decision, the loop had no guard against the model re-issuing
+an identical `SEARCH_CANDIDATES` call, eventually co-rendering
+`TOOL_CALL_LIMIT_EXCEEDED` above duplicated result blocks (fixed
+structurally: an identical repeated query within one turn now finalizes
+on the existing results instead of looping). A related prompt
+clarification (`AGENT_PROMPT_VERSION` -> v2) fixed two routing gaps the
+same real run surfaced: a general "experience" ask topic-filtering itself
+to zero evidence matches, and a duration question about an
+already-identified candidate being answered with `CLARIFY` echoing the
+user's own question instead of using the D-038 evidence+caveat mechanism.
+Re-verified end to end: all three turns of the real flow now produce a
+single coherent grounded result each, and Turn 3 correctly states the
+evidence does not prove a specific Python duration without ever deriving
+"2021–2025 = 4 years" or substituting total experience for it. 2 new
+regression tests for the thinking-disabled payload, 1 new + 1 rewritten
+for the redundant-search guard. Owner scope-corrected: D-039's
+`think: false` had been applied to every `OllamaLLMProvider._chat` call,
+which reaches previously-accepted extraction/identity/planner AI
+behavior (Slices 4/7/9) outside Slice 2. Fixed — see D-040:
+`OllamaLLMProvider._chat` now takes an optional `think` parameter, sent
+only by the two agent call sites (`decide_agent_action`,
+`select_grounded_facts`); extraction/identity/planner calls omit the
+`think` key entirely, byte-identical to their pre-D-039 request shape.
+The target-hardware benchmark that would formally back a real-model
+generation-parameter change like this is issue #36 (Slice 7, M9,
+"Agent understanding" dimension) — not #20, whose current scope is the
+broader Slice 13/M5 security + DoD acceptance issue (a target-hardware
+benchmark execution is one gate inside it, not its whole purpose). 3 new
+regression tests proving extraction/identity/planner requests omit
+`think`. Re-verified end to end again: the real 3-turn flow is unaffected
+by the narrowing (both prior fixes live only in the agent call sites).
+Quality gates re-verified: `ruff` clean, `mypy src` clean, full `pytest`
+suite 784 passed / 0 failed (up from 781), `alembic heads` unchanged (no
+migration), `scripts/scan-tracked-tree.sh` clean. Pushed to PR #40.
+**Still not merged — awaiting owner retest.**
 
 GitHub remote established (`https://github.com/a-r3/meyar.git`, private,
 temporary development remote — see D-012, `docs/DECISIONS.md`). `main`
@@ -689,8 +834,10 @@ Evaluation's persisted `candidate_profile_version_id`/
 `job_criteria_version_id` verified to equal the exact input versions.
 
 ## In progress
-No product Slice is currently in progress. Slice 14 is the most recently
-merged Slice work.
+**M8 Slice 2 — Read-Only Local AI Agent Foundation (#31)**: implementation
+complete on `feat/read-only-ai-agent-foundation`, PR not yet opened — see
+"Current phase" above. M8 Slice 1 (#30) merged as PR #39. Slice 14 remains
+the most recently merged product-Slice work before the M8 pivot.
 
 **Chore (issue #25, not a Slice):** pre-presentation readiness and local
 demo bootstrap — **MERGED as PR #26 at squash SHA `a539e34`** (see D-022).

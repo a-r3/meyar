@@ -47,6 +47,15 @@ class Settings(BaseSettings):
     # in-progress copy onto the source folder is never ingested
     # mid-write. Conservative default; see docs/DECISIONS.md D-021.
     folder_stability_seconds: int = Field(default=60, ge=0)
+    # Slice 2 (#31) — bounded read-only agent orchestration loop. A single
+    # user turn may trigger at most this many tool calls before the loop
+    # is forced to stop and return whatever was gathered so far — never an
+    # unbounded/recursive agent loop. See meyar.agent.service.
+    agent_max_tool_calls: int = Field(default=3, ge=1, le=10)
+    # How many of the most recent (role, text) turns are replayed into the
+    # agent's own prompt context each orchestration step. Bounds prompt
+    # size and how much conversation state one BrowserSession accumulates.
+    agent_max_context_turns: int = Field(default=8, ge=1, le=50)
 
     @model_validator(mode="after")
     def _production_ui_cookie_must_be_secure(self) -> "Settings":

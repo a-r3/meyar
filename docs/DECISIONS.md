@@ -2557,3 +2557,426 @@ data, so this only forces re-login, not data loss). `User`/
 `TenantMembership`/the `AuditEvent` actor columns can all be dropped by
 the migration's `downgrade()`. The machine API-key path
 (`meyar.core.auth`) was not modified by this decision at all.
+
+## D-035 — Slice 2: Read-Only Local AI Agent Foundation — tool-result
+evidence grounding, and a real Ollama `format`-schema `maxLength` limit
+
+**Date:** 2026-09-01
+**Decision:** Implements M8 Slice 2 (issue #31, per D-030/D-031). A
+bounded orchestration loop (`meyar.agent.service.run_agent_turn`) with
+exactly three read-only tools — `search_candidates`,
+`get_candidate_profile`, `get_candidate_evidence` — dispatched from one
+strict, `extra="forbid"` model-output schema (`AgentDecision`, mirroring
+`PlannerDraft`'s discipline). Two design points and one real bug, found
+and fixed during this slice's own manual real-Ollama verification:
+
+1. **Evidence grounding is structural, not a prompt instruction.** The
+   model's `message` field (used only by `FINAL_ANSWER`/`CLARIFY`) is
+   framing/clarifying text alone; every factual claim about a candidate
+   comes from a separate, typed, deterministic tool-result payload
+   (`AgentToolResult`) that the UI layer renders independently — the
+   model's own words are never the record a fact is checked against.
+   `search_candidates` forwards the model's restated query, unmodified,
+   into the existing frozen `plan_and_search_candidates` pipeline
+   (D-026/D-027/D-031 guarantees reused as-is). `get_candidate_profile`/
+   `get_candidate_evidence` resolve a model-produced ordinal
+   `candidate_ref` only against the conversation's own server-held
+   `last_search_candidate_ids` — the model is never shown or trusted
+   with a real `candidate_id` — and both always finalize the turn
+   immediately, found or not, so a small local model never gets a second
+   inference pass to freelance about an answer that is already complete.
+2. **Real bug: Ollama's JSON-schema `format`-constrained decoding fails
+   outright above a `maxLength` of roughly 2000.** `AgentDecision.
+   search_query` was originally capped at 4000 (matching the raw HR
+   message field). Every real call to the new
+   `OllamaLLMProvider.decide_agent_action` against a real local Ollama
+   daemon (`qwen3:0.6b`) failed with HTTP 500
+   (`"failed to load model vocabulary required for format"`) — a
+   request-time provider failure, never a validation-time symptom, so no
+   `FakeLLMProvider`-based test could have caught it. Bisected precisely
+   (isolated to the single `search_query` field, then to its `maxLength`
+   value specifically) by posting hand-built schema variants directly to
+   the real Ollama `/api/chat` endpoint outside the application. Fixed by
+   capping `search_query` at a new `MAX_AGENT_SEARCH_QUERY_LENGTH = 2000`
+   — the same bound already proven safe in production on
+   `PlannerDraft.semantic_query` (`meyar.search.policy.
+   MAX_SEMANTIC_QUERY_LENGTH`). Verified fixed both directly (repeated
+   real-Ollama calls) and through a real authenticated browser session
+   end to end. A regression test
+   (`test_search_query_max_length_stays_within_the_ollama_grammar_safe_bound`)
+   pins the bound itself, since no functional test can otherwise detect
+   a future regression here.
+3. **Ollama inference concurrency guard.** `Settings.inference_concurrency`
+   existed since an earlier slice but was never wired to anything. Added
+   `meyar.llm.concurrency`: one process-wide (module-level, not
+   per-instance) `asyncio.Semaphore`, sized from that setting, shared by
+   every `OllamaLLMProvider._chat` call — extraction, identity
+   extraction, NL search planning, and the new agent loop alike — so no
+   combination of concurrent browser sessions can exceed the configured
+   local-inference budget.
+
+**Why:** A tiny local model (the only kind this project can assume on
+constrained target hardware — see the still-open Mac Mini benchmark,
+issue #20/M5) cannot be trusted to narrate candidate facts reliably;
+structural grounding removes that trust requirement entirely rather than
+asking the prompt to enforce it. The `maxLength` limit is genuinely
+non-obvious, hardware/model-dependent, and would silently break any
+future agent-facing Pydantic schema that adds a long free-text field
+without re-testing against a real Ollama daemon — recording it here is
+the only way a future slice avoids re-discovering it the same way.
+
+**Reversibility:** Fully additive — new package (`meyar.agent`), new
+table (migration `a1c5e9f2b6d3`, cleanly dropped by `downgrade()`), new
+`LLMProvider.decide_agent_action` protocol method. No existing search,
+scoring, or evaluation behavior changed. The `MAX_AGENT_SEARCH_QUERY_LENGTH`
+bound and the concurrency guard are both simple constant/wiring changes,
+trivially adjustable if re-verified against different hardware or a
+different local model.
+
+## D-036 — Slice 2 correctness fix: a successful tool result must never
+co-render with a fatal-looking outcome, and an assistant turn must never
+be stored/shown blank
+
+**Date:** 2026-09-01
+**Decision:** Owner live inspection of PR #40 found `/ui/agent` rendering
+an empty assistant bubble, a red "AI response could not be safely
+processed" error, a simultaneous green "query executed" banner, and a
+valid candidate card with a misleading "Uyğunluq 0%" badge — all for one
+turn. Root-caused (not guessed) with a real-DB repro test before any fix:
+`meyar.agent.service.run_agent_turn`'s loop always asks the model a
+second "what next" decision after a successful `SEARCH_CANDIDATES` call;
+when that second call failed (repeated schema-invalid output, or a
+provider timeout/outage), the returned `AgentTurnResult` carried
+`outcome=MALFORMED_MODEL_OUTPUT` (red, by name-collision with the
+existing `PlannerOutcome.MALFORMED_MODEL_OUTPUT` CSS rule) while still
+carrying the FIRST call's successful `tool_results` — the search's own
+outcome banner (green, `EXECUTABLE`) and candidate card rendered
+underneath the red one. The stored assistant turn was `""`, redisplayed
+verbatim as an empty bubble.
+
+1. **A follow-up decision failure is never fatal once a tool already
+   succeeded.** New `AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT`: used
+   whenever the loop's second-or-later `decide_agent_action` call fails
+   (schema-invalid, timeout, unavailable) but `tool_results` is
+   non-empty, and whenever `GET_CANDIDATE_PROFILE`/`GET_CANDIDATE_EVIDENCE`
+   succeeds (neither ever carries a model message — there is no
+   "framing" to fail). Plain `ANSWERED` is now reserved for a real
+   model-authored `FINAL_ANSWER`, which `AgentDecision`'s own shape
+   validator already guarantees always carries a non-empty `message` — so
+   `ANSWERED` with `message=None` is unreachable, and grounded tool
+   results never again co-occur with `MALFORMED_MODEL_OUTPUT`/
+   `AGENT_PROVIDER_FAILURE` (both now only ever returned with
+   `tool_results == []`).
+2. **No fabricated fallback text in the service layer.** AZ-language text
+   continues to live only in `meyar.ui.presentation`
+   (`AGENT_TURN_OUTCOME_TEXT["ANSWERED_FROM_TOOL_RESULT"] = "Nəticələr
+   aşağıdadır."`) — `meyar.agent.service` stays UI-agnostic, matching
+   `meyar.search.planner_service`'s existing precedent.
+3. **A stored assistant turn is never blank.** `conversation.turns` now
+   persists `(outcome, message)` per assistant turn instead of
+   pre-rendered text; `meyar.ui.router._agent_turn_log_views` redisplays
+   past turns through the exact same `agent_turn_outcome_message`
+   function the live turn's banner uses, so a past turn is exactly as
+   informative on reload as it was live, and is never empty (every
+   `AgentTurnOutcome` has a non-empty deterministic fallback, verified by
+   a regression test that loops over the whole enum).
+4. **No misleading relevance percentage on unscored discovery.** The
+   agent's search-result card (`agent.html` only — the classic
+   `/ui/search` page is unchanged) now shows the "Uyğunluq X%" pill only
+   for `SEMANTIC_ONLY`/`HYBRID` search modes, where `relevance_score` is a
+   real similarity signal. A plain `STRUCTURED_ONLY` discovery query with
+   no `preferred_filters` always produces `relevance_score == 0.0` by
+   construction (no preferred criteria are being scored) — that is not a
+   deficiency to hide, it is simply not a percentage, so the card shows
+   matched required/preferred criteria instead (already rendered).
+
+**Why:** A contradictory red-error/green-success render is a trust-safety
+defect for an HR-facing decision-support tool, independent of local-model
+quality — the owner's framing ("model parse/timeout/failure states MUST
+produce coherent UI") is the correct bar regardless of what hardware or
+model MEYAR eventually runs on.
+
+**Reversibility:** Fully additive to the Slice 2 (D-035) design — one new
+`AgentTurnOutcome` member, one new `AGENT_TURN_OUTCOME_TEXT` entry, a
+`conversation.turns` shape change (`text` + `outcome` instead of
+pre-rendered `text` alone; no migration, JSON column, old rows still
+readable via `.get()` defaults), and a template-only conditional for the
+relevance pill. No scoring/evaluation math changed, no planner regex
+changed, no navigation removed.
+
+## D-037 — Slice 2 product-gap fix: grounded conversational answers for
+profile/evidence explanations, with independent server-side validation
+
+**Date:** 2026-09-02
+**Decision:** Owner inspection found that "birincinin təcrübəsini izah
+et" (explain the first one's experience) correctly resolved the ordinal
+and fetched the right profile/evidence data, but the assistant only ever
+said the generic D-036 fallback ("Nəticələr aşağıdadır.") while the UI
+dumped the full structured profile below it — not a coherent explanation.
+Root cause: D-035's design deliberately restricted the model's `message`
+to framing text only, with no path for it to synthesize prose from a
+tool's own facts. Closed with the smallest workable grounded-answer
+contract, not a general-purpose agent framework:
+
+1. **A second, narrow LLM call, used only after a successful
+   `GET_CANDIDATE_PROFILE`/`GET_CANDIDATE_EVIDENCE`.**
+   `LLMProvider.synthesize_grounded_answer(question, facts)` (new
+   protocol method, reusing `OllamaLLMProvider._chat` — the existing
+   concurrency guard applies automatically) is given the user's own
+   question and a small, bounded, INDEXED list of `GroundedFact` (id,
+   category, title, detail) built server-side from the SAME
+   already-extracted, already-schema-validated `CandidateProfileExtraction`
+   fields `_EVIDENCE_CATEGORIES` already uses for topic matching — never
+   raw `evidence.quote` CV text (that stays server-rendered-only, never
+   model input, for both tools identically), never `CandidateIdentity`.
+2. **The model's `GroundedAnswer` (`answer` + `used_facts`) is never
+   trusted at face value.** `meyar.agent.service._validate_grounded_answer`
+   independently re-checks it against the exact facts supplied: rejects
+   an answer citing zero facts; rejects any `used_facts` id that was
+   never actually given to the model; and — the concrete, testable guard
+   against an invented duration/count, the owner's explicit safety
+   concern — rejects an answer stating any number that does not appear
+   verbatim in the title/detail of the facts it was given. A rejected
+   answer is discarded outright, never partially trusted or repaired
+   into something "close enough."
+3. **Failure is never a turn failure.** `_synthesize_grounded_answer`
+   returns `None` on any provider error, repeated schema-invalid output,
+   or a failed validation, and the caller treats `None` exactly like "no
+   model framing available" — the existing D-036 `ANSWERED_FROM_TOOL_RESULT`
+   deterministic fallback, tool results intact, no contradictory error
+   state. The bounded two-attempt repair pattern already used for
+   `decide_agent_action` is reused unchanged.
+4. **Scope.** Applies only to `GET_CANDIDATE_PROFILE`/
+   `GET_CANDIDATE_EVIDENCE` (the owner's exact repro) — `SEARCH_CANDIDATES`
+   is unchanged, still governed entirely by the existing orchestrator
+   decision loop. No planner regex, scoring math, evidence schema, or
+   Search/Vacancies navigation changed.
+5. **UI.** The synthesized (or deterministic-fallback) message renders as
+   the turn's existing outcome banner, ABOVE the unchanged structured
+   profile/evidence cards, which now read as supporting evidence rather
+   than the entire answer — a "Tam profilə bax" link was added to the
+   evidence card (the profile card already had one), closing the one
+   missing piece of the owner's UI requirement.
+
+**Why:** A local-AI agent that can correctly fetch grounded facts but
+cannot say anything about them beyond a fixed generic sentence does not
+meet the product's own bar (`docs/PROJECT_VISION.md`: "AI understands...
+evidence explains"). The fix keeps the LLM's role exactly where D-030/
+D-031 already draw the line — interpretation and phrasing, never fact
+authority — by making every claim the model's prose contains
+independently checkable against data the server already trusts.
+
+**Reversibility:** Fully additive to the Slice 2 (D-035/D-036) design —
+one new provider method, two new schemas (`GroundedFact`,
+`GroundedAnswer`), no migration, no change to `AgentTurnResult`'s shape
+beyond how `message` is now sometimes populated. Deleting the
+`_synthesize_grounded_answer` call site restores the exact D-036
+behavior (deterministic fallback only) with no other change required.
+
+## D-038 — Slice 2 factuality hardening: the server, not the model, is
+authoritative over every span of factual text in a grounded answer
+
+**Date:** 2026-09-02
+**Decision:** Owner review of D-037's `GroundedAnswer.answer` free-text
+field found it could not prevent an unsupported NON-numeric claim: given
+only the fact "Data Analyst at Caspian Analytics, 2021–2025", the model
+could still write "He managed a team there" — a predicate absent from
+every supplied fact — and D-037's validation (fact-id citation + numeric
+grounding) would not catch it, since it never inspected qualitative
+content at all. Fixed by removing the model's ability to author sentence
+text altogether, not by trying to detect bad prose after the fact (which
+would need an LLM judge — explicitly out of bounds):
+
+1. **`GroundedAnswer` (D-037) is replaced by `GroundedSelection`
+   (`used_facts: list[int]`, `caveat: GroundedCaveat | None`).** There is
+   no `answer` field, no free-text field of any kind — `extra="forbid"`
+   makes attempting to add one a validation error, not merely a policy
+   ask. The model's only two levers are: which already-supplied
+   `GroundedFact` ids are relevant (and in what order to lead with them),
+   and whether to flag `DURATION_NOT_PROVEN` — a single, fixed,
+   non-extensible caveat enum member (mirroring the D-027 skill-duration
+   precedent), never a free-text caveat.
+2. **`meyar.agent.service.render_grounded_answer` builds the entire
+   displayed sentence server-side** from `_render_fact_clause` — one
+   fixed AZ template per `GroundedFact.category` — applied to the
+   selected facts' own `title`/`detail` values, joined in the model's
+   chosen order. Every span of the resulting string is either one of a
+   small number of hand-authored template phrases or a verbatim value
+   already sourced from the same already-schema-validated
+   `CandidateProfileExtraction` fields the rest of this module treats as
+   trusted (D-030/D-031) — there is structurally no channel through
+   which "managed a team," an invented duration, or any other
+   unsupported predicate could appear. This is checked, not just argued:
+   `test_render_grounded_answer_never_contains_unsupported_claim` and an
+   HTTP-level equivalent assert the literal absence of such words from
+   real rendered output over the exact reported repro facts.
+3. **Validation surface shrinks accordingly.** `render_grounded_answer`
+   only re-checks that every selected id was actually supplied (D-037's
+   fact-existence check, kept unchanged) — the D-037 numeric-hallucination
+   regex is deleted outright, because it is now structurally impossible
+   for a number to appear in the answer that didn't already come from a
+   fact's own `title`/`detail`.
+4. **Failure handling, scope, PII/CV boundary, and the bounded two-attempt
+   repair mechanism are all unchanged from D-037** — an unrenderable
+   selection (no facts, no caveat, or an invalid id) still falls back to
+   the existing D-036 deterministic message, never a turn failure; only
+   `GET_CANDIDATE_PROFILE`/`GET_CANDIDATE_EVIDENCE` are affected;
+   `SEARCH_CANDIDATES`, scoring, planner regex, and navigation are
+   untouched.
+
+**Why:** "The model selects, the server writes" is the only design that
+can make "no unsupported non-numeric claim can survive" a structural
+guarantee rather than a best-effort filter — the owner's bar was
+explicit that this must not depend on pattern-matching model prose after
+the fact, and no second LLM is permitted to serve as a factuality judge.
+
+**Reversibility:** Fully additive to the Slice 2 (D-035/D-036/D-037)
+design — one schema rename/shape change (`GroundedAnswer` ->
+`GroundedSelection`), one provider method rename
+(`synthesize_grounded_answer` -> `select_grounded_facts`), one new pure
+rendering function, no migration. No scoring/evaluation math, planner
+regex, evidence schema, or navigation changed.
+
+## D-039 — Slice 2 acceptance-loop hardening: a real Ollama bug
+(hidden-thinking latency) and a real orchestration bug (redundant
+identical searches) found via the PR #40 real 3-turn qwen3:1.7b flow
+
+**Date:** 2026-09-02
+**Decision:** Owner-directed autonomous acceptance testing of PR #40 ran
+the exact real Ollama flow ("Python bilən namizədləri göstər" ->
+"birincinin təcrübəsini izah et" -> "onun Python təcrübəsi neçə ildir?")
+against a real local `qwen3:1.7b` daemon (8 GB dev hardware) and found two
+real, reproducible defects — neither visible to `FakeLLMProvider`-based
+tests, matching the D-035 precedent that only a real daemon can surface
+them:
+
+1. **Real bug: qwen3's default hybrid "thinking" mode makes every
+   schema-constrained call ~5x slower**, which turned Turn 1's very first
+   `decide_agent_action` call into an outright `AGENT_PROVIDER_FAILURE`
+   (measured cold-load latency: ~34s with thinking on vs. ~6.5s with
+   `think: false`, isolated by posting both payload variants directly to
+   the real Ollama `/api/chat` endpoint outside the application, mirroring
+   D-035's isolation method). Every prompt in `meyar.agent.prompts` /
+   `meyar.search.planner_prompts` already forbids chain-of-thought output,
+   so the hidden reasoning was pure waste, not a quality tradeoff being
+   traded away. Fixed by adding `"think": False` to
+   `OllamaLLMProvider._chat`'s request payload — applies uniformly to
+   every call site (extraction, identity extraction, NL search planning,
+   agent decision, grounded-fact selection), consistent with there being
+   exactly one `_chat` method.
+2. **Real bug: the orchestration loop had no guard against a model
+   re-issuing an identical `SEARCH_CANDIDATES` call.** Once (1) made the
+   model fast enough to reliably reach a second "what next" decision
+   within one turn, it would sometimes re-search the exact same query it
+   had already fully answered, eventually hitting
+   `TOOL_CALL_LIMIT_EXCEEDED` — which co-rendered a "simplify your query"
+   message above several duplicated, otherwise-correct result blocks: a
+   contradictory-looking state matching the D-036 class of defect. Fixed
+   structurally, not by a prompt instruction alone (this module's D-038
+   precedent): `run_agent_turn` now tracks the (folded) search queries
+   already executed within this one turn and finalizes on the existing
+   `tool_results` as `ANSWERED_FROM_TOOL_RESULT` the moment an identical
+   query recurs, never re-dispatching or spending another real tool/model
+   call. Scoped to a single turn's local loop state only — never
+   persisted, never shared across turns/tenants/sessions.
+3. **Prompt clarification (`AGENT_PROMPT_VERSION` bumped to
+   `agent-orchestrator-prompt-v2`).** The real flow's Turn 2 and Turn 3
+   also showed two related routing gaps: `evidence_topic` had no guidance
+   for a general category ask ("təcrübəsini" — "his experience", inflected)
+   vs. one specific named fact, so a category-level question could
+   topic-filter itself down to zero evidence matches; and a duration
+   question about an already-identified candidate ("onun Python təcrübəsi
+   neçə ildir?") was answered with `CLARIFY` echoing the user's own
+   question verbatim instead of using the already-built D-038
+   evidence+caveat mechanism designed for exactly this case. The
+   `GET_CANDIDATE_EVIDENCE`/`CLARIFY` bullets in `AGENT_SYSTEM_PROMPT` now
+   say explicitly: set `evidence_topic` only for one named skill/fact,
+   leave it unset for a whole-category ask; a pronoun referring to an
+   already-discussed candidate resolves to that candidate_ref rather than
+   `CLARIFY`; a duration/count question about an identifiable candidate
+   always routes to `GET_CANDIDATE_EVIDENCE` (the D-038 caveat mechanism
+   decides provability, never the model directly). This is prompt guidance
+   only — it does not change the underlying grounding mechanism, and a
+   small model can still make an imperfect tool choice (explicitly out of
+   scope per the owner's own acceptance framing: latency and semantic
+   sophistication are not acceptance criteria).
+
+Re-verified end to end after the fix: all three turns of the real flow
+produced a single, coherent, evidence-grounded, non-contradictory result
+each, with Turn 3 correctly stating the available evidence does not prove
+a specific Python duration (`Mövcud sübut konkret müddəti göstərmir.`)
+without ever deriving "2021–2025 = 4 years of Python" or silently
+substituting total experience for it.
+
+**Why:** Slice 2's own acceptance bar (issue #31, D-035/D-036/D-037/D-038)
+requires a real candidate result with no contradictory success/error
+state — a request-shape latency bug and an unbounded-loop-adjacent
+orchestration gap both defeat that bar independently of model quality,
+and (per D-035's own precedent) neither is discoverable without a real
+local daemon.
+
+**Reversibility:** Fully additive/corrective to the Slice 2 (D-035
+through D-038) design. `think: false` is a per-request Ollama parameter,
+not a model/config change — reverting it is a one-line diff with no
+migration impact. The redundant-search guard is pure orchestration-loop
+logic (`meyar.agent.service`), no schema/migration change. The prompt
+edit only affects `AGENT_SYSTEM_PROMPT` text and its version constant. No
+scoring, planner regex, Search/Vacancies UI, or mutation path touched.
+
+## D-040 — Scope correction: `think: false` narrowed to agent-only calls,
+never applied to extraction/identity/planner
+
+**Date:** 2026-09-02
+**Decision:** D-039 disabled Ollama's hidden-thinking mode on every
+`OllamaLLMProvider._chat` call — correct for the two agent call sites
+(`decide_agent_action`, `select_grounded_facts`), which is what Slice 2's
+own acceptance run actually exercised, but out of scope for
+`extract_candidate_profile`/`extract_candidate_identity`/
+`plan_candidate_search`: those are previously-accepted AI behavior on
+`main` from earlier slices (4, 7, 9), and changing their real-model
+generation behavior — even to make it faster — is a model-behavior change
+with no dedicated extraction/planner quality benchmark backing it, not a
+Slice 2 bug fix.
+
+Narrowed: `OllamaLLMProvider._chat` gained a `think: bool | None = None`
+parameter. When omitted, the request payload has **no** `think` key at
+all — byte-identical to every pre-D-039 call, the exact previously-
+accepted request shape. Only `decide_agent_action`/`select_grounded_facts`
+now pass `think=False` explicitly; `extract_candidate_profile`,
+`extract_candidate_identity`, and `plan_candidate_search` pass nothing and
+so keep relying on the Ollama/model default exactly as before D-039. Two
+new regression tests assert the two agent call sites still send
+`think: false`; three new regression tests assert extraction, identity,
+and planner requests never carry a `think` key at all.
+
+Re-verified end to end after the narrowing: the real 3-turn qwen3:1.7b
+flow (Slice 2 acceptance) still produces the same coherent, grounded,
+non-contradictory result each turn as under D-039 — narrowing the change
+to the two agent call sites that actually needed it does not reintroduce
+the cold-start timeout or the redundant-search loop, both of which were
+never touched by this correction.
+
+**Benchmark issue-reference correction:** the target-hardware benchmark
+that would formally validate real-model generation-parameter changes like
+this is issue #36 ("Slice 7 — Real Target-Mac Model Selection &
+Benchmark", M9) — its matrix explicitly covers "Agent understanding
+(tool-call accuracy/reliability)" as a dimension distinct from #20's
+original scope. Issue #20 ("Slice 13 — Security + Official
+Definition-of-Done Acceptance", M5) is the broader MVP-acceptance/DoD
+issue that happens to include a target-hardware benchmark execution gate
+among many unrelated gates (security, backup/restore, the original-CV
+route) — it is not itself "the benchmark issue" and should not be cited
+as such going forward; #36 is. Both remain open and neither supersedes
+the other (per #36's own text).
+
+**Why:** the owner's Slice 2 acceptance framing was explicit that a
+real-Ollama fix must stay inside Slice 2's own bounded scope — a shared
+provider file makes it easy to over-apply a fix meant for one call site
+to every call site, and doing so here would have silently changed
+extraction/identity/planner behavior that Slices 4/7/9 already accepted,
+without the benchmark evidence (#36) that a change like that should be
+backed by.
+
+**Reversibility:** Pure narrowing of D-039 — one new optional parameter
+on `_chat`, two call sites opt in, three call sites unchanged. No schema,
+migration, scoring, or navigation impact.
