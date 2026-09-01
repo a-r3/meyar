@@ -1,5 +1,6 @@
 import re
 
+from meyar.core.domain_terms import domain_term_present
 from meyar.extraction.view import ProfessionalDocumentView
 from meyar.schemas.candidate_identity import CandidateIdentityExtraction
 from meyar.schemas.candidate_profile import CandidateProfileExtraction, EvidenceRef
@@ -64,6 +65,28 @@ def verify_extraction_evidence(
         for item in category:
             for ref in item.evidence:
                 verify_evidence(view, ref)
+
+    # Slice 3 (issue #32): skill/employment grounding and domain/sector
+    # evidence. Every skill_experience/domain_experience evidence ref is
+    # re-verified exactly like any other category above; domain claims get
+    # one additional deterministic check (see docs/DECISIONS.md and
+    # meyar.core.domain_terms) so an opaque employer name can never satisfy
+    # a domain claim by itself.
+    for skill_exp in extraction.skill_experience:
+        for ref in skill_exp.evidence:
+            verify_evidence(view, ref)
+
+    for domain_exp in extraction.domain_experience:
+        for ref in domain_exp.evidence:
+            verify_evidence(view, ref)
+        quotes = [ref.quote for ref in domain_exp.evidence]
+        if not domain_term_present(domain_exp.domain, quotes):
+            raise EvidenceValidationError(
+                "DOMAIN_EVIDENCE_NOT_EXPLICIT",
+                f"Domain/sector claim '{domain_exp.domain}' is not explicitly supported "
+                "by its cited evidence quotes (no accepted sector/domain term found; an "
+                "employer name alone is never sufficient).",
+            )
 
 
 def verify_identity_evidence(

@@ -246,6 +246,11 @@ _EVIDENCE_CATEGORIES = (
     ("certifications", lambda item: item.name),
     ("languages", lambda item: item.language),
     ("projects", lambda item: item.description),
+    # Slice 3 (issue #32): surfaces the same skill/domain grounding the
+    # deterministic evaluators consume, so HR can ask "evidence for Java"
+    # or "evidence for AML" and get the attributable-period items back.
+    ("skill_experience", lambda item: item.skill_name),
+    ("domain_experience", lambda item: item.domain),
 )
 
 
@@ -398,6 +403,37 @@ def _build_profile_facts(profile: CandidateProfileExtraction) -> list[GroundedFa
             facts.append(GroundedFact(id=len(facts), category=category, title=title, detail=detail))
             if len(facts) >= MAX_GROUNDED_FACTS:
                 return facts
+
+    # skill_experience/domain_experience (issue #32) reference an
+    # employment_history index, so — unlike the categories above — their
+    # detail (the attributable period) is resolved here with `profile` in
+    # scope, rather than via a standalone item -> (title, detail) lambda.
+    for item in profile.skill_experience:
+        if len(facts) >= MAX_GROUNDED_FACTS:
+            return facts
+        entry = profile.employment_history[item.employment_index]
+        title = f"{item.skill_name} — {entry.title}" if entry.title else item.skill_name
+        facts.append(
+            GroundedFact(
+                id=len(facts),
+                category="skill_experience",
+                title=title,
+                detail=_employment_detail(entry),
+            )
+        )
+
+    for item in profile.domain_experience:
+        if len(facts) >= MAX_GROUNDED_FACTS:
+            return facts
+        detail = None
+        if item.employment_index is not None:
+            detail = _employment_detail(profile.employment_history[item.employment_index])
+        facts.append(
+            GroundedFact(
+                id=len(facts), category="domain_experience", title=item.domain, detail=detail
+            )
+        )
+
     return facts
 
 
@@ -421,6 +457,10 @@ def _render_fact_clause(fact: GroundedFact) -> str:
         return f"{fact.title}{suffix} dil bilgisi"
     if fact.category == "projects":
         return f"{fact.title} layihəsi"
+    if fact.category == "skill_experience":
+        return f"{fact.title}{suffix} təcrübəsi"
+    if fact.category == "domain_experience":
+        return f"{fact.title}{suffix} sahəsində təcrübə"
     return fact.title  # pragma: no cover - every real category is handled above
 
 

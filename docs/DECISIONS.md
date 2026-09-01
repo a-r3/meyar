@@ -2980,3 +2980,121 @@ backed by.
 **Reversibility:** Pure narrowing of D-039 — one new optional parameter
 on `_chat`, two call sites opt in, three call sites unchanged. No schema,
 migration, scoring, or navigation impact.
+
+## D-041 — Slice 3 (issue #32): evidence-capability completion — skill↔employment grounding and explicit-only domain/sector evidence
+
+**Date:** 2026-09-02
+**Decision:** Closes the D-027-identified gap (`SkillItem`/`EmploymentItem`
+were independent flat lists) with the minimum coherent extension, applying
+the same "prove it or say UNKNOWN" discipline D-027 already established.
+
+1. **New structural grounding, not new inference.** `CandidateProfileExtraction`
+   gains two optional lists: `skill_experience` (`SkillExperienceItem`:
+   skill name + `employment_index` into the same extraction's
+   `employment_history` + its own evidence) and `domain_experience`
+   (`DomainExperienceItem`: domain/sector label + optional
+   `employment_index` + evidence). `employment_index` is a 0-based
+   position into this extraction's own list, re-validated by a
+   `model_validator` on `CandidateProfileExtraction` — never a
+   free-floating id the model could point anywhere. An unlinked
+   `SkillItem` is unchanged and still valid; it simply has no
+   `SkillExperienceItem`, so its duration is provably UNKNOWN.
+2. **No migration.** `CandidateProfileVersion.profile_content` and
+   `JobCriteriaVersion.criteria` are both plain JSON columns. Both new
+   list fields default to `[]`, so a pre-Slice-3 row round-trips through
+   `CandidateProfileExtraction.model_validate` unchanged (regression test:
+   `test_pre_slice_3_profile_content_still_validates_backward_compatibly`).
+3. **Domain/sector evidence is explicit-only by construction — no
+   company-name mapping was built.** Issue #32 allows either "an accepted
+   deterministic/domain mapping" or "explicit extracted evidence"; this
+   slice implements only the latter, deliberately, rather than building
+   and maintaining a curated known-employer→sector table (higher risk,
+   heavier, and not required to close the gap). `meyar.core.domain_terms`
+   holds a small curated synonym table of unambiguous sector *descriptor*
+   phrases (e.g. "banking sector", "anti-money laundering", "AML") —
+   deliberately never a bare word that commonly appears inside an
+   unrelated proper noun (no bare "bank"/"banka" entry). Extraction
+   verification (`meyar.extraction.evidence.verify_extraction_evidence`)
+   independently re-checks that a `domain_experience` item's own cited
+   quotes contain one of these terms before the extraction can be
+   persisted — same terminal, no-retry failure discipline as a fabricated
+   evidence quote. Consequence: a company name alone (e.g. "ABC Bank
+   Holdings LLC" with no other sector language) can never produce a
+   domain claim; confirmed by
+   `test_scenario_g_extraction_rejects_domain_claim_without_explicit_term`
+   and `test_scenario_g_company_name_alone_never_yields_domain_evidence`.
+   `canonicalize_domain`/`domain_term_present` fold Azerbaijani diacritics
+   (`meyar.core.text.fold_az_ascii`, D-023's typing-variance discipline)
+   so "bankçılıq" and its plain-keyboard variant "bankcilik" compare
+   equal.
+4. **Two new `CriterionKind` values**, additive to the existing five:
+   `SKILL_EXPERIENCE` (skill + required `min_years`, e.g. "5 years Java" —
+   distinct from unscoped `EXPERIENCE`) and `DOMAIN_EXPERIENCE` (domain
+   presence, with optional `min_years`). Both go through `CriterionIn`'s
+   existing `_validate_not_sensitive` check unchanged, so a
+   `DOMAIN_EXPERIENCE`/`SKILL_EXPERIENCE` criterion can no more reference
+   a protected attribute than any other kind. This does not touch or
+   widen the frozen NL search fast path (D-031) — these are evaluation-
+   engine criterion kinds, not new search-planner phrase patterns.
+5. **Deterministic duration aggregation, never LLM-computed.**
+   `evaluate_skill_experience`/`evaluate_domain_experience`
+   (`meyar.evaluation.evaluators`) sum only `SkillExperienceItem`/
+   `DomainExperienceItem`-linked, date-parseable periods via a new
+   `merge_and_sum_years` (`meyar.evaluation.experience`) that merges
+   overlapping/adjacent ranges before summing — deliberately different
+   from `evaluate_experience`'s total-career EXPERIENCE evaluator, which
+   still flags any overlap as `CONFLICTING_EVIDENCE` (frozen, unchanged;
+   overlapping attributable periods for the *same skill* across two jobs
+   are a normal, legitimate shape — e.g. a full-time role and a
+   concurrent freelance project — not a data conflict). No linkage ->
+   `UNKNOWN` (`..._NO_ATTRIBUTABLE_PERIODS`), never 0 years and never
+   total career experience. Any linked-but-unparseable date ->
+   `UNKNOWN` (`..._DATES_UNPARSEABLE`) for both evaluators — deliberately
+   never `MANUAL_REVIEW_REQUIRED` (unlike `evaluate_experience`'s
+   unparseable-date case) per issue #32's explicit instruction that
+   unsupported per-skill/domain dates stay UNKNOWN. `evaluation_as_of_date`
+   remains the pre-existing explicit application-boundary parameter
+   (never a UI prompt, never the wall clock) for both new evaluators.
+6. **Agent surfacing (issue #32 item 7).** `meyar.agent.service`'s
+   `_EVIDENCE_CATEGORIES` (GET_CANDIDATE_EVIDENCE) and
+   `_build_profile_facts` (D-038 grounded-answer synthesis) both gained
+   `skill_experience`/`domain_experience` entries, so HR can retrieve and
+   have explained which attributable period(s) support a duration/domain
+   conclusion — the classic (non-agent) candidate-detail UI is
+   unchanged/out of scope, consistent with D-030's agent-first framing.
+7. **Prompt version bumped** `candidate-profile-extraction-v1` ->
+   `candidate-profile-extraction-v2` (materially new instructions on when
+   to populate the two new lists, including an explicit "do not infer
+   domain from an employer name" rule); `SCHEMA_VERSION`
+   (`candidate-profile-v1`) intentionally left unchanged since the JSON
+   shape is additive/backward-compatible, not a breaking format change.
+8. **Considered and declined:** a deterministic `find_prohibited_term`
+   scan on the new free-text `domain`/`skill_name` fields. Declined for
+   consistency, not oversight — every existing profile free-text field
+   (`SkillItem.name`, `EmploymentItem.title`, `ProjectItem.description`,
+   etc.) has exactly the same soft, prompt-level-only protection against
+   a hostile/malformed extraction containing a protected-attribute word;
+   the actual deterministic enforcement point is, and remains, at
+   criterion configuration (`CriterionIn._validate_not_sensitive`, which
+   `SKILL_EXPERIENCE`/`DOMAIN_EXPERIENCE` criteria already inherit
+   unchanged) — where a sensitive value could actually influence
+   matching/ranking, not in read-only extracted display text. Adding an
+   asymmetric guard only on the two new fields would suggest a partial
+   protection model without closing the equivalent pre-existing surface
+   on every other free-text field.
+
+**Why:** The agent (Slice 2/4) will be asked exactly these questions in
+ordinary HR conversation; shipping without closing this gap risks either
+silent fabrication (skill duration quietly computed from unrelated total
+experience) or a permanently-declining UX for a legitimately answerable
+question. The core rule throughout: a duration/domain claim is provable
+only when stored evidence supports both the subject and an attributable
+interval strongly enough for the deterministic layer to compute it —
+otherwise UNKNOWN, never guessed.
+
+**Reversibility:** Fully additive and migration-free. Removing
+`skill_experience`/`domain_experience` from `CandidateProfileExtraction`,
+the two new `CriterionKind` values, the two new evaluators, and the
+`meyar.core.domain_terms` module restores exactly the pre-Slice-3 shape;
+every pre-existing field, evaluator, and prompt instruction is untouched.
+No schema/data migration exists to roll back.

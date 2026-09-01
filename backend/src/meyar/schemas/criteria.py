@@ -170,6 +170,15 @@ class CriterionKind(StrEnum):
     CERTIFICATION = "CERTIFICATION"
     EDUCATION = "EDUCATION"
     LANGUAGE = "LANGUAGE"
+    # Slice 3 (issue #32): a duration claim scoped to one named skill (e.g.
+    # "5 years of Java") — distinct from EXPERIENCE, which is unscoped
+    # total career duration. Provable only from meyar.schemas.
+    # candidate_profile.SkillExperienceItem grounding; otherwise UNKNOWN.
+    SKILL_EXPERIENCE = "SKILL_EXPERIENCE"
+    # An explicit sector/domain claim (e.g. "banking", "AML"), optionally
+    # duration-scoped via min_years. Provable only from explicit
+    # DomainExperienceItem evidence, never inferred from an employer name.
+    DOMAIN_EXPERIENCE = "DOMAIN_EXPERIENCE"
 
 
 class CriterionType(StrEnum):
@@ -195,6 +204,22 @@ class CriterionIn(BaseModel):
             if self.min_years is None:
                 raise ValueError(
                     f"Criterion '{self.id}': kind EXPERIENCE requires min_years."
+                )
+        elif self.kind == CriterionKind.SKILL_EXPERIENCE:
+            if not self.value:
+                raise ValueError(
+                    f"Criterion '{self.id}': kind SKILL_EXPERIENCE requires a non-empty "
+                    "value (the skill name)."
+                )
+            if self.min_years is None:
+                raise ValueError(
+                    f"Criterion '{self.id}': kind SKILL_EXPERIENCE requires min_years."
+                )
+        elif self.kind == CriterionKind.DOMAIN_EXPERIENCE:
+            if not self.value:
+                raise ValueError(
+                    f"Criterion '{self.id}': kind DOMAIN_EXPERIENCE requires a non-empty "
+                    "value (the domain/sector name). min_years is optional."
                 )
         elif not self.value:
             raise ValueError(
