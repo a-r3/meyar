@@ -58,16 +58,30 @@ class SkillExperienceItem(BaseModel):
     period — the structural link SkillItem/EmploymentItem alone cannot
     express (root-caused in D-027; closed by issue #32). Populated only
     when the source text itself ties this specific skill to this specific
-    employment entry's dates (e.g. a bullet under that job, or "5 years of
-    Java at Company X"). A skill with no such link simply has no
+    employment entry (e.g. a bullet under that job, or "5 years of Java
+    at Company X"). A skill with no such link simply has no
     SkillExperienceItem — its duration then stays UNKNOWN, never
-    substituted with total career experience. `employment_index` is the
-    0-based position of the supporting entry in this same extraction's
-    `employment_history` list, re-validated below — never a free-floating
-    id the model could point anywhere."""
+    substituted with total career experience.
+
+    `employment_index` is the 0-based position of the supporting entry in
+    this same extraction's `employment_history` list, re-validated below
+    — never a free-floating id the model could point anywhere. It is
+    CONTEXT/PROVENANCE ONLY (which job this claim belongs to) — it must
+    never be used to derive the skill's own duration. `start_date`/
+    `end_date`/`is_current` are this item's OWN attributable interval,
+    stated independently: the same as the employment entry's dates ONLY
+    when the text says the skill was used for that whole job, and a
+    narrower sub-period (e.g. a 6-month project inside a 5-year job) when
+    that is what the text supports. Left null when no specific period for
+    the skill itself can be determined — the deterministic evaluator then
+    reports UNKNOWN rather than silently inheriting the full employment
+    period's span (see docs/DECISIONS.md)."""
 
     skill_name: str = Field(min_length=1, max_length=200)
     employment_index: int = Field(ge=0)
+    start_date: str | None = Field(default=None, max_length=50)
+    end_date: str | None = Field(default=None, max_length=50)
+    is_current: bool = False
     evidence: list[EvidenceRef] = Field(min_length=1, max_length=10)
 
 
@@ -76,13 +90,21 @@ class DomainExperienceItem(BaseModel):
     inferred from an employer's name alone; extraction verification
     (meyar.extraction.evidence) independently checks the cited quotes
     contain an accepted, unambiguous domain/sector term before this can be
-    persisted. `employment_index` is optional: set only when the text also
-    ties the domain to one specific attributable period (enabling
-    deterministic duration reasoning); otherwise the domain is known but
-    its duration stays UNKNOWN."""
+    persisted.
+
+    `employment_index` is optional CONTEXT/PROVENANCE ONLY — set when the
+    text also ties the domain to one specific job, but never used to
+    derive duration by itself. `start_date`/`end_date`/`is_current` are
+    this claim's OWN attributable interval (same rules as
+    SkillExperienceItem above): left null when no specific period is
+    stated, in which case the domain is known but its duration stays
+    UNKNOWN rather than inheriting a linked employment entry's full span."""
 
     domain: str = Field(min_length=1, max_length=100)
     employment_index: int | None = Field(default=None, ge=0)
+    start_date: str | None = Field(default=None, max_length=50)
+    end_date: str | None = Field(default=None, max_length=50)
+    is_current: bool = False
     evidence: list[EvidenceRef] = Field(min_length=1, max_length=10)
 
 

@@ -3098,3 +3098,74 @@ the two new `CriterionKind` values, the two new evaluators, and the
 `meyar.core.domain_terms` module restores exactly the pre-Slice-3 shape;
 every pre-existing field, evaluator, and prompt instruction is untouched.
 No schema/data migration exists to roll back.
+
+**Correctness fix (same PR #41, pre-merge, 2026-09-02):** an owner final
+review caught a real bug in the shape above:
+`SkillExperienceItem`/`DomainExperienceItem.employment_index` pointed at
+an employment entry, and the evaluators computed duration from THAT
+ENTRY's own `start_date`/`end_date` — so a skill/domain claim linked to a
+5-year job automatically became "5 years," even when the source text only
+evidenced a 6-month sub-period within that job. This silently violated
+the slice's own core rule (an attributable interval must be
+evidence-backed for the specific claim, not inherited from context).
+
+Fix: `SkillExperienceItem`/`DomainExperienceItem` each gained their OWN
+`start_date`/`end_date`/`is_current` fields — the item's own attributable
+interval, stated independently of the linked entry. `employment_index`
+is now explicitly documented and enforced-by-construction (evaluators
+never read `profile.employment_history[item.employment_index].start_date`/
+`.end_date` for duration) as CONTEXT/PROVENANCE ONLY. Both evaluators now
+resolve the period from the item itself via the same `_resolve_period_years`
+helper (duck-typed, reused unchanged); an item with no declared interval
+at all is a new explicit case (`SKILL_DURATION_NO_ATTRIBUTABLE_INTERVAL`
+— hard block, since every `SkillExperienceItem` exists specifically to
+ground a duration; `DOMAIN_DURATION_NO_ATTRIBUTABLE_INTERVAL` — for
+domain, a presence-only claim with no interval is a normal, complete
+shape on its own, so a matched item lacking an interval is skipped, not
+blocking, and the whole result is UNKNOWN only if NO matched item ends up
+contributing any computable interval). Extraction prompt bumped again,
+`v2` -> `v3`, with explicit "state the skill/domain's OWN period, a
+narrower sub-period when that's what the text supports, never
+automatically the job's full span" instructions. Agent fact/evidence
+presentation (`meyar.agent.service._build_profile_facts`) updated to show
+the item's own interval as the "detail," never the linked entry's.
+Four new regression tests added directly from the owner's request: (1)
+5-year employment + a short, year-boundary-crossing attributable Java
+sub-period != 5 years Java; (2) a skill linked to an employment entry
+with no interval of its own -> UNKNOWN; (3) two explicit non-overlapping
+attributable Java intervals summing to exactly 5 years -> MATCH; (4) the
+domain evaluator follows the identical rule. All prior scenario A-H
+tests were also updated to set explicit per-item intervals (several
+deliberately reusing a WIDER linked employment entry than the item's own
+interval, so a passing test also proves attribution, not just
+duration-vs-total non-substitution).
+
+**Extraction-version/reprocessing finding:** confirmed there is, and was
+already, no automatic mechanism that reprocesses an existing
+`CandidateProfileVersion` when `PROMPT_VERSION` changes — this predates
+Slice 3 and is not a regression it introduced.
+`meyar.services.folder_reconciliation_service._process_candidate_document`
+only (re-)extracts "when not already COMPLETED for this document" by
+design (its own docstring), and no API/UI route triggers extraction at
+all. The only existing re-extraction path is the operator-only CLI
+command `meyar extract-profile <tenant_id> <candidate_id> <document_id>`
+(`meyar/cli.py`), which unconditionally calls `extract_candidate_profile`
+and always inserts a new version row regardless of an existing COMPLETED
+version (`create_profile_version`'s own docstring: "a re-extraction
+always creates the next version_number" — verified live by the existing
+`test_reextraction_creates_v2_and_leaves_v1_unchanged` regression). So
+Slice 3 is not new-CVs-only in the sense that operators CAN retroactively
+backfill `skill_experience`/`domain_experience` grounding onto any
+existing candidate by re-running that CLI command per candidate/document
+— it is new-CVs-automatic-only: nothing re-extracts existing candidates
+by itself. A pre-existing candidate simply keeps returning UNKNOWN for
+any `SKILL_EXPERIENCE`/`DOMAIN_EXPERIENCE` criterion (safe — never a
+fabricated/inherited duration) until someone explicitly re-extracts it.
+Building automatic bulk reprocessing keyed off a `PROMPT_VERSION`/
+`SCHEMA_VERSION` mismatch was explicitly out of scope for this pass (no
+prior prompt-version bump in this codebase's history has ever had one
+either — including the v1->v2 bump earlier in this same slice) and would
+be a genuinely new operational feature, not a "smallest correct fix";
+recorded here as a known, deliberate limitation rather than left
+undocumented. `SCHEMA_VERSION` remains `candidate-profile-v1` for the
+same additive/backward-compatible reasoning as the original entry above.

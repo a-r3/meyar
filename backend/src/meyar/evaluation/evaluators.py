@@ -247,6 +247,14 @@ def _resolve_period_years(
     return (start_year, end_year)
 
 
+def _has_declared_interval(item) -> bool:  # noqa: ANN001 - duck-typed skill/domain item
+    """True only when the item's OWN start_date/end_date/is_current say
+    something — never a proxy for its linked employment entry. See
+    docs/DECISIONS.md: employment_index is context/provenance only and
+    must never be used to derive a skill/domain's duration."""
+    return item.start_date is not None or item.end_date is not None or item.is_current
+
+
 def evaluate_skill_experience(
     criterion: CriterionIn,
     profile: CandidateProfileExtraction,
@@ -254,9 +262,12 @@ def evaluate_skill_experience(
     evaluation_as_of_date: date,
 ) -> CriterionResult:
     """A duration claim scoped to ONE named skill (e.g. "5 years Java") —
-    provable ONLY via explicit SkillExperienceItem grounding, never via
-    total career experience or an unlinked SkillItem. See issue #32 core
-    rule: subject + attributable interval, or UNKNOWN."""
+    provable ONLY from the SkillExperienceItem's OWN attributable
+    start_date/end_date/is_current, never via total career experience, an
+    unlinked SkillItem, or the linked employment entry's full period
+    (employment_index is context/provenance only — see
+    SkillExperienceItem's docstring and docs/DECISIONS.md). See issue #32
+    core rule: subject + attributable interval, or UNKNOWN."""
     target = normalize_skill_name(criterion.value or "")
     linked = [
         item
@@ -268,24 +279,34 @@ def evaluate_skill_experience(
             criterion,
             CRITERION_STATUS_UNKNOWN,
             "SKILL_DURATION_NO_ATTRIBUTABLE_PERIODS",
-            f"No attributable employment period links required skill "
-            f"'{criterion.value}' to a specific date range; duration cannot be computed.",
+            f"No attributable period links required skill '{criterion.value}' to a "
+            "specific date range; duration cannot be computed.",
         )
 
     ranges: list[tuple[int, int]] = []
     evidence: list[EvidenceRef] = []
     for item in linked:
         entry = profile.employment_history[item.employment_index]
-        period = _resolve_period_years(entry, evaluation_as_of_date=evaluation_as_of_date)
+        if not _has_declared_interval(item):
+            return _finalize(
+                criterion,
+                CRITERION_STATUS_UNKNOWN,
+                "SKILL_DURATION_NO_ATTRIBUTABLE_INTERVAL",
+                f"Skill '{criterion.value}' is linked to employment entry "
+                f"'{entry.title}' for context, but no explicit attributable "
+                "start/end was stated for the skill itself — the full employment "
+                "period is never used as a substitute; duration cannot be computed.",
+                evidence=item.evidence + entry.evidence,
+            )
+        period = _resolve_period_years(item, evaluation_as_of_date=evaluation_as_of_date)
         if period is None:
             return _finalize(
                 criterion,
                 CRITERION_STATUS_UNKNOWN,
                 "SKILL_DURATION_DATES_UNPARSEABLE",
-                f"An attributable period for skill '{criterion.value}' (entry "
-                f"'{entry.title}') has dates that cannot be reliably parsed "
-                f"(start='{entry.start_date}', end='{entry.end_date}'); duration "
-                "cannot be computed.",
+                f"The attributable period stated for skill '{criterion.value}' "
+                f"(start='{item.start_date}', end='{item.end_date}') cannot be "
+                "reliably parsed; duration cannot be computed.",
                 evidence=item.evidence + entry.evidence,
             )
         ranges.append(period)
@@ -325,8 +346,10 @@ def evaluate_domain_experience(
     only against DomainExperienceItem entries whose evidence already
     passed the extraction-time explicit-term check (never inferred from
     an employer name — see meyar.core.domain_terms). min_years is
-    optional: when set, only attributable (dated) linked periods count
-    toward it."""
+    optional: when set, duration comes ONLY from a matched item's OWN
+    attributable start_date/end_date/is_current — never from a linked
+    employment entry's full period (employment_index is context/
+    provenance only)."""
     target = canonicalize_domain(criterion.value or "")
     matches = [
         item for item in profile.domain_experience if canonicalize_domain(item.domain) == target
@@ -355,10 +378,16 @@ def evaluate_domain_experience(
     ranges: list[tuple[int, int]] = []
     duration_evidence: list[EvidenceRef] = list(presence_evidence)
     for item in matches:
-        if item.employment_index is None:
+        if not _has_declared_interval(item):
+            # Unlike SKILL_EXPERIENCE (where every item exists specifically
+            # to ground a duration), a presence-only domain claim with no
+            # interval is a normal, complete shape on its own — it simply
+            # doesn't contribute to the duration sum. Skipping never
+            # fabricates (only ever under-counts); UNKNOWN is still
+            # returned below if no matched item ends up contributing any
+            # computable interval at all.
             continue
-        entry = profile.employment_history[item.employment_index]
-        period = _resolve_period_years(entry, evaluation_as_of_date=evaluation_as_of_date)
+        period = _resolve_period_years(item, evaluation_as_of_date=evaluation_as_of_date)
         if period is None:
             # An attributed-but-unparseable period makes the duration claim
             # not fully provable — UNKNOWN, never a possibly-undercounted
@@ -367,22 +396,22 @@ def evaluate_domain_experience(
                 criterion,
                 CRITERION_STATUS_UNKNOWN,
                 "DOMAIN_DURATION_DATES_UNPARSEABLE",
-                f"An attributable period for domain/sector '{criterion.value}' (entry "
-                f"'{entry.title}') has dates that cannot be reliably parsed "
-                f"(start='{entry.start_date}', end='{entry.end_date}'); duration "
-                "cannot be computed.",
-                evidence=item.evidence + entry.evidence,
+                f"The attributable period stated for domain/sector '{criterion.value}' "
+                f"(start='{item.start_date}', end='{item.end_date}') cannot be reliably "
+                "parsed; duration cannot be computed.",
+                evidence=item.evidence,
             )
         ranges.append(period)
-        duration_evidence.extend(entry.evidence)
+        duration_evidence.extend(item.evidence)
 
     if not ranges:
         return _finalize(
             criterion,
             CRITERION_STATUS_UNKNOWN,
-            "DOMAIN_DURATION_NO_ATTRIBUTABLE_PERIODS",
+            "DOMAIN_DURATION_NO_ATTRIBUTABLE_INTERVAL",
             f"Profile has explicit '{criterion.value}' domain/sector evidence but no "
-            "attributable dated period to compute duration.",
+            "attributable dated period to compute duration — a linked employment "
+            "entry's full period is never used as a substitute.",
             evidence=presence_evidence,
         )
 

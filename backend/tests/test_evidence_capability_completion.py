@@ -58,6 +58,51 @@ def _evidence(quote: str) -> list[dict]:
     return [{"page": 1, "block_index": 0, "quote": quote}]
 
 
+def _skill_exp(
+    skill: str,
+    employment_index: int,
+    quote: str,
+    *,
+    start: str | None = None,
+    end: str | None = None,
+    is_current: bool = False,
+) -> dict:
+    """A skill_experience item. start/end/is_current are the item's OWN
+    attributable interval — deliberately independent of the linked
+    employment entry's dates (employment_index is context/provenance
+    only; see docs/DECISIONS.md). Omitting start/end/is_current entirely
+    models "linked but no attributable interval was ever stated"."""
+    return {
+        "skill_name": skill,
+        "employment_index": employment_index,
+        "start_date": start,
+        "end_date": end,
+        "is_current": is_current,
+        "evidence": _evidence(quote),
+    }
+
+
+def _domain_exp(
+    domain: str,
+    employment_index: int | None,
+    quote: str,
+    *,
+    start: str | None = None,
+    end: str | None = None,
+    is_current: bool = False,
+) -> dict:
+    """A domain_experience item — same own-interval discipline as
+    _skill_exp above."""
+    return {
+        "domain": domain,
+        "employment_index": employment_index,
+        "start_date": start,
+        "end_date": end,
+        "is_current": is_current,
+        "evidence": _evidence(quote),
+    }
+
+
 def _employment(
     index_note: str, start: str, end: str | None = None, is_current: bool = False
 ) -> dict:
@@ -98,16 +143,12 @@ def test_scenario_a_provable_skill_years_across_two_periods_satisfies_criterion(
                 _employment("B", "2019", "2022"),
             ],
             skill_experience=[
-                {
-                    "skill_name": "Java",
-                    "employment_index": 0,
-                    "evidence": _evidence("Java backend work 2015-2018"),
-                },
-                {
-                    "skill_name": "Java",
-                    "employment_index": 1,
-                    "evidence": _evidence("Java backend work 2019-2022"),
-                },
+                _skill_exp(
+                    "Java", 0, "Java backend work 2015-2018", start="2015", end="2018"
+                ),
+                _skill_exp(
+                    "Java", 1, "Java backend work 2019-2022", start="2019", end="2022"
+                ),
             ],
         )
     )
@@ -134,11 +175,9 @@ def test_scenario_b_total_experience_never_substitutes_for_skill_duration() -> N
                 _employment("C", "2022", "2024"),  # 2 yrs, no Java
             ],
             skill_experience=[
-                {
-                    "skill_name": "Java",
-                    "employment_index": 1,
-                    "evidence": _evidence("Java backend work 2020-2022"),
-                },
+                _skill_exp(
+                    "Java", 1, "Java backend work 2020-2022", start="2020", end="2022"
+                ),
             ],
         )
     )
@@ -191,26 +230,22 @@ def test_scenario_c_skill_with_no_attributable_period_is_unknown_not_zero_or_tot
 def test_scenario_c_unparseable_linked_dates_also_stay_unknown_not_manual_review() -> None:
     """Distinct from evaluate_experience (MANUAL_REVIEW_REQUIRED on
     unparseable total-career dates) — issue #32 explicitly requires
-    unsupported per-skill dates to stay UNKNOWN."""
+    unsupported per-skill dates to stay UNKNOWN. The employment entry
+    itself has clean, parseable dates (2016-2024) — proving the evaluator
+    never falls back to the entry's dates when the SKILL's own declared
+    interval is what's garbled."""
     profile = CandidateProfileExtraction.model_validate(
         _profile(
             skills=[{"name": "Java", "category": None, "evidence": _evidence("Java")}],
-            employment_history=[
-                {
-                    "title": "Engineer",
-                    "organization": "Acme",
-                    "start_date": "sometime",
-                    "end_date": "later",
-                    "is_current": False,
-                    "evidence": _evidence("Engineer sometime - later"),
-                }
-            ],
+            employment_history=[_employment("A", "2016", "2024")],
             skill_experience=[
-                {
-                    "skill_name": "Java",
-                    "employment_index": 0,
-                    "evidence": _evidence("Java work at Acme"),
-                }
+                _skill_exp(
+                    "Java",
+                    0,
+                    "Java work at Acme, sometime - later",
+                    start="sometime",
+                    end="later",
+                )
             ],
         )
     )
@@ -227,24 +262,29 @@ def test_scenario_c_unparseable_linked_dates_also_stay_unknown_not_manual_review
 
 
 def test_scenario_d_overlapping_skill_periods_not_double_counted() -> None:
+    """Employment entries are deliberately WIDER than the skill's own
+    attributable intervals (2015-2023 and 2019-2023), so a passing test
+    here also proves attribution: only the item's own dates (2018-2022,
+    2020-2021 — one fully nested in the other) drive the sum, not the
+    entries' own wider spans."""
     profile = CandidateProfileExtraction.model_validate(
         _profile(
             skills=[{"name": "Java", "category": None, "evidence": _evidence("Java")}],
             employment_history=[
-                _employment("FullTime", "2018", "2022"),  # 4 yrs
-                _employment("Freelance", "2020", "2021"),  # fully inside the above
+                _employment("FullTime", "2015", "2023"),
+                _employment("Freelance", "2019", "2023"),
             ],
             skill_experience=[
-                {
-                    "skill_name": "Java",
-                    "employment_index": 0,
-                    "evidence": _evidence("Java at full-time job 2018-2022"),
-                },
-                {
-                    "skill_name": "Java",
-                    "employment_index": 1,
-                    "evidence": _evidence("Java freelance 2020-2021"),
-                },
+                _skill_exp(
+                    "Java",
+                    0,
+                    "Java at full-time job 2018-2022",
+                    start="2018",
+                    end="2022",
+                ),
+                _skill_exp(
+                    "Java", 1, "Java freelance 2020-2021", start="2020", end="2021"
+                ),
             ],
         )
     )
@@ -264,6 +304,159 @@ def test_scenario_d_overlapping_skill_periods_not_double_counted() -> None:
     assert over_result.status == CRITERION_STATUS_NOT_MATCHED
 
 
+# --- Duration attribution: a linked employment record's full span must ---
+# --- never be inherited as the skill/domain's own duration ---------------
+
+
+def test_regression_1_narrow_skill_evidence_inside_wide_employment_never_inherits_full_span() -> (
+    None
+):
+    """The exact counterexample from the owner's final correctness check:
+    employment 2020-2025 (5 years), Java evidence-backed only for a short
+    project spanning late 2023 into early 2024. This must NOT become
+    "5 years Java". (Date parsing is deliberately year-granularity only —
+    the same frozen `parse_year` used everywhere else in this engine — so
+    the project's dates are chosen to cross a calendar-year boundary,
+    giving a small but non-zero, exactly-computable attributable span.)"""
+    profile = CandidateProfileExtraction.model_validate(
+        _profile(
+            skills=[{"name": "Java", "category": None, "evidence": _evidence("Java")}],
+            employment_history=[_employment("A", "2020", "2025")],
+            skill_experience=[
+                _skill_exp(
+                    "Java",
+                    0,
+                    "Used Java on a short project from late 2023 into early 2024",
+                    start="2023-10",
+                    end="2024-02",
+                )
+            ],
+        )
+    )
+    five_year_result = evaluate_criterion(
+        _skill_experience_criterion("java5", "Java", 5.0),
+        profile,
+        evaluation_as_of_date=_AS_OF_DATE,
+    )
+    assert five_year_result.status == CRITERION_STATUS_NOT_MATCHED
+    assert five_year_result.reason_code == "SKILL_DURATION_INSUFFICIENT"
+    assert "Computed 1" in five_year_result.explanation  # 1 attributable year, never 5
+
+    one_year_result = evaluate_criterion(
+        _skill_experience_criterion("java1", "Java", 1.0),
+        profile,
+        evaluation_as_of_date=_AS_OF_DATE,
+    )
+    assert one_year_result.status == CRITERION_STATUS_MATCH  # the real, small, provable span
+
+
+def test_regression_2_skill_linked_to_employment_with_no_skill_interval_is_unknown() -> None:
+    """A skill_experience item that links to a real employment entry
+    (context/provenance) but declares no start_date/end_date/is_current of
+    its own must be UNKNOWN — never fall back to the employment entry's
+    dates."""
+    profile = CandidateProfileExtraction.model_validate(
+        _profile(
+            skills=[{"name": "Java", "category": None, "evidence": _evidence("Java")}],
+            employment_history=[_employment("A", "2015", "2025")],  # 10 provable-looking years
+            skill_experience=[
+                {
+                    "skill_name": "Java",
+                    "employment_index": 0,
+                    "evidence": _evidence("Java"),
+                    # no start_date/end_date/is_current at all
+                }
+            ],
+        )
+    )
+    result = evaluate_criterion(
+        _skill_experience_criterion("java5", "Java", 5.0),
+        profile,
+        evaluation_as_of_date=_AS_OF_DATE,
+    )
+    assert result.status == CRITERION_STATUS_UNKNOWN
+    assert result.reason_code == "SKILL_DURATION_NO_ATTRIBUTABLE_INTERVAL"
+
+
+def test_regression_3_explicit_five_plus_attributable_years_match() -> None:
+    """Two explicit, non-overlapping attributable Java intervals summing
+    to exactly 5 years satisfy a 5-year Java criterion."""
+    profile = CandidateProfileExtraction.model_validate(
+        _profile(
+            skills=[{"name": "Java", "category": None, "evidence": _evidence("Java")}],
+            employment_history=[
+                _employment("A", "2015", "2018"),
+                _employment("B", "2018", "2020"),
+            ],
+            skill_experience=[
+                _skill_exp("Java", 0, "Java 2015-2018", start="2015", end="2018"),
+                _skill_exp("Java", 1, "Java 2018-2020", start="2018", end="2020"),
+            ],
+        )
+    )
+    result = evaluate_criterion(
+        _skill_experience_criterion("java5", "Java", 5.0),
+        profile,
+        evaluation_as_of_date=_AS_OF_DATE,
+    )
+    assert result.status == CRITERION_STATUS_MATCH
+    assert result.reason_code == "SKILL_DURATION_SUFFICIENT"
+
+
+def test_regression_4_domain_duration_follows_the_same_attribution_rule() -> None:
+    """Domain mirror of regression 1: a 5-year employment record with AML
+    evidence backed by only a short attributable sub-period must NOT
+    become "5 years AML" (dates cross a calendar-year boundary for the
+    same year-granularity-parsing reason as regression 1)."""
+    profile = CandidateProfileExtraction.model_validate(
+        _profile(
+            employment_history=[_employment("Compliance", "2020", "2025")],
+            domain_experience=[
+                _domain_exp(
+                    "AML",
+                    0,
+                    "AML review engagement from late 2023 into early 2024",
+                    start="2023-10",
+                    end="2024-02",
+                )
+            ],
+        )
+    )
+    five_year_result = evaluate_criterion(
+        _domain_criterion("aml5", "AML", 5.0), profile, evaluation_as_of_date=_AS_OF_DATE
+    )
+    assert five_year_result.status == CRITERION_STATUS_NOT_MATCHED
+    assert five_year_result.reason_code == "DOMAIN_DURATION_INSUFFICIENT"
+    assert "Computed 1" in five_year_result.explanation  # 1 attributable year, never 5
+
+    one_year_result = evaluate_criterion(
+        _domain_criterion("aml1", "AML", 1.0), profile, evaluation_as_of_date=_AS_OF_DATE
+    )
+    assert one_year_result.status == CRITERION_STATUS_MATCH
+
+    # And a domain claim with no attributable interval at all, linked to
+    # a real (wide) employment entry, is UNKNOWN — never that entry's span.
+    no_interval_profile = CandidateProfileExtraction.model_validate(
+        _profile(
+            employment_history=[_employment("Compliance", "2015", "2025")],
+            domain_experience=[
+                {
+                    "domain": "AML",
+                    "employment_index": 0,
+                    "evidence": _evidence("AML"),
+                }
+            ],
+        )
+    )
+    no_interval_result = evaluate_criterion(
+        _domain_criterion("aml5", "AML", 5.0),
+        no_interval_profile,
+        evaluation_as_of_date=_AS_OF_DATE,
+    )
+    assert no_interval_result.status == CRITERION_STATUS_UNKNOWN
+    assert no_interval_result.reason_code == "DOMAIN_DURATION_NO_ATTRIBUTABLE_INTERVAL"
+
+
 # --- Scenario E: open/current employment uses the explicit as-of date ----
 
 
@@ -273,11 +466,13 @@ def test_scenario_e_open_employment_uses_explicit_evaluation_date_deterministica
             skills=[{"name": "Java", "category": None, "evidence": _evidence("Java")}],
             employment_history=[_employment("Current", "2020", None, is_current=True)],
             skill_experience=[
-                {
-                    "skill_name": "Java",
-                    "employment_index": 0,
-                    "evidence": _evidence("Java, ongoing role since 2020"),
-                }
+                _skill_exp(
+                    "Java",
+                    0,
+                    "Java, ongoing role since 2020",
+                    start="2020",
+                    is_current=True,
+                )
             ],
         )
     )
@@ -304,11 +499,13 @@ def test_scenario_f_explicit_domain_evidence_matches() -> None:
         _profile(
             employment_history=[_employment("Compliance", "2019", "2023")],
             domain_experience=[
-                {
-                    "domain": "AML",
-                    "employment_index": 0,
-                    "evidence": _evidence("AML compliance analyst, anti-money laundering team"),
-                }
+                _domain_exp(
+                    "AML",
+                    0,
+                    "AML compliance analyst, anti-money laundering team, 2019-2023",
+                    start="2019",
+                    end="2023",
+                )
             ],
         )
     )
@@ -347,25 +544,20 @@ def test_scenario_f_banking_domain_synonym_and_typing_variance_matches() -> None
 def test_domain_duration_with_unparseable_linked_dates_stays_unknown() -> None:
     """Same discipline as the skill-duration evaluator: an attributed but
     unparseable period makes the duration claim not fully provable, so the
-    result is UNKNOWN — never a possibly-undercounted NOT_MATCHED."""
+    result is UNKNOWN — never a possibly-undercounted NOT_MATCHED. The
+    employment entry itself has clean dates, proving the evaluator never
+    falls back to them."""
     profile = CandidateProfileExtraction.model_validate(
         _profile(
-            employment_history=[
-                {
-                    "title": "Compliance Officer",
-                    "organization": "Acme",
-                    "start_date": "sometime",
-                    "end_date": "later",
-                    "is_current": False,
-                    "evidence": _evidence("Compliance Officer sometime - later"),
-                }
-            ],
+            employment_history=[_employment("Compliance", "2016", "2024")],
             domain_experience=[
-                {
-                    "domain": "AML",
-                    "employment_index": 0,
-                    "evidence": _evidence("AML compliance work"),
-                }
+                _domain_exp(
+                    "AML",
+                    0,
+                    "AML compliance work, sometime - later",
+                    start="sometime",
+                    end="later",
+                )
             ],
         )
     )
@@ -496,18 +688,14 @@ def test_scenario_h_agent_evidence_tool_surfaces_skill_and_domain_grounding() ->
             skills=[{"name": "Java", "category": None, "evidence": _evidence("Java")}],
             employment_history=[_employment("A", "2019", "2023")],
             skill_experience=[
-                {
-                    "skill_name": "Java",
-                    "employment_index": 0,
-                    "evidence": _evidence("Java backend work 2019-2023"),
-                }
+                _skill_exp(
+                    "Java", 0, "Java backend work 2019-2023", start="2019", end="2023"
+                )
             ],
             domain_experience=[
-                {
-                    "domain": "AML",
-                    "employment_index": 0,
-                    "evidence": _evidence("AML compliance work"),
-                }
+                _domain_exp(
+                    "AML", 0, "AML compliance work 2019-2023", start="2019", end="2023"
+                )
             ],
         )
     )
@@ -525,26 +713,24 @@ def test_scenario_h_grounded_facts_include_attributable_period_detail() -> None:
 
     profile = CandidateProfileExtraction.model_validate(
         _profile(
-            employment_history=[_employment("A", "2019", "2023")],
+            employment_history=[_employment("A", "2015", "2025")],  # deliberately wider
             skill_experience=[
-                {
-                    "skill_name": "Java",
-                    "employment_index": 0,
-                    "evidence": _evidence("Java backend work 2019-2023"),
-                }
+                _skill_exp(
+                    "Java", 0, "Java backend work 2019-2023", start="2019", end="2023"
+                )
             ],
             domain_experience=[
-                {
-                    "domain": "AML",
-                    "employment_index": 0,
-                    "evidence": _evidence("AML compliance work"),
-                }
+                _domain_exp(
+                    "AML", 0, "AML compliance work 2019-2023", start="2019", end="2023"
+                )
             ],
         )
     )
     facts = _build_profile_facts(profile)
     skill_fact = next(f for f in facts if f.category == "skill_experience")
     assert "Java" in skill_fact.title
+    # The item's OWN attributable period (2019-2023), never the linked
+    # employment entry's wider span (2015-2025).
     assert skill_fact.detail == "2019 — 2023"
 
     domain_fact = next(f for f in facts if f.category == "domain_experience")

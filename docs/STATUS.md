@@ -846,8 +846,21 @@ lists, two new deterministic evaluators (`SKILL_EXPERIENCE`/
 attributable, date-parseable periods (merging overlaps, never
 double-counting), and agent evidence/fact surfacing for both. No
 migration (`profile_content`/`criteria` are JSON columns; both new lists
-default to empty, old rows validate unchanged). Extraction prompt bumped
-to `candidate-profile-extraction-v2`. See D-041.
+default to empty, old rows validate unchanged). An owner final-review pass
+caught and fixed a real bug before merge: a skill/domain claim's duration
+was being computed from its LINKED EMPLOYMENT ENTRY's full period rather
+than its own evidence-backed sub-interval (e.g. a 5-year job with only
+6 months of attributed Java evidence was wrongly becoming "5 years
+Java"). Fixed by giving `SkillExperienceItem`/`DomainExperienceItem` their
+own `start_date`/`end_date`/`is_current` — `employment_index` is now
+context/provenance only, never a duration source. Extraction prompt
+bumped again to `candidate-profile-extraction-v3`. Also confirmed (not a
+regression, pre-existing/unchanged): no automatic reprocessing exists for
+already-COMPLETED profiles on a prompt-version bump; the operator-only
+CLI `meyar extract-profile <tenant> <candidate> <document>` remains the
+only way to retroactively backfill this grounding onto a pre-Slice-3
+candidate — until then it safely reports UNKNOWN, never a fabricated/
+inherited duration. See D-041.
 
 **M8 Slice 2 — Read-Only Local AI Agent Foundation (#31)**: **MERGED as
 PR #40 (`c430518`, squash); issue #31 closed.** M8 Slice 1 (#30) merged as

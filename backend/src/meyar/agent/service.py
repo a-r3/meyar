@@ -405,9 +405,12 @@ def _build_profile_facts(profile: CandidateProfileExtraction) -> list[GroundedFa
                 return facts
 
     # skill_experience/domain_experience (issue #32) reference an
-    # employment_history index, so — unlike the categories above — their
-    # detail (the attributable period) is resolved here with `profile` in
-    # scope, rather than via a standalone item -> (title, detail) lambda.
+    # employment_history index for CONTEXT ONLY (which job the claim
+    # belongs to) — the detail shown here is always the item's OWN
+    # attributable start_date/end_date/is_current (via _employment_detail,
+    # duck-typed on those same three fields), never the linked employment
+    # entry's full period; that entry's dates must never be presented as
+    # if they were the skill/domain's own duration (see docs/DECISIONS.md).
     for item in profile.skill_experience:
         if len(facts) >= MAX_GROUNDED_FACTS:
             return facts
@@ -418,19 +421,19 @@ def _build_profile_facts(profile: CandidateProfileExtraction) -> list[GroundedFa
                 id=len(facts),
                 category="skill_experience",
                 title=title,
-                detail=_employment_detail(entry),
+                detail=_employment_detail(item),
             )
         )
 
     for item in profile.domain_experience:
         if len(facts) >= MAX_GROUNDED_FACTS:
             return facts
-        detail = None
-        if item.employment_index is not None:
-            detail = _employment_detail(profile.employment_history[item.employment_index])
         facts.append(
             GroundedFact(
-                id=len(facts), category="domain_experience", title=item.domain, detail=detail
+                id=len(facts),
+                category="domain_experience",
+                title=item.domain,
+                detail=_employment_detail(item),
             )
         )
 
