@@ -16,7 +16,6 @@ conversation's OWN server-held ``last_search_candidate_ids`` (see
 ``_resolve_candidate_ref``), so the model's own memory of what it was
 shown is never the authority for which candidate a tool call touches."""
 
-import re
 import uuid
 from datetime import date
 
@@ -35,8 +34,9 @@ from meyar.agent.schemas import (
     AgentTurnOutcome,
     AgentTurnResult,
     EvidenceMatchItem,
-    GroundedAnswer,
+    GroundedCaveat,
     GroundedFact,
+    GroundedSelection,
 )
 from meyar.core.text import fold_az_ascii, normalize_azerbaijani_case
 from meyar.embedding.provider import EmbeddingProvider
@@ -164,7 +164,7 @@ async def _dispatch_profile(
 ) -> tuple[AgentToolResult, CandidateProfileExtraction | None]:
     """Returns (tool result, the raw validated profile when found) — the
     profile is handed back separately so run_agent_turn can build grounded
-    -answer facts (D-037) without a second, redundant DB fetch."""
+    -answer facts (D-037/D-038) without a second, redundant DB fetch."""
     assert decision.candidate_ref is not None
     candidate_id = _resolve_candidate_ref(
         last_search_candidate_ids=last_search_candidate_ids,
@@ -178,9 +178,7 @@ async def _dispatch_profile(
             ),
             None,
         )
-    version = await get_current_profile_version(
-        db, tenant_id=tenant_id, candidate_id=candidate_id
-    )
+    version = await get_current_profile_version(db, tenant_id=tenant_id, candidate_id=candidate_id)
     if (
         version is None
         or version.status != PROFILE_STATUS_COMPLETED
@@ -240,10 +238,10 @@ _EVIDENCE_CATEGORIES = (
     ),
     (
         "education",
-        lambda item: " ".join(
-            part for part in (item.degree, item.field_of_study) if part
-        )
-        or (item.institution or "Təhsil"),
+        lambda item: (
+            " ".join(part for part in (item.degree, item.field_of_study) if part)
+            or (item.institution or "Təhsil")
+        ),
     ),
     ("certifications", lambda item: item.name),
     ("languages", lambda item: item.language),
@@ -259,9 +257,10 @@ async def _dispatch_evidence(
     last_search_candidate_ids: list[str],
 ) -> tuple[AgentToolResult, CandidateProfileExtraction | None]:
     """Returns (tool result, the raw validated profile when found) — see
-    _dispatch_profile's docstring; the same profile backs D-037 grounded-
-    answer synthesis for both tools identically (never the raw evidence
-    quote text, which stays server-rendered-only, never model input)."""
+    _dispatch_profile's docstring; the same profile backs D-037/D-038
+    grounded-answer synthesis for both tools identically (never the raw
+    evidence quote text, which stays server-rendered-only, never model
+    input)."""
     assert decision.candidate_ref is not None
     candidate_id = _resolve_candidate_ref(
         last_search_candidate_ids=last_search_candidate_ids,
@@ -279,9 +278,7 @@ async def _dispatch_evidence(
             ),
             None,
         )
-    version = await get_current_profile_version(
-        db, tenant_id=tenant_id, candidate_id=candidate_id
-    )
+    version = await get_current_profile_version(db, tenant_id=tenant_id, candidate_id=candidate_id)
     if (
         version is None
         or version.status != PROFILE_STATUS_COMPLETED
@@ -351,16 +348,14 @@ async def _dispatch_evidence(
 
 
 # (category key, item -> (fact title, fact detail)) — the fact source
-# for D-037 grounded-answer synthesis. Deliberately built from the SAME
+# for D-038 grounded-answer synthesis. Deliberately built from the SAME
 # already-extracted, already-schema-validated CandidateProfileExtraction
 # fields _EVIDENCE_CATEGORIES above uses for topic matching — never raw
-# evidence.quote CV text, so the second-stage synthesis prompt's input
+# evidence.quote CV text, so the second-stage selection prompt's input
 # surface stays exactly as narrow as the rest of this module's (D-030/
-# D-031). "detail" carries the one place a real, grounded number can
-# legitimately come from (a date range) — see _validate_grounded_answer.
+# D-031).
 MAX_GROUNDED_FACTS = 30
 MAX_SYNTHESIS_ATTEMPTS = 2
-_NUMBER_RE = re.compile(r"\d+")
 
 
 def _employment_detail(item) -> str | None:  # noqa: ANN001 - profile item, no shared base type
@@ -394,69 +389,95 @@ _PROFILE_FACT_CATEGORIES = (
 
 def _build_profile_facts(profile: CandidateProfileExtraction) -> list[GroundedFact]:
     """Flattens a candidate's profile into a small, bounded, indexed fact
-    list for D-037 grounded-answer synthesis — the ONLY data the second
+    list for D-038 grounded-answer synthesis — the ONLY data the second
     model call ever sees about this candidate."""
     facts: list[GroundedFact] = []
     for category, fact_fn in _PROFILE_FACT_CATEGORIES:
         for item in getattr(profile, category):
             title, detail = fact_fn(item)
-            facts.append(
-                GroundedFact(id=len(facts), category=category, title=title, detail=detail)
-            )
+            facts.append(GroundedFact(id=len(facts), category=category, title=title, detail=detail))
             if len(facts) >= MAX_GROUNDED_FACTS:
                 return facts
     return facts
 
 
-def _validate_grounded_answer(
-    answer: GroundedAnswer, facts: list[GroundedFact]
-) -> str | None:
-    """Independently re-checks a model-produced GroundedAnswer against the
-    exact facts it was given — the model output is never trusted at face
-    value. Rejects (returns None, meaning "fall back to the deterministic
-    message") when: no fact was cited; a cited fact id was never actually
-    supplied; or the answer states a number that appears in none of the
-    supplied facts (the concrete, testable guard against an invented
-    duration/count — D-037)."""
-    if not answer.used_facts:
-        return None
+# category -> a fixed AZ clause template. Every span of the resulting
+# clause is EITHER one of these literal strings OR a verbatim
+# fact.title/fact.detail value — there is no channel through which
+# model-authored text can enter the rendered sentence, so an unsupported
+# non-numeric claim (e.g. "managed a team") is structurally impossible,
+# not merely checked-for (D-038; see docs/DECISIONS.md).
+def _render_fact_clause(fact: GroundedFact) -> str:
+    suffix = f" ({fact.detail})" if fact.detail else ""
+    if fact.category == "skills":
+        return f"{fact.title} bacarığı"
+    if fact.category == "employment_history":
+        return f"{fact.title}{suffix} mövqeyində çalışıb"
+    if fact.category == "education":
+        return f"{fact.title}{suffix} təhsili"
+    if fact.category == "certifications":
+        return f"{fact.title}{suffix} sertifikatı"
+    if fact.category == "languages":
+        return f"{fact.title}{suffix} dil bilgisi"
+    if fact.category == "projects":
+        return f"{fact.title} layihəsi"
+    return fact.title  # pragma: no cover - every real category is handled above
+
+
+def render_grounded_answer(selection: GroundedSelection, facts: list[GroundedFact]) -> str | None:
+    """Independently re-checks a model-produced GroundedSelection against
+    the exact facts it was given, then builds the displayed sentence
+    ENTIRELY server-side from those facts' own values — the model never
+    authors any part of the final text. Rejects (returns None, meaning
+    "fall back to the deterministic message") when a cited fact id was
+    never actually supplied, or when nothing was selected and no caveat
+    was set (nothing to say). See D-038."""
     valid_ids = {fact.id for fact in facts}
-    if not set(answer.used_facts).issubset(valid_ids):
+    if not set(selection.used_facts).issubset(valid_ids):
         return None
-    allowed_numbers: set[str] = set()
-    for fact in facts:
-        allowed_numbers.update(_NUMBER_RE.findall(fact.title))
-        if fact.detail:
-            allowed_numbers.update(_NUMBER_RE.findall(fact.detail))
-    answer_numbers = set(_NUMBER_RE.findall(answer.answer))
-    if not answer_numbers.issubset(allowed_numbers):
+    facts_by_id = {fact.id: fact for fact in facts}
+    seen: set[int] = set()
+    ordered_facts = []
+    for fact_id in selection.used_facts:
+        if fact_id in seen:
+            continue
+        seen.add(fact_id)
+        ordered_facts.append(facts_by_id[fact_id])
+    if not ordered_facts and selection.caveat is None:
         return None
-    return answer.answer
+
+    sentences: list[str] = []
+    if ordered_facts:
+        clauses = [_render_fact_clause(fact) for fact in ordered_facts]
+        sentences.append("Məlum faktlar: " + "; ".join(clauses) + ".")
+    if selection.caveat == GroundedCaveat.DURATION_NOT_PROVEN:
+        sentences.append("Mövcud sübut konkret müddəti göstərmir.")
+    return " ".join(sentences)
 
 
 async def _synthesize_grounded_answer(
     llm: LLMProvider, *, question: str, facts: list[GroundedFact]
 ) -> str | None:
-    """Returns a server-validated grounded answer, or None when synthesis
-    is unavailable/fails/doesn't validate — callers must treat None
-    exactly like "no model framing available" (the existing deterministic
-    fallback), never as a turn failure (D-036/D-037: a successful tool
+    """Returns a server-built grounded answer, or None when selection is
+    unavailable/fails/doesn't validate — callers must treat None exactly
+    like "no model framing available" (the existing deterministic
+    fallback), never as a turn failure (D-036/D-038: a successful tool
     result is never downgraded to an error because this optional step
     didn't pan out)."""
     if not facts:
         return None
     for attempt in range(1, MAX_SYNTHESIS_ATTEMPTS + 1):
         try:
-            answer, _provenance = await llm.synthesize_grounded_answer(
+            selection, _provenance = await llm.select_grounded_facts(
                 question=question, facts=facts, repair=attempt > 1
             )
         except ModelSchemaInvalidError:
             continue
         except (ModelTimeoutError, ModelUnavailableError, LLMProviderError):
             return None
-        validated = _validate_grounded_answer(answer, facts)
-        if validated is not None:
-            return validated
+        rendered = render_grounded_answer(selection, facts)
+        if rendered is not None:
+            return rendered
     return None
 
 
@@ -553,13 +574,9 @@ async def run_agent_turn(
         for attempt in range(1, MAX_DECISION_ATTEMPTS + 1):
             try:
                 decision, provenance = await llm.decide_agent_action(
-                    recent_turns=[
-                        (t["role"], t["text"]) for t in turns[-max_context_turns:]
-                    ],
+                    recent_turns=[(t["role"], t["text"]) for t in turns[-max_context_turns:]],
                     last_tool_result_summary=last_tool_summary,
-                    available_candidate_refs=list(
-                        range(1, len(last_search_candidate_ids) + 1)
-                    ),
+                    available_candidate_refs=list(range(1, len(last_search_candidate_ids) + 1)),
                     repair=attempt > 1,
                 )
                 break
@@ -713,7 +730,7 @@ async def run_agent_turn(
             # real model-authored FINAL_ANSWER message (guaranteed
             # non-None by AgentDecision's own shape validator). A
             # successful profile/evidence lookup has no model framing at
-            # all — instead, when found, attempt one bounded D-037
+            # all — instead, when found, attempt one bounded D-038
             # grounded-answer synthesis over this candidate's own facts;
             # a None result (unavailable, invalid, or ungrounded) falls
             # back to the existing deterministic message exactly as

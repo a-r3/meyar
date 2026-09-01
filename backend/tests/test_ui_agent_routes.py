@@ -366,8 +366,9 @@ async def test_get_candidate_profile_success_never_renders_empty_bubble(
     assert str(candidate.id) in response.text
 
 
-# --- D-037 regression tests: rendered-page assertions for a grounded
-# conversational explanation of a specific candidate's experience. ---
+# --- D-038 regression tests: rendered-page assertions for a grounded
+# conversational explanation of a specific candidate's experience, where
+# the server (not the model) authors every span of factual text. ---
 
 
 async def test_grounded_explanation_renders_as_meaningful_answer_with_evidence(
@@ -380,7 +381,7 @@ async def test_grounded_explanation_renders_as_meaningful_answer_with_evidence(
     must show (1) a meaningful assistant explanation, (2) relevant
     grounded evidence, (3) an optional 'Tam profilə bax' link — not
     merely a generic framing sentence plus a full-profile dump."""
-    from meyar.agent.schemas import GroundedAnswer
+    from meyar.agent.schemas import GroundedSelection
 
     tenant, user, password, _membership = tenant_and_user
     profile_content = {
@@ -418,19 +419,80 @@ async def test_grounded_explanation_renders_as_meaningful_answer_with_evidence(
     )
 
     # facts: 0 = Python skill, 1 = Backend Developer employment (detail "2020 — hazırda davam edir")
-    explanation = "Namizəd 2020-ci ildən Backend Developer olaraq çalışıb və Python bilir."
     fake_profile = FakeLLMProvider(
         agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1),
-        grounded_answer=GroundedAnswer(answer=explanation, used_facts=[0, 1]),
+        grounded_selection=GroundedSelection(used_facts=[1, 0]),
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake_profile
     response = await client.post(
         "/ui/agent", data={"message": "birincinin təcrübəsini izah et", "csrf_token": csrf}
     )
     assert response.status_code == 200
-    assert explanation in response.text
+    assert "Backend Developer" in response.text
     assert "Bacarıqlar" in response.text  # supporting evidence cards still present
     assert f"/ui/candidates/{candidate.id}" in response.text  # optional "Tam profilə bax"
+
+
+async def test_grounded_explanation_never_contains_unsupported_claim_over_http(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
+) -> None:
+    """End-to-end version of the owner-reported vulnerability: even a
+    GroundedSelection over a real employment fact can never render
+    'managed a team' or any other predicate the fact doesn't state —
+    there is no field for the model to author it in."""
+    from meyar.agent.schemas import GroundedSelection
+
+    tenant, user, password, _membership = tenant_and_user
+    profile_content = {
+        **_profile("Python"),
+        "employment_history": [
+            {
+                "title": "Data Analyst",
+                "organization": "Caspian Analytics",
+                "start_date": "2021",
+                "end_date": "2025",
+                "is_current": False,
+                "evidence": [{"page": 1, "block_index": 0, "quote": "Synthetic evidence"}],
+            }
+        ],
+    }
+    candidate, _pv = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=profile_content
+    )
+    await db_session.commit()
+
+    fake_search = FakeLLMProvider(
+        planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
+        agent_decisions=[
+            AgentDecision(
+                action=AgentActionType.SEARCH_CANDIDATES,
+                search_query="Python bilən namizədləri göstər",
+            ),
+            AgentDecision(action=AgentActionType.FINAL_ANSWER, message="Budur nəticələr."),
+        ],
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake_search
+    csrf = await _login_and_csrf(client, user.username, password)
+    await client.post(
+        "/ui/agent", data={"message": "Python bilən namizədləri göstər", "csrf_token": csrf}
+    )
+
+    fake_profile = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1),
+        grounded_selection=GroundedSelection(used_facts=[1]),  # the employment fact
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake_profile
+    response = await client.post(
+        "/ui/agent", data={"message": "birincinin təcrübəsini izah et", "csrf_token": csrf}
+    )
+    assert response.status_code == 200
+    assert "Data Analyst" in response.text
+    assert "2021" in response.text and "2025" in response.text
+    for forbidden in ("managed", "team", "komanda", "rəhbərlik"):
+        assert forbidden not in response.text.casefold()
 
 
 async def test_grounded_explanation_never_leaks_identity_to_model(
@@ -472,11 +534,11 @@ async def test_grounded_explanation_never_leaks_identity_to_model(
     )
     await db_session.commit()
 
-    from meyar.agent.schemas import GroundedAnswer
+    from meyar.agent.schemas import GroundedSelection
 
     fake_profile = FakeLLMProvider(
         agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1),
-        grounded_answer=GroundedAnswer(answer="Namizəd Python bilir.", used_facts=[0]),
+        grounded_selection=GroundedSelection(used_facts=[0]),
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake_profile
     csrf = await _login_and_csrf(client, user.username, password)

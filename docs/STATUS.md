@@ -211,8 +211,27 @@ migration), `scripts/scan-tracked-tree.sh` clean; the new `GroundedAnswer`
 schema was independently spot-checked against a real local Ollama daemon
 to rule out a repeat of D-035's `maxLength` failure mode (none found — a
 slow response on this memory-constrained dev box, not a schema defect).
-Pushed to PR #40. **Still not merged — awaiting owner conversational
-retest.**
+Pushed to PR #40. Owner factuality review then found D-037's free-text
+`GroundedAnswer.answer` field could not prevent an unsupported
+NON-numeric claim (e.g. "he managed a team" from a fact that only states
+role/company/dates) — D-037's validation only checked cited fact ids and
+numbers, never qualitative content. Fixed — see D-038:
+`GroundedAnswer` is replaced by `GroundedSelection` (`used_facts` +
+a single closed-enum `caveat`, no free-text field at all — `extra=
+"forbid"` makes adding one a validation error); the model only selects/
+orders which already-supplied facts are relevant, and
+`render_grounded_answer` builds the entire displayed sentence
+server-side from fixed per-category AZ templates applied to those facts'
+own verbatim values — there is structurally no channel for an
+unsupported claim (numeric or not) to appear, not merely a check that
+usually catches one. Verified live against a real Ollama daemon (no
+schema-crash regression) and rendered exactly as expected. 11 new/rewritten
+regression tests (8 service-level including a structural schema test
+proving the vulnerability class is closed, 3 HTTP-level). Quality gates:
+`ruff` clean, `mypy src` clean, full `pytest` suite 778 passed / 0 failed
+(up from 765), `alembic heads` unchanged (no migration),
+`scripts/scan-tracked-tree.sh` clean. Pushed to PR #40. **Still not
+merged — awaiting owner retest.**
 
 GitHub remote established (`https://github.com/a-r3/meyar.git`, private,
 temporary development remote — see D-012, `docs/DECISIONS.md`). `main`

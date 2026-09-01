@@ -6,11 +6,11 @@ from pydantic import ValidationError
 
 from meyar.agent.prompts import (
     AGENT_SYSTEM_PROMPT,
-    GROUNDED_ANSWER_SYSTEM_PROMPT,
+    GROUNDED_SELECTION_SYSTEM_PROMPT,
     build_agent_user_prompt,
-    build_grounded_answer_user_prompt,
+    build_grounded_selection_user_prompt,
 )
-from meyar.agent.schemas import AgentDecision, GroundedAnswer, GroundedFact
+from meyar.agent.schemas import AgentDecision, GroundedFact, GroundedSelection
 from meyar.extraction.identity_prompts import IDENTITY_SYSTEM_PROMPT
 from meyar.extraction.prompts import SYSTEM_PROMPT, build_user_prompt
 from meyar.extraction.view import ProfessionalDocumentView
@@ -107,9 +107,7 @@ class OllamaLLMProvider:
     ) -> tuple[PlannerDraft, LLMResultProvenance]:
         content, provenance = await self._chat(
             system_prompt=SEARCH_PLANNER_SYSTEM_PROMPT,
-            user_prompt=build_search_planner_user_prompt(
-                natural_language_request, repair=repair
-            ),
+            user_prompt=build_search_planner_user_prompt(natural_language_request, repair=repair),
             schema=PlannerDraft.model_json_schema(),
         )
         try:
@@ -146,29 +144,29 @@ class OllamaLLMProvider:
             ) from exc
         return decision, provenance
 
-    async def synthesize_grounded_answer(
+    async def select_grounded_facts(
         self,
         *,
         question: str,
         facts: list[GroundedFact],
         repair: bool = False,
-    ) -> tuple[GroundedAnswer, LLMResultProvenance]:
+    ) -> tuple[GroundedSelection, LLMResultProvenance]:
         content, provenance = await self._chat(
-            system_prompt=GROUNDED_ANSWER_SYSTEM_PROMPT,
-            user_prompt=build_grounded_answer_user_prompt(
+            system_prompt=GROUNDED_SELECTION_SYSTEM_PROMPT,
+            user_prompt=build_grounded_selection_user_prompt(
                 question=question,
                 facts=[fact.model_dump() for fact in facts],
                 repair=repair,
             ),
-            schema=GroundedAnswer.model_json_schema(),
+            schema=GroundedSelection.model_json_schema(),
         )
         try:
-            answer = GroundedAnswer.model_validate(json.loads(content))
+            selection = GroundedSelection.model_validate(json.loads(content))
         except (json.JSONDecodeError, ValidationError) as exc:
             raise ModelSchemaInvalidError(
-                "Model output failed GroundedAnswer structured-schema validation."
+                "Model output failed GroundedSelection structured-schema validation."
             ) from exc
-        return answer, provenance
+        return selection, provenance
 
     async def _chat(
         self, *, system_prompt: str, user_prompt: str, schema: dict

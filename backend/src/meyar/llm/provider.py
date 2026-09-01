@@ -2,7 +2,7 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel, Field
 
-from meyar.agent.schemas import AgentDecision, GroundedAnswer, GroundedFact
+from meyar.agent.schemas import AgentDecision, GroundedFact, GroundedSelection
 from meyar.extraction.view import ProfessionalDocumentView
 from meyar.schemas.candidate_identity import CandidateIdentityExtraction
 from meyar.schemas.candidate_profile import CandidateProfileExtraction
@@ -86,20 +86,22 @@ class LLMProvider(Protocol):
         single bounded repair prompt, mirroring plan_candidate_search."""
         ...
 
-    async def synthesize_grounded_answer(
+    async def select_grounded_facts(
         self,
         *,
         question: str,
         facts: list[GroundedFact],
         repair: bool = False,
-    ) -> tuple[GroundedAnswer, "LLMResultProvenance"]:
-        """One bounded, narrow synthesis call for Slice 2's D-037 grounded
+    ) -> tuple[GroundedSelection, "LLMResultProvenance"]:
+        """One bounded, narrow selection call for Slice 2's D-038 grounded
         profile/evidence explanation (meyar.agent.service). ``facts`` is
         the exact, already-fetched, already-tenant-scoped fact list the
-        answer may draw from — never raw CV text, never identity. The
-        caller independently re-validates the returned GroundedAnswer
-        against ``facts`` before ever trusting it; this method itself only
-        guarantees schema shape, not factual grounding."""
+        model may select from — never raw CV text, never identity. The
+        model authors no sentence text at all: the caller independently
+        re-validates the returned GroundedSelection's fact ids against
+        ``facts`` and builds the actual displayed sentence itself
+        (meyar.agent.service.render_grounded_answer) — this method only
+        guarantees schema shape, never factual content."""
         ...
 
     async def health(self) -> dict:

@@ -2772,3 +2772,67 @@ one new provider method, two new schemas (`GroundedFact`,
 beyond how `message` is now sometimes populated. Deleting the
 `_synthesize_grounded_answer` call site restores the exact D-036
 behavior (deterministic fallback only) with no other change required.
+
+## D-038 — Slice 2 factuality hardening: the server, not the model, is
+authoritative over every span of factual text in a grounded answer
+
+**Date:** 2026-09-02
+**Decision:** Owner review of D-037's `GroundedAnswer.answer` free-text
+field found it could not prevent an unsupported NON-numeric claim: given
+only the fact "Data Analyst at Caspian Analytics, 2021–2025", the model
+could still write "He managed a team there" — a predicate absent from
+every supplied fact — and D-037's validation (fact-id citation + numeric
+grounding) would not catch it, since it never inspected qualitative
+content at all. Fixed by removing the model's ability to author sentence
+text altogether, not by trying to detect bad prose after the fact (which
+would need an LLM judge — explicitly out of bounds):
+
+1. **`GroundedAnswer` (D-037) is replaced by `GroundedSelection`
+   (`used_facts: list[int]`, `caveat: GroundedCaveat | None`).** There is
+   no `answer` field, no free-text field of any kind — `extra="forbid"`
+   makes attempting to add one a validation error, not merely a policy
+   ask. The model's only two levers are: which already-supplied
+   `GroundedFact` ids are relevant (and in what order to lead with them),
+   and whether to flag `DURATION_NOT_PROVEN` — a single, fixed,
+   non-extensible caveat enum member (mirroring the D-027 skill-duration
+   precedent), never a free-text caveat.
+2. **`meyar.agent.service.render_grounded_answer` builds the entire
+   displayed sentence server-side** from `_render_fact_clause` — one
+   fixed AZ template per `GroundedFact.category` — applied to the
+   selected facts' own `title`/`detail` values, joined in the model's
+   chosen order. Every span of the resulting string is either one of a
+   small number of hand-authored template phrases or a verbatim value
+   already sourced from the same already-schema-validated
+   `CandidateProfileExtraction` fields the rest of this module treats as
+   trusted (D-030/D-031) — there is structurally no channel through
+   which "managed a team," an invented duration, or any other
+   unsupported predicate could appear. This is checked, not just argued:
+   `test_render_grounded_answer_never_contains_unsupported_claim` and an
+   HTTP-level equivalent assert the literal absence of such words from
+   real rendered output over the exact reported repro facts.
+3. **Validation surface shrinks accordingly.** `render_grounded_answer`
+   only re-checks that every selected id was actually supplied (D-037's
+   fact-existence check, kept unchanged) — the D-037 numeric-hallucination
+   regex is deleted outright, because it is now structurally impossible
+   for a number to appear in the answer that didn't already come from a
+   fact's own `title`/`detail`.
+4. **Failure handling, scope, PII/CV boundary, and the bounded two-attempt
+   repair mechanism are all unchanged from D-037** — an unrenderable
+   selection (no facts, no caveat, or an invalid id) still falls back to
+   the existing D-036 deterministic message, never a turn failure; only
+   `GET_CANDIDATE_PROFILE`/`GET_CANDIDATE_EVIDENCE` are affected;
+   `SEARCH_CANDIDATES`, scoring, planner regex, and navigation are
+   untouched.
+
+**Why:** "The model selects, the server writes" is the only design that
+can make "no unsupported non-numeric claim can survive" a structural
+guarantee rather than a best-effort filter — the owner's bar was
+explicit that this must not depend on pattern-matching model prose after
+the fact, and no second LLM is permitted to serve as a factuality judge.
+
+**Reversibility:** Fully additive to the Slice 2 (D-035/D-036/D-037)
+design — one schema rename/shape change (`GroundedAnswer` ->
+`GroundedSelection`), one provider method rename
+(`synthesize_grounded_answer` -> `select_grounded_facts`), one new pure
+rendering function, no migration. No scoring/evaluation math, planner
+regex, evidence schema, or navigation changed.

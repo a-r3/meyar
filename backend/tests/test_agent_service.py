@@ -787,11 +787,25 @@ async def test_ordinal_reference_still_resolves_after_followup_framing_failure(
     assert second_result.tool_results[0].profile.candidate_id == candidate.id
 
 
-# --- D-037 regression tests: grounded conversational answers over typed
-# tool results, with independent server-side validation of every model
-# claim (facts cited + numbers stated) before it is ever trusted. See
-# docs/DECISIONS.md D-037 for the owner's product-gap report and the
-# grounded-answer contract this closes it with. ---
+# --- D-038 regression tests: the server, not the model, is authoritative
+# over every span of factual text in a grounded answer. The model only
+# selects/orders GroundedFact ids (and an optional closed-enum caveat) —
+# it has no field through which it could author "he managed a team" or
+# any other unsupported predicate. See docs/DECISIONS.md D-038 for the
+# owner's factuality-hardening report this closes. ---
+
+
+def test_grounded_selection_schema_has_no_free_text_answer_field() -> None:
+    """Structural proof the vulnerability class is closed: there is no
+    field on GroundedSelection a model could use to author prose at all
+    (extra='forbid' rejects any attempt to smuggle one in), unlike the
+    superseded D-037 GroundedAnswer.answer field."""
+    from meyar.agent.schemas import GroundedSelection
+
+    with pytest.raises(ValidationError):
+        GroundedSelection.model_validate({"used_facts": [0], "answer": "He managed a team there."})
+    # The only two fields that exist at all:
+    assert set(GroundedSelection.model_fields) == {"used_facts", "caveat"}
 
 
 def test_build_profile_facts_never_includes_identity_fields() -> None:
@@ -812,55 +826,93 @@ def test_build_profile_facts_never_includes_identity_fields() -> None:
         assert pii not in dumped
 
 
-def test_validate_grounded_answer_rejects_unsupported_number() -> None:
-    """The concrete, testable guard against invented durations/counts: a
-    number in the model's answer that appears in none of the supplied
-    facts is rejected outright."""
-    from meyar.agent.schemas import GroundedAnswer, GroundedFact
-    from meyar.agent.service import _validate_grounded_answer
-
-    facts = [
-        GroundedFact(id=0, category="skills", title="Python", detail=None),
-        GroundedFact(
-            id=1,
-            category="employment_history",
-            title="Data Analyst — Caspian Analytics",
-            detail="2021 — 2025",
-        ),
-    ]
-    grounded = GroundedAnswer(
-        answer="Namizəd 2021-2025-ci illərdə Data Analyst kimi çalışıb.", used_facts=[0, 1]
-    )
-    assert _validate_grounded_answer(grounded, facts) == grounded.answer
-
-    hallucinated = GroundedAnswer(answer="Namizəd Python-dan 5 il istifadə edib.", used_facts=[0])
-    assert _validate_grounded_answer(hallucinated, facts) is None
-
-
-def test_validate_grounded_answer_rejects_unknown_or_missing_fact_refs() -> None:
-    from meyar.agent.schemas import GroundedAnswer, GroundedFact
-    from meyar.agent.service import _validate_grounded_answer
+def test_render_grounded_answer_rejects_unknown_fact_refs() -> None:
+    from meyar.agent.schemas import GroundedFact, GroundedSelection
+    from meyar.agent.service import render_grounded_answer
 
     facts = [GroundedFact(id=0, category="skills", title="Python", detail=None)]
 
     # Fact id never supplied to the model.
-    assert (
-        _validate_grounded_answer(GroundedAnswer(answer="Python bilir.", used_facts=[7]), facts)
-        is None
+    assert render_grounded_answer(GroundedSelection(used_facts=[7]), facts) is None
+    # Nothing selected and no caveat set — nothing to say.
+    assert render_grounded_answer(GroundedSelection(used_facts=[]), facts) is None
+
+
+def test_render_grounded_answer_builds_deterministic_sentence_from_selected_facts() -> None:
+    """Supported role/company/date facts and supported skills each render
+    correctly — the output is EXACTLY the fixed template applied to the
+    verbatim fact values, in the model's chosen order (employment first,
+    then the skill), never a paraphrase or an added claim."""
+    from meyar.agent.schemas import GroundedFact, GroundedSelection
+    from meyar.agent.service import _render_fact_clause, render_grounded_answer
+
+    employment = GroundedFact(
+        id=1,
+        category="employment_history",
+        title="Data Analyst — Caspian Analytics",
+        detail="2021 — 2025",
     )
-    # No fact cited at all.
-    assert (
-        _validate_grounded_answer(GroundedAnswer(answer="Python bilir.", used_facts=[]), facts)
-        is None
+    skill = GroundedFact(id=0, category="skills", title="Python", detail="Backend")
+    facts = [skill, employment]
+
+    rendered = render_grounded_answer(GroundedSelection(used_facts=[1, 0]), facts)
+    expected = f"Məlum faktlar: {_render_fact_clause(employment)}; {_render_fact_clause(skill)}."
+    assert rendered == expected
+    assert "Data Analyst — Caspian Analytics" in rendered
+    assert "2021 — 2025" in rendered
+    assert "Python" in rendered
+
+
+def test_render_grounded_answer_never_contains_unsupported_claim() -> None:
+    """The exact owner-reported vulnerability: given only an employment
+    fact, the rendered sentence can never say anything like 'managed a
+    team' — there is no channel for that text to appear, since the model
+    only ever supplies fact ids, never sentence content."""
+    from meyar.agent.schemas import GroundedFact, GroundedSelection
+    from meyar.agent.service import render_grounded_answer
+
+    facts = [
+        GroundedFact(
+            id=0,
+            category="employment_history",
+            title="Data Analyst — Caspian Analytics",
+            detail="2021 — 2025",
+        )
+    ]
+    rendered = render_grounded_answer(GroundedSelection(used_facts=[0]), facts)
+    assert rendered is not None
+    for forbidden in ("managed", "team", "rəhbərlik", "komanda"):
+        assert forbidden not in rendered.casefold()
+
+
+def test_render_grounded_answer_duration_caveat_never_states_a_number() -> None:
+    """Unsupported duration stays absent: the caveat sentence is a fixed
+    string naming no number at all, regardless of what the question
+    asked or which facts were selected."""
+    from meyar.agent.schemas import GroundedCaveat, GroundedFact, GroundedSelection
+    from meyar.agent.service import render_grounded_answer
+
+    facts = [GroundedFact(id=0, category="skills", title="Python", detail=None)]
+    rendered = render_grounded_answer(
+        GroundedSelection(used_facts=[0], caveat=GroundedCaveat.DURATION_NOT_PROVEN), facts
     )
+    assert rendered is not None
+    assert "Mövcud sübut konkret müddəti göstərmir." in rendered
+    assert not any(char.isdigit() for char in rendered.split("Mövcud sübut")[-1])
+
+    # A caveat alone (nothing relevant selected) is also renderable.
+    caveat_only = render_grounded_answer(
+        GroundedSelection(used_facts=[], caveat=GroundedCaveat.DURATION_NOT_PROVEN), facts
+    )
+    assert caveat_only == "Mövcud sübut konkret müddəti göstərmir."
 
 
 async def test_grounded_experience_explanation_uses_only_supplied_facts(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
-    """End-to-end: a validated GroundedAnswer becomes the turn's message
-    for a successful GET_CANDIDATE_PROFILE lookup."""
-    from meyar.agent.schemas import GroundedAnswer
+    """End-to-end: a validated GroundedSelection becomes a server-rendered
+    message for a successful GET_CANDIDATE_PROFILE lookup."""
+    from meyar.agent.schemas import GroundedSelection
 
     tenant, user, _password, membership = tenant_and_user
     candidate, _pv = await seed_candidate_with_profile(
@@ -871,10 +923,9 @@ async def test_grounded_experience_explanation_uses_only_supplied_facts(
     conversation.last_search_candidate_ids = [str(candidate.id)]
     await db_session.flush()
 
-    answer_text = "Namizəd 2020-ci ildən Backend Developer olaraq çalışıb və Python bilir."
     llm = FakeLLMProvider(
         agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1),
-        grounded_answer=GroundedAnswer(answer=answer_text, used_facts=[0, 1, 2]),
+        grounded_selection=GroundedSelection(used_facts=[2, 0]),  # employment fact, Python skill
     )
     result = await _run(
         db_session,
@@ -884,56 +935,21 @@ async def test_grounded_experience_explanation_uses_only_supplied_facts(
         message="birincinin təcrübəsini izah et",
     )
     assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
-    assert result.message == answer_text
+    assert result.message is not None
+    assert "Backend Developer" in result.message
+    assert "Python" in result.message
     # The question the model was asked to answer is the user's own turn text.
     assert llm.last_grounded_question == "birincinin təcrübəsini izah et"
     assert llm.last_grounded_facts is not None
     assert len(llm.last_grounded_facts) >= 2  # 2 skills + 1 employment fact from _profile()
 
 
-async def test_grounded_answer_with_invented_duration_falls_back_safely(
-    db_session: AsyncSession, tenant_and_user
-) -> None:
-    """The model claims a specific Python duration that is not supported
-    by any supplied fact — the server must discard it and fall back to
-    the deterministic message, never show the invented number."""
-    from meyar.agent.schemas import GroundedAnswer
-
-    tenant, user, _password, membership = tenant_and_user
-    candidate, _pv = await seed_candidate_with_profile(
-        db_session, tenant_id=tenant.id, profile_content=_profile("Python")
-    )
-    await db_session.commit()
-    conversation = await _new_conversation(db_session, tenant, user, membership)
-    conversation.last_search_candidate_ids = [str(candidate.id)]
-    await db_session.flush()
-
-    llm = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1),
-        grounded_answer=GroundedAnswer(
-            answer="Namizəd Python-dan 5 il istifadə edib.", used_facts=[0]
-        ),
-    )
-    result = await _run(
-        db_session,
-        llm,
-        tenant_id=tenant.id,
-        conversation=conversation,
-        message="birincinin təcrübəsini izah et",
-    )
-    assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
-    assert result.message is None
-    assert "5 il" not in (result.message or "")
-    # The grounded tool result itself is still present and correct.
-    assert result.tool_results[0].profile.found is True
-
-
-async def test_grounded_answer_citing_unknown_fact_id_falls_back_safely(
+async def test_grounded_selection_citing_unknown_fact_id_falls_back_safely(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
     """The model cannot introduce a fact absent from the supplied list —
     an out-of-range used_facts id is rejected, not silently trusted."""
-    from meyar.agent.schemas import GroundedAnswer
+    from meyar.agent.schemas import GroundedSelection
 
     tenant, user, _password, membership = tenant_and_user
     candidate, _pv = await seed_candidate_with_profile(
@@ -946,7 +962,7 @@ async def test_grounded_answer_citing_unknown_fact_id_falls_back_safely(
 
     llm = FakeLLMProvider(
         agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1),
-        grounded_answer=GroundedAnswer(answer="Namizəd Excel bilir.", used_facts=[999]),
+        grounded_selection=GroundedSelection(used_facts=[999]),
     )
     result = await _run(
         db_session,
@@ -997,7 +1013,7 @@ async def test_grounded_synthesis_does_not_disturb_ordinal_resolution(
     """Ordinal resolution (rule E from D-036) must remain correct
     regardless of whether grounded synthesis succeeds, fails, or is
     rejected — last_search_candidate_ids is untouched by this feature."""
-    from meyar.agent.schemas import GroundedAnswer
+    from meyar.agent.schemas import GroundedSelection
 
     tenant, user, _password, membership = tenant_and_user
     first, _pv1 = await seed_candidate_with_profile(
@@ -1016,7 +1032,7 @@ async def test_grounded_synthesis_does_not_disturb_ordinal_resolution(
 
     llm = FakeLLMProvider(
         agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=2),
-        grounded_answer=GroundedAnswer(answer="İkinci namizəd Python bilir.", used_facts=[0]),
+        grounded_selection=GroundedSelection(used_facts=[0]),
     )
     result = await _run(
         db_session, llm, tenant_id=tenant.id, conversation=conversation, message="ikincini aç"

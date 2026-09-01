@@ -17,13 +17,17 @@ deterministic, already-tenant-scoped output of existing services
 identity data) and ``CandidateProfileExtraction`` facts, exactly the same
 boundary ``meyar.search.schemas.CandidateSearchResult`` already enforces.
 
-``GroundedAnswer`` (D-037) is a SECOND, narrower LLM-output shape used
-only to synthesize a natural-language explanation of an already-fetched
-profile/evidence tool result. It is subject to the exact same "untrusted
-input" discipline as ``AgentDecision`` — every ``used_facts`` id and every
-number appearing in its ``answer`` is independently re-checked against
-the ``GroundedFact`` list actually supplied before it is ever trusted;
-see meyar.agent.service._validate_grounded_answer.
+``GroundedSelection`` (D-038, superseding the D-037 ``GroundedAnswer``
+shape) is a SECOND, narrower LLM-output shape used to explain an
+already-fetched profile/evidence tool result. The model NEVER authors any
+part of the displayed sentence text — it only selects (and orders) which
+already-supplied ``GroundedFact`` ids are relevant to the question, plus
+an optional closed-enum caveat. The actual sentence is built entirely
+server-side from those facts' own title/detail values (see
+meyar.agent.service.render_grounded_answer), so no unsupported factual
+claim — numeric or otherwise — can ever reach the user: there is no
+free-text span in the final answer that did not come from a
+GroundedFact.
 """
 
 import uuid
@@ -232,8 +236,8 @@ class AgentTurnOutcome(StrEnum):
 
 class GroundedFact(BaseModel):
     """One already-validated, already-extracted professional fact offered
-    to the model for grounded-answer synthesis (D-037) — never raw CV
-    text, never CandidateIdentity. Built server-side, purely from an
+    to the model for grounded-answer synthesis (D-037/D-038) — never raw
+    CV text, never CandidateIdentity. Built server-side, purely from an
     already-fetched AgentProfileToolResult/AgentEvidenceToolResult; ``id``
     is this fact's position in the list given to the model for exactly
     this one call, not a database id."""
@@ -246,30 +250,46 @@ class GroundedFact(BaseModel):
     detail: str | None = Field(default=None, max_length=300)
 
 
-class GroundedAnswer(BaseModel):
-    """Strict model output for D-037 grounded-answer synthesis. ``answer``
-    is natural-language prose; ``used_facts`` must name which of the
-    supplied ``GroundedFact.id`` values it draws from — meyar.agent.
-    service._validate_grounded_answer independently re-checks every id is
-    real and that every number appearing in ``answer`` also appears
-    somewhere in the facts actually supplied, before this is ever trusted
-    as the turn's message. A model response failing that check is
-    discarded, never persisted or shown — see D-037."""
+class GroundedCaveat(StrEnum):
+    """A closed, non-extensible set of caveat SENTENCES the server may
+    append — never free text, so a caveat can never itself smuggle in an
+    unsupported claim. Add a new member only when a genuinely new,
+    deterministic caveat sentence is needed; never add a free-text
+    caveat field."""
+
+    # The question asked about a specific duration/count (e.g. "how many
+    # years of Python") that the supplied facts cannot support — see the
+    # skill-specific-duration precedent (D-027) this mirrors for the
+    # agent path.
+    DURATION_NOT_PROVEN = "DURATION_NOT_PROVEN"
+
+
+class GroundedSelection(BaseModel):
+    """Strict model output for D-038 grounded-answer synthesis. The model
+    selects which of the supplied ``GroundedFact.id`` values are relevant
+    to the question, in the order it judges most useful, and may set
+    ``caveat`` to one fixed, closed-enum caveat — it authors no sentence
+    text at all. meyar.agent.service.render_grounded_answer independently
+    re-checks every id is one that was actually supplied before building
+    the displayed sentence purely from those facts' own values; an
+    invalid selection is discarded, never persisted or shown — see
+    D-038."""
 
     model_config = {"extra": "forbid"}
 
-    answer: str = Field(min_length=1, max_length=800)
     used_facts: list[int] = Field(default_factory=list, max_length=30)
+    caveat: GroundedCaveat | None = None
 
 
 class AgentTurnResult(BaseModel):
     """The full, safe result of one bounded orchestration turn. ``message``
     is either (a) a model-authored FINAL_ANSWER/CLARIFY framing string
-    (D-035), or (b) a server-VALIDATED grounded-answer synthesis over this
-    turn's own ``tool_results`` (D-037) — never free-standing model prose
-    trusted at face value. Every factual claim also always lives in
-    ``tool_results`` itself (deterministic, evidence-grounded,
-    server-rendered) regardless of what ``message`` says."""
+    (D-035), or (b) a server-BUILT grounded-answer sentence assembled
+    entirely from GroundedFact values the model only selected/ordered
+    (D-038) — never free-standing model prose trusted at face value.
+    Every factual claim also always lives in ``tool_results`` itself
+    (deterministic, evidence-grounded, server-rendered) regardless of
+    what ``message`` says."""
 
     model_config = {"extra": "forbid"}
 

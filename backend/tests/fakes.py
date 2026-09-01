@@ -3,7 +3,7 @@ real running LLM or embedding model — see Slice 4 spec §21."""
 
 from typing import Any
 
-from meyar.agent.schemas import AgentDecision, GroundedAnswer, GroundedFact
+from meyar.agent.schemas import AgentDecision, GroundedFact, GroundedSelection
 from meyar.embedding.provider import EmbeddingProviderError, EmbeddingResult
 from meyar.extraction.view import ProfessionalDocumentView
 from meyar.llm.provider import LLMProviderError, LLMResultProvenance
@@ -32,7 +32,7 @@ class FakeLLMProvider:
         agent_error: LLMProviderError | None = None,
         agent_fail_first_n_calls: int = 0,
         agent_fail_after_n_calls: int | None = None,
-        grounded_answer: GroundedAnswer | None = None,
+        grounded_selection: GroundedSelection | None = None,
         grounded_error: LLMProviderError | None = None,
         grounded_fail_first_n_calls: int = 0,
     ) -> None:
@@ -50,7 +50,7 @@ class FakeLLMProvider:
         self._agent_fail_first_n_calls = agent_fail_first_n_calls
         self._agent_fail_after_n_calls = agent_fail_after_n_calls
         self.agent_call_count = 0
-        self._grounded_answer = grounded_answer
+        self._grounded_selection = grounded_selection
         self._grounded_error = grounded_error
         self._grounded_fail_first_n_calls = grounded_fail_first_n_calls
         self.grounded_call_count = 0
@@ -140,37 +140,37 @@ class FakeLLMProvider:
         )
         return decision, provenance
 
-    async def synthesize_grounded_answer(
+    async def select_grounded_facts(
         self,
         *,
         question: str,
         facts: list[GroundedFact],
         repair: bool = False,
-    ) -> tuple[GroundedAnswer, LLMResultProvenance]:
+    ) -> tuple[GroundedSelection, LLMResultProvenance]:
         self.grounded_call_count += 1
         self.last_grounded_question = question
         self.last_grounded_facts = facts
         if self.grounded_call_count <= self._grounded_fail_first_n_calls:
             from meyar.llm.provider import ModelSchemaInvalidError
 
-            raise ModelSchemaInvalidError("Simulated schema-invalid grounded-answer output.")
+            raise ModelSchemaInvalidError("Simulated schema-invalid grounded-selection output.")
         if self._grounded_error is not None:
             raise self._grounded_error
-        if self._grounded_answer is None:
-            # Grounded synthesis is best-effort/optional (D-037): a test
+        if self._grounded_selection is None:
+            # Grounded synthesis is best-effort/optional (D-038): a test
             # that never configured it is exercising unrelated behavior
             # and should see exactly the same deterministic-fallback
             # result as if synthesis were simply unavailable — never an
             # unhandled assertion error.
             from meyar.llm.provider import ModelUnavailableError
 
-            raise ModelUnavailableError("FakeLLMProvider: grounded_answer not configured.")
+            raise ModelUnavailableError("FakeLLMProvider: grounded_selection not configured.")
         provenance = self._planner_provenance or LLMResultProvenance(
             provider=self.provider_name,
             model_name=self.model_name,
             model_revision=self.model_revision,
         )
-        return self._grounded_answer, provenance
+        return self._grounded_selection, provenance
 
 
 class FakeEmbeddingProvider:
