@@ -28,11 +28,12 @@ from meyar.main import app
 from meyar.models.job import Job
 from meyar.models.job_criteria_version import JobCriteriaVersion
 from meyar.schemas.criteria import CriterionIn, CriterionKind, CriterionType
-from meyar.services.api_key_repo import create_api_key
 from meyar.services.candidate_identity_repo import create_identity_version
 from meyar.services.job_criteria_repo import create_criteria_version
 from meyar.services.job_repo import archive_job, create_job
+from meyar.services.tenant_membership_repo import create_membership
 from meyar.services.tenant_repo import create_tenant
+from meyar.services.user_repo import create_user
 from meyar.ui.service import compute_job_duplicate_signature
 
 
@@ -43,15 +44,31 @@ def local_ui_settings() -> Settings:
     return settings
 
 
-async def _login_and_csrf(client: AsyncClient, plaintext: str) -> str:
+async def _login_and_csrf(client: AsyncClient, username: str, password: str) -> str:
     response = await client.post(
-        "/ui/login", data={"api_key": plaintext}, follow_redirects=False
+        "/ui/login",
+        data={"username": username, "password": password},
+        follow_redirects=False,
     )
     assert response.status_code == 303
     home = await client.get("/ui")
     match = re.search(r'name="csrf_token" value="([0-9a-f]{64})"', home.text)
     assert match is not None
     return match.group(1)
+
+
+async def _create_restricted_user(db: AsyncSession, *, tenant_id) -> tuple[str, str]:
+    """A user with an active membership carrying an unrecognized role —
+    meyar.core.roles.permissions_for_role fails closed on any role it
+    doesn't recognize, so this deterministically has zero UI permissions.
+    Exercises the same require_ui_scopes enforcement path a genuinely
+    reduced-permission role would, without inventing a fake product role."""
+    password = "restricted-password-1"
+    username = f"restricted-{uuid.uuid4().hex[:8]}"
+    user = await create_user(db, username=username, plaintext_password=password)
+    await create_membership(db, user_id=user.id, tenant_id=tenant_id, role="NO_PERMISSIONS")
+    await db.commit()
+    return username, password
 
 
 def _row(
@@ -105,10 +122,10 @@ async def _job_by_title(db_session: AsyncSession, *, tenant_id: uuid.UUID, title
 async def test_active_jobs_shown_by_default(
     client: AsyncClient,
     db_session: AsyncSession,
-    tenant_and_key,
+    tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
-    tenant, _key, plaintext = tenant_and_key
+    tenant, user, password, _membership = tenant_and_user
     job = await create_job(db_session, tenant_id=tenant.id, title="Default Active JD")
     await create_criteria_version(
         db_session,
@@ -126,7 +143,7 @@ async def test_active_jobs_shown_by_default(
         created_by_api_key_id=None,
     )
     await db_session.commit()
-    await _login_and_csrf(client, plaintext)
+    await _login_and_csrf(client, user.username, password)
 
     response = await client.get("/ui/jobs")
 
@@ -138,15 +155,15 @@ async def test_active_jobs_shown_by_default(
 async def test_archived_jobs_absent_from_default_list_but_visible_in_archive(
     client: AsyncClient,
     db_session: AsyncSession,
-    tenant_and_key,
+    tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
-    tenant, _key, plaintext = tenant_and_key
+    tenant, user, password, _membership = tenant_and_user
     job = await create_job(db_session, tenant_id=tenant.id, title="Archive View JD")
     await db_session.commit()
     await archive_job(db_session, tenant_id=tenant.id, job_id=job.id)
     await db_session.commit()
-    await _login_and_csrf(client, plaintext)
+    await _login_and_csrf(client, user.username, password)
 
     active_page = await client.get("/ui/jobs")
     archived_page = await client.get("/ui/jobs?status=archived")
@@ -178,13 +195,13 @@ async def test_archive_unauthenticated_is_redirected(client: AsyncClient) -> Non
 async def test_archive_requires_csrf_token(
     client: AsyncClient,
     db_session: AsyncSession,
-    tenant_and_key,
+    tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
-    tenant, _key, plaintext = tenant_and_key
+    tenant, user, password, _membership = tenant_and_user
     job = await create_job(db_session, tenant_id=tenant.id, title="CSRF Archive JD")
     await db_session.commit()
-    await _login_and_csrf(client, plaintext)
+    await _login_and_csrf(client, user.username, password)
 
     response = await client.post(
         f"/ui/jobs/{job.id}/archive", data={"csrf_token": "wrong"}
@@ -198,16 +215,16 @@ async def test_archive_requires_csrf_token(
 async def test_archive_requires_jobs_write_scope(
     client: AsyncClient,
     db_session: AsyncSession,
-    tenant_and_key,
+    tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
-    tenant, _key, _plaintext = tenant_and_key
+    tenant, _user, _password, _membership = tenant_and_user
     job = await create_job(db_session, tenant_id=tenant.id, title="Scope Archive JD")
-    _read_only_key, read_only_plaintext = await create_api_key(
-        db_session, tenant_id=tenant.id, env="test", scopes=["jobs:read"]
-    )
     await db_session.commit()
-    csrf = await _login_and_csrf(client, read_only_plaintext)
+    restricted_username, restricted_password = await _create_restricted_user(
+        db_session, tenant_id=tenant.id
+    )
+    csrf = await _login_and_csrf(client, restricted_username, restricted_password)
 
     response = await client.post(
         f"/ui/jobs/{job.id}/archive", data={"csrf_token": csrf}
@@ -221,14 +238,14 @@ async def test_archive_requires_jobs_write_scope(
 async def test_archive_is_tenant_scoped_and_cross_tenant_denied(
     client: AsyncClient,
     db_session: AsyncSession,
-    tenant_and_key,
+    tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
-    tenant, _key, plaintext = tenant_and_key
+    tenant, user, password, _membership = tenant_and_user
     foreign = await create_tenant(db_session, name="Foreign archive tenant")
     foreign_job = await create_job(db_session, tenant_id=foreign.id, title="Foreign JD")
     await db_session.commit()
-    csrf = await _login_and_csrf(client, plaintext)
+    csrf = await _login_and_csrf(client, user.username, password)
 
     response = await client.post(
         f"/ui/jobs/{foreign_job.id}/archive", data={"csrf_token": csrf}
@@ -243,10 +260,10 @@ async def test_archive_is_tenant_scoped_and_cross_tenant_denied(
 async def test_archive_succeeds_and_never_hard_deletes(
     client: AsyncClient,
     db_session: AsyncSession,
-    tenant_and_key,
+    tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
-    tenant, _key, plaintext = tenant_and_key
+    tenant, user, password, _membership = tenant_and_user
     job = await create_job(db_session, tenant_id=tenant.id, title="Soft Archive JD")
     version = await create_criteria_version(
         db_session,
@@ -264,7 +281,7 @@ async def test_archive_succeeds_and_never_hard_deletes(
         created_by_api_key_id=None,
     )
     await db_session.commit()
-    csrf = await _login_and_csrf(client, plaintext)
+    csrf = await _login_and_csrf(client, user.username, password)
 
     response = await client.post(
         f"/ui/jobs/{job.id}/archive", data={"csrf_token": csrf}, follow_redirects=False
@@ -288,10 +305,10 @@ async def test_archive_succeeds_and_never_hard_deletes(
 async def test_archived_job_evaluation_history_still_resolves_title(
     client: AsyncClient,
     db_session: AsyncSession,
-    tenant_and_key,
+    tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
-    tenant, _key, plaintext = tenant_and_key
+    tenant, user, password, _membership = tenant_and_user
     candidate, profile = await seed_candidate_with_profile(
         db_session,
         tenant_id=tenant.id,
@@ -345,7 +362,7 @@ async def test_archived_job_evaluation_history_still_resolves_title(
         created_by_api_key_id=None,
     )
     await db_session.commit()
-    csrf = await _login_and_csrf(client, plaintext)
+    csrf = await _login_and_csrf(client, user.username, password)
 
     rank_response = await client.post(
         f"/ui/jobs/{version.id}/rank", data={"csrf_token": csrf}
@@ -395,15 +412,15 @@ async def _job_with_python_criteria(
 async def test_active_job_can_still_be_ranked(
     client: AsyncClient,
     db_session: AsyncSession,
-    tenant_and_key,
+    tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
-    tenant, _key, plaintext = tenant_and_key
+    tenant, user, password, _membership = tenant_and_user
     job, version = await _job_with_python_criteria(
         db_session, tenant_id=tenant.id, title="Active Rank JD"
     )
     await db_session.commit()
-    csrf = await _login_and_csrf(client, plaintext)
+    csrf = await _login_and_csrf(client, user.username, password)
 
     response = await client.post(f"/ui/jobs/{version.id}/rank", data={"csrf_token": csrf})
 
@@ -415,13 +432,13 @@ async def test_active_job_can_still_be_ranked(
 async def test_archived_job_direct_stale_rank_post_is_rejected_with_hr_safe_message(
     client: AsyncClient,
     db_session: AsyncSession,
-    tenant_and_key,
+    tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
     """Simulates a stale/bookmarked rank URL for a job archived after the
     tab was opened: the button is gone from the UI, but the POST itself
     must still be rejected — not just hidden."""
-    tenant, _key, plaintext = tenant_and_key
+    tenant, user, password, _membership = tenant_and_user
     candidate, _profile = await seed_candidate_with_profile(
         db_session,
         tenant_id=tenant.id,
@@ -444,7 +461,7 @@ async def test_archived_job_direct_stale_rank_post_is_rejected_with_hr_safe_mess
         db_session, tenant_id=tenant.id, title="Archived Rank JD"
     )
     await db_session.commit()
-    csrf = await _login_and_csrf(client, plaintext)
+    csrf = await _login_and_csrf(client, user.username, password)
 
     # Capture plain ids up front: the app's rejected-request rollback below
     # expires every ORM object tracked by this shared session (regardless
@@ -484,20 +501,20 @@ async def test_archived_job_direct_stale_rank_post_is_rejected_with_hr_safe_mess
 async def test_archived_job_rank_rejection_does_not_leak_cross_tenant(
     client: AsyncClient,
     db_session: AsyncSession,
-    tenant_and_key,
+    tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
     """A foreign tenant's job — archived or not — must resolve the same
     generic not-found outcome; the new lifecycle check must never expose
     that a foreign-tenant criteria version exists or is archived."""
-    tenant, _key, plaintext = tenant_and_key
+    tenant, user, password, _membership = tenant_and_user
     foreign = await create_tenant(db_session, name="Foreign rank tenant")
     foreign_job, foreign_version = await _job_with_python_criteria(
         db_session, tenant_id=foreign.id, title="Foreign Archived JD"
     )
     foreign_job.status = "ARCHIVED"
     await db_session.commit()
-    csrf = await _login_and_csrf(client, plaintext)
+    csrf = await _login_and_csrf(client, user.username, password)
 
     response = await client.post(f"/ui/jobs/{foreign_version.id}/rank", data={"csrf_token": csrf})
 
@@ -514,11 +531,11 @@ async def test_archived_job_rank_rejection_does_not_leak_cross_tenant(
 async def test_identical_active_duplicate_is_rejected(
     client: AsyncClient,
     db_session: AsyncSession,
-    tenant_and_key,
+    tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
-    tenant, _key, plaintext = tenant_and_key
-    csrf = await _login_and_csrf(client, plaintext)
+    tenant, user, password, _membership = tenant_and_user
+    csrf = await _login_and_csrf(client, user.username, password)
     first = await client.post(
         "/ui/jobs",
         data=_create_job_form_data(csrf, "Duplicate Guard JD", "Python"),
@@ -545,11 +562,11 @@ async def test_identical_active_duplicate_is_rejected(
 async def test_same_title_different_criteria_is_allowed(
     client: AsyncClient,
     db_session: AsyncSession,
-    tenant_and_key,
+    tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
-    tenant, _key, plaintext = tenant_and_key
-    csrf = await _login_and_csrf(client, plaintext)
+    tenant, user, password, _membership = tenant_and_user
+    csrf = await _login_and_csrf(client, user.username, password)
     first = await client.post(
         "/ui/jobs",
         data=_create_job_form_data(csrf, "Shared Title JD", "Python"),
@@ -575,11 +592,11 @@ async def test_same_title_different_criteria_is_allowed(
 async def test_archived_duplicate_does_not_block_new_active_job(
     client: AsyncClient,
     db_session: AsyncSession,
-    tenant_and_key,
+    tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
-    tenant, _key, plaintext = tenant_and_key
-    csrf = await _login_and_csrf(client, plaintext)
+    tenant, user, password, _membership = tenant_and_user
+    csrf = await _login_and_csrf(client, user.username, password)
     first = await client.post(
         "/ui/jobs",
         data=_create_job_form_data(csrf, "Reopen JD", "Python"),
@@ -607,14 +624,14 @@ async def test_archived_duplicate_does_not_block_new_active_job(
 
 
 async def test_concurrent_double_submit_is_rejected_by_db_constraint_not_only_precheck(
-    db_session: AsyncSession, tenant_and_key
+    db_session: AsyncSession, tenant_and_user
 ) -> None:
     """The real concurrency guard: two requests that both pass the
     application-level pre-check (because neither has committed yet) must
     still not both succeed — the partial unique index on
     (tenant_id, duplicate_signature) WHERE status='ACTIVE' is what
     actually prevents the race, not the pre-check alone."""
-    tenant, _key, _plaintext = tenant_and_key
+    tenant, user, _password, _membership = tenant_and_user
     criteria = [
         CriterionIn(
             id="python",
@@ -664,8 +681,9 @@ async def test_api_job_creation_is_unaffected_by_ui_duplicate_guard(
     """POST /api/v1/jobs has no duplicate-signature check — API/CLI
     behavior is unchanged by this UI-only lifecycle/duplicate-safety
     pass. Two API-created jobs with identical title+criteria must both
-    succeed exactly as before."""
-    _tenant, _key, plaintext = tenant_and_key
+    succeed exactly as before. Machine access still authenticates with an
+    API key, entirely independent of the human /ui/login path."""
+    _tenant, _api_key, plaintext = tenant_and_key
     body = {
         "title": "API Regression JD",
         "criteria": [

@@ -18,6 +18,7 @@ here is pre-written, evidence-matched synthetic data (the same technique
 claim otherwise. See docs/LOCAL_DEMO.md."""
 
 import io
+import secrets
 import uuid
 from dataclasses import dataclass, field
 from datetime import date
@@ -26,6 +27,7 @@ from docx import Document
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meyar.core.roles import ROLE_HR_USER
 from meyar.embedding.provider import EmbeddingResult
 from meyar.evaluation.service import evaluate_and_score_candidate
 from meyar.extraction.identity_service import extract_candidate_identity
@@ -55,7 +57,12 @@ from meyar.services.candidate_profile_repo import get_current_profile_version
 from meyar.services.candidate_repo import count_candidates_for_tenant, create_candidate
 from meyar.services.job_criteria_repo import create_criteria_version
 from meyar.services.job_repo import create_job
+from meyar.services.tenant_membership_repo import (
+    create_membership,
+    get_membership_for_user_and_tenant,
+)
 from meyar.services.tenant_repo import create_tenant
+from meyar.services.user_repo import create_user, get_user_by_username, set_password
 from meyar.storage.base import DocumentStorage
 
 # The display name every demo tenant is created with. NEVER sufficient
@@ -75,6 +82,15 @@ DEMO_TENANT_NAME = "MEYAR Demo (Synthetic)"
 # own), so this is a reliable proof-of-origin marker in this operator/
 # dev-tool context.
 DEMO_TENANT_MARKER_EVENT = "DEMO_TENANT_BOOTSTRAPPED"
+
+# The synthetic demo HUMAN login (Slice 1, issue #30) — distinct from,
+# and in addition to, the machine API key summary.api_key_plaintext below.
+# Only ever created/rotated inside the positively-identified demo tenant
+# (see _bootstrap_demo_human_login) — this never touches a real operator
+# account, even one that happens to share this username, because a
+# same-named user is only ever treated as "the demo user" if it already
+# holds a TenantMembership on the positively-identified demo tenant.
+DEMO_USER_USERNAME = "demo.hr"
 
 
 class _DemoLLMProvider:
@@ -745,6 +761,8 @@ class DemoSeedSummary:
     embeddings_created: int
     jobs_created: int
     evaluations_created: int
+    human_username: str
+    human_temp_password: str  # always freshly (re)issued; see _bootstrap_demo_human_login
 
 
 class DemoTenantAmbiguousError(Exception):
@@ -807,20 +825,64 @@ async def _find_demo_tenant(db: AsyncSession) -> Tenant | None:
 
 
 async def reset_demo(db: AsyncSession) -> bool:
-    """Deletes ONLY the positively-identified demo tenant (see
+    """Deletes the positively-identified demo tenant (see
     _find_demo_tenant) — every tenant-owned table cascades via its
-    existing ondelete=CASCADE foreign key, no bespoke deletion logic.
-    Returns whether a demo tenant existed to delete. Raises
-    DemoTenantAmbiguousError (never deletes anything) if the demo tenant
-    cannot be positively and unambiguously identified — see
-    _find_demo_tenant. There is no path here that accepts an arbitrary
-    tenant id."""
+    existing ondelete=CASCADE foreign key, no bespoke deletion logic —
+    plus the demo human User row (Slice 1), which is NOT tenant-owned
+    (a User can belong to more than one tenant by design) and so does
+    not cascade-delete on its own. Only deleted when it is positively
+    tied to this exact demo tenant via an active TenantMembership,
+    mirroring the same collision-safety discipline as the tenant lookup
+    itself — an unrelated same-named user is never touched. Without this,
+    a reset -> seed cycle would orphan the demo user (its membership
+    deleted with the tenant, the user row surviving) and the next
+    seed_demo would misidentify it as a name collision. Returns whether a
+    demo tenant existed to delete. Raises DemoTenantAmbiguousError (never
+    deletes anything) if the demo tenant cannot be positively and
+    unambiguously identified — see _find_demo_tenant. There is no path
+    here that accepts an arbitrary tenant id."""
     tenant = await _find_demo_tenant(db)
     if tenant is None:
         return False
+    demo_user = await get_user_by_username(db, DEMO_USER_USERNAME)
+    if demo_user is not None:
+        membership = await get_membership_for_user_and_tenant(
+            db, user_id=demo_user.id, tenant_id=tenant.id
+        )
+        if membership is not None:
+            await db.delete(demo_user)
     await db.delete(tenant)
     await db.flush()
     return True
+
+
+async def _bootstrap_demo_human_login(
+    db: AsyncSession, *, tenant_id: uuid.UUID
+) -> tuple[str, str]:
+    """Creates the synthetic demo human login on first run, or rotates its
+    temporary password on every subsequent seed-demo run — mirroring the
+    existing machine API-key rotation behavior below. The plaintext is
+    returned once for the CLI to print; it is never persisted, logged, or
+    reused. Never touches any user other than the one positively tied to
+    tenant_id (see DEMO_USER_USERNAME's docstring above)."""
+    temp_password = secrets.token_urlsafe(12)
+    existing = await get_user_by_username(db, DEMO_USER_USERNAME)
+    if existing is not None:
+        membership = await get_membership_for_user_and_tenant(
+            db, user_id=existing.id, tenant_id=tenant_id
+        )
+        if membership is None:
+            raise DemoTenantAmbiguousError(
+                f"A user named {DEMO_USER_USERNAME!r} exists but is not a member of "
+                "the demo tenant — refusing to rotate an unrelated account's password. "
+                "Rename or remove that user if this is a name collision."
+            )
+        await set_password(db, user_id=existing.id, plaintext_password=temp_password)
+        return existing.username, temp_password
+
+    user = await create_user(db, username=DEMO_USER_USERNAME, plaintext_password=temp_password)
+    await create_membership(db, user_id=user.id, tenant_id=tenant_id, role=ROLE_HR_USER)
+    return user.username, temp_password
 
 
 async def seed_demo(
@@ -870,6 +932,9 @@ async def seed_demo(
         # strictly to tenant.id — never a generic cross-tenant operation.
         await revoke_active_api_keys_for_tenant(db, tenant_id=tenant.id)
         api_key, plaintext = await create_api_key(db, tenant_id=tenant.id, env="test")
+        human_username, human_temp_password = await _bootstrap_demo_human_login(
+            db, tenant_id=tenant.id
+        )
         await db.flush()
         return DemoSeedSummary(
             tenant_id=tenant.id,
@@ -883,6 +948,8 @@ async def seed_demo(
             embeddings_created=0,
             jobs_created=0,
             evaluations_created=0,
+            human_username=human_username,
+            human_temp_password=human_temp_password,
         )
 
     api_key, plaintext = await create_api_key(db, tenant_id=tenant.id, env="test")
@@ -978,6 +1045,10 @@ async def seed_demo(
             )
             evaluations_created += 1
 
+    human_username, human_temp_password = await _bootstrap_demo_human_login(
+        db, tenant_id=tenant.id
+    )
+
     return DemoSeedSummary(
         tenant_id=tenant.id,
         api_key_prefix=api_key.prefix,
@@ -990,4 +1061,6 @@ async def seed_demo(
         embeddings_created=embeddings_created,
         jobs_created=jobs_created,
         evaluations_created=evaluations_created,
+        human_username=human_username,
+        human_temp_password=human_temp_password,
     )

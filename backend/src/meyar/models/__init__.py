@@ -13,6 +13,8 @@ from meyar.models.folder_source import FolderSource
 from meyar.models.job import Job
 from meyar.models.job_criteria_version import JobCriteriaVersion
 from meyar.models.tenant import Tenant
+from meyar.models.tenant_membership import TenantMembership
+from meyar.models.user import User
 
 __all__ = [
     "ApiKey",
@@ -30,4 +32,6 @@ __all__ = [
     "Job",
     "JobCriteriaVersion",
     "Tenant",
+    "TenantMembership",
+    "User",
 ]

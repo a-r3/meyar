@@ -15,11 +15,12 @@ BASE_URL = ADMIN_DATABASE_URL.rsplit("/", 1)[0]
 ADMIN_URL = f"{BASE_URL}/postgres"
 PRE_SLICE11_REVISION = "c0a4f2d8e317"
 SLICE11_REVISION = "e3b1f7a9c2d4"
+PRE_SLICE1_HUMAN_IDENTITY_REVISION = "db7e4523f491"
 # The expected result of `alembic upgrade head` right now — bump this
 # alongside alembic/versions whenever a new migration becomes the head
-# (most recently: db7e4523f491, add job lifecycle status and duplicate
-# signature — see docs/DECISIONS.md D-028).
-CURRENT_HEAD_REVISION = "db7e4523f491"
+# (most recently: f4a91c2e6b7d, add human identity/dual access — see
+# docs/DECISIONS.md, Slice 1 / issue #30).
+CURRENT_HEAD_REVISION = "f4a91c2e6b7d"
 
 
 async def _create_database(name: str) -> None:
@@ -64,7 +65,8 @@ async def _assert_upgraded(database_url: str) -> None:
     await engine.dispose()
     assert {
         "id",
-        "api_key_id",
+        "user_id",
+        "tenant_membership_id",
         "session_token_hash",
         "csrf_secret",
         "created_at",
@@ -159,6 +161,107 @@ def test_job_lifecycle_migration_backfills_existing_jobs_as_active(monkeypatch) 
         job_id = asyncio.run(_insert_pre_lifecycle_job(database_url))
         command.upgrade(alembic_config, "head")
         asyncio.run(_assert_job_backfilled_active(database_url, job_id))
+    finally:
+        get_settings.cache_clear()
+        asyncio.run(_drop_database(database_name))
+
+
+async def _insert_pre_slice1_state(database_url: str) -> tuple[uuid.UUID, uuid.UUID]:
+    """Inserts a tenant + api_key row against the schema exactly as it
+    stood immediately before the human-identity migration — simulating a
+    real pre-existing deployment. Also inserts a pre-migration
+    browser_session row (api_key_id-shaped) to prove the migration's
+    documented session-clearing behavior."""
+    engine = create_async_engine(database_url)
+    tenant_id = uuid.uuid4()
+    api_key_id = uuid.uuid4()
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("INSERT INTO tenants (id, name, is_active) VALUES (:id, :name, true)"),
+            {"id": tenant_id, "name": "Pre-Slice1 tenant"},
+        )
+        await connection.execute(
+            text(
+                "INSERT INTO api_keys (id, tenant_id, prefix, key_hash, scopes, created_at) "
+                "VALUES (:id, :tenant_id, 'meyar_test_pre', :key_hash, '{}', now())"
+            ),
+            {"id": api_key_id, "tenant_id": tenant_id, "key_hash": "x" * 64},
+        )
+        await connection.execute(
+            text(
+                "INSERT INTO browser_sessions "
+                "(id, api_key_id, session_token_hash, csrf_secret, expires_at) "
+                "VALUES (:id, :api_key_id, :hash, :secret, now() + interval '1 hour')"
+            ),
+            {
+                "id": uuid.uuid4(),
+                "api_key_id": api_key_id,
+                "hash": "y" * 64,
+                "secret": "z" * 64,
+            },
+        )
+    await engine.dispose()
+    return tenant_id, api_key_id
+
+
+async def _assert_slice1_upgrade_preserved_data(
+    database_url: str, tenant_id: uuid.UUID, api_key_id: uuid.UUID
+) -> None:
+    engine = create_async_engine(database_url)
+    async with engine.connect() as connection:
+        tenant_row = await connection.execute(
+            text("SELECT id FROM tenants WHERE id = :id"), {"id": tenant_id}
+        )
+        assert tenant_row.scalar_one_or_none() == tenant_id
+
+        api_key_row = await connection.execute(
+            text("SELECT id FROM api_keys WHERE id = :id"), {"id": api_key_id}
+        )
+        assert api_key_row.scalar_one_or_none() == api_key_id
+
+        # Pre-migration session rows are intentionally cleared (they are
+        # short-lived, fully revocable session state, not durable
+        # identity data — see the migration's upgrade() docstring).
+        session_count = await connection.scalar(text("SELECT count(*) FROM browser_sessions"))
+        assert session_count == 0
+
+        user_table = await connection.scalar(text("SELECT to_regclass('users')"))
+        membership_table = await connection.scalar(
+            text("SELECT to_regclass('tenant_memberships')")
+        )
+        assert user_table is not None
+        assert membership_table is not None
+
+        actor_columns = set(
+            (
+                await connection.execute(
+                    text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name='audit_events' AND column_name IN "
+                        "('actor_type', 'actor_id')"
+                    )
+                )
+            ).scalars()
+        )
+        assert actor_columns == {"actor_type", "actor_id"}
+    await engine.dispose()
+
+
+def test_slice1_human_identity_migration_preserves_existing_data(monkeypatch) -> None:
+    database_name = f"meyar_slice1_{uuid.uuid4().hex}"
+    database_url = f"{BASE_URL}/{database_name}"
+    alembic_config = Config(str(Path(__file__).resolve().parent.parent / "alembic.ini"))
+    asyncio.run(_create_database(database_name))
+    monkeypatch.setenv("MEYAR_DATABASE_URL", database_url)
+    get_settings.cache_clear()
+    try:
+        command.upgrade(alembic_config, PRE_SLICE1_HUMAN_IDENTITY_REVISION)
+        tenant_id, api_key_id = asyncio.run(_insert_pre_slice1_state(database_url))
+        command.upgrade(alembic_config, "head")
+        asyncio.run(_assert_slice1_upgrade_preserved_data(database_url, tenant_id, api_key_id))
+        command.downgrade(alembic_config, PRE_SLICE1_HUMAN_IDENTITY_REVISION)
+        command.upgrade(alembic_config, "head")
+        asyncio.run(_assert_slice1_upgrade_preserved_data(database_url, tenant_id, api_key_id))
     finally:
         get_settings.cache_clear()
         asyncio.run(_drop_database(database_name))

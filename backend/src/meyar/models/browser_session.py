@@ -8,18 +8,26 @@ from meyar.db import Base
 
 
 class BrowserSession(Base):
-    """Revocable server-side UI session.
+    """Revocable server-side UI session for an authenticated human.
 
-    Tenant and scopes are intentionally absent: every browser request derives
-    both from the live ApiKey row. Only a SHA-256 session-token digest is
-    persisted; the opaque raw token exists solely in the browser cookie.
+    Tenant and role/scopes are intentionally absent: every browser request
+    re-derives both, live, from the User + TenantMembership rows (Slice 1 —
+    see meyar.ui.auth.get_ui_context) — a disabled user or a
+    revoked/deactivated membership takes effect immediately, without
+    re-login. Only a SHA-256 session-token digest is persisted; the opaque
+    raw token exists solely in the browser cookie. This is the human/UI
+    principal only — machine API-key access never creates or consumes a
+    BrowserSession (see meyar.core.auth for that unchanged path).
     """
 
     __tablename__ = "browser_sessions"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    api_key_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("api_keys.id", ondelete="CASCADE"), nullable=False, index=True
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    tenant_membership_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenant_memberships.id", ondelete="CASCADE"), nullable=False, index=True
     )
     session_token_hash: Mapped[str] = mapped_column(
         String(64), nullable=False, unique=True, index=True

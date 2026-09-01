@@ -12,7 +12,7 @@ from meyar.schemas.job import (
     JobCriteriaVersionOut,
     JobOut,
 )
-from meyar.services.audit_repo import record_event
+from meyar.services.audit_repo import ACTOR_API_KEY, record_event
 from meyar.services.job_criteria_repo import (
     create_criteria_version,
     get_criteria_version,
@@ -54,6 +54,8 @@ async def post_job(
         tenant_id=ctx.tenant_id,
         event_type="job.created",
         metadata={"job_id": str(job.id), "criteria_version": version.version_number},
+        actor_type=ACTOR_API_KEY,
+        actor_id=ctx.api_key_id,
     )
     await db.commit()
     return JobOut(

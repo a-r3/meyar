@@ -7,10 +7,11 @@ from datetime import UTC, datetime
 from fastapi import Depends, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meyar.core.auth import api_key_is_active
+from meyar.core.roles import permissions_for_role
 from meyar.db import get_db
-from meyar.services.api_key_repo import get_api_key_by_id
 from meyar.services.browser_session_repo import get_browser_session_by_token
+from meyar.services.tenant_membership_repo import get_membership_by_id
+from meyar.services.user_repo import get_user_by_id
 
 UI_SESSION_COOKIE = "meyar_ui_session"
 
@@ -24,9 +25,17 @@ class UIAccessError(Exception):
 
 @dataclass(frozen=True)
 class UIContext:
+    """The accountable human principal for one authenticated UI request.
+    Every field below is re-derived live from the User + TenantMembership
+    rows on every request (see get_ui_context) — a disabled user or a
+    deactivated/revoked membership takes effect immediately, without
+    waiting for the session to expire or for re-login."""
+
     session_id: uuid.UUID
-    api_key_id: uuid.UUID
+    user_id: uuid.UUID
     tenant_id: uuid.UUID
+    membership_id: uuid.UUID
+    role: str
     scopes: frozenset[str]
     csrf_token: str
 
@@ -52,14 +61,22 @@ async def get_ui_context(
     now = datetime.now(UTC)
     if session is None or session.revoked_at is not None or session.expires_at <= now:
         raise UIAccessError(status.HTTP_303_SEE_OTHER, clear_cookie=True)
-    api_key = await get_api_key_by_id(db, session.api_key_id)
-    if api_key is None or not api_key_is_active(api_key, now=now):
+
+    user = await get_user_by_id(db, session.user_id)
+    if user is None or not user.is_active:
         raise UIAccessError(status.HTTP_303_SEE_OTHER, clear_cookie=True)
+
+    membership = await get_membership_by_id(db, session.tenant_membership_id)
+    if membership is None or not membership.is_active or membership.user_id != user.id:
+        raise UIAccessError(status.HTTP_303_SEE_OTHER, clear_cookie=True)
+
     return UIContext(
         session_id=session.id,
-        api_key_id=api_key.id,
-        tenant_id=api_key.tenant_id,
-        scopes=frozenset(api_key.scopes),
+        user_id=user.id,
+        tenant_id=membership.tenant_id,
+        membership_id=membership.id,
+        role=membership.role,
+        scopes=permissions_for_role(membership.role),
         csrf_token=derive_csrf_token(
             csrf_secret=session.csrf_secret, raw_session_token=raw_token
         ),

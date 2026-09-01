@@ -34,6 +34,13 @@ class Settings(BaseSettings):
     # default. Local loopback development must opt out explicitly.
     ui_session_ttl_hours: int = Field(default=8, ge=1, le=24)
     ui_cookie_secure: bool = True
+    # Signs the short-lived (not persisted) pending-login token used only
+    # between password verification and an explicit tenant choice, for a
+    # user with more than one active TenantMembership (Slice 1, #30) — see
+    # meyar.ui.router._issue_pending_login_token. Never a session/auth
+    # token itself; a captured token still requires the real password to
+    # have already been verified and expires in minutes.
+    pending_login_secret: str = "dev-insecure-pending-login-secret-change-me"
     # Folder-import file-stability window (Slice 14): a discovered file
     # whose mtime is newer than (scan time - this many seconds) is
     # skipped for this scan only — never marked FAILED — so a partial/
@@ -45,6 +52,17 @@ class Settings(BaseSettings):
     def _production_ui_cookie_must_be_secure(self) -> "Settings":
         if self.env == "production" and not self.ui_cookie_secure:
             raise ValueError("Production UI cookies must be Secure.")
+        return self
+
+    @model_validator(mode="after")
+    def _production_needs_real_pending_login_secret(self) -> "Settings":
+        if (
+            self.env == "production"
+            and self.pending_login_secret == "dev-insecure-pending-login-secret-change-me"
+        ):
+            raise ValueError(
+                "Production requires MEYAR_PENDING_LOGIN_SECRET to be set explicitly."
+            )
         return self
 
     @property

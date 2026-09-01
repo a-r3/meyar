@@ -17,7 +17,7 @@ from starlette.responses import Response
 from starlette.templating import Jinja2Templates
 
 from meyar.config import Settings, get_settings
-from meyar.core.auth import authenticate_raw_api_key
+from meyar.core.password import hash_password, needs_rehash, verify_password
 from meyar.db import get_db
 from meyar.embedding.dependency import get_embedding_provider, get_embedding_search_config
 from meyar.embedding.provider import EmbeddingProvider, EmbeddingProviderError
@@ -32,7 +32,7 @@ from meyar.search.planner_schemas import PlannerOutcome, PlannerReasonCode
 from meyar.search.planner_service import plan_and_search_candidates
 from meyar.search.schemas import EmbeddingSearchConfig
 from meyar.search.service import SearchRequestError
-from meyar.services.audit_repo import record_event
+from meyar.services.audit_repo import ACTOR_HUMAN_USER, record_event
 from meyar.services.browser_session_repo import (
     create_browser_session,
     revoke_browser_session_by_id,
@@ -40,6 +40,12 @@ from meyar.services.browser_session_repo import (
 from meyar.services.candidate_document_repo import get_candidate_document
 from meyar.services.job_criteria_repo import create_criteria_version
 from meyar.services.job_repo import archive_job, create_job, find_active_duplicate_job
+from meyar.services.tenant_membership_repo import (
+    get_membership_by_id,
+    list_active_memberships_for_user,
+)
+from meyar.services.tenant_repo import get_tenant
+from meyar.services.user_repo import get_user_by_username, set_password
 from meyar.storage.base import DocumentStorage
 from meyar.storage.dependency import get_document_storage
 from meyar.ui.auth import (
@@ -49,6 +55,7 @@ from meyar.ui.auth import (
     require_ui_scopes,
     verify_csrf,
 )
+from meyar.ui.pending_login import issue_pending_login_token, verify_pending_login_token
 from meyar.ui.presentation import (
     CRITERION_KIND_LABELS,
     CRITERION_STATUS_LABELS,
@@ -82,6 +89,16 @@ from meyar.ui.view_models import PlannerOutcomeView
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/ui", tags=["internal-ui"], include_in_schema=False)
+
+# A fixed, valid-shaped Argon2 hash verified against on an unknown
+# username so that responding to "unknown user" costs roughly the same
+# CPU time as "known user, wrong password" — the login endpoint must not
+# leak username existence through a timing side channel either. This is
+# not a real credential; it hashes a constant that is never treated as a
+# password anywhere else.
+_DUMMY_PASSWORD_HASH = hash_password("meyar-login-timing-decoy-never-a-real-password")
+
+_GENERIC_LOGIN_ERROR = "İstifadəçi adı və ya parol yanlışdır."
 
 _ui_root = resources.files("meyar.ui")
 _template_dir = _ui_root.joinpath("templates")
@@ -152,32 +169,7 @@ def _clear_session_cookie(response: Response, settings: Settings) -> None:
     )
 
 
-@router.get("/login", response_class=HTMLResponse)
-async def login_page(request: Request) -> HTMLResponse:
-    return _render(request, "login.html", _context())
-
-
-@router.post("/login", response_class=HTMLResponse)
-async def login(
-    request: Request,
-    api_key: str = Form(...),
-    db: AsyncSession = Depends(get_db),
-    settings: Settings = Depends(get_settings),
-) -> Response:
-    credential = await authenticate_raw_api_key(db, api_key)
-    if credential is None:
-        await db.rollback()
-        return _render(
-            request,
-            "login.html",
-            _context(error="Daxilolma məlumatı etibarlı deyil."),
-            status_code=status.HTTP_401_UNAUTHORIZED,
-        )
-    _session, raw_session_token = await create_browser_session(
-        db, api_key_id=credential.id, ttl_hours=settings.ui_session_ttl_hours
-    )
-    await db.commit()
-    response = RedirectResponse("/ui", status_code=status.HTTP_303_SEE_OTHER)
+def _issue_session_cookie(response: Response, raw_session_token: str, settings: Settings) -> None:
     response.set_cookie(
         UI_SESSION_COOKIE,
         raw_session_token,
@@ -187,7 +179,153 @@ async def login(
         httponly=True,
         samesite="lax",
     )
+
+
+async def _finalize_human_login(
+    db: AsyncSession,
+    settings: Settings,
+    *,
+    user_id: uuid.UUID,
+    membership_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+) -> Response:
+    """The single place a real BrowserSession is minted for a human — both
+    the direct single-membership login and the tenant-selection flow call
+    this. Always issues a fresh random token (session-fixation prevention:
+    no pre-existing/attacker-supplied cookie value is ever reused)."""
+    _session, raw_session_token = await create_browser_session(
+        db,
+        user_id=user_id,
+        tenant_membership_id=membership_id,
+        ttl_hours=settings.ui_session_ttl_hours,
+    )
+    await record_event(
+        db,
+        tenant_id=tenant_id,
+        event_type="ui.login.succeeded",
+        actor_type=ACTOR_HUMAN_USER,
+        actor_id=user_id,
+    )
+    await db.commit()
+    response = RedirectResponse("/ui", status_code=status.HTTP_303_SEE_OTHER)
+    _issue_session_cookie(response, raw_session_token, settings)
     return response
+
+
+@router.get("/login", response_class=HTMLResponse)
+async def login_page(request: Request) -> HTMLResponse:
+    return _render(request, "login.html", _context())
+
+
+@router.post("/login", response_class=HTMLResponse)
+async def login(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> Response:
+    user = await get_user_by_username(db, username.strip())
+    stored_hash = user.password_hash if user is not None else _DUMMY_PASSWORD_HASH
+    password_ok = verify_password(stored_hash, password)
+
+    # Generic, identical failure for "no such user", "wrong password", and
+    # "disabled user" — never lets a login attempt confirm a username
+    # exists or distinguish why it failed. See docs/DECISIONS.md.
+    if user is None or not password_ok or not user.is_active:
+        await db.rollback()
+        return _render(
+            request,
+            "login.html",
+            _context(error=_GENERIC_LOGIN_ERROR),
+            status_code=status.HTTP_401_UNAUTHORIZED,
+        )
+
+    if needs_rehash(user.password_hash):
+        await set_password(db, user_id=user.id, plaintext_password=password)
+
+    memberships = await list_active_memberships_for_user(db, user_id=user.id)
+    if not memberships:
+        await db.rollback()
+        return _render(
+            request,
+            "login.html",
+            _context(
+                error=(
+                    "Hesabınıza heç bir aktiv təşkilat girişi təyin edilməyib. "
+                    "Administratorla əlaqə saxlayın."
+                )
+            ),
+            status_code=status.HTTP_403_FORBIDDEN,
+        )
+
+    if len(memberships) == 1:
+        return await _finalize_human_login(
+            db,
+            settings,
+            user_id=user.id,
+            membership_id=memberships[0].id,
+            tenant_id=memberships[0].tenant_id,
+        )
+
+    # More than one active tenant membership: never silently pick one —
+    # require an explicit, server-validated choice (see
+    # meyar.ui.pending_login and the /login/select-tenant route below).
+    # Every value needed below is captured before the rollback expires
+    # these ORM instances — a post-rollback attribute access would
+    # otherwise trigger an unawaited lazy-load (MissingGreenlet).
+    user_id = user.id
+    membership_ids_and_tenant_ids = [(m.id, m.tenant_id) for m in memberships]
+    await db.rollback()
+    token = issue_pending_login_token(secret=settings.pending_login_secret, user_id=user_id)
+    tenant_options = []
+    for membership_id, tenant_id in membership_ids_and_tenant_ids:
+        tenant = await get_tenant(db, tenant_id)
+        tenant_options.append((membership_id, tenant.name if tenant else str(tenant_id)))
+    return _render(
+        request,
+        "select_tenant.html",
+        _context(token=token, tenant_options=tenant_options),
+    )
+
+
+@router.post("/login/select-tenant", response_class=HTMLResponse)
+async def select_tenant(
+    request: Request,
+    token: str = Form(...),
+    membership_id: uuid.UUID = Form(...),
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> Response:
+    user_id = verify_pending_login_token(secret=settings.pending_login_secret, token=token)
+    if user_id is None:
+        return _render(
+            request,
+            "login.html",
+            _context(error=_GENERIC_LOGIN_ERROR),
+            status_code=status.HTTP_401_UNAUTHORIZED,
+        )
+
+    # The membership id is always re-validated live against the database
+    # and checked to actually belong to the token's authenticated user and
+    # be currently active — a tampered/foreign membership_id never
+    # resolves, regardless of what the client submitted.
+    membership = await get_membership_by_id(db, membership_id)
+    if membership is None or membership.user_id != user_id or not membership.is_active:
+        return _render(
+            request,
+            "login.html",
+            _context(error=_GENERIC_LOGIN_ERROR),
+            status_code=status.HTTP_401_UNAUTHORIZED,
+        )
+
+    return await _finalize_human_login(
+        db,
+        settings,
+        user_id=user_id,
+        membership_id=membership.id,
+        tenant_id=membership.tenant_id,
+    )
 
 
 @router.post("/logout")
@@ -199,6 +337,13 @@ async def logout(
 ) -> Response:
     verify_csrf(ctx.csrf_token, csrf_token)
     await revoke_browser_session_by_id(db, session_id=ctx.session_id)
+    await record_event(
+        db,
+        tenant_id=ctx.tenant_id,
+        event_type="ui.logout",
+        actor_type=ACTOR_HUMAN_USER,
+        actor_id=ctx.user_id,
+    )
     await db.commit()
     response = RedirectResponse("/ui/login", status_code=status.HTTP_303_SEE_OTHER)
     _clear_session_cookie(response, settings)
@@ -495,6 +640,8 @@ async def archive_job_route(
             tenant_id=ctx.tenant_id,
             event_type="job.archived",
             metadata={"job_id": str(job.id)},
+            actor_type=ACTOR_HUMAN_USER,
+            actor_id=ctx.user_id,
         )
         await db.commit()
     except SQLAlchemyError:
@@ -640,13 +787,18 @@ async def create_job_route(
             tenant_id=ctx.tenant_id,
             job_id=job.id,
             criteria=[c.model_dump(mode="json") for c in job_request.criteria],
-            created_by_api_key_id=ctx.api_key_id,
+            # No API key is involved in a human UI-authored job — this
+            # column already models "not machine-authored" as None; the
+            # audit event below carries the accountable human actor.
+            created_by_api_key_id=None,
         )
         await record_event(
             db,
             tenant_id=ctx.tenant_id,
             event_type="job.created",
             metadata={"job_id": str(job.id), "criteria_version": version.version_number},
+            actor_type=ACTOR_HUMAN_USER,
+            actor_id=ctx.user_id,
         )
         await db.commit()
     except IntegrityError:

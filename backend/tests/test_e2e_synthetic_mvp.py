@@ -104,10 +104,10 @@ JOB_CRITERIA = {
 async def test_synthetic_mvp_scenario_end_to_end(
     client: AsyncClient,
     db_session: AsyncSession,
-    tenant_and_key,
+    tenant_key_and_user,
     local_ui_settings: Settings,
 ) -> None:
-    tenant_a, _key_a, plaintext_a = tenant_and_key
+    tenant_a, _key_a, plaintext_a, hr_user, hr_password, _membership = tenant_key_and_user
     tenant_b = await create_tenant(db_session, name="E2E-Tenant-B")
     _key_b, plaintext_b = await create_api_key(db_session, tenant_id=tenant_b.id, env="test")
     await db_session.commit()
@@ -154,7 +154,9 @@ async def test_synthetic_mvp_scenario_end_to_end(
     document_id = upload.json()["id"]
 
     login = await client.post(
-        "/ui/login", data={"api_key": plaintext_a}, follow_redirects=False
+        "/ui/login",
+        data={"username": hr_user.username, "password": hr_password},
+        follow_redirects=False,
     )
     assert login.status_code == 303
     original = await client.get(

@@ -17,7 +17,7 @@ from meyar.schemas.candidate import (
     CandidateOut,
     CanonicalDocumentOut,
 )
-from meyar.services.audit_repo import record_event
+from meyar.services.audit_repo import ACTOR_API_KEY, record_event
 from meyar.services.candidate_document_repo import (
     get_candidate_document,
     get_latest_canonical_document,
@@ -95,6 +95,8 @@ async def post_candidate(
         tenant_id=ctx.tenant_id,
         event_type="CANDIDATE_CREATED",
         metadata={"candidate_id": str(candidate.id)},
+        actor_type=ACTOR_API_KEY,
+        actor_id=ctx.api_key_id,
     )
     await db.commit()
     return _candidate_out(candidate)
@@ -141,6 +143,8 @@ async def delete_candidate(
         tenant_id=ctx.tenant_id,
         event_type="CANDIDATE_DELETED",
         metadata={"candidate_id": str(candidate_id), "document_count": deleted_count},
+        actor_type=ACTOR_API_KEY,
+        actor_id=ctx.api_key_id,
     )
     await db.commit()
 

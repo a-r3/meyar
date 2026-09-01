@@ -45,6 +45,16 @@ _FORBIDDEN_METADATA_KEYS = frozenset(
 # string value is treated as accidental free-text leakage.
 _MAX_METADATA_STRING_LENGTH = 300
 
+# Structured actor identity (Slice 1, issue #30). Prefer these over ever
+# putting a human-identifying string into `metadata` — the audit system's
+# PII-safe intent (see _FORBIDDEN_METADATA_KEYS above) is preserved by
+# keeping "who/what did this" to an id reference, never a name/email/
+# password/API-key secret. A future agent-confirmed action (Slice 5) is
+# expected to reuse ACTOR_HUMAN_USER unchanged.
+ACTOR_HUMAN_USER = "HUMAN_USER"
+ACTOR_API_KEY = "API_KEY"
+ACTOR_SYSTEM = "SYSTEM"
+
 
 def _assert_metadata_is_privacy_safe(metadata: dict) -> None:
     for key, value in metadata.items():
@@ -58,11 +68,23 @@ def _assert_metadata_is_privacy_safe(metadata: dict) -> None:
 
 
 async def record_event(
-    db: AsyncSession, *, tenant_id: uuid.UUID, event_type: str, metadata: dict | None = None
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    event_type: str,
+    metadata: dict | None = None,
+    actor_type: str | None = None,
+    actor_id: uuid.UUID | None = None,
 ) -> AuditEvent:
     if metadata:
         _assert_metadata_is_privacy_safe(metadata)
-    event = AuditEvent(tenant_id=tenant_id, event_type=event_type, event_metadata=metadata or {})
+    event = AuditEvent(
+        tenant_id=tenant_id,
+        event_type=event_type,
+        event_metadata=metadata or {},
+        actor_type=actor_type,
+        actor_id=actor_id,
+    )
     db.add(event)
     await db.flush()
     return event

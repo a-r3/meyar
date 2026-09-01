@@ -1,9 +1,11 @@
 import argparse
 import asyncio
+import getpass
 import uuid
 from datetime import date
 
 from meyar.config import get_settings
+from meyar.core.roles import VALID_ROLES
 from meyar.db import get_session_factory
 from meyar.embedding.dependency import get_embedding_provider, get_embedding_search_config
 from meyar.embedding.provider import EmbeddingProviderError
@@ -34,7 +36,18 @@ from meyar.services.demo_seed_service import DemoTenantAmbiguousError, reset_dem
 from meyar.services.folder_indexer_service import index_folder
 from meyar.services.folder_reconciliation_service import reconcile_folder
 from meyar.services.job_criteria_repo import get_current_criteria_version
-from meyar.services.tenant_repo import create_tenant
+from meyar.services.tenant_membership_repo import (
+    create_membership,
+    get_membership_for_user_and_tenant,
+    set_membership_active,
+)
+from meyar.services.tenant_repo import create_tenant, get_tenant
+from meyar.services.user_repo import create_user as create_user_row
+from meyar.services.user_repo import (
+    get_user_by_username,
+    set_password,
+    set_user_active,
+)
 from meyar.storage.dependency import get_document_storage
 
 
@@ -57,6 +70,133 @@ async def _create_tenant(name: str) -> None:
     print(f"Created tenant: {tenant.id} ({name})")
     print(f"API key (shown once, store it now): {plaintext}")
     print(f"Key prefix (safe to log/display): {api_key.prefix}")
+
+
+def _prompt_new_password() -> str:
+    """Interactive, non-echoing secret input — never a CLI argument, so it
+    can never land in shell history or a process listing. Requires a
+    matching confirmation entry before proceeding."""
+    while True:
+        password = getpass.getpass("New password: ")
+        if len(password) < 8:
+            print("Password must be at least 8 characters. Try again.")
+            continue
+        confirm = getpass.getpass("Confirm new password: ")
+        if password != confirm:
+            print("Passwords did not match. Try again.")
+            continue
+        return password
+
+
+async def _create_user(username: str) -> None:
+    """Creates a human identity with no tenant access yet — pair with
+    `add-membership` to grant access. Interactive-only password entry;
+    the plaintext is never echoed, logged, or persisted (see
+    meyar.core.password)."""
+    password = _prompt_new_password()
+    factory = get_session_factory()
+    async with factory() as db:
+        existing = await get_user_by_username(db, username)
+        if existing is not None:
+            print(f"A user named {username!r} already exists.")
+            raise SystemExit(2)
+        user = await create_user_row(db, username=username, plaintext_password=password)
+        await db.commit()
+    print(f"Created user: {user.id} ({user.username})")
+    print("No tenant access granted yet — run add-membership next.")
+
+
+async def _add_membership(username: str, tenant_id: str, role: str) -> None:
+    if role not in VALID_ROLES:
+        print(f"Invalid role {role!r}. Valid roles: {sorted(VALID_ROLES)}")
+        raise SystemExit(2)
+    try:
+        parsed_tenant_id = uuid.UUID(tenant_id)
+    except ValueError:
+        print("Invalid tenant id (expected UUID).")
+        raise SystemExit(2) from None
+
+    factory = get_session_factory()
+    async with factory() as db:
+        user = await get_user_by_username(db, username)
+        if user is None:
+            print(f"No user named {username!r}.")
+            raise SystemExit(2)
+        tenant = await get_tenant(db, parsed_tenant_id)
+        if tenant is None:
+            print("Tenant not found.")
+            raise SystemExit(2)
+        existing = await get_membership_for_user_and_tenant(
+            db, user_id=user.id, tenant_id=parsed_tenant_id
+        )
+        if existing is not None:
+            if existing.is_active and existing.role == role:
+                print("Membership already exists with this role — nothing to do.")
+                return
+            print(
+                "A membership already exists for this user/tenant "
+                f"(active={existing.is_active}, role={existing.role}). "
+                "Use enable-user/disable-user or edit the row directly to change it; "
+                "add-membership never overwrites an existing membership."
+            )
+            raise SystemExit(2)
+        membership = await create_membership(
+            db, user_id=user.id, tenant_id=parsed_tenant_id, role=role
+        )
+        await db.commit()
+    print(f"Granted membership: {membership.id} ({username} -> tenant {parsed_tenant_id}, {role})")
+
+
+async def _set_user_password(username: str) -> None:
+    password = _prompt_new_password()
+    factory = get_session_factory()
+    async with factory() as db:
+        user = await get_user_by_username(db, username)
+        if user is None:
+            print(f"No user named {username!r}.")
+            raise SystemExit(2)
+        await set_password(db, user_id=user.id, plaintext_password=password)
+        await db.commit()
+    print(f"Password updated for user: {username}")
+
+
+async def _set_user_active(username: str, *, active: bool) -> None:
+    factory = get_session_factory()
+    async with factory() as db:
+        user = await get_user_by_username(db, username)
+        if user is None:
+            print(f"No user named {username!r}.")
+            raise SystemExit(2)
+        await set_user_active(db, user_id=user.id, is_active=active)
+        await db.commit()
+    print(f"User {username} is now {'active' if active else 'disabled'}.")
+
+
+async def _set_membership_active_cli(username: str, tenant_id: str, *, active: bool) -> None:
+    try:
+        parsed_tenant_id = uuid.UUID(tenant_id)
+    except ValueError:
+        print("Invalid tenant id (expected UUID).")
+        raise SystemExit(2) from None
+
+    factory = get_session_factory()
+    async with factory() as db:
+        user = await get_user_by_username(db, username)
+        if user is None:
+            print(f"No user named {username!r}.")
+            raise SystemExit(2)
+        membership = await get_membership_for_user_and_tenant(
+            db, user_id=user.id, tenant_id=parsed_tenant_id
+        )
+        if membership is None:
+            print("No membership found for this user/tenant.")
+            raise SystemExit(2)
+        await set_membership_active(db, membership_id=membership.id, is_active=active)
+        await db.commit()
+    print(
+        f"Membership for {username} on tenant {parsed_tenant_id} is now "
+        f"{'active' if active else 'disabled'}."
+    )
 
 
 async def _extract_profile(tenant_id: str, candidate_id: str, document_id: str) -> None:
@@ -397,6 +537,7 @@ async def _seed_demo(reset: bool) -> None:
         print(f"Embeddings created (synthetic input): {summary.embeddings_created}")
         print(f"Jobs created: {summary.jobs_created}")
         print(f"Evaluations created (real deterministic evaluator): {summary.evaluations_created}")
+    print("--- Machine/API credential (for REST API testing) ---")
     print(f"API key prefix (safe to log/display): {summary.api_key_prefix}")
     if summary.already_seeded:
         print(
@@ -405,6 +546,12 @@ async def _seed_demo(reset: bool) -> None:
             "can never be recovered)."
         )
     print(f"API key (shown once, store it now): {summary.api_key_plaintext}")
+    print("--- Human/UI login (for the normal /ui/login screen) ---")
+    print(f"Username: {summary.human_username}")
+    print(
+        "Temporary password (shown once, never persisted in plaintext — "
+        f"log in and it works immediately): {summary.human_temp_password}"
+    )
 
 
 async def _extract_identity(tenant_id: str, candidate_id: str, document_id: str) -> None:
@@ -626,6 +773,49 @@ def main() -> None:
     )
     create_tenant_parser.add_argument("--name", required=True)
 
+    create_user_parser = sub.add_parser(
+        "create-user",
+        help=(
+            "Create a human identity (no tenant access yet — pair with "
+            "add-membership). Prompts interactively for the password; "
+            "never pass a password as a CLI argument."
+        ),
+    )
+    create_user_parser.add_argument("--username", required=True)
+
+    add_membership_parser = sub.add_parser(
+        "add-membership", help="Grant a user a role on a tenant."
+    )
+    add_membership_parser.add_argument("--username", required=True)
+    add_membership_parser.add_argument("--tenant-id", required=True)
+    add_membership_parser.add_argument(
+        "--role", required=True, help=f"One of: {sorted(VALID_ROLES)}"
+    )
+
+    set_password_parser = sub.add_parser(
+        "set-password",
+        help="Reset a user's password. Prompts interactively; never a CLI argument.",
+    )
+    set_password_parser.add_argument("--username", required=True)
+
+    disable_user_parser = sub.add_parser("disable-user", help="Disable a user (blocks login).")
+    disable_user_parser.add_argument("--username", required=True)
+
+    enable_user_parser = sub.add_parser("enable-user", help="Re-enable a disabled user.")
+    enable_user_parser.add_argument("--username", required=True)
+
+    disable_membership_parser = sub.add_parser(
+        "disable-membership", help="Disable a user's membership on one tenant."
+    )
+    disable_membership_parser.add_argument("--username", required=True)
+    disable_membership_parser.add_argument("--tenant-id", required=True)
+
+    enable_membership_parser = sub.add_parser(
+        "enable-membership", help="Re-enable a user's membership on one tenant."
+    )
+    enable_membership_parser.add_argument("--username", required=True)
+    enable_membership_parser.add_argument("--tenant-id", required=True)
+
     extract_parser = sub.add_parser(
         "extract-profile", help="Run candidate profile extraction against a real local LLM."
     )
@@ -745,6 +935,24 @@ def main() -> None:
     args = parser.parse_args()
     if args.command == "create-tenant":
         asyncio.run(_create_tenant(args.name))
+    elif args.command == "create-user":
+        asyncio.run(_create_user(args.username))
+    elif args.command == "add-membership":
+        asyncio.run(_add_membership(args.username, args.tenant_id, args.role))
+    elif args.command == "set-password":
+        asyncio.run(_set_user_password(args.username))
+    elif args.command == "disable-user":
+        asyncio.run(_set_user_active(args.username, active=False))
+    elif args.command == "enable-user":
+        asyncio.run(_set_user_active(args.username, active=True))
+    elif args.command == "disable-membership":
+        asyncio.run(
+            _set_membership_active_cli(args.username, args.tenant_id, active=False)
+        )
+    elif args.command == "enable-membership":
+        asyncio.run(
+            _set_membership_active_cli(args.username, args.tenant_id, active=True)
+        )
     elif args.command == "extract-profile":
         asyncio.run(_extract_profile(args.tenant_id, args.candidate_id, args.document_id))
     elif args.command == "evaluate":
