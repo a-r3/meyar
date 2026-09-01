@@ -179,6 +179,11 @@ class OllamaLLMProvider:
             ],
             "format": schema,
             "stream": False,
+            # Hybrid-thinking models (qwen3) default to emitting a hidden
+            # chain-of-thought before the schema-constrained JSON, multiplying
+            # real latency ~5x for no benefit here — every prompt in this
+            # module already forbids chain-of-thought output. See D-039.
+            "think": False,
             "options": {"temperature": 0.0},
         }
         semaphore = get_inference_semaphore(self._max_concurrency)

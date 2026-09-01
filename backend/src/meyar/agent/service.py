@@ -568,6 +568,15 @@ async def run_agent_turn(
     last_tool_summary: dict | None = None
     tool_calls_made = 0
     provenance = _configured_provenance(llm)
+    # Scoped to this one turn only (never persisted): a small local model
+    # sometimes re-issues an identical SEARCH_CANDIDATES call instead of
+    # recognizing the request is already answered by its own prior result —
+    # found via real-Ollama Slice 2 acceptance testing (PR #40), where this
+    # produced a contradictory-looking TOOL_CALL_LIMIT_EXCEEDED banner
+    # stacked above several duplicated result blocks. Guarded structurally
+    # rather than only by prompt instruction, matching this module's D-038
+    # precedent.
+    searched_queries: set[str] = set()
 
     while True:
         decision: AgentDecision | None = None
@@ -671,6 +680,33 @@ async def run_agent_turn(
                 max_context_turns=max_context_turns,
                 result=result,
             )
+
+        if decision.action == AgentActionType.SEARCH_CANDIDATES:
+            assert decision.search_query is not None
+            normalized_query = _fold(decision.search_query)
+            if normalized_query in searched_queries:
+                # Already answered by an identical search this same turn —
+                # finalize on the existing results instead of repeating (or
+                # worse, eventually hitting TOOL_CALL_LIMIT_EXCEEDED, which
+                # would co-render a "simplify your query" message above
+                # results that already fully answer the very same query).
+                result = _build_result(
+                    outcome=AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT,
+                    message=None,
+                    tool_results=tool_results,
+                    tool_call_count=tool_calls_made,
+                    provenance=provenance,
+                )
+                return await _finish_turn(
+                    db,
+                    conversation,
+                    tenant_id=tenant_id,
+                    turns=turns,
+                    last_search_candidate_ids=last_search_candidate_ids,
+                    max_context_turns=max_context_turns,
+                    result=result,
+                )
+            searched_queries.add(normalized_query)
 
         matched_profile: CandidateProfileExtraction | None = None
         if decision.action == AgentActionType.SEARCH_CANDIDATES:

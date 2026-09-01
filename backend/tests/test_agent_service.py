@@ -400,7 +400,10 @@ async def test_bounded_tool_call_loop_stops_at_configured_maximum(
 
     # A misbehaving/adversarial model keeps returning TOOL_CALL decisions
     # forever — the loop must still stop at max_tool_calls, never spin
-    # unboundedly.
+    # unboundedly. Each decision uses a DISTINCT query so this test
+    # exercises the true unbounded-loop guard rather than the separate
+    # identical-repeated-query dedup guard (see
+    # test_repeated_identical_search_finalizes_instead_of_looping below).
     from meyar.search.planner_schemas import PlannerDraft
     from meyar.search.schemas import RequiredFilters
 
@@ -409,10 +412,10 @@ async def test_bounded_tool_call_loop_stops_at_configured_maximum(
         agent_decisions=[
             AgentDecision(
                 action=AgentActionType.SEARCH_CANDIDATES,
-                search_query="NoMatch bilən namizədləri göstər",
+                search_query=f"NoMatch bilən namizədləri göstər #{i}",
             )
-        ]
-        * 10,
+            for i in range(10)
+        ],
     )
     result = await _run(
         db_session,
@@ -424,6 +427,46 @@ async def test_bounded_tool_call_loop_stops_at_configured_maximum(
     )
     assert result.outcome == AgentTurnOutcome.TOOL_CALL_LIMIT_EXCEEDED
     assert result.tool_call_count == 2
+
+
+async def test_repeated_identical_search_finalizes_instead_of_looping(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    """Real-Ollama Slice 2 acceptance testing (PR #40): once made fast by
+    disabling qwen3's default hidden-thinking mode (D-039), the model would
+    re-issue an identical SEARCH_CANDIDATES call for a request it had
+    already fully answered, eventually co-rendering a contradictory
+    TOOL_CALL_LIMIT_EXCEEDED ("simplify your query") banner above several
+    duplicated result blocks. An identical repeated query within one turn
+    must finalize on the existing results instead of repeating the work."""
+    tenant, user, _password, membership = tenant_and_user
+    await db_session.commit()
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+
+    from meyar.search.planner_schemas import PlannerDraft
+    from meyar.search.schemas import RequiredFilters
+
+    llm = FakeLLMProvider(
+        planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
+        agent_decisions=[
+            AgentDecision(
+                action=AgentActionType.SEARCH_CANDIDATES,
+                search_query="Python bilən namizədləri göstər",
+            )
+        ]
+        * 5,
+    )
+    result = await _run(
+        db_session,
+        llm,
+        tenant_id=tenant.id,
+        conversation=conversation,
+        message="Python bilən namizədləri göstər",
+        max_tool_calls=3,
+    )
+    assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
+    assert result.tool_call_count == 1
+    assert len(result.tool_results) == 1
 
 
 async def test_model_timeout_is_a_safe_typed_failure_not_an_exception(

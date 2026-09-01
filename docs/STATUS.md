@@ -230,6 +230,32 @@ regression tests (8 service-level including a structural schema test
 proving the vulnerability class is closed, 3 HTTP-level). Quality gates:
 `ruff` clean, `mypy src` clean, full `pytest` suite 778 passed / 0 failed
 (up from 765), `alembic heads` unchanged (no migration),
+`scripts/scan-tracked-tree.sh` clean. Pushed to PR #40. Owner-directed
+autonomous acceptance run of the real 3-turn flow against a real local
+`qwen3:1.7b` daemon then found two more real bugs neither visible to
+`FakeLLMProvider`-based tests — see D-039: qwen3's default hidden-
+thinking mode made every call ~5x slower, turning Turn 1's very first
+decision into an outright `AGENT_PROVIDER_FAILURE` (fixed: `think: false`
+on every `OllamaLLMProvider._chat` call, ~34s cold-load latency measured
+down to ~6.5s); and, once fast enough to reliably reach a second
+"what next" decision, the loop had no guard against the model re-issuing
+an identical `SEARCH_CANDIDATES` call, eventually co-rendering
+`TOOL_CALL_LIMIT_EXCEEDED` above duplicated result blocks (fixed
+structurally: an identical repeated query within one turn now finalizes
+on the existing results instead of looping). A related prompt
+clarification (`AGENT_PROMPT_VERSION` -> v2) fixed two routing gaps the
+same real run surfaced: a general "experience" ask topic-filtering itself
+to zero evidence matches, and a duration question about an
+already-identified candidate being answered with `CLARIFY` echoing the
+user's own question instead of using the D-038 evidence+caveat mechanism.
+Re-verified end to end: all three turns of the real flow now produce a
+single coherent grounded result each, and Turn 3 correctly states the
+evidence does not prove a specific Python duration without ever deriving
+"2021–2025 = 4 years" or substituting total experience for it. 2 new
+regression tests for the thinking-disabled payload, 1 new + 1 rewritten
+for the redundant-search guard. Quality gates re-verified: `ruff` clean,
+`mypy src` clean, full `pytest` suite 781 passed / 0 failed (up from
+778), `alembic heads` unchanged (no migration),
 `scripts/scan-tracked-tree.sh` clean. Pushed to PR #40. **Still not
 merged — awaiting owner retest.**
 

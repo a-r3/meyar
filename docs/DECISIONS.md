@@ -2836,3 +2836,89 @@ design — one schema rename/shape change (`GroundedAnswer` ->
 (`synthesize_grounded_answer` -> `select_grounded_facts`), one new pure
 rendering function, no migration. No scoring/evaluation math, planner
 regex, evidence schema, or navigation changed.
+
+## D-039 — Slice 2 acceptance-loop hardening: a real Ollama bug
+(hidden-thinking latency) and a real orchestration bug (redundant
+identical searches) found via the PR #40 real 3-turn qwen3:1.7b flow
+
+**Date:** 2026-09-02
+**Decision:** Owner-directed autonomous acceptance testing of PR #40 ran
+the exact real Ollama flow ("Python bilən namizədləri göstər" ->
+"birincinin təcrübəsini izah et" -> "onun Python təcrübəsi neçə ildir?")
+against a real local `qwen3:1.7b` daemon (8 GB dev hardware) and found two
+real, reproducible defects — neither visible to `FakeLLMProvider`-based
+tests, matching the D-035 precedent that only a real daemon can surface
+them:
+
+1. **Real bug: qwen3's default hybrid "thinking" mode makes every
+   schema-constrained call ~5x slower**, which turned Turn 1's very first
+   `decide_agent_action` call into an outright `AGENT_PROVIDER_FAILURE`
+   (measured cold-load latency: ~34s with thinking on vs. ~6.5s with
+   `think: false`, isolated by posting both payload variants directly to
+   the real Ollama `/api/chat` endpoint outside the application, mirroring
+   D-035's isolation method). Every prompt in `meyar.agent.prompts` /
+   `meyar.search.planner_prompts` already forbids chain-of-thought output,
+   so the hidden reasoning was pure waste, not a quality tradeoff being
+   traded away. Fixed by adding `"think": False` to
+   `OllamaLLMProvider._chat`'s request payload — applies uniformly to
+   every call site (extraction, identity extraction, NL search planning,
+   agent decision, grounded-fact selection), consistent with there being
+   exactly one `_chat` method.
+2. **Real bug: the orchestration loop had no guard against a model
+   re-issuing an identical `SEARCH_CANDIDATES` call.** Once (1) made the
+   model fast enough to reliably reach a second "what next" decision
+   within one turn, it would sometimes re-search the exact same query it
+   had already fully answered, eventually hitting
+   `TOOL_CALL_LIMIT_EXCEEDED` — which co-rendered a "simplify your query"
+   message above several duplicated, otherwise-correct result blocks: a
+   contradictory-looking state matching the D-036 class of defect. Fixed
+   structurally, not by a prompt instruction alone (this module's D-038
+   precedent): `run_agent_turn` now tracks the (folded) search queries
+   already executed within this one turn and finalizes on the existing
+   `tool_results` as `ANSWERED_FROM_TOOL_RESULT` the moment an identical
+   query recurs, never re-dispatching or spending another real tool/model
+   call. Scoped to a single turn's local loop state only — never
+   persisted, never shared across turns/tenants/sessions.
+3. **Prompt clarification (`AGENT_PROMPT_VERSION` bumped to
+   `agent-orchestrator-prompt-v2`).** The real flow's Turn 2 and Turn 3
+   also showed two related routing gaps: `evidence_topic` had no guidance
+   for a general category ask ("təcrübəsini" — "his experience", inflected)
+   vs. one specific named fact, so a category-level question could
+   topic-filter itself down to zero evidence matches; and a duration
+   question about an already-identified candidate ("onun Python təcrübəsi
+   neçə ildir?") was answered with `CLARIFY` echoing the user's own
+   question verbatim instead of using the already-built D-038
+   evidence+caveat mechanism designed for exactly this case. The
+   `GET_CANDIDATE_EVIDENCE`/`CLARIFY` bullets in `AGENT_SYSTEM_PROMPT` now
+   say explicitly: set `evidence_topic` only for one named skill/fact,
+   leave it unset for a whole-category ask; a pronoun referring to an
+   already-discussed candidate resolves to that candidate_ref rather than
+   `CLARIFY`; a duration/count question about an identifiable candidate
+   always routes to `GET_CANDIDATE_EVIDENCE` (the D-038 caveat mechanism
+   decides provability, never the model directly). This is prompt guidance
+   only — it does not change the underlying grounding mechanism, and a
+   small model can still make an imperfect tool choice (explicitly out of
+   scope per the owner's own acceptance framing: latency and semantic
+   sophistication are not acceptance criteria).
+
+Re-verified end to end after the fix: all three turns of the real flow
+produced a single, coherent, evidence-grounded, non-contradictory result
+each, with Turn 3 correctly stating the available evidence does not prove
+a specific Python duration (`Mövcud sübut konkret müddəti göstərmir.`)
+without ever deriving "2021–2025 = 4 years of Python" or silently
+substituting total experience for it.
+
+**Why:** Slice 2's own acceptance bar (issue #31, D-035/D-036/D-037/D-038)
+requires a real candidate result with no contradictory success/error
+state — a request-shape latency bug and an unbounded-loop-adjacent
+orchestration gap both defeat that bar independently of model quality,
+and (per D-035's own precedent) neither is discoverable without a real
+local daemon.
+
+**Reversibility:** Fully additive/corrective to the Slice 2 (D-035
+through D-038) design. `think: false` is a per-request Ollama parameter,
+not a model/config change — reverting it is a one-line diff with no
+migration impact. The redundant-search guard is pure orchestration-loop
+logic (`meyar.agent.service`), no schema/migration change. The prompt
+edit only affects `AGENT_SYSTEM_PROMPT` text and its version constant. No
+scoring, planner regex, Search/Vacancies UI, or mutation path touched.
