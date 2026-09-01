@@ -186,7 +186,33 @@ re-verified: `ruff` clean, `mypy src` clean, full `pytest` suite 765
 passed / 0 failed (up from 756),
 `alembic heads` unchanged (no migration — additive JSON turn shape only),
 `scripts/scan-tracked-tree.sh` clean. Pushed to PR #40, CI re-verified
-green. **Still not merged — awaiting owner retest.**
+green. Owner conversational retest then found a product-level gap: a
+follow-up like "birincinin təcrübəsini izah et" correctly resolved the
+ordinal and fetched the right profile/evidence data, but the assistant
+only ever repeated the generic D-036 fallback sentence while the UI
+dumped the full structured profile below it — not a coherent
+explanation. Fixed — see D-037: a new, narrow
+`LLMProvider.synthesize_grounded_answer` call (used only after a
+successful `GET_CANDIDATE_PROFILE`/`GET_CANDIDATE_EVIDENCE`) lets the
+model produce natural-language prose from a small, bounded, indexed fact
+list built from the candidate's own already-validated profile fields
+(never raw CV text, never identity); the model's answer is independently
+re-validated server-side before ever being trusted — every cited fact id
+must have actually been supplied, and every number the answer states must
+appear verbatim in those facts (the concrete guard against an invented
+duration/skill-year count). A rejected or unavailable answer falls back
+to the existing D-036 deterministic message exactly as before — never a
+turn failure. `SEARCH_CANDIDATES` and all scoring/planner/navigation
+behavior unchanged. 10 new regression tests (8 service-level — including
+direct unit tests on the fact-builder and validator — 2 HTTP-level).
+Quality gates re-verified: `ruff` clean, `mypy src` clean, full `pytest`
+suite 775 passed / 0 failed (up from 765), `alembic heads` unchanged (no
+migration), `scripts/scan-tracked-tree.sh` clean; the new `GroundedAnswer`
+schema was independently spot-checked against a real local Ollama daemon
+to rule out a repeat of D-035's `maxLength` failure mode (none found — a
+slow response on this memory-constrained dev box, not a schema defect).
+Pushed to PR #40. **Still not merged — awaiting owner conversational
+retest.**
 
 GitHub remote established (`https://github.com/a-r3/meyar.git`, private,
 temporary development remote — see D-012, `docs/DECISIONS.md`). `main`

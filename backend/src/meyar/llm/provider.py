@@ -2,7 +2,7 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel, Field
 
-from meyar.agent.schemas import AgentDecision
+from meyar.agent.schemas import AgentDecision, GroundedAnswer, GroundedFact
 from meyar.extraction.view import ProfessionalDocumentView
 from meyar.schemas.candidate_identity import CandidateIdentityExtraction
 from meyar.schemas.candidate_profile import CandidateProfileExtraction
@@ -84,6 +84,22 @@ class LLMProvider(Protocol):
         (meyar.agent.service). Returns a strict AgentDecision and actual
         call provenance — never raw model output. ``repair`` selects the
         single bounded repair prompt, mirroring plan_candidate_search."""
+        ...
+
+    async def synthesize_grounded_answer(
+        self,
+        *,
+        question: str,
+        facts: list[GroundedFact],
+        repair: bool = False,
+    ) -> tuple[GroundedAnswer, "LLMResultProvenance"]:
+        """One bounded, narrow synthesis call for Slice 2's D-037 grounded
+        profile/evidence explanation (meyar.agent.service). ``facts`` is
+        the exact, already-fetched, already-tenant-scoped fact list the
+        answer may draw from — never raw CV text, never identity. The
+        caller independently re-validates the returned GroundedAnswer
+        against ``facts`` before ever trusting it; this method itself only
+        guarantees schema shape, not factual grounding."""
         ...
 
     async def health(self) -> dict:

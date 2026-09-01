@@ -364,3 +364,146 @@ async def test_get_candidate_profile_success_never_renders_empty_bubble(
     assert response.status_code == 200
     assert '<p class="untrusted-text"></p>' not in response.text
     assert str(candidate.id) in response.text
+
+
+# --- D-037 regression tests: rendered-page assertions for a grounded
+# conversational explanation of a specific candidate's experience. ---
+
+
+async def test_grounded_explanation_renders_as_meaningful_answer_with_evidence(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
+) -> None:
+    """UI requirement: a follow-up like 'birincinin təcrübəsini izah et'
+    must show (1) a meaningful assistant explanation, (2) relevant
+    grounded evidence, (3) an optional 'Tam profilə bax' link — not
+    merely a generic framing sentence plus a full-profile dump."""
+    from meyar.agent.schemas import GroundedAnswer
+
+    tenant, user, password, _membership = tenant_and_user
+    profile_content = {
+        **_profile("Python"),
+        "employment_history": [
+            {
+                "title": "Backend Developer",
+                "organization": "Synthetic Co",
+                "start_date": "2020",
+                "end_date": None,
+                "is_current": True,
+                "evidence": [{"page": 1, "block_index": 0, "quote": "Synthetic evidence"}],
+            }
+        ],
+    }
+    candidate, _pv = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=profile_content
+    )
+    await db_session.commit()
+
+    fake_search = FakeLLMProvider(
+        planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
+        agent_decisions=[
+            AgentDecision(
+                action=AgentActionType.SEARCH_CANDIDATES,
+                search_query="Python bilən namizədləri göstər",
+            ),
+            AgentDecision(action=AgentActionType.FINAL_ANSWER, message="Budur nəticələr."),
+        ],
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake_search
+    csrf = await _login_and_csrf(client, user.username, password)
+    await client.post(
+        "/ui/agent", data={"message": "Python bilən namizədləri göstər", "csrf_token": csrf}
+    )
+
+    # facts: 0 = Python skill, 1 = Backend Developer employment (detail "2020 — hazırda davam edir")
+    explanation = "Namizəd 2020-ci ildən Backend Developer olaraq çalışıb və Python bilir."
+    fake_profile = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1),
+        grounded_answer=GroundedAnswer(answer=explanation, used_facts=[0, 1]),
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake_profile
+    response = await client.post(
+        "/ui/agent", data={"message": "birincinin təcrübəsini izah et", "csrf_token": csrf}
+    )
+    assert response.status_code == 200
+    assert explanation in response.text
+    assert "Bacarıqlar" in response.text  # supporting evidence cards still present
+    assert f"/ui/candidates/{candidate.id}" in response.text  # optional "Tam profilə bax"
+
+
+async def test_grounded_explanation_never_leaks_identity_to_model(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
+) -> None:
+    tenant, user, password, _membership = tenant_and_user
+    candidate, pv = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=_profile("Python")
+    )
+    await db_session.commit()
+    from meyar.services.candidate_identity_repo import create_identity_version
+
+    await create_identity_version(
+        db_session,
+        tenant_id=tenant.id,
+        candidate_id=candidate.id,
+        candidate_document_id=pv.candidate_document_id,
+        canonical_document_id=pv.canonical_document_id,
+        source_sha256=pv.source_sha256,
+        schema_version="candidate-identity-v1",
+        prompt_version="test",
+        model_provider="fake",
+        model_name="fake",
+        status="COMPLETED",
+        identity_content={
+            "full_name": {
+                "value": "Tural Demo-Aliyev",
+                "evidence": [{"page": 1, "block_index": 0, "quote": "Synthetic evidence"}],
+            },
+            "email": {
+                "value": "tural@example.invalid",
+                "evidence": [{"page": 1, "block_index": 0, "quote": "Synthetic evidence"}],
+            },
+            "phone": None,
+        },
+    )
+    await db_session.commit()
+
+    from meyar.agent.schemas import GroundedAnswer
+
+    fake_profile = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1),
+        grounded_answer=GroundedAnswer(answer="Namizəd Python bilir.", used_facts=[0]),
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake_profile
+    csrf = await _login_and_csrf(client, user.username, password)
+    csrf_conv_setup = FakeLLMProvider(
+        planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
+        agent_decisions=[
+            AgentDecision(
+                action=AgentActionType.SEARCH_CANDIDATES,
+                search_query="Python bilən namizədləri göstər",
+            ),
+            AgentDecision(action=AgentActionType.FINAL_ANSWER, message="Budur nəticələr."),
+        ],
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: csrf_conv_setup
+    await client.post(
+        "/ui/agent", data={"message": "Python bilən namizədləri göstər", "csrf_token": csrf}
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake_profile
+    response = await client.post(
+        "/ui/agent", data={"message": "birincinin təcrübəsini izah et", "csrf_token": csrf}
+    )
+    assert response.status_code == 200
+    # The human-facing page may legitimately show the candidate's name
+    # (an authorized HR user is viewing it) — what must never happen is
+    # identity reaching the MODEL's own input. Assert the fake provider's
+    # captured facts/question never carried it.
+    assert fake_profile.last_grounded_facts is not None
+    for fact in fake_profile.last_grounded_facts:
+        assert "Tural" not in fact.title and "tural@" not in (fact.detail or "")
+    assert "tural@example.invalid" not in (fake_profile.last_grounded_question or "")

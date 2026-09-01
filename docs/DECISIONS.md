@@ -2703,3 +2703,72 @@ pre-rendered `text` alone; no migration, JSON column, old rows still
 readable via `.get()` defaults), and a template-only conditional for the
 relevance pill. No scoring/evaluation math changed, no planner regex
 changed, no navigation removed.
+
+## D-037 — Slice 2 product-gap fix: grounded conversational answers for
+profile/evidence explanations, with independent server-side validation
+
+**Date:** 2026-09-02
+**Decision:** Owner inspection found that "birincinin təcrübəsini izah
+et" (explain the first one's experience) correctly resolved the ordinal
+and fetched the right profile/evidence data, but the assistant only ever
+said the generic D-036 fallback ("Nəticələr aşağıdadır.") while the UI
+dumped the full structured profile below it — not a coherent explanation.
+Root cause: D-035's design deliberately restricted the model's `message`
+to framing text only, with no path for it to synthesize prose from a
+tool's own facts. Closed with the smallest workable grounded-answer
+contract, not a general-purpose agent framework:
+
+1. **A second, narrow LLM call, used only after a successful
+   `GET_CANDIDATE_PROFILE`/`GET_CANDIDATE_EVIDENCE`.**
+   `LLMProvider.synthesize_grounded_answer(question, facts)` (new
+   protocol method, reusing `OllamaLLMProvider._chat` — the existing
+   concurrency guard applies automatically) is given the user's own
+   question and a small, bounded, INDEXED list of `GroundedFact` (id,
+   category, title, detail) built server-side from the SAME
+   already-extracted, already-schema-validated `CandidateProfileExtraction`
+   fields `_EVIDENCE_CATEGORIES` already uses for topic matching — never
+   raw `evidence.quote` CV text (that stays server-rendered-only, never
+   model input, for both tools identically), never `CandidateIdentity`.
+2. **The model's `GroundedAnswer` (`answer` + `used_facts`) is never
+   trusted at face value.** `meyar.agent.service._validate_grounded_answer`
+   independently re-checks it against the exact facts supplied: rejects
+   an answer citing zero facts; rejects any `used_facts` id that was
+   never actually given to the model; and — the concrete, testable guard
+   against an invented duration/count, the owner's explicit safety
+   concern — rejects an answer stating any number that does not appear
+   verbatim in the title/detail of the facts it was given. A rejected
+   answer is discarded outright, never partially trusted or repaired
+   into something "close enough."
+3. **Failure is never a turn failure.** `_synthesize_grounded_answer`
+   returns `None` on any provider error, repeated schema-invalid output,
+   or a failed validation, and the caller treats `None` exactly like "no
+   model framing available" — the existing D-036 `ANSWERED_FROM_TOOL_RESULT`
+   deterministic fallback, tool results intact, no contradictory error
+   state. The bounded two-attempt repair pattern already used for
+   `decide_agent_action` is reused unchanged.
+4. **Scope.** Applies only to `GET_CANDIDATE_PROFILE`/
+   `GET_CANDIDATE_EVIDENCE` (the owner's exact repro) — `SEARCH_CANDIDATES`
+   is unchanged, still governed entirely by the existing orchestrator
+   decision loop. No planner regex, scoring math, evidence schema, or
+   Search/Vacancies navigation changed.
+5. **UI.** The synthesized (or deterministic-fallback) message renders as
+   the turn's existing outcome banner, ABOVE the unchanged structured
+   profile/evidence cards, which now read as supporting evidence rather
+   than the entire answer — a "Tam profilə bax" link was added to the
+   evidence card (the profile card already had one), closing the one
+   missing piece of the owner's UI requirement.
+
+**Why:** A local-AI agent that can correctly fetch grounded facts but
+cannot say anything about them beyond a fixed generic sentence does not
+meet the product's own bar (`docs/PROJECT_VISION.md`: "AI understands...
+evidence explains"). The fix keeps the LLM's role exactly where D-030/
+D-031 already draw the line — interpretation and phrasing, never fact
+authority — by making every claim the model's prose contains
+independently checkable against data the server already trusts.
+
+**Reversibility:** Fully additive to the Slice 2 (D-035/D-036) design —
+one new provider method, two new schemas (`GroundedFact`,
+`GroundedAnswer`), no migration, no change to `AgentTurnResult`'s shape
+beyond how `message` is now sometimes populated. Deleting the
+`_synthesize_grounded_answer` call site restores the exact D-036
+behavior (deterministic fallback only) with no other change required.

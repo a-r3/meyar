@@ -16,6 +16,14 @@ deterministic, already-tenant-scoped output of existing services
 ``CandidateIdentity`` field: only ``candidate_id`` (an opaque UUID, not
 identity data) and ``CandidateProfileExtraction`` facts, exactly the same
 boundary ``meyar.search.schemas.CandidateSearchResult`` already enforces.
+
+``GroundedAnswer`` (D-037) is a SECOND, narrower LLM-output shape used
+only to synthesize a natural-language explanation of an already-fetched
+profile/evidence tool result. It is subject to the exact same "untrusted
+input" discipline as ``AgentDecision`` — every ``used_facts`` id and every
+number appearing in its ``answer`` is independently re-checked against
+the ``GroundedFact`` list actually supplied before it is ever trusted;
+see meyar.agent.service._validate_grounded_answer.
 """
 
 import uuid
@@ -222,11 +230,46 @@ class AgentTurnOutcome(StrEnum):
     MALFORMED_MODEL_OUTPUT = "MALFORMED_MODEL_OUTPUT"
 
 
+class GroundedFact(BaseModel):
+    """One already-validated, already-extracted professional fact offered
+    to the model for grounded-answer synthesis (D-037) — never raw CV
+    text, never CandidateIdentity. Built server-side, purely from an
+    already-fetched AgentProfileToolResult/AgentEvidenceToolResult; ``id``
+    is this fact's position in the list given to the model for exactly
+    this one call, not a database id."""
+
+    model_config = {"extra": "forbid"}
+
+    id: int = Field(ge=0)
+    category: str = Field(min_length=1, max_length=32)
+    title: str = Field(min_length=1, max_length=500)
+    detail: str | None = Field(default=None, max_length=300)
+
+
+class GroundedAnswer(BaseModel):
+    """Strict model output for D-037 grounded-answer synthesis. ``answer``
+    is natural-language prose; ``used_facts`` must name which of the
+    supplied ``GroundedFact.id`` values it draws from — meyar.agent.
+    service._validate_grounded_answer independently re-checks every id is
+    real and that every number appearing in ``answer`` also appears
+    somewhere in the facts actually supplied, before this is ever trusted
+    as the turn's message. A model response failing that check is
+    discarded, never persisted or shown — see D-037."""
+
+    model_config = {"extra": "forbid"}
+
+    answer: str = Field(min_length=1, max_length=800)
+    used_facts: list[int] = Field(default_factory=list, max_length=30)
+
+
 class AgentTurnResult(BaseModel):
     """The full, safe result of one bounded orchestration turn. ``message``
-    is model-authored framing text only — every factual claim about a
-    candidate lives in ``tool_results`` (deterministic, evidence-grounded,
-    server-rendered), never in ``message`` alone. See D-035."""
+    is either (a) a model-authored FINAL_ANSWER/CLARIFY framing string
+    (D-035), or (b) a server-VALIDATED grounded-answer synthesis over this
+    turn's own ``tool_results`` (D-037) — never free-standing model prose
+    trusted at face value. Every factual claim also always lives in
+    ``tool_results`` itself (deterministic, evidence-grounded,
+    server-rendered) regardless of what ``message`` says."""
 
     model_config = {"extra": "forbid"}
 

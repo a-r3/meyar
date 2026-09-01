@@ -105,7 +105,10 @@
     <div class="empty-state"><h2>Namizəd tapılmadı</h2><p>Göstərilən namizəd bu söhbətin son axtarış nəticələrində yoxdur.</p></div>
     {% else %}
     <section class="panel">
-      <h2>{{ tool_result.evidence.full_name or "Ad məlumatı yoxdur" }}{% if tool_result.evidence.topic %} — {{ tool_result.evidence.topic }}{% endif %}</h2>
+      <div class="page-heading">
+        <h2>{{ tool_result.evidence.full_name or "Ad məlumatı yoxdur" }}{% if tool_result.evidence.topic %} — {{ tool_result.evidence.topic }}{% endif %}</h2>
+        <a class="button button-secondary" href="/ui/candidates/{{ tool_result.evidence.candidate_id }}">Tam profilə bax</a>
+      </div>
       {% if not tool_result.evidence.matches %}
       <p class="muted">Bu mövzu üzrə profil daxilində sübut tapılmadı — bu, mövcud olmadığı demək deyil, yalnız CV-də açıq şəkildə göstərilmədiyi deməkdir.</p>
       {% endif %}

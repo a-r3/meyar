@@ -785,3 +785,242 @@ async def test_ordinal_reference_still_resolves_after_followup_framing_failure(
     assert second_result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
     assert second_result.tool_results[0].profile.found is True
     assert second_result.tool_results[0].profile.candidate_id == candidate.id
+
+
+# --- D-037 regression tests: grounded conversational answers over typed
+# tool results, with independent server-side validation of every model
+# claim (facts cited + numbers stated) before it is ever trusted. See
+# docs/DECISIONS.md D-037 for the owner's product-gap report and the
+# grounded-answer contract this closes it with. ---
+
+
+def test_build_profile_facts_never_includes_identity_fields() -> None:
+    """Direct unit test on the fact-flattening helper: no PII field can
+    ever exist on GroundedFact by construction, and _build_profile_facts
+    reads only CandidateProfileExtraction — this asserts it never even
+    touches an identity source."""
+    from meyar.agent.service import _build_profile_facts
+    from meyar.schemas.candidate_profile import CandidateProfileExtraction
+
+    profile = CandidateProfileExtraction.model_validate(
+        _profile("Python", "SQL", quote="Backend Developer - Python - 2021-2025")
+    )
+    facts = _build_profile_facts(profile)
+    assert facts
+    dumped = " ".join(f"{f.title} {f.detail or ''}" for f in facts)
+    for pii in ("@", "full_name", "email", "phone"):
+        assert pii not in dumped
+
+
+def test_validate_grounded_answer_rejects_unsupported_number() -> None:
+    """The concrete, testable guard against invented durations/counts: a
+    number in the model's answer that appears in none of the supplied
+    facts is rejected outright."""
+    from meyar.agent.schemas import GroundedAnswer, GroundedFact
+    from meyar.agent.service import _validate_grounded_answer
+
+    facts = [
+        GroundedFact(id=0, category="skills", title="Python", detail=None),
+        GroundedFact(
+            id=1,
+            category="employment_history",
+            title="Data Analyst — Caspian Analytics",
+            detail="2021 — 2025",
+        ),
+    ]
+    grounded = GroundedAnswer(
+        answer="Namizəd 2021-2025-ci illərdə Data Analyst kimi çalışıb.", used_facts=[0, 1]
+    )
+    assert _validate_grounded_answer(grounded, facts) == grounded.answer
+
+    hallucinated = GroundedAnswer(answer="Namizəd Python-dan 5 il istifadə edib.", used_facts=[0])
+    assert _validate_grounded_answer(hallucinated, facts) is None
+
+
+def test_validate_grounded_answer_rejects_unknown_or_missing_fact_refs() -> None:
+    from meyar.agent.schemas import GroundedAnswer, GroundedFact
+    from meyar.agent.service import _validate_grounded_answer
+
+    facts = [GroundedFact(id=0, category="skills", title="Python", detail=None)]
+
+    # Fact id never supplied to the model.
+    assert (
+        _validate_grounded_answer(GroundedAnswer(answer="Python bilir.", used_facts=[7]), facts)
+        is None
+    )
+    # No fact cited at all.
+    assert (
+        _validate_grounded_answer(GroundedAnswer(answer="Python bilir.", used_facts=[]), facts)
+        is None
+    )
+
+
+async def test_grounded_experience_explanation_uses_only_supplied_facts(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    """End-to-end: a validated GroundedAnswer becomes the turn's message
+    for a successful GET_CANDIDATE_PROFILE lookup."""
+    from meyar.agent.schemas import GroundedAnswer
+
+    tenant, user, _password, membership = tenant_and_user
+    candidate, _pv = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=_profile("Python", "SQL")
+    )
+    await db_session.commit()
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation.last_search_candidate_ids = [str(candidate.id)]
+    await db_session.flush()
+
+    answer_text = "Namizəd 2020-ci ildən Backend Developer olaraq çalışıb və Python bilir."
+    llm = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1),
+        grounded_answer=GroundedAnswer(answer=answer_text, used_facts=[0, 1, 2]),
+    )
+    result = await _run(
+        db_session,
+        llm,
+        tenant_id=tenant.id,
+        conversation=conversation,
+        message="birincinin təcrübəsini izah et",
+    )
+    assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
+    assert result.message == answer_text
+    # The question the model was asked to answer is the user's own turn text.
+    assert llm.last_grounded_question == "birincinin təcrübəsini izah et"
+    assert llm.last_grounded_facts is not None
+    assert len(llm.last_grounded_facts) >= 2  # 2 skills + 1 employment fact from _profile()
+
+
+async def test_grounded_answer_with_invented_duration_falls_back_safely(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    """The model claims a specific Python duration that is not supported
+    by any supplied fact — the server must discard it and fall back to
+    the deterministic message, never show the invented number."""
+    from meyar.agent.schemas import GroundedAnswer
+
+    tenant, user, _password, membership = tenant_and_user
+    candidate, _pv = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=_profile("Python")
+    )
+    await db_session.commit()
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation.last_search_candidate_ids = [str(candidate.id)]
+    await db_session.flush()
+
+    llm = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1),
+        grounded_answer=GroundedAnswer(
+            answer="Namizəd Python-dan 5 il istifadə edib.", used_facts=[0]
+        ),
+    )
+    result = await _run(
+        db_session,
+        llm,
+        tenant_id=tenant.id,
+        conversation=conversation,
+        message="birincinin təcrübəsini izah et",
+    )
+    assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
+    assert result.message is None
+    assert "5 il" not in (result.message or "")
+    # The grounded tool result itself is still present and correct.
+    assert result.tool_results[0].profile.found is True
+
+
+async def test_grounded_answer_citing_unknown_fact_id_falls_back_safely(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    """The model cannot introduce a fact absent from the supplied list —
+    an out-of-range used_facts id is rejected, not silently trusted."""
+    from meyar.agent.schemas import GroundedAnswer
+
+    tenant, user, _password, membership = tenant_and_user
+    candidate, _pv = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=_profile("Python")
+    )
+    await db_session.commit()
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation.last_search_candidate_ids = [str(candidate.id)]
+    await db_session.flush()
+
+    llm = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1),
+        grounded_answer=GroundedAnswer(answer="Namizəd Excel bilir.", used_facts=[999]),
+    )
+    result = await _run(
+        db_session,
+        llm,
+        tenant_id=tenant.id,
+        conversation=conversation,
+        message="birincinin təcrübəsini izah et",
+    )
+    assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
+    assert result.message is None
+
+
+async def test_grounded_synthesis_failure_falls_back_to_deterministic_message(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    """FAILURE requirement: if grounded final-answer generation fails
+    after a successful tool call, use the deterministic fallback, keep
+    the tool results, and never produce a contradictory error state."""
+    tenant, user, _password, membership = tenant_and_user
+    candidate, _pv = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=_profile("Python")
+    )
+    await db_session.commit()
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation.last_search_candidate_ids = [str(candidate.id)]
+    await db_session.flush()
+
+    llm = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1),
+        grounded_error=ModelTimeoutError("simulated grounded-synthesis timeout"),
+    )
+    result = await _run(
+        db_session,
+        llm,
+        tenant_id=tenant.id,
+        conversation=conversation,
+        message="birincinin təcrübəsini izah et",
+    )
+    assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
+    assert result.message is None
+    assert result.tool_results[0].profile.found is True
+    assert result.tool_results[0].profile.candidate_id == candidate.id
+
+
+async def test_grounded_synthesis_does_not_disturb_ordinal_resolution(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    """Ordinal resolution (rule E from D-036) must remain correct
+    regardless of whether grounded synthesis succeeds, fails, or is
+    rejected — last_search_candidate_ids is untouched by this feature."""
+    from meyar.agent.schemas import GroundedAnswer
+
+    tenant, user, _password, membership = tenant_and_user
+    first, _pv1 = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=_profile("Python")
+    )
+    second, _pv2 = await seed_candidate_with_profile(
+        db_session,
+        tenant_id=tenant.id,
+        profile_content=_profile("Python", quote="Second candidate evidence"),
+    )
+    await db_session.commit()
+    ordered_ids = sorted([first.id, second.id], key=str)
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation.last_search_candidate_ids = [str(cid) for cid in ordered_ids]
+    await db_session.flush()
+
+    llm = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=2),
+        grounded_answer=GroundedAnswer(answer="İkinci namizəd Python bilir.", used_facts=[0]),
+    )
+    result = await _run(
+        db_session, llm, tenant_id=tenant.id, conversation=conversation, message="ikincini aç"
+    )
+    assert result.tool_results[0].profile.candidate_id == ordered_ids[1]
+    await db_session.refresh(conversation)
+    assert conversation.last_search_candidate_ids == [str(cid) for cid in ordered_ids]

@@ -16,6 +16,7 @@ conversation's OWN server-held ``last_search_candidate_ids`` (see
 ``_resolve_candidate_ref``), so the model's own memory of what it was
 shown is never the authority for which candidate a tool call touches."""
 
+import re
 import uuid
 from datetime import date
 
@@ -34,6 +35,8 @@ from meyar.agent.schemas import (
     AgentTurnOutcome,
     AgentTurnResult,
     EvidenceMatchItem,
+    GroundedAnswer,
+    GroundedFact,
 )
 from meyar.core.text import fold_az_ascii, normalize_azerbaijani_case
 from meyar.embedding.provider import EmbeddingProvider
@@ -158,16 +161,22 @@ async def _dispatch_profile(
     tenant_id: uuid.UUID,
     decision: AgentDecision,
     last_search_candidate_ids: list[str],
-) -> AgentToolResult:
+) -> tuple[AgentToolResult, CandidateProfileExtraction | None]:
+    """Returns (tool result, the raw validated profile when found) — the
+    profile is handed back separately so run_agent_turn can build grounded
+    -answer facts (D-037) without a second, redundant DB fetch."""
     assert decision.candidate_ref is not None
     candidate_id = _resolve_candidate_ref(
         last_search_candidate_ids=last_search_candidate_ids,
         candidate_ref=decision.candidate_ref,
     )
     if candidate_id is None:
-        return AgentToolResult(
-            tool_name=AgentActionType.GET_CANDIDATE_PROFILE,
-            profile=AgentProfileToolResult(candidate_ref=decision.candidate_ref, found=False),
+        return (
+            AgentToolResult(
+                tool_name=AgentActionType.GET_CANDIDATE_PROFILE,
+                profile=AgentProfileToolResult(candidate_ref=decision.candidate_ref, found=False),
+            ),
+            None,
         )
     version = await get_current_profile_version(
         db, tenant_id=tenant_id, candidate_id=candidate_id
@@ -177,36 +186,45 @@ async def _dispatch_profile(
         or version.status != PROFILE_STATUS_COMPLETED
         or version.profile_content is None
     ):
-        return AgentToolResult(
-            tool_name=AgentActionType.GET_CANDIDATE_PROFILE,
-            profile=AgentProfileToolResult(
-                candidate_ref=decision.candidate_ref,
-                candidate_id=candidate_id,
-                found=False,
-                profile_status=version.status if version else None,
+        return (
+            AgentToolResult(
+                tool_name=AgentActionType.GET_CANDIDATE_PROFILE,
+                profile=AgentProfileToolResult(
+                    candidate_ref=decision.candidate_ref,
+                    candidate_id=candidate_id,
+                    found=False,
+                    profile_status=version.status if version else None,
+                ),
             ),
+            None,
         )
     try:
         profile = CandidateProfileExtraction.model_validate(version.profile_content)
     except ValidationError:
-        return AgentToolResult(
+        return (
+            AgentToolResult(
+                tool_name=AgentActionType.GET_CANDIDATE_PROFILE,
+                profile=AgentProfileToolResult(
+                    candidate_ref=decision.candidate_ref,
+                    candidate_id=candidate_id,
+                    found=False,
+                    profile_status=version.status,
+                ),
+            ),
+            None,
+        )
+    return (
+        AgentToolResult(
             tool_name=AgentActionType.GET_CANDIDATE_PROFILE,
             profile=AgentProfileToolResult(
                 candidate_ref=decision.candidate_ref,
                 candidate_id=candidate_id,
-                found=False,
+                found=True,
                 profile_status=version.status,
+                profile=profile,
             ),
-        )
-    return AgentToolResult(
-        tool_name=AgentActionType.GET_CANDIDATE_PROFILE,
-        profile=AgentProfileToolResult(
-            candidate_ref=decision.candidate_ref,
-            candidate_id=candidate_id,
-            found=True,
-            profile_status=version.status,
-            profile=profile,
         ),
+        profile,
     )
 
 
@@ -239,18 +257,27 @@ async def _dispatch_evidence(
     tenant_id: uuid.UUID,
     decision: AgentDecision,
     last_search_candidate_ids: list[str],
-) -> AgentToolResult:
+) -> tuple[AgentToolResult, CandidateProfileExtraction | None]:
+    """Returns (tool result, the raw validated profile when found) — see
+    _dispatch_profile's docstring; the same profile backs D-037 grounded-
+    answer synthesis for both tools identically (never the raw evidence
+    quote text, which stays server-rendered-only, never model input)."""
     assert decision.candidate_ref is not None
     candidate_id = _resolve_candidate_ref(
         last_search_candidate_ids=last_search_candidate_ids,
         candidate_ref=decision.candidate_ref,
     )
     if candidate_id is None:
-        return AgentToolResult(
-            tool_name=AgentActionType.GET_CANDIDATE_EVIDENCE,
-            evidence=AgentEvidenceToolResult(
-                candidate_ref=decision.candidate_ref, found=False, topic=decision.evidence_topic
+        return (
+            AgentToolResult(
+                tool_name=AgentActionType.GET_CANDIDATE_EVIDENCE,
+                evidence=AgentEvidenceToolResult(
+                    candidate_ref=decision.candidate_ref,
+                    found=False,
+                    topic=decision.evidence_topic,
+                ),
             ),
+            None,
         )
     version = await get_current_profile_version(
         db, tenant_id=tenant_id, candidate_id=candidate_id
@@ -260,28 +287,34 @@ async def _dispatch_evidence(
         or version.status != PROFILE_STATUS_COMPLETED
         or version.profile_content is None
     ):
-        return AgentToolResult(
-            tool_name=AgentActionType.GET_CANDIDATE_EVIDENCE,
-            evidence=AgentEvidenceToolResult(
-                candidate_ref=decision.candidate_ref,
-                candidate_id=candidate_id,
-                found=False,
-                profile_status=version.status if version else None,
-                topic=decision.evidence_topic,
+        return (
+            AgentToolResult(
+                tool_name=AgentActionType.GET_CANDIDATE_EVIDENCE,
+                evidence=AgentEvidenceToolResult(
+                    candidate_ref=decision.candidate_ref,
+                    candidate_id=candidate_id,
+                    found=False,
+                    profile_status=version.status if version else None,
+                    topic=decision.evidence_topic,
+                ),
             ),
+            None,
         )
     try:
         profile = CandidateProfileExtraction.model_validate(version.profile_content)
     except ValidationError:
-        return AgentToolResult(
-            tool_name=AgentActionType.GET_CANDIDATE_EVIDENCE,
-            evidence=AgentEvidenceToolResult(
-                candidate_ref=decision.candidate_ref,
-                candidate_id=candidate_id,
-                found=False,
-                profile_status=version.status,
-                topic=decision.evidence_topic,
+        return (
+            AgentToolResult(
+                tool_name=AgentActionType.GET_CANDIDATE_EVIDENCE,
+                evidence=AgentEvidenceToolResult(
+                    candidate_ref=decision.candidate_ref,
+                    candidate_id=candidate_id,
+                    found=False,
+                    profile_status=version.status,
+                    topic=decision.evidence_topic,
+                ),
             ),
+            None,
         )
 
     topic_folded = _fold(decision.evidence_topic) if decision.evidence_topic else None
@@ -301,17 +334,130 @@ async def _dispatch_evidence(
         if len(matches) >= MAX_EVIDENCE_MATCHES:
             break
 
-    return AgentToolResult(
-        tool_name=AgentActionType.GET_CANDIDATE_EVIDENCE,
-        evidence=AgentEvidenceToolResult(
-            candidate_ref=decision.candidate_ref,
-            candidate_id=candidate_id,
-            found=True,
-            profile_status=version.status,
-            topic=decision.evidence_topic,
-            matches=matches,
+    return (
+        AgentToolResult(
+            tool_name=AgentActionType.GET_CANDIDATE_EVIDENCE,
+            evidence=AgentEvidenceToolResult(
+                candidate_ref=decision.candidate_ref,
+                candidate_id=candidate_id,
+                found=True,
+                profile_status=version.status,
+                topic=decision.evidence_topic,
+                matches=matches,
+            ),
         ),
+        profile,
     )
+
+
+# (category key, item -> (fact title, fact detail)) — the fact source
+# for D-037 grounded-answer synthesis. Deliberately built from the SAME
+# already-extracted, already-schema-validated CandidateProfileExtraction
+# fields _EVIDENCE_CATEGORIES above uses for topic matching — never raw
+# evidence.quote CV text, so the second-stage synthesis prompt's input
+# surface stays exactly as narrow as the rest of this module's (D-030/
+# D-031). "detail" carries the one place a real, grounded number can
+# legitimately come from (a date range) — see _validate_grounded_answer.
+MAX_GROUNDED_FACTS = 30
+MAX_SYNTHESIS_ATTEMPTS = 2
+_NUMBER_RE = re.compile(r"\d+")
+
+
+def _employment_detail(item) -> str | None:  # noqa: ANN001 - profile item, no shared base type
+    end = "hazırda davam edir" if item.is_current else item.end_date
+    parts = [part for part in (item.start_date, end) if part]
+    return " — ".join(parts) if parts else None
+
+
+_PROFILE_FACT_CATEGORIES = (
+    ("skills", lambda item: (item.name, item.category)),
+    (
+        "employment_history",
+        lambda item: (
+            item.title + (f" — {item.organization}" if item.organization else ""),
+            _employment_detail(item),
+        ),
+    ),
+    (
+        "education",
+        lambda item: (
+            " ".join(part for part in (item.degree, item.field_of_study) if part)
+            or (item.institution or "Təhsil"),
+            item.date,
+        ),
+    ),
+    ("certifications", lambda item: (item.name, item.date)),
+    ("languages", lambda item: (item.language, item.proficiency)),
+    ("projects", lambda item: (item.description, None)),
+)
+
+
+def _build_profile_facts(profile: CandidateProfileExtraction) -> list[GroundedFact]:
+    """Flattens a candidate's profile into a small, bounded, indexed fact
+    list for D-037 grounded-answer synthesis — the ONLY data the second
+    model call ever sees about this candidate."""
+    facts: list[GroundedFact] = []
+    for category, fact_fn in _PROFILE_FACT_CATEGORIES:
+        for item in getattr(profile, category):
+            title, detail = fact_fn(item)
+            facts.append(
+                GroundedFact(id=len(facts), category=category, title=title, detail=detail)
+            )
+            if len(facts) >= MAX_GROUNDED_FACTS:
+                return facts
+    return facts
+
+
+def _validate_grounded_answer(
+    answer: GroundedAnswer, facts: list[GroundedFact]
+) -> str | None:
+    """Independently re-checks a model-produced GroundedAnswer against the
+    exact facts it was given — the model output is never trusted at face
+    value. Rejects (returns None, meaning "fall back to the deterministic
+    message") when: no fact was cited; a cited fact id was never actually
+    supplied; or the answer states a number that appears in none of the
+    supplied facts (the concrete, testable guard against an invented
+    duration/count — D-037)."""
+    if not answer.used_facts:
+        return None
+    valid_ids = {fact.id for fact in facts}
+    if not set(answer.used_facts).issubset(valid_ids):
+        return None
+    allowed_numbers: set[str] = set()
+    for fact in facts:
+        allowed_numbers.update(_NUMBER_RE.findall(fact.title))
+        if fact.detail:
+            allowed_numbers.update(_NUMBER_RE.findall(fact.detail))
+    answer_numbers = set(_NUMBER_RE.findall(answer.answer))
+    if not answer_numbers.issubset(allowed_numbers):
+        return None
+    return answer.answer
+
+
+async def _synthesize_grounded_answer(
+    llm: LLMProvider, *, question: str, facts: list[GroundedFact]
+) -> str | None:
+    """Returns a server-validated grounded answer, or None when synthesis
+    is unavailable/fails/doesn't validate — callers must treat None
+    exactly like "no model framing available" (the existing deterministic
+    fallback), never as a turn failure (D-036/D-037: a successful tool
+    result is never downgraded to an error because this optional step
+    didn't pan out)."""
+    if not facts:
+        return None
+    for attempt in range(1, MAX_SYNTHESIS_ATTEMPTS + 1):
+        try:
+            answer, _provenance = await llm.synthesize_grounded_answer(
+                question=question, facts=facts, repair=attempt > 1
+            )
+        except ModelSchemaInvalidError:
+            continue
+        except (ModelTimeoutError, ModelUnavailableError, LLMProviderError):
+            return None
+        validated = _validate_grounded_answer(answer, facts)
+        if validated is not None:
+            return validated
+    return None
 
 
 def _configured_provenance(llm: LLMProvider) -> LLMResultProvenance:
@@ -509,6 +655,7 @@ async def run_agent_turn(
                 result=result,
             )
 
+        matched_profile: CandidateProfileExtraction | None = None
         if decision.action == AgentActionType.SEARCH_CANDIDATES:
             tool_result, updated_ids = await _dispatch_search(
                 db,
@@ -522,14 +669,14 @@ async def run_agent_turn(
             if updated_ids is not None:
                 last_search_candidate_ids = updated_ids
         elif decision.action == AgentActionType.GET_CANDIDATE_PROFILE:
-            tool_result = await _dispatch_profile(
+            tool_result, matched_profile = await _dispatch_profile(
                 db,
                 tenant_id=tenant_id,
                 decision=decision,
                 last_search_candidate_ids=last_search_candidate_ids,
             )
         else:
-            tool_result = await _dispatch_evidence(
+            tool_result, matched_profile = await _dispatch_evidence(
                 db,
                 tenant_id=tenant_id,
                 decision=decision,
@@ -566,15 +713,25 @@ async def run_agent_turn(
             # real model-authored FINAL_ANSWER message (guaranteed
             # non-None by AgentDecision's own shape validator). A
             # successful profile/evidence lookup has no model framing at
-            # all, so it uses the same "grounded result, no framing"
-            # outcome as the search-loop case (D-036).
+            # all — instead, when found, attempt one bounded D-037
+            # grounded-answer synthesis over this candidate's own facts;
+            # a None result (unavailable, invalid, or ungrounded) falls
+            # back to the existing deterministic message exactly as
+            # before (D-036) — never a turn failure.
+            synthesized_message: str | None = None
+            if found and matched_profile is not None:
+                synthesized_message = await _synthesize_grounded_answer(
+                    llm,
+                    question=user_message,
+                    facts=_build_profile_facts(matched_profile),
+                )
             result = _build_result(
                 outcome=(
                     AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
                     if found
                     else AgentTurnOutcome.CANDIDATE_REF_NOT_FOUND
                 ),
-                message=None,
+                message=synthesized_message,
                 tool_results=tool_results,
                 tool_call_count=tool_calls_made,
                 provenance=provenance,
