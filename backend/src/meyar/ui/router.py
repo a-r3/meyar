@@ -225,14 +225,14 @@ async def login(
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> Response:
-    # Leading/trailing whitespace (a stray newline/space from copying a
-    # credential out of a terminal or password manager) is normalized away
-    # once, up front — the same treatment already applied to `username`.
-    # Every subsequent use (verification below, and the needs_rehash
-    # persistence further down) reads this one normalized value, so a
-    # rehash can never persist a whitespace-corrupted hash that a
-    # correctly-typed retry would then fail against.
-    password = password.strip()
+    # Passwords are exact opaque strings: verified byte-for-byte as
+    # submitted, never normalized. A leading/trailing space is a valid,
+    # distinct password character, not incidental noise to discard — only
+    # `username` (a login identifier, not a secret) is trimmed. The actual
+    # copy-paste-corruption risk this could be confused with is addressed
+    # at its real source instead: every CLI-issued secret (see
+    # meyar.cli._seed_demo/_create_tenant) is printed alone on its own
+    # line, never sharing a line with label text that could soft-wrap.
     user = await get_user_by_username(db, username.strip())
     stored_hash = user.password_hash if user is not None else _DUMMY_PASSWORD_HASH
     password_ok = verify_password(stored_hash, password)

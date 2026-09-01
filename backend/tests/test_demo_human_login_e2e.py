@@ -1,14 +1,21 @@
 """Regression coverage for the Slice 1 demo-human-login blocker: a
 correct, freshly-generated `seed-demo` password was being rejected by
-`/ui/login`. Root cause was NOT the hashing/generation logic (which was
-already correct) but the login route not tolerating incidental
-leading/trailing whitespace the way it already did for `username` —
-exactly the kind of corruption a terminal-copied secret can pick up.
-Fixed in meyar.ui.router.login (password.strip() before verification,
-consistently reused for the needs_rehash persistence path too) and in
-meyar.cli (the secret is now printed alone on its own line, never
-sharing a line with descriptive text, to reduce the chance of that
-corruption happening in the first place).
+`/ui/login`.
+
+Root-cause history (see docs/DECISIONS.md): hash generation, storage, and
+the demo bootstrap logic were always correct — `verify_password` on the
+exact generated password always returned `True`. The real, reproducible
+trigger was terminal soft-wrap: the CLI printed a ~100-character label and
+the secret on one line, a well-known vector for a terminal to insert a
+stray newline/space into a copied value. The correct fix is at that
+source — every CLI-issued secret is now printed alone on its own line
+(see meyar.cli) — NOT by having `/ui/login` silently strip/normalize the
+submitted password. Passwords are exact opaque strings and must be
+verified byte-for-byte as submitted; only `username` (a login identifier,
+not a secret) is trimmed. This file's earlier revision incorrectly
+asserted that whitespace-padded passwords should authenticate — that
+assertion is removed and replaced with the opposite, explicit contract:
+an exact password must match exactly, and nothing else may.
 
 Exercises the real HTTP /ui/login path end to end — not just the
 repository/hashing functions — using meyar.services.demo_seed_service
@@ -29,7 +36,9 @@ from meyar.main import app
 from meyar.models.audit_event import AuditEvent
 from meyar.models.user import User
 from meyar.services.demo_seed_service import DEMO_USER_USERNAME, reset_demo, seed_demo
-from meyar.services.user_repo import get_user_by_username
+from meyar.services.tenant_membership_repo import create_membership
+from meyar.services.tenant_repo import create_tenant
+from meyar.services.user_repo import create_user, get_user_by_username
 from meyar.storage.local import LocalFilesystemStorage
 
 MAX_BYTES = 10 * 1024 * 1024
@@ -83,37 +92,49 @@ async def test_freshly_seeded_demo_credential_logs_in_over_real_http(
     assert library.status_code == 200
 
 
-@pytest.mark.parametrize(
-    "corrupt",
-    [
-        lambda p: p + "\n",
-        lambda p: p + " ",
-        lambda p: " " + p,
-        lambda p: "  " + p + "  \n",
-    ],
-    ids=["trailing-newline", "trailing-space", "leading-space", "both"],
-)
-async def test_incidental_copy_paste_whitespace_around_password_still_logs_in(
+async def test_password_is_verified_exactly_not_normalized(
     client: AsyncClient,
     db_session: AsyncSession,
-    tmp_path: Path,
     local_ui_settings: Settings,
-    corrupt,
 ) -> None:
-    """Regression for the actual reported blocker: a stray newline/space
-    picked up when copying the password out of a terminal (a realistic
-    outcome of soft-wrapped terminal text) must not turn a correct
-    password into a rejected one."""
-    summary = await _seed(db_session, tmp_path)
+    """Passwords are exact opaque strings (see module docstring). A
+    password intentionally provisioned with leading/trailing whitespace
+    through the normal provisioning path must authenticate only with that
+    exact value — never with a stripped/different variant — proving
+    /ui/login does not silently mutate the submitted credential."""
+    tenant = await create_tenant(db_session, name="Password-Exactness-Tenant")
+    exact_password = "  has intentional surrounding whitespace  "
+    user = await create_user(
+        db_session, username="whitespace-password-user", plaintext_password=exact_password
+    )
+    await create_membership(db_session, user_id=user.id, tenant_id=tenant.id, role="HR_USER")
     await db_session.commit()
+    # Captured before any login POST below — those share db_session with
+    # the app via the client fixture's dependency override, and a failed
+    # login's rollback would otherwise expire this already-loaded instance.
+    username = user.username
 
-    response = await client.post(
+    exact = await client.post(
         "/ui/login",
-        data={"username": summary.human_username, "password": corrupt(summary.human_temp_password)},
+        data={"username": username, "password": exact_password},
         follow_redirects=False,
     )
-    assert response.status_code == 303
-    assert response.headers["location"] == "/ui"
+    assert exact.status_code == 303
+    assert exact.headers["location"] == "/ui"
+
+    for corrupted in (
+        exact_password.strip(),
+        exact_password + "\n",
+        exact_password.rstrip(),
+        exact_password.lstrip(),
+        " " + exact_password.strip(),
+    ):
+        response = await client.post(
+            "/ui/login",
+            data={"username": username, "password": corrupted},
+            follow_redirects=False,
+        )
+        assert response.status_code == 401, f"corrupted variant {corrupted!r} must not match"
 
 
 async def test_incidental_whitespace_around_username_still_logs_in(
@@ -122,6 +143,8 @@ async def test_incidental_whitespace_around_username_still_logs_in(
     tmp_path: Path,
     local_ui_settings: Settings,
 ) -> None:
+    """Unlike the password, `username` is a login identifier (not a
+    secret) and is trimmed — this contract is unchanged."""
     summary = await _seed(db_session, tmp_path)
     await db_session.commit()
 
@@ -142,7 +165,6 @@ async def test_genuinely_wrong_password_still_rejected(
     tmp_path: Path,
     local_ui_settings: Settings,
 ) -> None:
-    """The whitespace-tolerance fix must not weaken real rejection."""
     summary = await _seed(db_session, tmp_path)
     await db_session.commit()
 
@@ -257,8 +279,6 @@ async def test_disabled_demo_user_is_still_correctly_rejected_after_the_fix(
     tmp_path: Path,
     local_ui_settings: Settings,
 ) -> None:
-    """The whitespace-tolerance fix must not accidentally bypass the
-    live is_active recheck it sits next to."""
     summary = await _seed(db_session, tmp_path)
     await db_session.commit()
 
