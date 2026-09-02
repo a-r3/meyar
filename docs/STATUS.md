@@ -860,7 +860,17 @@ already-COMPLETED profiles on a prompt-version bump; the operator-only
 CLI `meyar extract-profile <tenant> <candidate> <document>` remains the
 only way to retroactively backfill this grounding onto a pre-Slice-3
 candidate — until then it safely reports UNKNOWN, never a fabricated/
-inherited duration. See D-041.
+inherited duration. A second owner review found a further real gap: a
+verbatim, real evidence quote proved a skill/domain was mentioned but
+never proved the SPECIFIC start_date/end_date claimed for it — a model
+could cite a real quote and still claim an arbitrary broader interval
+(e.g. an unrelated employment entry's own dates line). Fixed with a new
+deterministic (non-LLM) `meyar.core.interval_terms.
+interval_grounded_in_quotes` check at extraction-verification time: each
+claimed year must literally appear in that item's own cited quotes
+(skill also requires the skill name itself to co-occur). Confirmed
+open/current grounding remains fully deterministic via the explicit
+`evaluation_as_of_date` parameter, unaffected by this check. See D-041.
 
 **M8 Slice 2 — Read-Only Local AI Agent Foundation (#31)**: **MERGED as
 PR #40 (`c430518`, squash); issue #31 closed.** M8 Slice 1 (#30) merged as

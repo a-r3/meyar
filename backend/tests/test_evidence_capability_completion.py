@@ -143,12 +143,8 @@ def test_scenario_a_provable_skill_years_across_two_periods_satisfies_criterion(
                 _employment("B", "2019", "2022"),
             ],
             skill_experience=[
-                _skill_exp(
-                    "Java", 0, "Java backend work 2015-2018", start="2015", end="2018"
-                ),
-                _skill_exp(
-                    "Java", 1, "Java backend work 2019-2022", start="2019", end="2022"
-                ),
+                _skill_exp("Java", 0, "Java backend work 2015-2018", start="2015", end="2018"),
+                _skill_exp("Java", 1, "Java backend work 2019-2022", start="2019", end="2022"),
             ],
         )
     )
@@ -175,9 +171,7 @@ def test_scenario_b_total_experience_never_substitutes_for_skill_duration() -> N
                 _employment("C", "2022", "2024"),  # 2 yrs, no Java
             ],
             skill_experience=[
-                _skill_exp(
-                    "Java", 1, "Java backend work 2020-2022", start="2020", end="2022"
-                ),
+                _skill_exp("Java", 1, "Java backend work 2020-2022", start="2020", end="2022"),
             ],
         )
     )
@@ -282,9 +276,7 @@ def test_scenario_d_overlapping_skill_periods_not_double_counted() -> None:
                     start="2018",
                     end="2022",
                 ),
-                _skill_exp(
-                    "Java", 1, "Java freelance 2020-2021", start="2020", end="2021"
-                ),
+                _skill_exp("Java", 1, "Java freelance 2020-2021", start="2020", end="2021"),
             ],
         )
     )
@@ -677,6 +669,315 @@ def test_scenario_g_extraction_accepts_domain_claim_with_explicit_term() -> None
     verify_extraction_evidence(view, extraction)  # must not raise
 
 
+# --- Final review: a claimed interval must be GROUNDED by the item's own -
+# --- evidence quotes, not merely accompanied by a verbatim-real quote ----
+
+
+def _employment_view_block(text: str) -> ProfessionalDocumentView:
+    return ProfessionalDocumentView(
+        canonical_document_id=uuid_mod.uuid4(),
+        blocks=[ModelInputBlock(page=1, block_index=0, text=text)],
+    )
+
+
+def test_final_review_1_skill_interval_with_no_dates_in_quote_is_rejected() -> None:
+    """Counterexample 1: the quote proves Java usage but supports no
+    attributable dates at all — the model must not still be able to claim
+    2020-2025 for it."""
+    view = _employment_view_block("Backend Developer using Java at Acme")
+    extraction = CandidateProfileExtraction.model_validate(
+        _profile(
+            employment_history=[
+                {
+                    "title": "Backend Developer",
+                    "organization": "Acme",
+                    "start_date": "2020",
+                    "end_date": "2025",
+                    "is_current": False,
+                    "evidence": [
+                        {
+                            "page": 1,
+                            "block_index": 0,
+                            "quote": "Backend Developer using Java at Acme",
+                        }
+                    ],
+                }
+            ],
+            skill_experience=[
+                _skill_exp(
+                    "Java",
+                    0,
+                    "Backend Developer using Java at Acme",
+                    start="2020",
+                    end="2025",
+                )
+            ],
+        )
+    )
+    with pytest.raises(EvidenceValidationError) as exc_info:
+        verify_extraction_evidence(view, extraction)
+    assert exc_info.value.code == "SKILL_INTERVAL_NOT_EXPLICIT"
+
+
+def test_final_review_2_skill_interval_wider_than_quoted_subperiod_is_rejected() -> None:
+    """Counterexample 2: the quote supports only a short 2023-2024 project,
+    but the model claims the full 2020-2025 employment span."""
+    view = _employment_view_block(
+        "Backend Developer 2020-2025. Used Java on a project from late 2023 into 2024."
+    )
+    extraction = CandidateProfileExtraction.model_validate(
+        _profile(
+            employment_history=[
+                {
+                    "title": "Backend Developer",
+                    "organization": "Acme",
+                    "start_date": "2020",
+                    "end_date": "2025",
+                    "is_current": False,
+                    "evidence": [
+                        {
+                            "page": 1,
+                            "block_index": 0,
+                            "quote": "Backend Developer 2020-2025.",
+                        }
+                    ],
+                }
+            ],
+            skill_experience=[
+                _skill_exp(
+                    "Java",
+                    0,
+                    "Used Java on a project from late 2023 into 2024.",
+                    start="2020",  # claims the FULL job span, not the true sub-period
+                    end="2025",
+                )
+            ],
+        )
+    )
+    with pytest.raises(EvidenceValidationError) as exc_info:
+        verify_extraction_evidence(view, extraction)
+    assert exc_info.value.code == "SKILL_INTERVAL_NOT_EXPLICIT"
+
+
+def test_final_review_3_skill_cannot_borrow_employment_dates_from_a_different_quote() -> None:
+    """Counterexample 3: the employment record's own dates line (2020-2025)
+    is real, verbatim, verified text — but it is a DIFFERENT item's
+    evidence. The skill's own cited evidence never mentions those years at
+    all, so it must not be able to claim that span merely because it
+    exists elsewhere in the document."""
+    view = _employment_view_block(
+        "Backend Developer, Acme, 2020-2025. Responsibilities included Java development."
+    )
+    extraction = CandidateProfileExtraction.model_validate(
+        _profile(
+            employment_history=[
+                {
+                    "title": "Backend Developer",
+                    "organization": "Acme",
+                    "start_date": "2020",
+                    "end_date": "2025",
+                    "is_current": False,
+                    "evidence": [
+                        {
+                            "page": 1,
+                            "block_index": 0,
+                            "quote": "Backend Developer, Acme, 2020-2025.",
+                        }
+                    ],
+                }
+            ],
+            skill_experience=[
+                _skill_exp(
+                    "Java",
+                    0,
+                    "Responsibilities included Java development.",
+                    start="2020",
+                    end="2025",
+                )
+            ],
+        )
+    )
+    with pytest.raises(EvidenceValidationError) as exc_info:
+        verify_extraction_evidence(view, extraction)
+    assert exc_info.value.code == "SKILL_INTERVAL_NOT_EXPLICIT"
+
+
+def test_final_review_skill_interval_genuinely_grounded_is_accepted() -> None:
+    """Positive case: the SAME quote states both the skill and its actual
+    years — this must pass."""
+    view = _employment_view_block("Used Java from 2020 to 2025 on backend systems at Acme.")
+    extraction = CandidateProfileExtraction.model_validate(
+        _profile(
+            employment_history=[
+                {
+                    "title": "Backend Developer",
+                    "organization": "Acme",
+                    "start_date": "2020",
+                    "end_date": "2025",
+                    "is_current": False,
+                    "evidence": [
+                        {
+                            "page": 1,
+                            "block_index": 0,
+                            "quote": "Used Java from 2020 to 2025 on backend systems at Acme.",
+                        }
+                    ],
+                }
+            ],
+            skill_experience=[
+                _skill_exp(
+                    "Java",
+                    0,
+                    "Used Java from 2020 to 2025 on backend systems at Acme.",
+                    start="2020",
+                    end="2025",
+                )
+            ],
+        )
+    )
+    verify_extraction_evidence(view, extraction)  # must not raise
+
+
+def test_final_review_skill_interval_grounded_subject_missing_is_rejected() -> None:
+    """The dates alone are not enough either — a quote that states the
+    right years but never mentions the skill itself must not ground it."""
+    view = _employment_view_block("Worked at Acme from 2020 to 2025 in various roles.")
+    extraction = CandidateProfileExtraction.model_validate(
+        _profile(
+            employment_history=[
+                {
+                    "title": "Backend Developer",
+                    "organization": "Acme",
+                    "start_date": "2020",
+                    "end_date": "2025",
+                    "is_current": False,
+                    "evidence": [
+                        {
+                            "page": 1,
+                            "block_index": 0,
+                            "quote": "Worked at Acme from 2020 to 2025 in various roles.",
+                        }
+                    ],
+                }
+            ],
+            skill_experience=[
+                _skill_exp(
+                    "Java",
+                    0,
+                    "Worked at Acme from 2020 to 2025 in various roles.",
+                    start="2020",
+                    end="2025",
+                )
+            ],
+        )
+    )
+    with pytest.raises(EvidenceValidationError) as exc_info:
+        verify_extraction_evidence(view, extraction)
+    assert exc_info.value.code == "SKILL_INTERVAL_NOT_EXPLICIT"
+
+
+def test_final_review_domain_interval_not_grounded_is_rejected() -> None:
+    """Domain mirror: explicit AML language is present (passes
+    domain_term_present), but the claimed 2020-2025 interval is never
+    stated in the same evidence."""
+    view = _employment_view_block("AML compliance officer at Acme.")
+    extraction = CandidateProfileExtraction.model_validate(
+        _profile(
+            employment_history=[
+                {
+                    "title": "Compliance Officer",
+                    "organization": "Acme",
+                    "start_date": "2020",
+                    "end_date": "2025",
+                    "is_current": False,
+                    "evidence": [
+                        {"page": 1, "block_index": 0, "quote": "AML compliance officer at Acme."}
+                    ],
+                }
+            ],
+            domain_experience=[
+                _domain_exp("AML", 0, "AML compliance officer at Acme.", start="2020", end="2025")
+            ],
+        )
+    )
+    with pytest.raises(EvidenceValidationError) as exc_info:
+        verify_extraction_evidence(view, extraction)
+    assert exc_info.value.code == "DOMAIN_INTERVAL_NOT_EXPLICIT"
+
+
+def test_final_review_domain_interval_genuinely_grounded_is_accepted() -> None:
+    view = _employment_view_block("AML compliance officer at Acme, 2020 to 2025.")
+    extraction = CandidateProfileExtraction.model_validate(
+        _profile(
+            employment_history=[
+                {
+                    "title": "Compliance Officer",
+                    "organization": "Acme",
+                    "start_date": "2020",
+                    "end_date": "2025",
+                    "is_current": False,
+                    "evidence": [
+                        {
+                            "page": 1,
+                            "block_index": 0,
+                            "quote": "AML compliance officer at Acme, 2020 to 2025.",
+                        }
+                    ],
+                }
+            ],
+            domain_experience=[
+                _domain_exp(
+                    "AML",
+                    0,
+                    "AML compliance officer at Acme, 2020 to 2025.",
+                    start="2020",
+                    end="2025",
+                )
+            ],
+        )
+    )
+    verify_extraction_evidence(view, extraction)  # must not raise
+
+
+def test_final_review_open_current_interval_grounding_requires_only_the_start_year() -> None:
+    """An is_current claim has no end_date to ground — only the stated
+    start year needs to be present. Confirms extraction-time grounding
+    verification does not spuriously reject a genuinely open-ended claim;
+    the deterministic explicit-evaluation_date computation itself is
+    unchanged and covered separately (see Scenario E)."""
+    view = _employment_view_block("Java developer since 2020, ongoing.")
+    extraction = CandidateProfileExtraction.model_validate(
+        _profile(
+            employment_history=[
+                {
+                    "title": "Java Developer",
+                    "organization": "Acme",
+                    "start_date": "2020",
+                    "end_date": None,
+                    "is_current": True,
+                    "evidence": [
+                        {
+                            "page": 1,
+                            "block_index": 0,
+                            "quote": "Java developer since 2020, ongoing.",
+                        }
+                    ],
+                }
+            ],
+            skill_experience=[
+                _skill_exp(
+                    "Java",
+                    0,
+                    "Java developer since 2020, ongoing.",
+                    start="2020",
+                    is_current=True,
+                )
+            ],
+        )
+    )
+    verify_extraction_evidence(view, extraction)  # must not raise
+
+
 # --- Scenario H: evidence shown to HR explains which periods/facts -------
 
 
@@ -688,14 +989,10 @@ def test_scenario_h_agent_evidence_tool_surfaces_skill_and_domain_grounding() ->
             skills=[{"name": "Java", "category": None, "evidence": _evidence("Java")}],
             employment_history=[_employment("A", "2019", "2023")],
             skill_experience=[
-                _skill_exp(
-                    "Java", 0, "Java backend work 2019-2023", start="2019", end="2023"
-                )
+                _skill_exp("Java", 0, "Java backend work 2019-2023", start="2019", end="2023")
             ],
             domain_experience=[
-                _domain_exp(
-                    "AML", 0, "AML compliance work 2019-2023", start="2019", end="2023"
-                )
+                _domain_exp("AML", 0, "AML compliance work 2019-2023", start="2019", end="2023")
             ],
         )
     )
@@ -715,14 +1012,10 @@ def test_scenario_h_grounded_facts_include_attributable_period_detail() -> None:
         _profile(
             employment_history=[_employment("A", "2015", "2025")],  # deliberately wider
             skill_experience=[
-                _skill_exp(
-                    "Java", 0, "Java backend work 2019-2023", start="2019", end="2023"
-                )
+                _skill_exp("Java", 0, "Java backend work 2019-2023", start="2019", end="2023")
             ],
             domain_experience=[
-                _domain_exp(
-                    "AML", 0, "AML compliance work 2019-2023", start="2019", end="2023"
-                )
+                _domain_exp("AML", 0, "AML compliance work 2019-2023", start="2019", end="2023")
             ],
         )
     )

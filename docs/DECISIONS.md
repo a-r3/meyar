@@ -3169,3 +3169,78 @@ be a genuinely new operational feature, not a "smallest correct fix";
 recorded here as a known, deliberate limitation rather than left
 undocumented. `SCHEMA_VERSION` remains `candidate-profile-v1` for the
 same additive/backward-compatible reasoning as the original entry above.
+
+**Second correctness fix (same PR #41, pre-merge, 2026-09-02) — interval
+must be grounded by evidence, not merely accompanied by it:** a further
+owner review found that the first correctness fix above (item's own
+`start_date`/`end_date`) was necessary but not sufficient. `verify_
+extraction_evidence` re-verified that a `skill_experience`/
+`domain_experience` evidence quote was real, verbatim text (`verify_
+evidence`) and — for domain — that an accepted sector term appeared in
+it (`domain_term_present`), but nothing checked that the item's claimed
+`start_date`/`end_date` were actually SUPPORTED by that quote's content.
+A model could cite a real, verbatim quote that only proves the skill/
+domain was mentioned (or supports a narrower/different period, or even
+borrow a *different* item's real quote — the linked employment entry's
+own dates line) while still claiming an arbitrary, broader interval such
+as an entire linked employment span. This was a genuine gap, not already
+safe — confirmed by reproducing all three of the owner's counterexamples
+against the pre-fix code before changing anything.
+
+Fix: a new deterministic function,
+`meyar.core.interval_terms.interval_grounded_in_quotes`, checked at
+extraction-verification time (same terminal, no-retry failure discipline
+as every other evidence check) for both `skill_experience` and
+`domain_experience`. For each bound the item actually claims
+(`start_date`/`end_date`; a bound left `None`, e.g. an `is_current`
+claim's `end_date`, trivially requires nothing — the evaluator's own
+UNKNOWN/insufficient-evidence handling already covers an absent bound),
+the SAME year the model claims must literally appear somewhere in that
+item's own cited evidence quotes — never a different item's quotes, never
+merely "a real quote exists somewhere." For `skill_experience` only, an
+additional `subject` check requires the skill name itself to also appear
+in the same quotes, so a quote that states the right years but never
+mentions the skill (or vice versa) still fails; domain intentionally does
+NOT reuse this literal-subject check — `domain_term_present`'s existing
+synonym-aware matching already independently guarantees domain-relatedness
+(e.g. "anti-money laundering" grounds domain "AML" without the literal
+string "AML" appearing anywhere), and a second, literal-only check on top
+would conflict with that, not reinforce it. New codes: `SKILL_INTERVAL_
+NOT_EXPLICIT`, `DOMAIN_INTERVAL_NOT_EXPLICIT`.
+
+Explicitly NOT an LLM-based verifier (issue #32 forbids one) — this is a
+token-presence heuristic, deterministic and auditable like `domain_term_
+present`, with an accepted, documented limit: it reliably rejects an
+interval whose claimed year(s)/subject are simply absent from the cited
+text (the shape of all three owner counterexamples), but cannot detect a
+quote deliberately engineered to contain the right years and subject
+without genuinely establishing them together (e.g. a quote listing every
+skill and the job's full date range in one sentence). Closing that
+residual gap would require either semantic (LLM) judgment — explicitly
+ruled out — or requiring every date/subject pair to co-occur within a
+single quote rather than across an item's whole evidence list, which was
+judged too strict for genuine multi-quote grounding (see the earlier
+scenario-A pattern of citing separate supporting lines) and out of scope
+for this pass; recorded here rather than left unstated.
+
+Confirmed unchanged and still correct: open/current interval grounding
+remains fully deterministic — `meyar.evaluation.evaluators.
+_resolve_period_years` resolves an `is_current=True` bound via the
+explicit `evaluation_as_of_date` parameter (never the wall clock, never a
+UI prompt), exactly as before this pass; the new extraction-time
+grounding check does not touch that logic and does not spuriously reject
+an open-ended claim (only the stated start year needs to be grounded,
+proven by a new regression, `test_final_review_open_current_interval_
+grounding_requires_only_the_start_year`).
+
+Eight new regression tests cover both positive (genuinely grounded skill/
+domain intervals accepted) and negative (all three owner counterexamples,
+plus a subject-without-dates and dates-without-subject variant, plus the
+domain equivalent) cases in
+`backend/tests/test_evidence_capability_completion.py`.
+
+No `PROMPT_VERSION` bump was needed for this pass — the prompt (already
+at `v3`) already instructed the model to "cite the exact text that
+supports both the skill-to-job link and the specific dates you set";
+this pass only added deterministic enforcement of that existing
+instruction, not a change to what the model is asked to do.

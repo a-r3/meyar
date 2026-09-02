@@ -1,6 +1,7 @@
 import re
 
 from meyar.core.domain_terms import domain_term_present
+from meyar.core.interval_terms import interval_grounded_in_quotes
 from meyar.extraction.view import ProfessionalDocumentView
 from meyar.schemas.candidate_identity import CandidateIdentityExtraction
 from meyar.schemas.candidate_profile import CandidateProfileExtraction, EvidenceRef
@@ -71,10 +72,28 @@ def verify_extraction_evidence(
     # re-verified exactly like any other category above; domain claims get
     # one additional deterministic check (see docs/DECISIONS.md and
     # meyar.core.domain_terms) so an opaque employer name can never satisfy
-    # a domain claim by itself.
+    # a domain claim by itself. Both also get a deterministic
+    # interval-grounding check (meyar.core.interval_terms): a verbatim
+    # quote proves the skill/domain was MENTIONED, not that it proves the
+    # specific start_date/end_date claimed for it — a quote with no date
+    # at all, or only a narrower/different date, can never ground an
+    # arbitrary broader interval (e.g. an entire linked employment span).
     for skill_exp in extraction.skill_experience:
         for ref in skill_exp.evidence:
             verify_evidence(view, ref)
+        quotes = [ref.quote for ref in skill_exp.evidence]
+        if not interval_grounded_in_quotes(
+            start_date=skill_exp.start_date,
+            end_date=skill_exp.end_date,
+            quotes=quotes,
+            subject=skill_exp.skill_name,
+        ):
+            raise EvidenceValidationError(
+                "SKILL_INTERVAL_NOT_EXPLICIT",
+                f"Attributable interval for skill '{skill_exp.skill_name}' "
+                f"(start='{skill_exp.start_date}', end='{skill_exp.end_date}') is not "
+                "explicitly supported by its cited evidence quotes.",
+            )
 
     for domain_exp in extraction.domain_experience:
         for ref in domain_exp.evidence:
@@ -86,6 +105,15 @@ def verify_extraction_evidence(
                 f"Domain/sector claim '{domain_exp.domain}' is not explicitly supported "
                 "by its cited evidence quotes (no accepted sector/domain term found; an "
                 "employer name alone is never sufficient).",
+            )
+        if not interval_grounded_in_quotes(
+            start_date=domain_exp.start_date, end_date=domain_exp.end_date, quotes=quotes
+        ):
+            raise EvidenceValidationError(
+                "DOMAIN_INTERVAL_NOT_EXPLICIT",
+                f"Attributable interval for domain/sector '{domain_exp.domain}' "
+                f"(start='{domain_exp.start_date}', end='{domain_exp.end_date}') is not "
+                "explicitly supported by its cited evidence quotes.",
             )
 
 
