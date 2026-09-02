@@ -100,7 +100,7 @@ async def test_valid_extraction_creates_completed_profile_v1(
     assert version.status == "COMPLETED"
     assert version.version_number == 1
     assert version.schema_version == "candidate-profile-v1"
-    assert version.prompt_version == "candidate-profile-extraction-v1"
+    assert version.prompt_version == "candidate-profile-extraction-v3"
     assert version.profile_content is not None
     assert set(version.profile_content.keys()) == {
         "skills",
@@ -109,6 +109,8 @@ async def test_valid_extraction_creates_completed_profile_v1(
         "certifications",
         "languages",
         "projects",
+        "skill_experience",
+        "domain_experience",
     }
     assert version.profile_content["skills"][0]["name"] == "Python"
 

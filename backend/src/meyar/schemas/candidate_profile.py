@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class EvidenceRef(BaseModel):
@@ -53,6 +53,61 @@ class ProjectItem(BaseModel):
     evidence: list[EvidenceRef] = Field(min_length=1, max_length=10)
 
 
+class SkillExperienceItem(BaseModel):
+    """Explicit grounding of a skill claim in ONE attributable employment
+    period — the structural link SkillItem/EmploymentItem alone cannot
+    express (root-caused in D-027; closed by issue #32). Populated only
+    when the source text itself ties this specific skill to this specific
+    employment entry (e.g. a bullet under that job, or "5 years of Java
+    at Company X"). A skill with no such link simply has no
+    SkillExperienceItem — its duration then stays UNKNOWN, never
+    substituted with total career experience.
+
+    `employment_index` is the 0-based position of the supporting entry in
+    this same extraction's `employment_history` list, re-validated below
+    — never a free-floating id the model could point anywhere. It is
+    CONTEXT/PROVENANCE ONLY (which job this claim belongs to) — it must
+    never be used to derive the skill's own duration. `start_date`/
+    `end_date`/`is_current` are this item's OWN attributable interval,
+    stated independently: the same as the employment entry's dates ONLY
+    when the text says the skill was used for that whole job, and a
+    narrower sub-period (e.g. a 6-month project inside a 5-year job) when
+    that is what the text supports. Left null when no specific period for
+    the skill itself can be determined — the deterministic evaluator then
+    reports UNKNOWN rather than silently inheriting the full employment
+    period's span (see docs/DECISIONS.md)."""
+
+    skill_name: str = Field(min_length=1, max_length=200)
+    employment_index: int = Field(ge=0)
+    start_date: str | None = Field(default=None, max_length=50)
+    end_date: str | None = Field(default=None, max_length=50)
+    is_current: bool = False
+    evidence: list[EvidenceRef] = Field(min_length=1, max_length=10)
+
+
+class DomainExperienceItem(BaseModel):
+    """An explicit sector/domain claim (e.g. "banking", "AML") — never
+    inferred from an employer's name alone; extraction verification
+    (meyar.extraction.evidence) independently checks the cited quotes
+    contain an accepted, unambiguous domain/sector term before this can be
+    persisted.
+
+    `employment_index` is optional CONTEXT/PROVENANCE ONLY — set when the
+    text also ties the domain to one specific job, but never used to
+    derive duration by itself. `start_date`/`end_date`/`is_current` are
+    this claim's OWN attributable interval (same rules as
+    SkillExperienceItem above): left null when no specific period is
+    stated, in which case the domain is known but its duration stays
+    UNKNOWN rather than inheriting a linked employment entry's full span."""
+
+    domain: str = Field(min_length=1, max_length=100)
+    employment_index: int | None = Field(default=None, ge=0)
+    start_date: str | None = Field(default=None, max_length=50)
+    end_date: str | None = Field(default=None, max_length=50)
+    is_current: bool = False
+    evidence: list[EvidenceRef] = Field(min_length=1, max_length=10)
+
+
 class CandidateProfileExtraction(BaseModel):
     """Strict, schema-validated model output. Every item requires at least
     one evidence reference — a fact with zero evidence simply fails
@@ -70,3 +125,30 @@ class CandidateProfileExtraction(BaseModel):
     certifications: list[CertificationItem] = Field(default_factory=list, max_length=50)
     languages: list[LanguageItem] = Field(default_factory=list, max_length=50)
     projects: list[ProjectItem] = Field(default_factory=list, max_length=50)
+    # Slice 3 (issue #32) evidence-capability completion. Both default to
+    # empty so a pre-Slice-3 CandidateProfileVersion.profile_content (JSON,
+    # no migration needed) still validates unchanged — see docs/DECISIONS.md.
+    skill_experience: list[SkillExperienceItem] = Field(default_factory=list, max_length=100)
+    domain_experience: list[DomainExperienceItem] = Field(default_factory=list, max_length=50)
+
+    @model_validator(mode="after")
+    def _validate_employment_indices(self) -> "CandidateProfileExtraction":
+        employment_count = len(self.employment_history)
+        for item in self.skill_experience:
+            if item.employment_index >= employment_count:
+                raise ValueError(
+                    f"skill_experience entry for '{item.skill_name}' references "
+                    f"employment_index={item.employment_index}, but employment_history "
+                    f"has only {employment_count} entries."
+                )
+        for domain_item in self.domain_experience:
+            if (
+                domain_item.employment_index is not None
+                and domain_item.employment_index >= employment_count
+            ):
+                raise ValueError(
+                    f"domain_experience entry for '{domain_item.domain}' references "
+                    f"employment_index={domain_item.employment_index}, but employment_history "
+                    f"has only {employment_count} entries."
+                )
+        return self

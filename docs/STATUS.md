@@ -834,10 +834,60 @@ Evaluation's persisted `candidate_profile_version_id`/
 `job_criteria_version_id` verified to equal the exact input versions.
 
 ## In progress
-**M8 Slice 2 — Read-Only Local AI Agent Foundation (#31)**: implementation
-complete on `feat/read-only-ai-agent-foundation`, PR not yet opened — see
-"Current phase" above. M8 Slice 1 (#30) merged as PR #39. Slice 14 remains
-the most recently merged product-Slice work before the M8 pivot.
+**M8 Slice 3 — Evidence Capability Completion (#32)**: implementation
+complete on `feat/evidence-capability-completion`, PR opened against
+`main`, **pending owner review — not merged.** Closes the D-027-identified
+`SkillItem`/`EmploymentItem` grounding gap: `CandidateProfileExtraction`
+gains optional `skill_experience` (skill <-> attributable employment-period
+grounding) and `domain_experience` (explicit sector/domain evidence,
+never inferred from an employer name — see `meyar.core.domain_terms`)
+lists, two new deterministic evaluators (`SKILL_EXPERIENCE`/
+`DOMAIN_EXPERIENCE` criterion kinds) that compute duration only from
+attributable, date-parseable periods (merging overlaps, never
+double-counting), and agent evidence/fact surfacing for both. No
+migration (`profile_content`/`criteria` are JSON columns; both new lists
+default to empty, old rows validate unchanged). An owner final-review pass
+caught and fixed a real bug before merge: a skill/domain claim's duration
+was being computed from its LINKED EMPLOYMENT ENTRY's full period rather
+than its own evidence-backed sub-interval (e.g. a 5-year job with only
+6 months of attributed Java evidence was wrongly becoming "5 years
+Java"). Fixed by giving `SkillExperienceItem`/`DomainExperienceItem` their
+own `start_date`/`end_date`/`is_current` — `employment_index` is now
+context/provenance only, never a duration source. Extraction prompt
+bumped again to `candidate-profile-extraction-v3`. Also confirmed (not a
+regression, pre-existing/unchanged): no automatic reprocessing exists for
+already-COMPLETED profiles on a prompt-version bump; the operator-only
+CLI `meyar extract-profile <tenant> <candidate> <document>` remains the
+only way to retroactively backfill this grounding onto a pre-Slice-3
+candidate — until then it safely reports UNKNOWN, never a fabricated/
+inherited duration. A second owner review found a further real gap: a
+verbatim, real evidence quote proved a skill/domain was mentioned but
+never proved the SPECIFIC start_date/end_date claimed for it — a model
+could cite a real quote and still claim an arbitrary broader interval
+(e.g. an unrelated employment entry's own dates line). Fixed with a new
+deterministic (non-LLM) `meyar.core.interval_terms.
+interval_grounded_in_quotes` check at extraction-verification time: each
+claimed year must literally appear in that item's own cited quotes
+(skill also requires the skill name itself to co-occur). Confirmed
+open/current grounding remains fully deterministic via the explicit
+`evaluation_as_of_date` parameter, unaffected by this check. A third
+owner review then found that check was itself still insufficient: it
+joined ALL of an item's evidence quotes before checking subject/year
+presence, so a subject in one real quote plus unrelated dates in a
+second real quote wrongly passed (reproduced live before fixing: exactly
+this shape returned `True` pre-fix). Fixed to check PER-QUOTE — one
+single evidence quote must contain both the subject and every claimed
+year together, never combined across separate quotes; `subject_terms`
+generalized so domain reuses its existing curated-synonym set
+(`meyar.core.domain_terms.accepted_terms_for_domain`) in the same
+relational check. Five new regressions match the owner's five required
+cases exactly, including that multiple independently-grounded periods
+still aggregate correctly. See D-041.
+
+**M8 Slice 2 — Read-Only Local AI Agent Foundation (#31)**: **MERGED as
+PR #40 (`c430518`, squash); issue #31 closed.** M8 Slice 1 (#30) merged as
+PR #39 (`d13ddb9`). Slice 14 remains the most recently merged non-M8
+product-Slice work before the M8 pivot.
 
 **Chore (issue #25, not a Slice):** pre-presentation readiness and local
 demo bootstrap — **MERGED as PR #26 at squash SHA `a539e34`** (see D-022).
@@ -1063,7 +1113,7 @@ due date because the official timeline has not been supplied.
 | M5 — Security, Target-Mac Validation & MVP Acceptance | Slice 13 + target-Mac benchmark | OPEN — issue #20 open; PR #22 merged at `a709ce1` implementing Pass 1 (original CV, no-exfiltration, backup/restore, audit guard, multilingual evidence) with `Refs #20`; Mac Mini benchmark execution on the now owner-confirmed target hardware remains the sole open mandatory gate |
 | M6 — Operational CV Intake & Reconciliation | Slice 14 | CLOSED — Slice 14 merged (PR #24 at `f6e31ff`), issue #23 closed; owner-approved closure |
 | M7 — HR UI & Presentation Readiness | HR UI productization (chore, issue #27) | OPEN — branch `feat/hr-ui-productization`, PR #29 open, pending final owner visual check; Job lifecycle implemented; see D-023 through D-029 |
-| M8 — Bounded Local-AI HR Agent Platform | Slices 1–5 (issues #30–#34) | OPEN — created 2026-09-01 per D-030/D-031/D-032; no implementation started |
+| M8 — Bounded Local-AI HR Agent Platform | Slices 1–5 (issues #30–#34) | OPEN — Slice 1 (#30) and Slice 2 (#31) merged; Slice 3 (#32) implementation complete, PR open, pending review |
 | M9 — Deployment, Benchmark & Integration Readiness | Slices 6–8 (issues #35–#37) | OPEN — created 2026-09-01 per D-030/D-031/D-032; no implementation started; does not supersede or close M5/#20 |
 
 ## Official requirement gap matrix

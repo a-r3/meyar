@@ -2980,3 +2980,335 @@ backed by.
 **Reversibility:** Pure narrowing of D-039 — one new optional parameter
 on `_chat`, two call sites opt in, three call sites unchanged. No schema,
 migration, scoring, or navigation impact.
+
+## D-041 — Slice 3 (issue #32): evidence-capability completion — skill↔employment grounding and explicit-only domain/sector evidence
+
+**Date:** 2026-09-02
+**Decision:** Closes the D-027-identified gap (`SkillItem`/`EmploymentItem`
+were independent flat lists) with the minimum coherent extension, applying
+the same "prove it or say UNKNOWN" discipline D-027 already established.
+
+1. **New structural grounding, not new inference.** `CandidateProfileExtraction`
+   gains two optional lists: `skill_experience` (`SkillExperienceItem`:
+   skill name + `employment_index` into the same extraction's
+   `employment_history` + its own evidence) and `domain_experience`
+   (`DomainExperienceItem`: domain/sector label + optional
+   `employment_index` + evidence). `employment_index` is a 0-based
+   position into this extraction's own list, re-validated by a
+   `model_validator` on `CandidateProfileExtraction` — never a
+   free-floating id the model could point anywhere. An unlinked
+   `SkillItem` is unchanged and still valid; it simply has no
+   `SkillExperienceItem`, so its duration is provably UNKNOWN.
+2. **No migration.** `CandidateProfileVersion.profile_content` and
+   `JobCriteriaVersion.criteria` are both plain JSON columns. Both new
+   list fields default to `[]`, so a pre-Slice-3 row round-trips through
+   `CandidateProfileExtraction.model_validate` unchanged (regression test:
+   `test_pre_slice_3_profile_content_still_validates_backward_compatibly`).
+3. **Domain/sector evidence is explicit-only by construction — no
+   company-name mapping was built.** Issue #32 allows either "an accepted
+   deterministic/domain mapping" or "explicit extracted evidence"; this
+   slice implements only the latter, deliberately, rather than building
+   and maintaining a curated known-employer→sector table (higher risk,
+   heavier, and not required to close the gap). `meyar.core.domain_terms`
+   holds a small curated synonym table of unambiguous sector *descriptor*
+   phrases (e.g. "banking sector", "anti-money laundering", "AML") —
+   deliberately never a bare word that commonly appears inside an
+   unrelated proper noun (no bare "bank"/"banka" entry). Extraction
+   verification (`meyar.extraction.evidence.verify_extraction_evidence`)
+   independently re-checks that a `domain_experience` item's own cited
+   quotes contain one of these terms before the extraction can be
+   persisted — same terminal, no-retry failure discipline as a fabricated
+   evidence quote. Consequence: a company name alone (e.g. "ABC Bank
+   Holdings LLC" with no other sector language) can never produce a
+   domain claim; confirmed by
+   `test_scenario_g_extraction_rejects_domain_claim_without_explicit_term`
+   and `test_scenario_g_company_name_alone_never_yields_domain_evidence`.
+   `canonicalize_domain`/`domain_term_present` fold Azerbaijani diacritics
+   (`meyar.core.text.fold_az_ascii`, D-023's typing-variance discipline)
+   so "bankçılıq" and its plain-keyboard variant "bankcilik" compare
+   equal.
+4. **Two new `CriterionKind` values**, additive to the existing five:
+   `SKILL_EXPERIENCE` (skill + required `min_years`, e.g. "5 years Java" —
+   distinct from unscoped `EXPERIENCE`) and `DOMAIN_EXPERIENCE` (domain
+   presence, with optional `min_years`). Both go through `CriterionIn`'s
+   existing `_validate_not_sensitive` check unchanged, so a
+   `DOMAIN_EXPERIENCE`/`SKILL_EXPERIENCE` criterion can no more reference
+   a protected attribute than any other kind. This does not touch or
+   widen the frozen NL search fast path (D-031) — these are evaluation-
+   engine criterion kinds, not new search-planner phrase patterns.
+5. **Deterministic duration aggregation, never LLM-computed.**
+   `evaluate_skill_experience`/`evaluate_domain_experience`
+   (`meyar.evaluation.evaluators`) sum only `SkillExperienceItem`/
+   `DomainExperienceItem`-linked, date-parseable periods via a new
+   `merge_and_sum_years` (`meyar.evaluation.experience`) that merges
+   overlapping/adjacent ranges before summing — deliberately different
+   from `evaluate_experience`'s total-career EXPERIENCE evaluator, which
+   still flags any overlap as `CONFLICTING_EVIDENCE` (frozen, unchanged;
+   overlapping attributable periods for the *same skill* across two jobs
+   are a normal, legitimate shape — e.g. a full-time role and a
+   concurrent freelance project — not a data conflict). No linkage ->
+   `UNKNOWN` (`..._NO_ATTRIBUTABLE_PERIODS`), never 0 years and never
+   total career experience. Any linked-but-unparseable date ->
+   `UNKNOWN` (`..._DATES_UNPARSEABLE`) for both evaluators — deliberately
+   never `MANUAL_REVIEW_REQUIRED` (unlike `evaluate_experience`'s
+   unparseable-date case) per issue #32's explicit instruction that
+   unsupported per-skill/domain dates stay UNKNOWN. `evaluation_as_of_date`
+   remains the pre-existing explicit application-boundary parameter
+   (never a UI prompt, never the wall clock) for both new evaluators.
+6. **Agent surfacing (issue #32 item 7).** `meyar.agent.service`'s
+   `_EVIDENCE_CATEGORIES` (GET_CANDIDATE_EVIDENCE) and
+   `_build_profile_facts` (D-038 grounded-answer synthesis) both gained
+   `skill_experience`/`domain_experience` entries, so HR can retrieve and
+   have explained which attributable period(s) support a duration/domain
+   conclusion — the classic (non-agent) candidate-detail UI is
+   unchanged/out of scope, consistent with D-030's agent-first framing.
+7. **Prompt version bumped** `candidate-profile-extraction-v1` ->
+   `candidate-profile-extraction-v2` (materially new instructions on when
+   to populate the two new lists, including an explicit "do not infer
+   domain from an employer name" rule); `SCHEMA_VERSION`
+   (`candidate-profile-v1`) intentionally left unchanged since the JSON
+   shape is additive/backward-compatible, not a breaking format change.
+8. **Considered and declined:** a deterministic `find_prohibited_term`
+   scan on the new free-text `domain`/`skill_name` fields. Declined for
+   consistency, not oversight — every existing profile free-text field
+   (`SkillItem.name`, `EmploymentItem.title`, `ProjectItem.description`,
+   etc.) has exactly the same soft, prompt-level-only protection against
+   a hostile/malformed extraction containing a protected-attribute word;
+   the actual deterministic enforcement point is, and remains, at
+   criterion configuration (`CriterionIn._validate_not_sensitive`, which
+   `SKILL_EXPERIENCE`/`DOMAIN_EXPERIENCE` criteria already inherit
+   unchanged) — where a sensitive value could actually influence
+   matching/ranking, not in read-only extracted display text. Adding an
+   asymmetric guard only on the two new fields would suggest a partial
+   protection model without closing the equivalent pre-existing surface
+   on every other free-text field.
+
+**Why:** The agent (Slice 2/4) will be asked exactly these questions in
+ordinary HR conversation; shipping without closing this gap risks either
+silent fabrication (skill duration quietly computed from unrelated total
+experience) or a permanently-declining UX for a legitimately answerable
+question. The core rule throughout: a duration/domain claim is provable
+only when stored evidence supports both the subject and an attributable
+interval strongly enough for the deterministic layer to compute it —
+otherwise UNKNOWN, never guessed.
+
+**Reversibility:** Fully additive and migration-free. Removing
+`skill_experience`/`domain_experience` from `CandidateProfileExtraction`,
+the two new `CriterionKind` values, the two new evaluators, and the
+`meyar.core.domain_terms` module restores exactly the pre-Slice-3 shape;
+every pre-existing field, evaluator, and prompt instruction is untouched.
+No schema/data migration exists to roll back.
+
+**Correctness fix (same PR #41, pre-merge, 2026-09-02):** an owner final
+review caught a real bug in the shape above:
+`SkillExperienceItem`/`DomainExperienceItem.employment_index` pointed at
+an employment entry, and the evaluators computed duration from THAT
+ENTRY's own `start_date`/`end_date` — so a skill/domain claim linked to a
+5-year job automatically became "5 years," even when the source text only
+evidenced a 6-month sub-period within that job. This silently violated
+the slice's own core rule (an attributable interval must be
+evidence-backed for the specific claim, not inherited from context).
+
+Fix: `SkillExperienceItem`/`DomainExperienceItem` each gained their OWN
+`start_date`/`end_date`/`is_current` fields — the item's own attributable
+interval, stated independently of the linked entry. `employment_index`
+is now explicitly documented and enforced-by-construction (evaluators
+never read `profile.employment_history[item.employment_index].start_date`/
+`.end_date` for duration) as CONTEXT/PROVENANCE ONLY. Both evaluators now
+resolve the period from the item itself via the same `_resolve_period_years`
+helper (duck-typed, reused unchanged); an item with no declared interval
+at all is a new explicit case (`SKILL_DURATION_NO_ATTRIBUTABLE_INTERVAL`
+— hard block, since every `SkillExperienceItem` exists specifically to
+ground a duration; `DOMAIN_DURATION_NO_ATTRIBUTABLE_INTERVAL` — for
+domain, a presence-only claim with no interval is a normal, complete
+shape on its own, so a matched item lacking an interval is skipped, not
+blocking, and the whole result is UNKNOWN only if NO matched item ends up
+contributing any computable interval). Extraction prompt bumped again,
+`v2` -> `v3`, with explicit "state the skill/domain's OWN period, a
+narrower sub-period when that's what the text supports, never
+automatically the job's full span" instructions. Agent fact/evidence
+presentation (`meyar.agent.service._build_profile_facts`) updated to show
+the item's own interval as the "detail," never the linked entry's.
+Four new regression tests added directly from the owner's request: (1)
+5-year employment + a short, year-boundary-crossing attributable Java
+sub-period != 5 years Java; (2) a skill linked to an employment entry
+with no interval of its own -> UNKNOWN; (3) two explicit non-overlapping
+attributable Java intervals summing to exactly 5 years -> MATCH; (4) the
+domain evaluator follows the identical rule. All prior scenario A-H
+tests were also updated to set explicit per-item intervals (several
+deliberately reusing a WIDER linked employment entry than the item's own
+interval, so a passing test also proves attribution, not just
+duration-vs-total non-substitution).
+
+**Extraction-version/reprocessing finding:** confirmed there is, and was
+already, no automatic mechanism that reprocesses an existing
+`CandidateProfileVersion` when `PROMPT_VERSION` changes — this predates
+Slice 3 and is not a regression it introduced.
+`meyar.services.folder_reconciliation_service._process_candidate_document`
+only (re-)extracts "when not already COMPLETED for this document" by
+design (its own docstring), and no API/UI route triggers extraction at
+all. The only existing re-extraction path is the operator-only CLI
+command `meyar extract-profile <tenant_id> <candidate_id> <document_id>`
+(`meyar/cli.py`), which unconditionally calls `extract_candidate_profile`
+and always inserts a new version row regardless of an existing COMPLETED
+version (`create_profile_version`'s own docstring: "a re-extraction
+always creates the next version_number" — verified live by the existing
+`test_reextraction_creates_v2_and_leaves_v1_unchanged` regression). So
+Slice 3 is not new-CVs-only in the sense that operators CAN retroactively
+backfill `skill_experience`/`domain_experience` grounding onto any
+existing candidate by re-running that CLI command per candidate/document
+— it is new-CVs-automatic-only: nothing re-extracts existing candidates
+by itself. A pre-existing candidate simply keeps returning UNKNOWN for
+any `SKILL_EXPERIENCE`/`DOMAIN_EXPERIENCE` criterion (safe — never a
+fabricated/inherited duration) until someone explicitly re-extracts it.
+Building automatic bulk reprocessing keyed off a `PROMPT_VERSION`/
+`SCHEMA_VERSION` mismatch was explicitly out of scope for this pass (no
+prior prompt-version bump in this codebase's history has ever had one
+either — including the v1->v2 bump earlier in this same slice) and would
+be a genuinely new operational feature, not a "smallest correct fix";
+recorded here as a known, deliberate limitation rather than left
+undocumented. `SCHEMA_VERSION` remains `candidate-profile-v1` for the
+same additive/backward-compatible reasoning as the original entry above.
+
+**Second correctness fix (same PR #41, pre-merge, 2026-09-02) — interval
+must be grounded by evidence, not merely accompanied by it:** a further
+owner review found that the first correctness fix above (item's own
+`start_date`/`end_date`) was necessary but not sufficient. `verify_
+extraction_evidence` re-verified that a `skill_experience`/
+`domain_experience` evidence quote was real, verbatim text (`verify_
+evidence`) and — for domain — that an accepted sector term appeared in
+it (`domain_term_present`), but nothing checked that the item's claimed
+`start_date`/`end_date` were actually SUPPORTED by that quote's content.
+A model could cite a real, verbatim quote that only proves the skill/
+domain was mentioned (or supports a narrower/different period, or even
+borrow a *different* item's real quote — the linked employment entry's
+own dates line) while still claiming an arbitrary, broader interval such
+as an entire linked employment span. This was a genuine gap, not already
+safe — confirmed by reproducing all three of the owner's counterexamples
+against the pre-fix code before changing anything.
+
+Fix: a new deterministic function,
+`meyar.core.interval_terms.interval_grounded_in_quotes`, checked at
+extraction-verification time (same terminal, no-retry failure discipline
+as every other evidence check) for both `skill_experience` and
+`domain_experience`. For each bound the item actually claims
+(`start_date`/`end_date`; a bound left `None`, e.g. an `is_current`
+claim's `end_date`, trivially requires nothing — the evaluator's own
+UNKNOWN/insufficient-evidence handling already covers an absent bound),
+the SAME year the model claims must literally appear somewhere in that
+item's own cited evidence quotes — never a different item's quotes, never
+merely "a real quote exists somewhere." For `skill_experience` only, an
+additional `subject` check requires the skill name itself to also appear
+in the same quotes, so a quote that states the right years but never
+mentions the skill (or vice versa) still fails; domain intentionally does
+NOT reuse this literal-subject check — `domain_term_present`'s existing
+synonym-aware matching already independently guarantees domain-relatedness
+(e.g. "anti-money laundering" grounds domain "AML" without the literal
+string "AML" appearing anywhere), and a second, literal-only check on top
+would conflict with that, not reinforce it. New codes: `SKILL_INTERVAL_
+NOT_EXPLICIT`, `DOMAIN_INTERVAL_NOT_EXPLICIT`.
+
+Explicitly NOT an LLM-based verifier (issue #32 forbids one) — this is a
+token-presence heuristic, deterministic and auditable like `domain_term_
+present`, with an accepted, documented limit: it reliably rejects an
+interval whose claimed year(s)/subject are simply absent from the cited
+text (the shape of all three owner counterexamples), but cannot detect a
+quote deliberately engineered to contain the right years and subject
+without genuinely establishing them together (e.g. a quote listing every
+skill and the job's full date range in one sentence). Closing that
+residual gap would require either semantic (LLM) judgment — explicitly
+ruled out — or requiring every date/subject pair to co-occur within a
+single quote rather than across an item's whole evidence list, which was
+judged too strict for genuine multi-quote grounding (see the earlier
+scenario-A pattern of citing separate supporting lines) and out of scope
+for this pass; recorded here rather than left unstated.
+
+Confirmed unchanged and still correct: open/current interval grounding
+remains fully deterministic — `meyar.evaluation.evaluators.
+_resolve_period_years` resolves an `is_current=True` bound via the
+explicit `evaluation_as_of_date` parameter (never the wall clock, never a
+UI prompt), exactly as before this pass; the new extraction-time
+grounding check does not touch that logic and does not spuriously reject
+an open-ended claim (only the stated start year needs to be grounded,
+proven by a new regression, `test_final_review_open_current_interval_
+grounding_requires_only_the_start_year`).
+
+Eight new regression tests cover both positive (genuinely grounded skill/
+domain intervals accepted) and negative (all three owner counterexamples,
+plus a subject-without-dates and dates-without-subject variant, plus the
+domain equivalent) cases in
+`backend/tests/test_evidence_capability_completion.py`.
+
+No `PROMPT_VERSION` bump was needed for this pass — the prompt (already
+at `v3`) already instructed the model to "cite the exact text that
+supports both the skill-to-job link and the specific dates you set";
+this pass only added deterministic enforcement of that existing
+instruction, not a change to what the model is asked to do.
+
+**Third correctness fix (same PR #41, pre-merge, 2026-09-02) — RELATIONAL
+grounding: subject and interval must be tied together in one quote, not
+merely each present somewhere:** a further owner review found that the
+second fix above, while correct as far as it went, was itself provably
+insufficient: `interval_grounded_in_quotes` joined ALL of an item's
+evidence quotes into one combined string before checking subject
+presence and year presence independently. Reproduced live before
+changing anything: `interval_grounded_in_quotes(start_date="2020",
+end_date="2025", quotes=["Java ilə işləyib.", "2020–2025 — Data
+Analyst."], subject="Java")` returned `True` — citing a real quote that
+only proves "Java" was used, plus a second real quote that only proves
+some unrelated "2020-2025" span, together satisfied the joined check even
+though the two facts were never actually stated together. A genuine gap,
+confirmed before fixing, not already safe.
+
+Fix: `interval_grounded_in_quotes` now checks PER-QUOTE, never a joined
+haystack. It requires ONE single evidence quote — one "accepted evidence
+span" out of the item's evidence list — that contains BOTH the subject
+(any term in a new `subject_terms: frozenset[str] | None` parameter) AND
+every year the item claims. Different quotes are never combined to
+satisfy different parts of the claim; an item with several evidence
+quotes still passes as soon as ONE of them alone is sufficient (so
+supplementary, non-qualifying quotes don't break a genuinely grounded
+claim — see `test_relational_3`).
+
+`subject_terms` generalizes the prior single-string `subject` param so
+domain can reuse the identical relational check: a new
+`meyar.core.domain_terms.accepted_terms_for_domain(domain) ->
+frozenset[str]` (the same curated synonym-set lookup `domain_term_present`
+already used internally, now shared) is passed as `subject_terms` for
+`domain_experience`, so "AML" and "anti-money laundering" are recognized
+as the same subject inside the relational check exactly as
+`domain_term_present` already recognizes them for the separate
+presence-anywhere check. `meyar.core.interval_terms._normalize` was also
+aligned to the identical az-ascii-fold + casefold normalization
+`domain_terms._normalize` already used (previously only casefold, no
+diacritic folding) — otherwise an AZ-diacritic quote could fail to match
+an ASCII-typed domain synonym inside the now-per-quote comparison.
+
+Five new regression tests, matching the owner's five required cases
+exactly: (1) skill subject in one quote + unrelated dates in another ->
+rejected (`SKILL_INTERVAL_NOT_EXPLICIT`, extraction never persisted — the
+strongest available guarantee, stronger than a mere evaluator-level
+UNKNOWN, consistent with every other evidence check in this module never
+persisting on failure); (2) domain term in one quote + unrelated dates in
+another -> rejected (`DOMAIN_INTERVAL_NOT_EXPLICIT`); (3) subject and
+interval genuinely tied together in one accepted quote, with an
+additional non-qualifying quote alongside it -> still valid; (4) two
+separate, EACH-individually-relationally-grounded `SkillExperienceItem`s
+both pass extraction verification and still aggregate correctly at
+evaluation time (3 + 3 = 6 years, `merge_and_sum_years` untouched); (5)
+an end-to-end `is_current` case: passes the relational check (only the
+start year needs grounding — an unset bound requires nothing), then the
+evaluator still resolves duration from the explicit
+`evaluation_as_of_date` parameter alone, confirmed against two different
+evaluation dates (2023 vs 2026) — the same deterministic mechanism as
+before this pass, unaffected by it.
+
+Deliberately still not an LLM verifier (explicitly ruled out again this
+round). Documented residual limit, unchanged in kind from the second fix:
+a single quote engineered to contain the right years and the right
+subject together, without those actually being causally related in the
+source CV, cannot be distinguished from a genuine claim by a token-
+presence check — closing that would require semantic judgment. This is
+now the smallest remaining gap after three correctness passes, and it is
+inherent to any purely deterministic, non-LLM text-matching approach, not
+a shortcut taken in this fix.

@@ -1,5 +1,7 @@
 import re
 
+from meyar.core.domain_terms import accepted_terms_for_domain, domain_term_present
+from meyar.core.interval_terms import interval_grounded_in_quotes
 from meyar.extraction.view import ProfessionalDocumentView
 from meyar.schemas.candidate_identity import CandidateIdentityExtraction
 from meyar.schemas.candidate_profile import CandidateProfileExtraction, EvidenceRef
@@ -64,6 +66,61 @@ def verify_extraction_evidence(
         for item in category:
             for ref in item.evidence:
                 verify_evidence(view, ref)
+
+    # Slice 3 (issue #32): skill/employment grounding and domain/sector
+    # evidence. Every skill_experience/domain_experience evidence ref is
+    # re-verified exactly like any other category above; domain claims get
+    # one additional deterministic check (see docs/DECISIONS.md and
+    # meyar.core.domain_terms) so an opaque employer name can never satisfy
+    # a domain claim by itself. Both also get a deterministic RELATIONAL
+    # interval-grounding check (meyar.core.interval_terms): a quote proving
+    # the subject was mentioned somewhere, plus a claimed year appearing
+    # somewhere else, is NOT enough — one accepted evidence quote must tie
+    # the subject and every claimed year together, so citing "Java" in one
+    # quote and unrelated dates ("2020-2025 - Data Analyst") in another can
+    # never prove "Java 2020-2025".
+    for skill_exp in extraction.skill_experience:
+        for ref in skill_exp.evidence:
+            verify_evidence(view, ref)
+        quotes = [ref.quote for ref in skill_exp.evidence]
+        if not interval_grounded_in_quotes(
+            start_date=skill_exp.start_date,
+            end_date=skill_exp.end_date,
+            quotes=quotes,
+            subject_terms=frozenset({skill_exp.skill_name}),
+        ):
+            raise EvidenceValidationError(
+                "SKILL_INTERVAL_NOT_EXPLICIT",
+                f"Attributable interval for skill '{skill_exp.skill_name}' "
+                f"(start='{skill_exp.start_date}', end='{skill_exp.end_date}') is not "
+                "explicitly supported, together with the skill itself, by a single "
+                "cited evidence quote.",
+            )
+
+    for domain_exp in extraction.domain_experience:
+        for ref in domain_exp.evidence:
+            verify_evidence(view, ref)
+        quotes = [ref.quote for ref in domain_exp.evidence]
+        if not domain_term_present(domain_exp.domain, quotes):
+            raise EvidenceValidationError(
+                "DOMAIN_EVIDENCE_NOT_EXPLICIT",
+                f"Domain/sector claim '{domain_exp.domain}' is not explicitly supported "
+                "by its cited evidence quotes (no accepted sector/domain term found; an "
+                "employer name alone is never sufficient).",
+            )
+        if not interval_grounded_in_quotes(
+            start_date=domain_exp.start_date,
+            end_date=domain_exp.end_date,
+            quotes=quotes,
+            subject_terms=accepted_terms_for_domain(domain_exp.domain),
+        ):
+            raise EvidenceValidationError(
+                "DOMAIN_INTERVAL_NOT_EXPLICIT",
+                f"Attributable interval for domain/sector '{domain_exp.domain}' "
+                f"(start='{domain_exp.start_date}', end='{domain_exp.end_date}') is not "
+                "explicitly supported, together with the domain term itself, by a "
+                "single cited evidence quote.",
+            )
 
 
 def verify_identity_evidence(

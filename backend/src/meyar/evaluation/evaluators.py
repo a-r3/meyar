@@ -1,7 +1,8 @@
 from collections.abc import Callable
 from datetime import date
 
-from meyar.evaluation.experience import parse_year, ranges_overlap
+from meyar.core.domain_terms import canonicalize_domain
+from meyar.evaluation.experience import merge_and_sum_years, parse_year, ranges_overlap
 from meyar.evaluation.normalization import normalize_skill_name, normalize_text
 from meyar.schemas.candidate_profile import CandidateProfileExtraction, EvidenceRef
 from meyar.schemas.criteria import CriterionIn, CriterionKind
@@ -231,6 +232,211 @@ def evaluate_experience(
     )
 
 
+def _resolve_period_years(
+    entry, *, evaluation_as_of_date: date
+) -> tuple[int, int] | None:
+    """Deterministically parses one employment entry's [start, end) year
+    range, or None when either bound cannot be reliably parsed — callers
+    must treat None as "insufficient evidence," never as 0 or "ongoing"."""
+    start_year = parse_year(entry.start_date, evaluation_as_of_date=evaluation_as_of_date)
+    end_year = parse_year(
+        entry.end_date, evaluation_as_of_date=evaluation_as_of_date, is_current=entry.is_current
+    )
+    if start_year is None or end_year is None:
+        return None
+    return (start_year, end_year)
+
+
+def _has_declared_interval(item) -> bool:  # noqa: ANN001 - duck-typed skill/domain item
+    """True only when the item's OWN start_date/end_date/is_current say
+    something — never a proxy for its linked employment entry. See
+    docs/DECISIONS.md: employment_index is context/provenance only and
+    must never be used to derive a skill/domain's duration."""
+    return item.start_date is not None or item.end_date is not None or item.is_current
+
+
+def evaluate_skill_experience(
+    criterion: CriterionIn,
+    profile: CandidateProfileExtraction,
+    *,
+    evaluation_as_of_date: date,
+) -> CriterionResult:
+    """A duration claim scoped to ONE named skill (e.g. "5 years Java") —
+    provable ONLY from the SkillExperienceItem's OWN attributable
+    start_date/end_date/is_current, never via total career experience, an
+    unlinked SkillItem, or the linked employment entry's full period
+    (employment_index is context/provenance only — see
+    SkillExperienceItem's docstring and docs/DECISIONS.md). See issue #32
+    core rule: subject + attributable interval, or UNKNOWN."""
+    target = normalize_skill_name(criterion.value or "")
+    linked = [
+        item
+        for item in profile.skill_experience
+        if normalize_skill_name(item.skill_name) == target
+    ]
+    if not linked:
+        return _finalize(
+            criterion,
+            CRITERION_STATUS_UNKNOWN,
+            "SKILL_DURATION_NO_ATTRIBUTABLE_PERIODS",
+            f"No attributable period links required skill '{criterion.value}' to a "
+            "specific date range; duration cannot be computed.",
+        )
+
+    ranges: list[tuple[int, int]] = []
+    evidence: list[EvidenceRef] = []
+    for item in linked:
+        entry = profile.employment_history[item.employment_index]
+        if not _has_declared_interval(item):
+            return _finalize(
+                criterion,
+                CRITERION_STATUS_UNKNOWN,
+                "SKILL_DURATION_NO_ATTRIBUTABLE_INTERVAL",
+                f"Skill '{criterion.value}' is linked to employment entry "
+                f"'{entry.title}' for context, but no explicit attributable "
+                "start/end was stated for the skill itself — the full employment "
+                "period is never used as a substitute; duration cannot be computed.",
+                evidence=item.evidence + entry.evidence,
+            )
+        period = _resolve_period_years(item, evaluation_as_of_date=evaluation_as_of_date)
+        if period is None:
+            return _finalize(
+                criterion,
+                CRITERION_STATUS_UNKNOWN,
+                "SKILL_DURATION_DATES_UNPARSEABLE",
+                f"The attributable period stated for skill '{criterion.value}' "
+                f"(start='{item.start_date}', end='{item.end_date}') cannot be "
+                "reliably parsed; duration cannot be computed.",
+                evidence=item.evidence + entry.evidence,
+            )
+        ranges.append(period)
+        evidence.extend(item.evidence)
+        evidence.extend(entry.evidence)
+
+    total_years = merge_and_sum_years(ranges)
+    required = criterion.min_years or 0.0
+    if total_years >= required:
+        return _finalize(
+            criterion,
+            CRITERION_STATUS_MATCH,
+            "SKILL_DURATION_SUFFICIENT",
+            f"Computed {total_years} attributable year(s) of '{criterion.value}' "
+            f"experience, meeting the required {required}.",
+            evidence=evidence,
+            confidence=1.0,
+        )
+    return _finalize(
+        criterion,
+        CRITERION_STATUS_NOT_MATCHED,
+        "SKILL_DURATION_INSUFFICIENT",
+        f"Computed {total_years} attributable year(s) of '{criterion.value}' "
+        f"experience, below the required {required}.",
+        evidence=evidence,
+        confidence=1.0,
+    )
+
+
+def evaluate_domain_experience(
+    criterion: CriterionIn,
+    profile: CandidateProfileExtraction,
+    *,
+    evaluation_as_of_date: date,
+) -> CriterionResult:
+    """An explicit sector/domain claim (e.g. "banking", "AML"), matched
+    only against DomainExperienceItem entries whose evidence already
+    passed the extraction-time explicit-term check (never inferred from
+    an employer name — see meyar.core.domain_terms). min_years is
+    optional: when set, duration comes ONLY from a matched item's OWN
+    attributable start_date/end_date/is_current — never from a linked
+    employment entry's full period (employment_index is context/
+    provenance only)."""
+    target = canonicalize_domain(criterion.value or "")
+    matches = [
+        item for item in profile.domain_experience if canonicalize_domain(item.domain) == target
+    ]
+    if not matches:
+        return _finalize(
+            criterion,
+            CRITERION_STATUS_UNKNOWN,
+            "DOMAIN_NOT_FOUND_IN_PROFILE",
+            f"No explicit profile evidence found for required domain/sector "
+            f"'{criterion.value}'.",
+        )
+
+    presence_evidence: list[EvidenceRef] = [ref for item in matches for ref in item.evidence]
+    if not criterion.min_years:
+        return _finalize(
+            criterion,
+            CRITERION_STATUS_MATCH,
+            "DOMAIN_EXPLICIT_MATCH",
+            f"Profile has explicit evidence of '{criterion.value}' domain/sector "
+            "experience.",
+            evidence=presence_evidence,
+            confidence=1.0,
+        )
+
+    ranges: list[tuple[int, int]] = []
+    duration_evidence: list[EvidenceRef] = list(presence_evidence)
+    for item in matches:
+        if not _has_declared_interval(item):
+            # Unlike SKILL_EXPERIENCE (where every item exists specifically
+            # to ground a duration), a presence-only domain claim with no
+            # interval is a normal, complete shape on its own — it simply
+            # doesn't contribute to the duration sum. Skipping never
+            # fabricates (only ever under-counts); UNKNOWN is still
+            # returned below if no matched item ends up contributing any
+            # computable interval at all.
+            continue
+        period = _resolve_period_years(item, evaluation_as_of_date=evaluation_as_of_date)
+        if period is None:
+            # An attributed-but-unparseable period makes the duration claim
+            # not fully provable — UNKNOWN, never a possibly-undercounted
+            # NOT_MATCHED (same discipline as evaluate_skill_experience).
+            return _finalize(
+                criterion,
+                CRITERION_STATUS_UNKNOWN,
+                "DOMAIN_DURATION_DATES_UNPARSEABLE",
+                f"The attributable period stated for domain/sector '{criterion.value}' "
+                f"(start='{item.start_date}', end='{item.end_date}') cannot be reliably "
+                "parsed; duration cannot be computed.",
+                evidence=item.evidence,
+            )
+        ranges.append(period)
+        duration_evidence.extend(item.evidence)
+
+    if not ranges:
+        return _finalize(
+            criterion,
+            CRITERION_STATUS_UNKNOWN,
+            "DOMAIN_DURATION_NO_ATTRIBUTABLE_INTERVAL",
+            f"Profile has explicit '{criterion.value}' domain/sector evidence but no "
+            "attributable dated period to compute duration — a linked employment "
+            "entry's full period is never used as a substitute.",
+            evidence=presence_evidence,
+        )
+
+    total_years = merge_and_sum_years(ranges)
+    if total_years >= criterion.min_years:
+        return _finalize(
+            criterion,
+            CRITERION_STATUS_MATCH,
+            "DOMAIN_DURATION_SUFFICIENT",
+            f"Computed {total_years} attributable year(s) of '{criterion.value}' "
+            f"domain/sector experience, meeting the required {criterion.min_years}.",
+            evidence=duration_evidence,
+            confidence=1.0,
+        )
+    return _finalize(
+        criterion,
+        CRITERION_STATUS_NOT_MATCHED,
+        "DOMAIN_DURATION_INSUFFICIENT",
+        f"Computed {total_years} attributable year(s) of '{criterion.value}' "
+        f"domain/sector experience, below the required {criterion.min_years}.",
+        evidence=duration_evidence,
+        confidence=1.0,
+    )
+
+
 _EVALUATORS: dict[
     CriterionKind, Callable[[CriterionIn, CandidateProfileExtraction], CriterionResult]
 ] = {
@@ -240,6 +446,15 @@ _EVALUATORS: dict[
     CriterionKind.LANGUAGE: evaluate_language,
 }
 
+_DATE_AWARE_EVALUATORS: dict[
+    CriterionKind,
+    Callable[..., CriterionResult],
+] = {
+    CriterionKind.EXPERIENCE: evaluate_experience,
+    CriterionKind.SKILL_EXPERIENCE: evaluate_skill_experience,
+    CriterionKind.DOMAIN_EXPERIENCE: evaluate_domain_experience,
+}
+
 
 def evaluate_criterion(
     criterion: CriterionIn,
@@ -247,10 +462,9 @@ def evaluate_criterion(
     *,
     evaluation_as_of_date: date,
 ) -> CriterionResult:
-    if criterion.kind == CriterionKind.EXPERIENCE:
-        return evaluate_experience(
-            criterion, profile, evaluation_as_of_date=evaluation_as_of_date
-        )
+    date_aware_evaluator = _DATE_AWARE_EVALUATORS.get(criterion.kind)
+    if date_aware_evaluator is not None:
+        return date_aware_evaluator(criterion, profile, evaluation_as_of_date=evaluation_as_of_date)
     evaluator = _EVALUATORS.get(criterion.kind)
     if evaluator is None:
         return _finalize(
