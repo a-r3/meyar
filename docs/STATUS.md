@@ -870,7 +870,19 @@ interval_grounded_in_quotes` check at extraction-verification time: each
 claimed year must literally appear in that item's own cited quotes
 (skill also requires the skill name itself to co-occur). Confirmed
 open/current grounding remains fully deterministic via the explicit
-`evaluation_as_of_date` parameter, unaffected by this check. See D-041.
+`evaluation_as_of_date` parameter, unaffected by this check. A third
+owner review then found that check was itself still insufficient: it
+joined ALL of an item's evidence quotes before checking subject/year
+presence, so a subject in one real quote plus unrelated dates in a
+second real quote wrongly passed (reproduced live before fixing: exactly
+this shape returned `True` pre-fix). Fixed to check PER-QUOTE — one
+single evidence quote must contain both the subject and every claimed
+year together, never combined across separate quotes; `subject_terms`
+generalized so domain reuses its existing curated-synonym set
+(`meyar.core.domain_terms.accepted_terms_for_domain`) in the same
+relational check. Five new regressions match the owner's five required
+cases exactly, including that multiple independently-grounded periods
+still aggregate correctly. See D-041.
 
 **M8 Slice 2 — Read-Only Local AI Agent Foundation (#31)**: **MERGED as
 PR #40 (`c430518`, squash); issue #31 closed.** M8 Slice 1 (#30) merged as

@@ -680,6 +680,13 @@ def _employment_view_block(text: str) -> ProfessionalDocumentView:
     )
 
 
+def _multi_block_view(*texts: str) -> ProfessionalDocumentView:
+    return ProfessionalDocumentView(
+        canonical_document_id=uuid_mod.uuid4(),
+        blocks=[ModelInputBlock(page=1, block_index=i, text=text) for i, text in enumerate(texts)],
+    )
+
+
 def test_final_review_1_skill_interval_with_no_dates_in_quote_is_rejected() -> None:
     """Counterexample 1: the quote proves Java usage but supports no
     attributable dates at all — the model must not still be able to claim
@@ -976,6 +983,275 @@ def test_final_review_open_current_interval_grounding_requires_only_the_start_ye
         )
     )
     verify_extraction_evidence(view, extraction)  # must not raise
+
+
+# --- Final review: RELATIONAL grounding — subject and interval must be ---
+# --- tied together in ONE accepted evidence quote, never split across ----
+# --- separately-true quotes -----------------------------------------------
+
+
+def test_relational_1_skill_in_one_quote_and_unrelated_dates_in_another_is_rejected() -> None:
+    """The owner's exact counterexample: quote A proves Java usage, quote
+    B independently proves some unrelated 2020-2025 dates. Both are real,
+    verbatim, individually-verifiable quotes — but citing both must NOT
+    prove "Java 2020-2025"."""
+    view = _multi_block_view("Java ilə işləyib.", "2020–2025 — Data Analyst.")
+    extraction = CandidateProfileExtraction.model_validate(
+        _profile(
+            employment_history=[
+                {
+                    "title": "Data Analyst",
+                    "organization": "Acme",
+                    "start_date": "2020",
+                    "end_date": "2025",
+                    "is_current": False,
+                    "evidence": [
+                        {"page": 1, "block_index": 1, "quote": "2020–2025 — Data Analyst."}
+                    ],
+                }
+            ],
+            skill_experience=[
+                {
+                    "skill_name": "Java",
+                    "employment_index": 0,
+                    "start_date": "2020",
+                    "end_date": "2025",
+                    "is_current": False,
+                    "evidence": [
+                        {"page": 1, "block_index": 0, "quote": "Java ilə işləyib."},
+                        {"page": 1, "block_index": 1, "quote": "2020–2025 — Data Analyst."},
+                    ],
+                }
+            ],
+        )
+    )
+    with pytest.raises(EvidenceValidationError) as exc_info:
+        verify_extraction_evidence(view, extraction)
+    assert exc_info.value.code == "SKILL_INTERVAL_NOT_EXPLICIT"
+
+
+def test_relational_2_domain_term_in_one_quote_and_unrelated_dates_in_another_is_rejected() -> None:
+    """Domain mirror of relational_1: explicit AML language in one quote,
+    unrelated dates in a separate quote."""
+    view = _multi_block_view("AML sahəsində çalışıb.", "2020–2025 — Analyst.")
+    extraction = CandidateProfileExtraction.model_validate(
+        _profile(
+            employment_history=[
+                {
+                    "title": "Analyst",
+                    "organization": "Acme",
+                    "start_date": "2020",
+                    "end_date": "2025",
+                    "is_current": False,
+                    "evidence": [{"page": 1, "block_index": 1, "quote": "2020–2025 — Analyst."}],
+                }
+            ],
+            domain_experience=[
+                {
+                    "domain": "AML",
+                    "employment_index": 0,
+                    "start_date": "2020",
+                    "end_date": "2025",
+                    "is_current": False,
+                    "evidence": [
+                        {"page": 1, "block_index": 0, "quote": "AML sahəsində çalışıb."},
+                        {"page": 1, "block_index": 1, "quote": "2020–2025 — Analyst."},
+                    ],
+                }
+            ],
+        )
+    )
+    with pytest.raises(EvidenceValidationError) as exc_info:
+        verify_extraction_evidence(view, extraction)
+    assert exc_info.value.code == "DOMAIN_INTERVAL_NOT_EXPLICIT"
+
+
+def test_relational_3_subject_and_interval_in_the_same_accepted_span_is_valid() -> None:
+    """Positive counterpart: one of the item's evidence quotes ties the
+    subject and the full claimed interval together — the presence of an
+    ADDITIONAL, non-qualifying quote alongside it must not break this."""
+    view = _multi_block_view(
+        "Used Java from 2020 to 2025 on backend systems.", "Also mentored two junior engineers."
+    )
+    extraction = CandidateProfileExtraction.model_validate(
+        _profile(
+            employment_history=[
+                {
+                    "title": "Backend Developer",
+                    "organization": "Acme",
+                    "start_date": "2020",
+                    "end_date": "2025",
+                    "is_current": False,
+                    "evidence": [
+                        {
+                            "page": 1,
+                            "block_index": 0,
+                            "quote": "Used Java from 2020 to 2025 on backend systems.",
+                        }
+                    ],
+                }
+            ],
+            skill_experience=[
+                {
+                    "skill_name": "Java",
+                    "employment_index": 0,
+                    "start_date": "2020",
+                    "end_date": "2025",
+                    "is_current": False,
+                    "evidence": [
+                        {
+                            "page": 1,
+                            "block_index": 0,
+                            "quote": "Used Java from 2020 to 2025 on backend systems.",
+                        },
+                        {
+                            "page": 1,
+                            "block_index": 1,
+                            "quote": "Also mentored two junior engineers.",
+                        },
+                    ],
+                }
+            ],
+        )
+    )
+    verify_extraction_evidence(view, extraction)  # must not raise
+
+
+def test_relational_4_multiple_relationally_grounded_periods_remain_aggregatable() -> None:
+    """Two separate skill_experience items, EACH relationally grounded in
+    its own single quote, both pass extraction verification AND still
+    aggregate correctly at evaluation time (2015-2018 + 2019-2022 = 5)."""
+    view = _multi_block_view(
+        "Used Java at Acme from 2015 to 2018.", "Used Java at Beta Corp from 2019 to 2022."
+    )
+    profile_dict = _profile(
+        skills=[{"name": "Java", "category": None, "evidence": _evidence("Java")}],
+        employment_history=[
+            {
+                "title": "Engineer A",
+                "organization": "Acme",
+                "start_date": "2015",
+                "end_date": "2018",
+                "is_current": False,
+                "evidence": [
+                    {"page": 1, "block_index": 0, "quote": "Used Java at Acme from 2015 to 2018."}
+                ],
+            },
+            {
+                "title": "Engineer B",
+                "organization": "Beta Corp",
+                "start_date": "2019",
+                "end_date": "2022",
+                "is_current": False,
+                "evidence": [
+                    {
+                        "page": 1,
+                        "block_index": 1,
+                        "quote": "Used Java at Beta Corp from 2019 to 2022.",
+                    }
+                ],
+            },
+        ],
+        skill_experience=[
+            {
+                "skill_name": "Java",
+                "employment_index": 0,
+                "start_date": "2015",
+                "end_date": "2018",
+                "is_current": False,
+                "evidence": [
+                    {
+                        "page": 1,
+                        "block_index": 0,
+                        "quote": "Used Java at Acme from 2015 to 2018.",
+                    }
+                ],
+            },
+            {
+                "skill_name": "Java",
+                "employment_index": 1,
+                "start_date": "2019",
+                "end_date": "2022",
+                "is_current": False,
+                "evidence": [
+                    {
+                        "page": 1,
+                        "block_index": 1,
+                        "quote": "Used Java at Beta Corp from 2019 to 2022.",
+                    }
+                ],
+            },
+        ],
+    )
+    extraction = CandidateProfileExtraction.model_validate(profile_dict)
+    verify_extraction_evidence(view, extraction)  # both items independently grounded
+
+    result = evaluate_criterion(
+        _skill_experience_criterion("java5", "Java", 5.0),
+        extraction,
+        evaluation_as_of_date=_AS_OF_DATE,
+    )
+    assert result.status == CRITERION_STATUS_MATCH
+    assert "Computed 6" in result.explanation  # (2018-2015) + (2022-2019) = 3 + 3 = 6
+
+
+def test_relational_5_open_current_period_still_uses_explicit_evaluation_date() -> None:
+    """End-to-end confirmation: an is_current claim passes the relational
+    extraction-time check (only the start year needs grounding), and the
+    evaluator still resolves its duration deterministically from the
+    explicit evaluation_as_of_date — never the wall clock."""
+    view = _employment_view_block("Java developer since 2020, ongoing role.")
+    profile_dict = _profile(
+        skills=[{"name": "Java", "category": None, "evidence": _evidence("Java")}],
+        employment_history=[
+            {
+                "title": "Java Developer",
+                "organization": "Acme",
+                "start_date": "2020",
+                "end_date": None,
+                "is_current": True,
+                "evidence": [
+                    {
+                        "page": 1,
+                        "block_index": 0,
+                        "quote": "Java developer since 2020, ongoing role.",
+                    }
+                ],
+            }
+        ],
+        skill_experience=[
+            {
+                "skill_name": "Java",
+                "employment_index": 0,
+                "start_date": "2020",
+                "end_date": None,
+                "is_current": True,
+                "evidence": [
+                    {
+                        "page": 1,
+                        "block_index": 0,
+                        "quote": "Java developer since 2020, ongoing role.",
+                    }
+                ],
+            }
+        ],
+    )
+    extraction = CandidateProfileExtraction.model_validate(profile_dict)
+    verify_extraction_evidence(view, extraction)  # must not raise
+
+    as_of_2026 = evaluate_criterion(
+        _skill_experience_criterion("java5", "Java", 5.0),
+        extraction,
+        evaluation_as_of_date=date(2026, 1, 1),
+    )
+    assert as_of_2026.status == CRITERION_STATUS_MATCH  # 6 years as of 2026
+
+    as_of_2023 = evaluate_criterion(
+        _skill_experience_criterion("java5", "Java", 5.0),
+        extraction,
+        evaluation_as_of_date=date(2023, 1, 1),
+    )
+    assert as_of_2023.status == CRITERION_STATUS_NOT_MATCHED  # only 3 years as of 2023
 
 
 # --- Scenario H: evidence shown to HR explains which periods/facts -------

@@ -64,6 +64,17 @@ def canonicalize_domain(text: str) -> str:
     return normalized
 
 
+def accepted_terms_for_domain(domain: str) -> frozenset[str]:
+    """The set of literal terms that count as explicit evidence for
+    `domain` — its curated synonyms when it resolves to a known canonical
+    domain, else just its own normalized text. Shared by
+    `domain_term_present` (presence-anywhere-in-evidence check) and
+    `meyar.core.interval_terms` (same-quote relational check) so both
+    recognize identical accepted forms."""
+    canonical = canonicalize_domain(domain)
+    return DOMAIN_SYNONYMS.get(canonical, frozenset({canonical}))
+
+
 def domain_term_present(domain: str, quotes: list[str]) -> bool:
     """True only when an explicit, unambiguous domain/sector term for
     `domain` literally appears (as a whole word/phrase, never a bare
@@ -71,8 +82,7 @@ def domain_term_present(domain: str, quotes: list[str]) -> bool:
     "ABC Solutions MMC") contains none of DOMAIN_SYNONYMS' curated
     phrases, so it can never satisfy this check by itself — see
     docs/DECISIONS.md."""
-    canonical = canonicalize_domain(domain)
-    accepted_terms = DOMAIN_SYNONYMS.get(canonical, frozenset({canonical}))
+    accepted_terms = accepted_terms_for_domain(domain)
     haystack = _normalize(" ".join(quotes))
     return any(
         re.search(rf"(?<!\w){re.escape(term)}(?!\w)", haystack) for term in accepted_terms if term

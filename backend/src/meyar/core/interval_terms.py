@@ -1,11 +1,17 @@
 import re
 
+from meyar.core.text import fold_az_ascii, normalize_azerbaijani_case
+
 _WHITESPACE_RE = re.compile(r"\s+")
 _YEAR_RE = re.compile(r"(19|20)\d{2}")
 
 
 def _normalize(text: str) -> str:
-    return _WHITESPACE_RE.sub(" ", text).strip()
+    """Same casefold/diacritic-fold discipline as
+    meyar.core.domain_terms._normalize (D-023 typing-variance matching) —
+    kept consistent here so an AZ-typed skill/domain term and its
+    plain-Latin-keyboard variant compare equal in both modules."""
+    return _WHITESPACE_RE.sub(" ", fold_az_ascii(normalize_azerbaijani_case(text))).strip()
 
 
 def _year_token(date_text: str | None) -> str | None:
@@ -20,46 +26,56 @@ def interval_grounded_in_quotes(
     start_date: str | None,
     end_date: str | None,
     quotes: list[str],
-    subject: str | None = None,
+    subject_terms: frozenset[str] | None = None,
 ) -> bool:
-    """Deterministic guard (issue #32 final review): a valid, verbatim
-    evidence quote proves the SKILL/DOMAIN was mentioned — it does not by
-    itself prove the specific start_date/end_date a model claims for that
-    item. This checks that the SAME year the model claims for each stated
-    bound literally appears somewhere in that item's own cited quotes, so
-    a quote that only proves "Java was used" (with no date at all, or
-    only a narrower/different date) can never ground an arbitrary,
-    broader interval such as an entire linked employment period.
+    """Deterministic RELATIONAL grounding guard (issue #32 final review).
 
-    A bound left unset (None — e.g. `is_current=True` with no end_date)
-    trivially requires nothing; the caller/evaluator already treats a
-    fully-unset interval as insufficient evidence on its own (see
-    meyar.evaluation.evaluators). This function only judges bounds that
-    ARE claimed.
+    Two earlier, weaker checks are not enough: (a) that a quote is real/
+    verbatim, and (b) that the subject and the claimed years each appear
+    SOMEWHERE across the item's evidence list. Citing quote A ("Java ilə
+    işləyib.") and quote B ("2020–2025 — Data Analyst.") together must
+    NOT prove "Java 2020-2025" — the subject and the interval were never
+    actually tied together in the source text.
 
-    `subject`, when given (skill_name — never used for domain, which
-    already has its own synonym-aware meyar.core.domain_terms check),
-    additionally requires that literal term to appear in the same quotes
-    — so a quote that only states a job's own dates, without ever
-    mentioning the skill, cannot ground that skill's interval either.
+    This function instead requires ONE evidence quote — a single
+    "accepted evidence span" — that contains BOTH the subject (any term
+    in `subject_terms`, when given) AND every year the item claims
+    (`start_date`/`end_date`, each reduced to its 4-digit year). Different
+    quotes are never combined to satisfy different parts of the claim.
 
-    This is a token-presence heuristic, not semantic verification — no
-    LLM verifier is used (issue #32 explicitly forbids one). It reliably
-    catches an interval whose claimed year(s) are simply absent from the
-    cited text; it cannot catch a quote deceptively engineered to contain
-    the right years/subject without actually supporting them together —
-    an accepted, documented limit of a purely deterministic check."""
-    haystack = _normalize(" ".join(quotes)).casefold()
-    if subject:
-        subject_normalized = _normalize(subject).casefold()
-        if subject_normalized and not re.search(
-            rf"(?<!\w){re.escape(subject_normalized)}(?!\w)", haystack
-        ):
-            return False
+    `subject_terms`, when given, is the set of acceptable literal terms
+    for the subject: a skill's own name, or a domain's curated synonym
+    set (meyar.core.domain_terms.accepted_terms_for_domain) — the same
+    matching discipline `domain_term_present` already uses, reused here
+    so this relational check recognizes the identical synonym forms.
+
+    A bound left unset (None — e.g. an `is_current` claim's `end_date`)
+    contributes nothing to require. If NEITHER bound is claimed, this
+    returns True trivially: there is no interval to relationally ground
+    (the caller/evaluator already treats a fully-unset interval as
+    insufficient evidence on its own — see meyar.evaluation.evaluators)."""
+    required_years: list[str] = []
     for date_text in (start_date, end_date):
         if date_text is None:
             continue
         year = _year_token(date_text)
-        if year is None or year not in haystack:
+        if year is None:
             return False
-    return True
+        required_years.append(year)
+    if not required_years:
+        return True
+
+    normalized_subject_terms = (
+        {_normalize(term) for term in subject_terms if term} if subject_terms else None
+    )
+
+    for quote in quotes:
+        normalized_quote = _normalize(quote)
+        if normalized_subject_terms and not any(
+            re.search(rf"(?<!\w){re.escape(term)}(?!\w)", normalized_quote)
+            for term in normalized_subject_terms
+        ):
+            continue
+        if all(year in normalized_quote for year in required_years):
+            return True
+    return False

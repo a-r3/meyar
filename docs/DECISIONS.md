@@ -3244,3 +3244,71 @@ at `v3`) already instructed the model to "cite the exact text that
 supports both the skill-to-job link and the specific dates you set";
 this pass only added deterministic enforcement of that existing
 instruction, not a change to what the model is asked to do.
+
+**Third correctness fix (same PR #41, pre-merge, 2026-09-02) — RELATIONAL
+grounding: subject and interval must be tied together in one quote, not
+merely each present somewhere:** a further owner review found that the
+second fix above, while correct as far as it went, was itself provably
+insufficient: `interval_grounded_in_quotes` joined ALL of an item's
+evidence quotes into one combined string before checking subject
+presence and year presence independently. Reproduced live before
+changing anything: `interval_grounded_in_quotes(start_date="2020",
+end_date="2025", quotes=["Java ilə işləyib.", "2020–2025 — Data
+Analyst."], subject="Java")` returned `True` — citing a real quote that
+only proves "Java" was used, plus a second real quote that only proves
+some unrelated "2020-2025" span, together satisfied the joined check even
+though the two facts were never actually stated together. A genuine gap,
+confirmed before fixing, not already safe.
+
+Fix: `interval_grounded_in_quotes` now checks PER-QUOTE, never a joined
+haystack. It requires ONE single evidence quote — one "accepted evidence
+span" out of the item's evidence list — that contains BOTH the subject
+(any term in a new `subject_terms: frozenset[str] | None` parameter) AND
+every year the item claims. Different quotes are never combined to
+satisfy different parts of the claim; an item with several evidence
+quotes still passes as soon as ONE of them alone is sufficient (so
+supplementary, non-qualifying quotes don't break a genuinely grounded
+claim — see `test_relational_3`).
+
+`subject_terms` generalizes the prior single-string `subject` param so
+domain can reuse the identical relational check: a new
+`meyar.core.domain_terms.accepted_terms_for_domain(domain) ->
+frozenset[str]` (the same curated synonym-set lookup `domain_term_present`
+already used internally, now shared) is passed as `subject_terms` for
+`domain_experience`, so "AML" and "anti-money laundering" are recognized
+as the same subject inside the relational check exactly as
+`domain_term_present` already recognizes them for the separate
+presence-anywhere check. `meyar.core.interval_terms._normalize` was also
+aligned to the identical az-ascii-fold + casefold normalization
+`domain_terms._normalize` already used (previously only casefold, no
+diacritic folding) — otherwise an AZ-diacritic quote could fail to match
+an ASCII-typed domain synonym inside the now-per-quote comparison.
+
+Five new regression tests, matching the owner's five required cases
+exactly: (1) skill subject in one quote + unrelated dates in another ->
+rejected (`SKILL_INTERVAL_NOT_EXPLICIT`, extraction never persisted — the
+strongest available guarantee, stronger than a mere evaluator-level
+UNKNOWN, consistent with every other evidence check in this module never
+persisting on failure); (2) domain term in one quote + unrelated dates in
+another -> rejected (`DOMAIN_INTERVAL_NOT_EXPLICIT`); (3) subject and
+interval genuinely tied together in one accepted quote, with an
+additional non-qualifying quote alongside it -> still valid; (4) two
+separate, EACH-individually-relationally-grounded `SkillExperienceItem`s
+both pass extraction verification and still aggregate correctly at
+evaluation time (3 + 3 = 6 years, `merge_and_sum_years` untouched); (5)
+an end-to-end `is_current` case: passes the relational check (only the
+start year needs grounding — an unset bound requires nothing), then the
+evaluator still resolves duration from the explicit
+`evaluation_as_of_date` parameter alone, confirmed against two different
+evaluation dates (2023 vs 2026) — the same deterministic mechanism as
+before this pass, unaffected by it.
+
+Deliberately still not an LLM verifier (explicitly ruled out again this
+round). Documented residual limit, unchanged in kind from the second fix:
+a single quote engineered to contain the right years and the right
+subject together, without those actually being causally related in the
+source CV, cannot be distinguished from a genuine claim by a token-
+presence check — closing that would require semantic judgment. This is
+now the smallest remaining gap after three correctness passes, and it is
+inherent to any purely deterministic, non-LLM text-matching approach, not
+a shortcut taken in this fix.
