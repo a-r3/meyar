@@ -27,7 +27,12 @@ from docx import Document
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meyar.agent.schemas import AgentDecision, GroundedFact, GroundedSelection
+from meyar.agent.schemas import (
+    AgentDecision,
+    GroundedFact,
+    GroundedSelection,
+    JDCriteriaDraft,
+)
 from meyar.core.roles import ROLE_HR_USER
 from meyar.embedding.provider import EmbeddingResult
 from meyar.evaluation.service import evaluate_and_score_candidate
@@ -146,6 +151,11 @@ class _DemoLLMProvider:
         repair: bool = False,
     ) -> tuple[GroundedSelection, LLMResultProvenance]:
         raise NotImplementedError("The demo seed provider never runs the agent loop.")
+
+    async def draft_job_criteria(
+        self, jd_text: str, *, repair: bool = False
+    ) -> tuple[JDCriteriaDraft, LLMResultProvenance]:
+        raise NotImplementedError("The demo seed provider never drafts job criteria.")
 
     async def health(self) -> dict:
         return {"reachable": True, "model": self.model_name, "model_available": True}

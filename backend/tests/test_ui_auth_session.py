@@ -49,7 +49,7 @@ async def test_valid_login_creates_hashed_server_session(
     _tenant, user, password, membership = tenant_and_user
     response = await _login(client, user.username, password)
     assert response.status_code == 303
-    assert response.headers["location"] == "/ui"
+    assert response.headers["location"] == "/ui/agent"
     raw_cookie = response.cookies.get("meyar_ui_session")
     assert raw_cookie is not None
 

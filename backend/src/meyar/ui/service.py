@@ -1,6 +1,5 @@
 import hashlib
 import json
-import re
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass
@@ -10,7 +9,7 @@ from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.agent.schemas import AgentActionType, AgentTurnResult
-from meyar.core.text import fold_az_ascii, normalize_azerbaijani_case
+from meyar.core.text import normalize_azerbaijani_case, slugify_criterion_label
 from meyar.ingestion.parser import CanonicalDocumentContent
 from meyar.models.candidate import Candidate
 from meyar.models.candidate_document import (
@@ -54,6 +53,8 @@ from meyar.services.candidate_profile_repo import (
 from meyar.services.candidate_repo import get_candidate
 from meyar.ui.presentation import (
     AGENT_EVIDENCE_CATEGORY_LABELS,
+    CRITERION_KIND_LABELS,
+    agent_turn_outcome_message,
     join_nonempty,
     planner_outcome_view,
 )
@@ -61,6 +62,7 @@ from meyar.ui.view_models import (
     AgentCandidateProfileView,
     AgentEvidenceMatchView,
     AgentEvidenceView,
+    AgentJobDraftView,
     AgentToolResultView,
     AgentTurnView,
     CandidateDetailView,
@@ -69,6 +71,7 @@ from meyar.ui.view_models import (
     CandidateLibraryItemView,
     CandidateLibraryPageView,
     CandidateSearchResultView,
+    CriterionRowView,
     DocumentPreviewPageView,
     EvaluationHistoryView,
     EvidenceLocationView,
@@ -563,6 +566,16 @@ async def build_search_result_views(
     return views
 
 
+def _criterion_row_view(criterion: CriterionIn) -> CriterionRowView:
+    return CriterionRowView(
+        kind=criterion.kind.value,
+        kind_label=CRITERION_KIND_LABELS.get(criterion.kind.value, criterion.kind.value),
+        requirement=criterion.label,
+        min_years=f"{criterion.min_years:g}" if criterion.min_years is not None else "",
+        weight=f"{criterion.weight:g}",
+    )
+
+
 async def _agent_candidate_profile_view(
     db: AsyncSession,
     *,
@@ -611,6 +624,20 @@ async def build_agent_turn_view(
                         result_count=search_response.result_count if search_response else None,
                     ),
                     search_results=search_results,
+                )
+            )
+        elif tool_result.tool_name == AgentActionType.DRAFT_JOB_CRITERIA:
+            assert tool_result.job_draft is not None
+            draft = tool_result.job_draft
+            tool_result_views.append(
+                AgentToolResultView(
+                    tool_name=tool_result.tool_name.value,
+                    job_draft=AgentJobDraftView(
+                        title=draft.title,
+                        must_have_rows=[_criterion_row_view(c) for c in draft.must_have],
+                        preferred_rows=[_criterion_row_view(c) for c in draft.preferred],
+                        dropped_count=draft.dropped_count,
+                    ),
                 )
             )
         elif tool_result.tool_name == AgentActionType.GET_CANDIDATE_PROFILE:
@@ -671,8 +698,53 @@ async def build_agent_turn_view(
                 )
             )
     return AgentTurnView(
-        outcome=result.outcome.value, message=result.message, tool_results=tool_result_views
+        outcome=result.outcome.value,
+        message=result.message,
+        headline=_agent_turn_headline(result, tool_result_views),
+        tool_results=tool_result_views,
     )
+
+
+def _agent_turn_headline(
+    result: AgentTurnResult, tool_result_views: list[AgentToolResultView]
+) -> str:
+    """One deterministic, HR-facing leading sentence for a live turn —
+    never a second, overlapping status banner alongside it (D-030
+    conversational-UX requirement). Priority: a real model-authored
+    FINAL_ANSWER/CLARIFY framing or D-038 grounded-synthesis sentence
+    always wins (it IS the meaningful assistant message); otherwise a
+    fixed, deterministic summary derived from the turn's own single most
+    recent tool result; otherwise the generic per-outcome fallback."""
+    if result.message:
+        return result.message
+    if tool_result_views:
+        latest_view = tool_result_views[-1]
+        if latest_view.tool_name == AgentActionType.SEARCH_CANDIDATES.value:
+            outcome = latest_view.search_outcome
+            assert outcome is not None
+            if outcome.executable:
+                return f"{len(latest_view.search_results)} namizəd tapıldı."
+            return outcome.message
+        if latest_view.tool_name == AgentActionType.DRAFT_JOB_CRITERIA.value:
+            draft = latest_view.job_draft
+            assert draft is not None
+            total = len(draft.must_have_rows) + len(draft.preferred_rows)
+            if total == 0:
+                return (
+                    "Bu mətndən konkret tələb müəyyən edilmədi. Aşağıdan əl ilə "
+                    "kriteriya əlavə edə bilərsiniz."
+                )
+            dropped_note = (
+                f" ({draft.dropped_count} tələb siyasətə görə çıxarıldı.)"
+                if draft.dropped_count
+                else ""
+            )
+            return (
+                f"\"{draft.title}\" üçün {len(draft.must_have_rows)} mütləq və "
+                f"{len(draft.preferred_rows)} üstünlük tələbi qaralandı. Nəzərdən keçirin, "
+                f"lazım gəldikdə düzəliş edin və təsdiqləyin.{dropped_note}"
+            )
+    return agent_turn_outcome_message(result.outcome.value, None)
 
 
 async def list_job_views(
@@ -891,8 +963,6 @@ CRITERION_KIND_OPTIONS: tuple[tuple[str, str], ...] = (
 )
 DEFAULT_CRITERION_WEIGHT = "1"
 
-_CRITERION_ID_FALLBACK = "meyar"
-
 
 @dataclass(frozen=True)
 class CriterionRowInput:
@@ -900,22 +970,6 @@ class CriterionRowInput:
     requirement: str
     min_years: str
     weight: str
-
-
-def _slugify_criterion_label(label: str, used_ids: set[str]) -> str:
-    """A stable, ASCII-only criterion id derived from the HR-entered
-    requirement text. The HR user never types or sees a raw id/UUID (owner
-    visual-inspection Blocker 2: 'no raw UUID entry by the HR user') — it
-    exists only as the deterministic policy engine's internal join key."""
-    ascii_text = fold_az_ascii(label).lower()
-    base = re.sub(r"[^a-z0-9]+", "_", ascii_text).strip("_")[:60] or _CRITERION_ID_FALLBACK
-    candidate = base
-    suffix = 2
-    while candidate in used_ids:
-        candidate = f"{base}_{suffix}"[:64]
-        suffix += 1
-    used_ids.add(candidate)
-    return candidate
 
 
 def _first_pydantic_message(exc: ValidationError) -> str:
@@ -971,7 +1025,7 @@ def _parse_criterion_row(
 
     try:
         return CriterionIn(
-            id=_slugify_criterion_label(requirement, used_ids),
+            id=slugify_criterion_label(requirement, used_ids),
             kind=kind,
             type=criterion_type,
             label=requirement,

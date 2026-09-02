@@ -3312,3 +3312,132 @@ presence check — closing that would require semantic judgment. This is
 now the smallest remaining gap after three correctness passes, and it is
 inherent to any purely deterministic, non-LLM text-matching approach, not
 a shortcut taken in this fix.
+
+## D-042 — Slice 4 (issue #33): agent-first product UX + JD → criteria
+drafting, and two real-Ollama findings
+
+**Date:** 2026-09-02
+**Decision:** Implements M8 Slice 4 (issue #33, per D-030/D-031/D-032) on
+`feat/agent-product-ux-jd-matching` from synced `main` (`8c1782f`).
+
+1. **MEYAR AI is now the primary post-login HR surface.** Top-level nav is
+   `MEYAR AI | Namizədlər | Çıxış`; classic NL search (`/ui`) and
+   Vacancies (`/ui/jobs`) remain fully reachable via a de-emphasized
+   secondary nav line ("Digər alətlər") rather than being removed, per
+   D-032 point 2. Human login (`_finalize_human_login`) now redirects to
+   `/ui/agent` instead of `/ui` — the only behavior change to the login
+   flow itself; six existing redirect-target test assertions updated
+   accordingly.
+2. **Conversation UX consolidation.** A new `AgentTurnView.headline`
+   (`meyar.ui.service._agent_turn_headline`), computed once server-side,
+   replaces the previous two-tier "generic outcome banner" +
+   "tool-specific outcome banner" stack — one meaningful assistant message
+   first, supporting cards/evidence second, no duplicated success/status
+   text. A non-executable search outcome's own explanation still IS that
+   headline (not redundant — it is the only informative content in that
+   case). New `POST /ui/agent/reset` ("Yeni söhbət") clears this browser
+   session's own `AgentConversation` (turns + `last_search_candidate_ids`)
+   via a new `meyar.services.agent_conversation_repo.reset_conversation`
+   — tenant/session-scoped exactly like every other conversation call
+   site, never touches another session/tenant.
+3. **Candidate presentation:** the semantic-similarity pill (previously
+   unconditional "Uyğunluq %" on `/ui/search`, and already mode-gated but
+   identically labeled on `/ui/agent`) is relabeled "Semantik yaxınlıq %"
+   on both surfaces and now consistently hidden outside SEMANTIC_ONLY/
+   HYBRID search modes — a plain structured/discovery result never shows
+   a percentage that could read as a compatibility score. The real 0–100
+   deterministic score stays exactly where it already correctly lived
+   (`ranking_results.html`, `rank_candidates_for_job` only) — unchanged.
+4. **JD → structured criteria draft → human review → deterministic rank.**
+   New `AgentActionType.DRAFT_JOB_CRITERIA`: the model signals only that
+   the message is a JD (no argument on `AgentDecision` itself — the
+   server uses the user's own already-known message text as the JD input
+   for a second, narrower LLM call, `LLMProvider.draft_job_criteria`,
+   deliberately never asking the model to reproduce the JD inside its own
+   output schema — the D-035 Ollama `maxLength`-in-output-schema failure
+   mode this avoids). The model drafts a `JDCriteriaDraft` (title +
+   bounded must-have/preferred lists, restricted to the same five
+   `CriterionKind`s the manual form already offers); every item is
+   re-validated into a real `CriterionIn` server-side (same schema +
+   prohibited-attribute denylist as the manual form/REST API — D-031
+   point 4, no exception), and any item that fails is silently dropped
+   (never shown, `dropped_count` surfaced) rather than weakened. The
+   result renders as an editable review form (shared Jinja macro,
+   `_criteria_rows.html`, extracted out of `job_new.html` so both surfaces
+   render criteria rows identically) that posts through the EXISTING,
+   unchanged `POST /ui/jobs` — nothing is persisted by drafting alone.
+   Ranking after creation reuses the existing `/ui/jobs` "Namizədləri
+   sırala" action unchanged: no manual evaluation-date input, today's date
+   injected at the UI boundary exactly as `/ui/search` already does, and
+   the effective evaluation date is already displayed on
+   `ranking_results.html`. No new vacancy-CRUD surface area; `Job`/
+   `JobCriteriaVersion`/scoring untouched. `AgentTurnOutcome.
+   JOB_DRAFT_FAILED` (bounded retry, then this outcome with empty
+   `tool_results`) covers the drafting call itself never producing a
+   usable result — mirrors the existing AGENT_PROVIDER_FAILURE/
+   MALFORMED_MODEL_OUTPUT precedent (D-036).
+5. **D-031 sunset condition NOT acted on this slice.** Issue #33/D-031
+   point 3 makes the fast-path sunset an owner-evaluated decision, not
+   automatic. This slice implements the agent-first JD/criteria flow the
+   sunset evaluation depends on but does not itself judge "accepted
+   functional parity" — that determination is left to the owner's UI
+   review (see the accompanying `## HUMAN ACTION REQUIRED`); D-026's fast
+   path is untouched.
+6. **Two real findings from live-Ollama acceptance testing** (qwen3:1.7b,
+   the same integration-verified model as D-039/D-040), matching the
+   established Slice 2 pattern (D-035 through D-040) of bugs no
+   `FakeLLMProvider`-based test can surface:
+   - **Prompt-leak defect (real, fixed structurally).** The model can
+     copy one of `AGENT_SYSTEM_PROMPT`'s own English instructional
+     sentences verbatim into `AgentDecision.message` for CLARIFY/
+     FINAL_ANSWER, instead of authoring real content — a raw
+     planner-internals leak into HR-facing text that D-035's "the
+     model's message is safe to show verbatim" boundary did not
+     anticipate. Fixed with `meyar.agent.service._looks_like_prompt_leak`
+     — an exact/near-exact containment check against the fixed prompt
+     text (not a fuzzy heuristic) — treated exactly like schema-invalid
+     output: bounded retry (`MAX_DECISION_ATTEMPTS`), then the existing
+     deterministic `MALFORMED_MODEL_OUTPUT` fallback. Reproduced live
+     post-fix: the guard correctly rejected a repeat leak and rendered
+     only the safe fallback text, never the leaked sentence. Two new
+     regression tests (`test_prompt_leaking_clarify_message_is_rejected_
+     and_retried`, `test_prompt_leak_persisting_through_every_retry_
+     falls_back_safely`).
+   - **Known, documented model-quality limitation (not fixed further this
+     slice).** `AGENT_PROMPT_VERSION` was bumped to
+     `agent-orchestrator-prompt-v3` (DRAFT_JOB_CRITERIA added, then its
+     disambiguation against SEARCH_CANDIDATES sharpened once) after live
+     testing showed qwen3:1.7b sometimes still routes a raw pasted JD to
+     SEARCH_CANDIDATES instead of DRAFT_JOB_CRITERIA when the message
+     carries no explicit trigger verb — the same class of small-local-
+     model intent-classification limitation the project already documents
+     honestly elsewhere (D-025's "AI tələbi tam anlaya bilmədi" framing).
+     Both branches remain fully safe regardless of which the model picks:
+     a misrouted JD either fails its own search-planner call (typed
+     `PLANNER_PROVIDER_FAILURE`/`MODEL_TIMEOUT`, never a fabricated
+     result) or, when routed correctly, drafts and validates exactly as
+     designed — confirmed live for both outcomes. HR can reliably reach
+     DRAFT_JOB_CRITERIA today with an explicit lead-in (e.g. "Bu elan
+     üçün kriteriyalar hazırla: ..."); further routing-accuracy tuning
+     (a bigger model, or — if ever justified by a DECISIONS.md entry — a
+     bounded deterministic pre-classifier) is deferred, not silently
+     attempted, per this slice's bounded-cycle scope.
+
+**Why:** Issue #33 requires MEYAR AI to become the primary HR surface with
+a bounded JD → draft → confirm → deterministic-rank flow, while explicitly
+prohibiting new vacancy-CRUD growth, any LLM scoring authority, and
+manual evaluation-date input — this decision records the concrete design
+(schema shape, validation boundary, reuse of existing job/ranking
+services) and the two real defects/limitations only live-model testing
+could surface, consistent with the Slice 2 precedent of documenting such
+findings rather than only the intended design.
+
+**Reversibility:** Fully additive at the schema/service layer (`agent/
+schemas.py`, new tool result/outcome variants) — no migration, no change
+to `Job`/`JobCriteriaVersion`/scoring/evaluation. `meyar.core.text.
+slugify_criterion_label` is a pure extraction of previously-private
+`meyar.ui.service._slugify_criterion_label` logic (same behavior, now
+shared with `meyar.agent.service`). The login-redirect and nav changes
+are template/route-level and trivially reversible. `_looks_like_prompt_
+leak` is a narrow, additive guard around one existing decision-fetch
+loop.

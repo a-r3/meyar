@@ -80,6 +80,26 @@ async def test_agent_nav_link_present_on_authenticated_pages(
     assert "MEYAR AI" in home.text
 
 
+async def test_primary_nav_is_agent_first_classic_tools_are_secondary(
+    client: AsyncClient, tenant_and_user, local_ui_settings: Settings
+) -> None:
+    """Slice 4 (issue #33, D-030): MEYAR AI + Namizədlər are the primary
+    HR navigation; classic search and Vacancies remain fully reachable but
+    de-emphasized (per D-032, not removed)."""
+    _tenant, user, password, _membership = tenant_and_user
+    await _login_and_csrf(client, user.username, password)
+    page = await client.get("/ui/agent")
+    primary_nav = re.search(r'<nav aria-label="Əsas naviqasiya">(.*?)</nav>', page.text, re.S)
+    assert primary_nav is not None
+    assert 'href="/ui/agent"' in primary_nav.group(1)
+    assert 'href="/ui/library"' in primary_nav.group(1)
+    assert 'href="/ui/jobs"' not in primary_nav.group(1)
+    assert 'href="/ui"' not in primary_nav.group(1)
+    # Still reachable, just not primary.
+    assert 'href="/ui/jobs"' in page.text
+    assert 'href="/ui">Klassik axtarış' in page.text
+
+
 async def test_search_candidates_turn_renders_grounded_results_not_model_text(
     client: AsyncClient,
     db_session: AsyncSession,
@@ -197,7 +217,7 @@ async def test_two_sessions_do_not_share_agent_conversation_state(
         )
         # A fresh browser session has its own empty conversation — an
         # ordinal reference from session A's search must not resolve here.
-        assert "Namizəd tapılmadı" in response.text
+        assert "Göstərilən namizəd tapılmadı" in response.text
 
 
 async def test_user_message_and_model_message_are_html_escaped_in_render(
@@ -569,3 +589,188 @@ async def test_grounded_explanation_never_leaks_identity_to_model(
     for fact in fake_profile.last_grounded_facts:
         assert "Tural" not in fact.title and "tural@" not in (fact.detail or "")
     assert "tural@example.invalid" not in (fake_profile.last_grounded_question or "")
+
+
+# --- Slice 4 (issue #33, D-030/D-032): DRAFT_JOB_CRITERIA + "Yeni söhbət" ---
+
+
+async def test_draft_job_criteria_renders_editable_prefilled_review_form(
+    client: AsyncClient, tenant_and_user, local_ui_settings: Settings
+) -> None:
+    from meyar.agent.schemas import JDCriteriaDraft, JDDraftCriterionItem
+    from meyar.schemas.criteria import CriterionKind
+
+    _tenant, user, password, _membership = tenant_and_user
+    fake = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        jd_draft=JDCriteriaDraft(
+            title="Baş Backend Mühəndisi",
+            must_have=[JDDraftCriterionItem(kind=CriterionKind.SKILL, requirement="Python")],
+            preferred=[JDDraftCriterionItem(kind=CriterionKind.SKILL, requirement="AWS")],
+        ),
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake
+    csrf = await _login_and_csrf(client, user.username, password)
+    jd_text = "Baş Backend Mühəndisi axtarırıq. Python bilməlidir. AWS üstünlükdür."
+    response = await client.post("/ui/agent", data={"message": jd_text, "csrf_token": csrf})
+    assert response.status_code == 200
+    assert 'value="Baş Backend Mühəndisi"' in response.text
+    assert 'value="Python"' in response.text
+    assert 'value="AWS"' in response.text
+    # HR-facing kind label, never the raw enum value, and no raw tool
+    # name/internal marker anywhere in the visible page.
+    assert "Bacarıq" in response.text
+    assert "DRAFT_JOB_CRITERIA" not in response.text
+    assert '<form method="post" action="/ui/jobs"' in response.text
+
+    # The review form is fully editable and posts through the EXISTING,
+    # unchanged /ui/jobs creation path — nothing was persisted by drafting
+    # alone (D-032): submitting it is what actually creates the vacancy.
+    create = await client.post(
+        "/ui/jobs",
+        data={
+            "csrf_token": csrf,
+            "title": "Baş Backend Mühəndisi",
+            "must_kind_0": "SKILL",
+            "must_requirement_0": "Python",
+            "must_min_years_0": "",
+            "must_weight_0": "1",
+            "pref_kind_0": "SKILL",
+            "pref_requirement_0": "AWS",
+            "pref_min_years_0": "",
+            "pref_weight_0": "1",
+        },
+        follow_redirects=False,
+    )
+    assert create.status_code == 303
+    jobs_page = await client.get("/ui/jobs")
+    assert "Baş Backend Mühəndisi" in jobs_page.text
+
+
+async def test_draft_job_criteria_drops_prohibited_item_and_notes_it(
+    client: AsyncClient, tenant_and_user, local_ui_settings: Settings
+) -> None:
+    from meyar.agent.schemas import JDCriteriaDraft, JDDraftCriterionItem
+    from meyar.schemas.criteria import CriterionKind
+
+    _tenant, user, password, _membership = tenant_and_user
+    fake = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        jd_draft=JDCriteriaDraft(
+            title="Rol",
+            must_have=[
+                JDDraftCriterionItem(kind=CriterionKind.SKILL, requirement="Python"),
+                JDDraftCriterionItem(kind=CriterionKind.SKILL, requirement="kişi"),
+            ],
+        ),
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake
+    csrf = await _login_and_csrf(client, user.username, password)
+    response = await client.post(
+        "/ui/agent", data={"message": "Rol üçün namizəd kişi olmalıdır.", "csrf_token": csrf}
+    )
+    assert response.status_code == 200
+    assert 'value="Python"' in response.text
+    # The dropped, prohibited term never becomes a form row (it may still
+    # appear verbatim in the HR user's own echoed message above, which is
+    # untrusted text shown as-is — that is not a policy leak).
+    assert 'value="kişi"' not in response.text
+    assert "1 tələb siyasətə görə çıxarıldı" in response.text
+
+
+async def test_draft_job_criteria_provider_failure_renders_safe_message(
+    client: AsyncClient, tenant_and_user, local_ui_settings: Settings
+) -> None:
+    from meyar.llm.provider import ModelUnavailableError
+
+    _tenant, user, password, _membership = tenant_and_user
+    fake = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        jd_draft_error=ModelUnavailableError("simulated outage"),
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake
+    csrf = await _login_and_csrf(client, user.username, password)
+    response = await client.post(
+        "/ui/agent", data={"message": "JD mətni", "csrf_token": csrf}
+    )
+    assert response.status_code == 200
+    assert "kriteriya qaralaması hazırlana bilmədi" in response.text
+
+
+async def test_agent_reset_clears_this_sessions_conversation_state(
+    client: AsyncClient, db_session: AsyncSession, tenant_and_user, local_ui_settings: Settings
+) -> None:
+    tenant, user, password, _membership = tenant_and_user
+    candidate, _pv = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=_profile("Python")
+    )
+    await db_session.commit()
+
+    fake_search = FakeLLMProvider(
+        planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
+        agent_decisions=[
+            AgentDecision(
+                action=AgentActionType.SEARCH_CANDIDATES,
+                search_query="Python bilən namizədləri göstər",
+            ),
+            AgentDecision(action=AgentActionType.FINAL_ANSWER, message="Budur nəticələr."),
+        ],
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake_search
+    csrf = await _login_and_csrf(client, user.username, password)
+    query_text = "Python bilən mühəndisləri tap zəhmət olmasa"
+    await client.post("/ui/agent", data={"message": query_text, "csrf_token": csrf})
+    workspace = await client.get("/ui/agent")
+    assert query_text in workspace.text
+
+    reset_response = await client.post(
+        "/ui/agent/reset", data={"csrf_token": csrf}, follow_redirects=False
+    )
+    assert reset_response.status_code == 303
+    workspace_after = await client.get("/ui/agent")
+    assert query_text not in workspace_after.text
+    del candidate
+
+    # The cleared last_search_candidate_ids table means a stale ordinal
+    # reference from before the reset can no longer resolve.
+    fake_profile = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1)
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake_profile
+    response = await client.post(
+        "/ui/agent", data={"message": "birincini aç", "csrf_token": csrf}
+    )
+    assert "Göstərilən namizəd tapılmadı" in response.text
+
+
+async def test_agent_reset_requires_valid_csrf(
+    client: AsyncClient, tenant_and_user, local_ui_settings: Settings
+) -> None:
+    _tenant, user, password, _membership = tenant_and_user
+    await _login_and_csrf(client, user.username, password)
+    response = await client.post(
+        "/ui/agent/reset", data={"csrf_token": "wrong-token"}, follow_redirects=False
+    )
+    assert response.status_code == 403
+
+
+async def test_agent_reset_does_not_affect_another_sessions_conversation(
+    client: AsyncClient, tenant_and_user, local_ui_settings: Settings
+) -> None:
+    from httpx import ASGITransport
+
+    tenant, user, password, _membership = tenant_and_user
+    fake = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.FINAL_ANSWER, message="Salam!")
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake
+    csrf_a = await _login_and_csrf(client, user.username, password)
+    await client.post("/ui/agent", data={"message": "salam", "csrf_token": csrf_a})
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as second_client:
+        csrf_b = await _login_and_csrf(second_client, user.username, password)
+        await second_client.post("/ui/agent/reset", data={"csrf_token": csrf_b})
+
+    workspace_a = await client.get("/ui/agent")
+    assert "salam" in workspace_a.text

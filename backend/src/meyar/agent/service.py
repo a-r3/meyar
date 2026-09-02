@@ -22,12 +22,13 @@ from datetime import date
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meyar.agent.prompts import AGENT_PROMPT_VERSION
+from meyar.agent.prompts import AGENT_PROMPT_VERSION, AGENT_SYSTEM_PROMPT
 from meyar.agent.schemas import (
     AGENT_POLICY_VERSION,
     AgentActionType,
     AgentDecision,
     AgentEvidenceToolResult,
+    AgentJobDraftToolResult,
     AgentProfileToolResult,
     AgentSearchToolResult,
     AgentToolResult,
@@ -37,8 +38,10 @@ from meyar.agent.schemas import (
     GroundedCaveat,
     GroundedFact,
     GroundedSelection,
+    JDCriteriaDraft,
+    JDDraftCriterionItem,
 )
-from meyar.core.text import fold_az_ascii, normalize_azerbaijani_case
+from meyar.core.text import fold_az_ascii, normalize_azerbaijani_case, slugify_criterion_label
 from meyar.embedding.provider import EmbeddingProvider
 from meyar.llm.provider import (
     LLMProvider,
@@ -51,6 +54,12 @@ from meyar.llm.provider import (
 from meyar.models.agent_conversation import AgentConversation
 from meyar.models.candidate_profile_version import PROFILE_STATUS_COMPLETED
 from meyar.schemas.candidate_profile import CandidateProfileExtraction
+from meyar.schemas.criteria import (
+    CriterionIn,
+    CriterionKind,
+    CriterionType,
+    ProhibitedCriterionError,
+)
 from meyar.search.planner_service import plan_and_search_candidates
 from meyar.search.schemas import EmbeddingSearchConfig
 from meyar.services.agent_conversation_repo import save_conversation_state
@@ -62,10 +71,32 @@ MAX_DECISION_ATTEMPTS = 2
 # call surfaces — a generous, but not unbounded, response even for a broad
 # (topic-less) request. See _dispatch_evidence.
 MAX_EVIDENCE_MATCHES = 30
+# Bounded retry for DRAFT_JOB_CRITERIA's own drafting call, matching the
+# D-038 grounded-synthesis precedent (_synthesize_grounded_answer).
+MAX_JD_DRAFT_ATTEMPTS = 2
 
 
 def _fold(text: str) -> str:
     return fold_az_ascii(normalize_azerbaijani_case(text))
+
+
+# Real-Ollama acceptance testing for Slice 4 (issue #33) surfaced a genuine
+# small-local-model defect: instead of authoring a real clarifying
+# question, the model can copy one of AGENT_SYSTEM_PROMPT's own English
+# instructional sentences verbatim into AgentDecision.message — a raw
+# planner-internals leak into HR-facing text, which D-035's "the model's
+# message is safe to show verbatim" boundary did not anticipate. Guarded
+# structurally (an exact/near-exact containment check against the fixed
+# prompt text, not a fuzzy heuristic) rather than by a prompt instruction
+# alone, matching this module's D-038 precedent — a leak is treated
+# exactly like schema-invalid output: bounded retry, then the existing
+# deterministic MALFORMED_MODEL_OUTPUT fallback.
+_MIN_PROMPT_LEAK_LENGTH = 40
+
+
+def _looks_like_prompt_leak(message: str) -> bool:
+    stripped = message.strip()
+    return len(stripped) >= _MIN_PROMPT_LEAK_LENGTH and stripped in AGENT_SYSTEM_PROMPT
 
 
 def _resolve_candidate_ref(
@@ -524,6 +555,83 @@ async def _synthesize_grounded_answer(
     return None
 
 
+def _build_criterion_from_draft_item(
+    item: JDDraftCriterionItem, *, criterion_type: CriterionType, used_ids: set[str]
+) -> CriterionIn | None:
+    """Re-validates one MODEL-PRODUCED draft item into a real CriterionIn —
+    the exact same schema/prohibited-attribute denylist the manual
+    vacancy-creation form and the REST API already enforce (D-031 point 4:
+    an agent tool-dispatch layer is a new PRODUCER of arguments, never a
+    new validator). Returns None (silently dropped, never shown) on any
+    validation failure — mirrors meyar.ui.service._parse_criterion_row's
+    kind-aware value/min_years shape, but drops instead of raising since
+    this is a best-effort DRAFT, not a form submission."""
+    value = None if item.kind == CriterionKind.EXPERIENCE else item.requirement
+    min_years = item.min_years if item.kind == CriterionKind.EXPERIENCE else None
+    try:
+        return CriterionIn(
+            id=slugify_criterion_label(item.requirement, used_ids),
+            kind=item.kind,
+            type=criterion_type,
+            label=item.requirement,
+            value=value,
+            min_years=min_years,
+            weight=item.weight,
+        )
+    except (ValidationError, ProhibitedCriterionError):
+        return None
+
+
+async def _dispatch_draft_job_criteria(
+    llm: LLMProvider, *, jd_text: str
+) -> AgentToolResult | None:
+    """Returns None only when the drafting call itself never produced a
+    usable JDCriteriaDraft (repeated schema-invalid output, or a
+    provider failure) — the caller turns that into AgentTurnOutcome.
+    JOB_DRAFT_FAILED with no tool_results, mirroring the existing
+    AGENT_PROVIDER_FAILURE/MALFORMED_MODEL_OUTPUT precedent (D-036). A
+    successful call always returns a real AgentToolResult, even with zero
+    criteria."""
+    draft: JDCriteriaDraft | None = None
+    for attempt in range(1, MAX_JD_DRAFT_ATTEMPTS + 1):
+        try:
+            draft, _provenance = await llm.draft_job_criteria(jd_text, repair=attempt > 1)
+            break
+        except ModelSchemaInvalidError:
+            continue
+        except (ModelTimeoutError, ModelUnavailableError, LLMProviderError):
+            return None
+    if draft is None:
+        return None
+
+    used_ids: set[str] = set()
+    must_have: list[CriterionIn] = []
+    preferred: list[CriterionIn] = []
+    dropped_count = 0
+    for items, criterion_type, bucket in (
+        (draft.must_have, CriterionType.MUST_HAVE, must_have),
+        (draft.preferred, CriterionType.PREFERRED, preferred),
+    ):
+        for item in items:
+            criterion = _build_criterion_from_draft_item(
+                item, criterion_type=criterion_type, used_ids=used_ids
+            )
+            if criterion is None:
+                dropped_count += 1
+            else:
+                bucket.append(criterion)
+
+    return AgentToolResult(
+        tool_name=AgentActionType.DRAFT_JOB_CRITERIA,
+        job_draft=AgentJobDraftToolResult(
+            title=draft.title,
+            must_have=must_have,
+            preferred=preferred,
+            dropped_count=dropped_count,
+        ),
+    )
+
+
 def _configured_provenance(llm: LLMProvider) -> LLMResultProvenance:
     return LLMResultProvenance(
         provider=llm.provider_name, model_name=llm.model_name, model_revision=llm.model_revision
@@ -631,8 +739,8 @@ async def run_agent_turn(
                     available_candidate_refs=list(range(1, len(last_search_candidate_ids) + 1)),
                     repair=attempt > 1,
                 )
-                break
             except ModelSchemaInvalidError:
+                decision = None
                 continue
             except (ModelTimeoutError, ModelUnavailableError, LLMProviderError):
                 # A follow-up "what next" decision failing after a tool
@@ -660,6 +768,13 @@ async def run_agent_turn(
                     max_context_turns=max_context_turns,
                     result=result,
                 )
+            if decision.action in (
+                AgentActionType.FINAL_ANSWER,
+                AgentActionType.CLARIFY,
+            ) and _looks_like_prompt_leak(decision.message or ""):
+                decision = None
+                continue
+            break
 
         if decision is None:
             result = _build_result(
@@ -750,6 +865,61 @@ async def run_agent_turn(
                     result=result,
                 )
             searched_queries.add(normalized_query)
+
+        if decision.action == AgentActionType.DRAFT_JOB_CRITERIA:
+            # Always turn-terminal, like GET_CANDIDATE_PROFILE/EVIDENCE —
+            # unlike those, the dispatch call itself can genuinely fail
+            # (a real LLM call, not a deterministic DB lookup), so it is
+            # handled as its own branch rather than forced into the
+            # uniform tool_result/matched_profile shape below.
+            job_draft_result = await _dispatch_draft_job_criteria(llm, jd_text=user_message)
+            if job_draft_result is None:
+                await record_event(
+                    db,
+                    tenant_id=tenant_id,
+                    event_type="agent.tool.failed",
+                    metadata={"tool_name": decision.action.value},
+                )
+                result = _build_result(
+                    outcome=AgentTurnOutcome.JOB_DRAFT_FAILED,
+                    message=None,
+                    tool_results=tool_results,
+                    tool_call_count=tool_calls_made,
+                    provenance=provenance,
+                )
+                return await _finish_turn(
+                    db,
+                    conversation,
+                    tenant_id=tenant_id,
+                    turns=turns,
+                    last_search_candidate_ids=last_search_candidate_ids,
+                    max_context_turns=max_context_turns,
+                    result=result,
+                )
+            tool_calls_made += 1
+            tool_results.append(job_draft_result)
+            await record_event(
+                db,
+                tenant_id=tenant_id,
+                event_type="agent.tool.executed",
+                metadata={"tool_name": decision.action.value, "tool_call_index": tool_calls_made},
+            )
+            result = _build_result(
+                outcome=AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT,
+                message=None,
+                tool_results=tool_results,
+                tool_call_count=tool_calls_made,
+                provenance=provenance,
+            )
+            return await _finish_turn(
+                db,
+                conversation,
+                tenant_id=tenant_id,
+                turns=turns,
+                last_search_candidate_ids=last_search_candidate_ids,
+                max_context_turns=max_context_turns,
+                result=result,
+            )
 
         matched_profile: CandidateProfileExtraction | None = None
         if decision.action == AgentActionType.SEARCH_CANDIDATES:

@@ -194,7 +194,10 @@ async def _finalize_human_login(
     """The single place a real BrowserSession is minted for a human — both
     the direct single-membership login and the tenant-selection flow call
     this. Always issues a fresh random token (session-fixation prevention:
-    no pre-existing/attacker-supplied cookie value is ever reused)."""
+    no pre-existing/attacker-supplied cookie value is ever reused). Lands
+    on MEYAR AI, not the classic search page — Slice 4 (issue #33, D-030)
+    makes the agent the primary post-login HR surface; classic search
+    remains one click away via the secondary nav."""
     _session, raw_session_token = await create_browser_session(
         db,
         user_id=user_id,
@@ -209,7 +212,7 @@ async def _finalize_human_login(
         actor_id=user_id,
     )
     await db.commit()
-    response = RedirectResponse("/ui", status_code=status.HTTP_303_SEE_OTHER)
+    response = RedirectResponse("/ui/agent", status_code=status.HTTP_303_SEE_OTHER)
     _issue_session_cookie(response, raw_session_token, settings)
     return response
 
@@ -503,7 +506,12 @@ async def agent_workspace(
     return _render(
         request,
         "agent.html",
-        _context(ctx, turns=_agent_turn_log_views(conversation), latest=None),
+        _context(
+            ctx,
+            turns=_agent_turn_log_views(conversation),
+            latest=None,
+            kind_options=CRITERION_KIND_OPTIONS,
+        ),
     )
 
 
@@ -552,6 +560,7 @@ async def agent_turn(
         latest = AgentTurnView(
             outcome="AGENT_PROVIDER_FAILURE",
             message="MEYAR AI xidməti hazırda əlçatan deyil. Bir qədər sonra yenidən cəhd edin.",
+            headline="MEYAR AI xidməti hazırda əlçatan deyil. Bir qədər sonra yenidən cəhd edin.",
         )
         conversation = await get_or_create_conversation(
             db, tenant_id=ctx.tenant_id, browser_session_id=ctx.session_id
@@ -559,15 +568,56 @@ async def agent_turn(
         return _render(
             request,
             "agent.html",
-            _context(ctx, turns=_agent_turn_log_views(conversation), latest=latest),
+            _context(
+                ctx,
+                turns=_agent_turn_log_views(conversation),
+                latest=latest,
+                kind_options=CRITERION_KIND_OPTIONS,
+            ),
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
 
     return _render(
         request,
         "agent.html",
-        _context(ctx, turns=_agent_turn_log_views(conversation), latest=latest),
+        _context(
+            ctx,
+            turns=_agent_turn_log_views(conversation),
+            latest=latest,
+            kind_options=CRITERION_KIND_OPTIONS,
+        ),
     )
+
+
+@router.post("/agent/reset", response_class=HTMLResponse)
+async def agent_reset(
+    request: Request,
+    csrf_token: str = Form(...),
+    ctx: UIContext = Depends(require_ui_scopes("candidates:read")),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """"Yeni söhbət" — clears this browser session's own server-held agent
+    conversation state (turns + last_search_candidate_ids). Never affects
+    another session, tenant, candidate, or job row."""
+    verify_csrf(ctx.csrf_token, csrf_token)
+    from meyar.services.agent_conversation_repo import (
+        get_or_create_conversation,
+        reset_conversation,
+    )
+
+    conversation = await get_or_create_conversation(
+        db, tenant_id=ctx.tenant_id, browser_session_id=ctx.session_id
+    )
+    await reset_conversation(db, conversation)
+    await record_event(
+        db,
+        tenant_id=ctx.tenant_id,
+        event_type="agent.conversation.reset",
+        actor_type=ACTOR_HUMAN_USER,
+        actor_id=ctx.user_id,
+    )
+    await db.commit()
+    return RedirectResponse("/ui/agent", status_code=status.HTTP_303_SEE_OTHER)
 
 
 @router.get("/library", response_class=HTMLResponse)

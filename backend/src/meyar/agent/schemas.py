@@ -36,6 +36,7 @@ from enum import StrEnum
 from pydantic import BaseModel, Field, model_validator
 
 from meyar.schemas.candidate_profile import CandidateProfileExtraction, EvidenceRef
+from meyar.schemas.criteria import CriterionIn, CriterionKind
 from meyar.search.planner_schemas import PlannedCandidateSearchResponse
 
 AGENT_SCHEMA_VERSION = "agent-decision-schema-v1"
@@ -63,6 +64,14 @@ class AgentActionType(StrEnum):
     SEARCH_CANDIDATES = "SEARCH_CANDIDATES"
     GET_CANDIDATE_PROFILE = "GET_CANDIDATE_PROFILE"
     GET_CANDIDATE_EVIDENCE = "GET_CANDIDATE_EVIDENCE"
+    # Slice 4 (issue #33, D-030/D-032): the user pasted/described a JD or
+    # role and wants candidate-evaluation criteria drafted from it. No
+    # argument on the decision itself — the server uses the user's OWN
+    # already-known message text as the JD input for a second, narrower
+    # LLM call (meyar.agent.service._dispatch_draft_job_criteria), exactly
+    # like GET_CANDIDATE_EVIDENCE never asks the model to restate CV text.
+    # Nothing is persisted by this action — see AgentJobDraftToolResult.
+    DRAFT_JOB_CRITERIA = "DRAFT_JOB_CRITERIA"
     FINAL_ANSWER = "FINAL_ANSWER"
     CLARIFY = "CLARIFY"
 
@@ -72,6 +81,7 @@ TOOL_ACTIONS = frozenset(
         AgentActionType.SEARCH_CANDIDATES,
         AgentActionType.GET_CANDIDATE_PROFILE,
         AgentActionType.GET_CANDIDATE_EVIDENCE,
+        AgentActionType.DRAFT_JOB_CRITERIA,
     }
 )
 
@@ -127,6 +137,20 @@ class AgentDecision(BaseModel):
                 and self.evidence_topic is not None
             ):
                 raise ValueError("GET_CANDIDATE_PROFILE must not set evidence_topic.")
+        elif self.action == AgentActionType.DRAFT_JOB_CRITERIA:
+            # Bare action, no argument — see AgentActionType.DRAFT_JOB_CRITERIA
+            # docstring for why the JD text itself is never round-tripped
+            # through the model's own output.
+            if (
+                self.search_query is not None
+                or self.candidate_ref is not None
+                or self.evidence_topic is not None
+                or self.message is not None
+            ):
+                raise ValueError(
+                    "DRAFT_JOB_CRITERIA must not set search_query, candidate_ref, "
+                    "evidence_topic, or message."
+                )
         else:  # FINAL_ANSWER / CLARIFY
             if self.message is None:
                 raise ValueError(f"{self.action} requires message.")
@@ -184,6 +208,93 @@ class AgentEvidenceToolResult(BaseModel):
     matches: list[EvidenceMatchItem] = Field(default_factory=list, max_length=100)
 
 
+class JDDraftCriterionItem(BaseModel):
+    """One MODEL-PRODUCED candidate requirement drafted from a JD's own
+    text — untrusted input, exactly like every other LLM-produced tool
+    argument (D-031 point 4). Restricted to the same five kinds the
+    existing manual vacancy-creation form offers
+    (meyar.ui.service.CRITERION_KIND_OPTIONS) — SKILL_EXPERIENCE/
+    DOMAIN_EXPERIENCE (D-041) are out of scope for JD drafting in this
+    slice, not silently downgraded. Never persisted directly: every item
+    is re-validated into a real ``CriterionIn`` (same prohibited-attribute
+    denylist, same kind-specific shape rules) by
+    meyar.agent.service._dispatch_draft_job_criteria before it is ever
+    shown to HR — an item that fails that check is dropped, never shown
+    or silently weakened."""
+
+    model_config = {"extra": "forbid"}
+
+    kind: CriterionKind
+    # Both the HR-facing label AND the exact term the deterministic scorer
+    # matches against candidate evidence — mirrors the single "Tələb"
+    # field discipline the manual form already established (D-025) so a
+    # drafted criterion can never disagree with its own displayed name.
+    requirement: str = Field(min_length=1, max_length=200)
+    min_years: float | None = Field(default=None, ge=0, le=60)
+    weight: float = Field(default=1.0, ge=0, le=10)
+
+    @model_validator(mode="after")
+    def _validate_kind_supported(self) -> "JDDraftCriterionItem":
+        if self.kind not in (
+            CriterionKind.SKILL,
+            CriterionKind.EXPERIENCE,
+            CriterionKind.CERTIFICATION,
+            CriterionKind.EDUCATION,
+            CriterionKind.LANGUAGE,
+        ):
+            raise ValueError(f"JD drafting does not support criterion kind {self.kind.value}.")
+        return self
+
+
+# Bounds how many must-have/preferred rows one JD draft may propose per
+# section — generous for real-world JDs while keeping the human review
+# screen a fixed, scrollable-but-bounded table (no unbounded LLM output
+# surface). A JD with more genuine requirements than this is still fully
+# usable — HR can add further rows by hand after review, same as the
+# manual form already allows.
+MAX_JD_DRAFT_ROWS_PER_SECTION = 8
+
+
+class JDCriteriaDraft(BaseModel):
+    """Strict model output for Slice 4 JD-criteria drafting
+    (meyar.llm.provider.LLMProvider.draft_job_criteria). The model drafts;
+    it never assigns a final score and nothing here is persisted until an
+    accountable human confirms via the existing job-creation path
+    (D-030/D-032)."""
+
+    model_config = {"extra": "forbid"}
+
+    title: str = Field(min_length=1, max_length=255)
+    must_have: list[JDDraftCriterionItem] = Field(
+        default_factory=list, max_length=MAX_JD_DRAFT_ROWS_PER_SECTION
+    )
+    preferred: list[JDDraftCriterionItem] = Field(
+        default_factory=list, max_length=MAX_JD_DRAFT_ROWS_PER_SECTION
+    )
+
+
+class AgentJobDraftToolResult(BaseModel):
+    """DRAFT_JOB_CRITERIA's tool result — NEVER LLM-authored directly:
+    must_have/preferred are real, already-validated CriterionIn rows (same
+    schema/denylist the manual form and the REST API use), built by
+    meyar.agent.service from a JDCriteriaDraft with every item that failed
+    validation (prohibited attribute, malformed shape) silently dropped
+    rather than shown — dropped_count is the only trace of that, never
+    which term matched. Carries no candidate/tenant data. Only ever
+    attached on a genuine drafting success (possibly with zero criteria)
+    — a drafting call that never produced a usable result at all is the
+    distinct AgentTurnOutcome.JOB_DRAFT_FAILED outcome with no
+    tool_results at all, mirroring the existing AGENT_PROVIDER_FAILURE/
+    MALFORMED_MODEL_OUTPUT precedent (D-036)."""
+
+    model_config = {"extra": "forbid"}
+
+    title: str | None = None
+    must_have: list[CriterionIn] = Field(default_factory=list)
+    preferred: list[CriterionIn] = Field(default_factory=list)
+    dropped_count: int = Field(default=0, ge=0)
+
+
 class AgentToolResult(BaseModel):
     """One executed tool call's typed result, tagged by which tool
     produced it. Exactly one of the payload fields is set, matching
@@ -195,6 +306,7 @@ class AgentToolResult(BaseModel):
     search: AgentSearchToolResult | None = None
     profile: AgentProfileToolResult | None = None
     evidence: AgentEvidenceToolResult | None = None
+    job_draft: AgentJobDraftToolResult | None = None
 
     @model_validator(mode="after")
     def _validate_payload_matches_tool(self) -> "AgentToolResult":
@@ -202,10 +314,11 @@ class AgentToolResult(BaseModel):
             AgentActionType.SEARCH_CANDIDATES: ("search",),
             AgentActionType.GET_CANDIDATE_PROFILE: ("profile",),
             AgentActionType.GET_CANDIDATE_EVIDENCE: ("evidence",),
+            AgentActionType.DRAFT_JOB_CRITERIA: ("job_draft",),
         }.get(self.tool_name)
         if expected is None:
             raise ValueError(f"{self.tool_name} is not a valid tool result tag.")
-        for field_name in ("search", "profile", "evidence"):
+        for field_name in ("search", "profile", "evidence", "job_draft"):
             populated = getattr(self, field_name) is not None
             should_be_populated = field_name in expected
             if populated != should_be_populated:
@@ -229,6 +342,11 @@ class AgentTurnOutcome(StrEnum):
     ANSWERED_FROM_TOOL_RESULT = "ANSWERED_FROM_TOOL_RESULT"
     CLARIFICATION_REQUESTED = "CLARIFICATION_REQUESTED"
     CANDIDATE_REF_NOT_FOUND = "CANDIDATE_REF_NOT_FOUND"
+    # DRAFT_JOB_CRITERIA's own drafting call never produced a usable
+    # result (provider failure or repeated schema-invalid output) —
+    # tool_results is always empty for this outcome, same as
+    # AGENT_PROVIDER_FAILURE/MALFORMED_MODEL_OUTPUT below.
+    JOB_DRAFT_FAILED = "JOB_DRAFT_FAILED"
     TOOL_CALL_LIMIT_EXCEEDED = "TOOL_CALL_LIMIT_EXCEEDED"
     AGENT_PROVIDER_FAILURE = "AGENT_PROVIDER_FAILURE"
     MALFORMED_MODEL_OUTPUT = "MALFORMED_MODEL_OUTPUT"

@@ -179,18 +179,44 @@ class AgentEvidenceView(BaseModel):
     matches: list[AgentEvidenceMatchView] = Field(default_factory=list)
 
 
+class CriterionRowView(BaseModel):
+    """One already-validated draft/manual criterion row, presentation-ready
+    — ``kind_label`` is the HR-facing text (meyar.ui.presentation.
+    CRITERION_KIND_LABELS), never the raw CriterionKind enum value."""
+
+    kind: str
+    kind_label: str
+    requirement: str
+    min_years: str
+    weight: str
+
+
+class AgentJobDraftView(BaseModel):
+    title: str | None
+    must_have_rows: list[CriterionRowView] = Field(default_factory=list)
+    preferred_rows: list[CriterionRowView] = Field(default_factory=list)
+    dropped_count: int = 0
+
+
 class AgentToolResultView(BaseModel):
     tool_name: str
     search_outcome: PlannerOutcomeView | None = None
     search_results: list[CandidateSearchResultView] = Field(default_factory=list)
     profile: AgentCandidateProfileView | None = None
     evidence: AgentEvidenceView | None = None
+    job_draft: AgentJobDraftView | None = None
     not_found_ref: int | None = None
 
 
 class AgentTurnView(BaseModel):
     outcome: str
     message: str | None
+    # A single, deterministic, HR-facing leading sentence for this turn —
+    # computed once server-side (meyar.ui.service.build_agent_turn_view) so
+    # the template never has to choose between multiple overlapping status
+    # banners (D-030 conversational-UX requirement: one meaningful message
+    # first, cards/evidence second, no redundant success/status text).
+    headline: str | None = None
     tool_results: list[AgentToolResultView] = Field(default_factory=list)
 
 

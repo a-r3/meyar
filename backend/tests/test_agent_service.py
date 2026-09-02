@@ -1083,3 +1083,216 @@ async def test_grounded_synthesis_does_not_disturb_ordinal_resolution(
     assert result.tool_results[0].profile.candidate_id == ordered_ids[1]
     await db_session.refresh(conversation)
     assert conversation.last_search_candidate_ids == [str(cid) for cid in ordered_ids]
+
+
+# --- Slice 4 (issue #33) real-Ollama acceptance finding: a small local
+# model can echo AGENT_SYSTEM_PROMPT's own instruction text verbatim into
+# a CLARIFY/FINAL_ANSWER message instead of authoring real content — a
+# raw planner-internals leak into HR-facing text. Guarded structurally in
+# meyar.agent.service._looks_like_prompt_leak. ---
+
+
+async def test_prompt_leaking_clarify_message_is_rejected_and_retried(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    from meyar.agent.prompts import AGENT_SYSTEM_PROMPT
+
+    tenant, user, _password, membership = tenant_and_user
+    await db_session.commit()
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    leaked_sentence = AGENT_SYSTEM_PROMPT.splitlines()[3].strip()
+    assert len(leaked_sentence) >= 40
+    llm = FakeLLMProvider(
+        agent_decisions=[
+            AgentDecision(action=AgentActionType.CLARIFY, message=leaked_sentence),
+            AgentDecision(
+                action=AgentActionType.CLARIFY, message="Hansı namizədi nəzərdə tutursunuz?"
+            ),
+        ],
+    )
+    result = await _run(
+        db_session, llm, tenant_id=tenant.id, conversation=conversation, message="salam"
+    )
+    assert result.outcome == AgentTurnOutcome.CLARIFICATION_REQUESTED
+    assert result.message == "Hansı namizədi nəzərdə tutursunuz?"
+    assert leaked_sentence not in (result.message or "")
+    assert llm.agent_call_count == 2
+
+
+async def test_prompt_leak_persisting_through_every_retry_falls_back_safely(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    from meyar.agent.prompts import AGENT_SYSTEM_PROMPT
+
+    tenant, user, _password, membership = tenant_and_user
+    await db_session.commit()
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    leaked_sentence = AGENT_SYSTEM_PROMPT.splitlines()[3].strip()
+    llm = FakeLLMProvider(
+        agent_decisions=[AgentDecision(action=AgentActionType.CLARIFY, message=leaked_sentence)],
+    )
+    result = await _run(
+        db_session, llm, tenant_id=tenant.id, conversation=conversation, message="salam"
+    )
+    assert result.outcome == AgentTurnOutcome.MALFORMED_MODEL_OUTPUT
+    assert result.message is None
+    rendered = result.model_dump_json()
+    assert leaked_sentence not in rendered
+
+
+# --- Slice 4 (issue #33, D-030/D-032): DRAFT_JOB_CRITERIA ---
+
+
+async def test_draft_job_criteria_builds_valid_criteria_from_llm_draft(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    from meyar.agent.schemas import JDCriteriaDraft, JDDraftCriterionItem
+    from meyar.schemas.criteria import CriterionKind, CriterionType
+
+    tenant, user, _password, membership = tenant_and_user
+    await db_session.commit()
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    jd_text = "Baş Backend Mühəndisi axtarırıq. Python bilməlidir. AWS üstünlükdür."
+    llm = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        jd_draft=JDCriteriaDraft(
+            title="Baş Backend Mühəndisi",
+            must_have=[JDDraftCriterionItem(kind=CriterionKind.SKILL, requirement="Python")],
+            preferred=[JDDraftCriterionItem(kind=CriterionKind.SKILL, requirement="AWS")],
+        ),
+    )
+    result = await _run(
+        db_session, llm, tenant_id=tenant.id, conversation=conversation, message=jd_text
+    )
+    assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
+    assert len(result.tool_results) == 1
+    draft = result.tool_results[0].job_draft
+    assert draft is not None
+    assert draft.title == "Baş Backend Mühəndisi"
+    assert [c.label for c in draft.must_have] == ["Python"]
+    assert draft.must_have[0].type == CriterionType.MUST_HAVE
+    assert [c.label for c in draft.preferred] == ["AWS"]
+    assert draft.preferred[0].type == CriterionType.PREFERRED
+    assert draft.dropped_count == 0
+    # Nothing is persisted — this is a draft only (D-032).
+    from sqlalchemy import select
+
+    from meyar.models.job import Job
+
+    jobs = (
+        await db_session.execute(select(Job).where(Job.tenant_id == tenant.id))
+    ).scalars().all()
+    assert jobs == []
+    # Turn-terminal like GET_CANDIDATE_PROFILE/EVIDENCE — no second decision call.
+    assert llm.agent_call_count == 1
+
+
+async def test_draft_job_criteria_uses_original_user_message_never_a_model_restated_field(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    """The JD text is the HR user's own already-known message — never
+    round-tripped through a model OUTPUT field (see AgentActionType.
+    DRAFT_JOB_CRITERIA docstring and the D-035 Ollama maxLength lesson)."""
+    from meyar.agent.schemas import JDCriteriaDraft
+
+    tenant, user, _password, membership = tenant_and_user
+    await db_session.commit()
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    jd_text = "Uzun bir vakansiya təsviri." * 50
+    llm = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        jd_draft=JDCriteriaDraft(title="Rol"),
+    )
+    await _run(db_session, llm, tenant_id=tenant.id, conversation=conversation, message=jd_text)
+    assert llm.last_jd_text == jd_text
+
+
+async def test_draft_job_criteria_drops_prohibited_attribute_item(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    """A model-drafted item referencing a prohibited/sensitive attribute
+    is silently dropped by the same deterministic denylist the manual
+    form and REST API already enforce (D-031 point 4) — never shown to
+    HR, never persisted, and never present anywhere in the turn output."""
+    from meyar.agent.schemas import JDCriteriaDraft, JDDraftCriterionItem
+    from meyar.schemas.criteria import CriterionKind
+
+    tenant, user, _password, membership = tenant_and_user
+    await db_session.commit()
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    llm = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        jd_draft=JDCriteriaDraft(
+            title="Rol",
+            must_have=[
+                JDDraftCriterionItem(kind=CriterionKind.SKILL, requirement="Python"),
+                JDDraftCriterionItem(kind=CriterionKind.SKILL, requirement="kişi"),
+            ],
+        ),
+    )
+    result = await _run(
+        db_session, llm, tenant_id=tenant.id, conversation=conversation, message="JD mətni"
+    )
+    draft = result.tool_results[0].job_draft
+    assert draft is not None
+    assert [c.label for c in draft.must_have] == ["Python"]
+    assert draft.dropped_count == 1
+    rendered = result.model_dump_json()
+    assert "kişi" not in rendered
+
+
+async def test_draft_job_criteria_repairs_after_one_schema_invalid_attempt(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    from meyar.agent.schemas import JDCriteriaDraft
+
+    tenant, user, _password, membership = tenant_and_user
+    await db_session.commit()
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    llm = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        jd_draft=JDCriteriaDraft(title="Rol"),
+        jd_draft_fail_first_n_calls=1,
+    )
+    result = await _run(
+        db_session, llm, tenant_id=tenant.id, conversation=conversation, message="JD mətni"
+    )
+    assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
+    assert llm.jd_draft_call_count == 2
+
+
+async def test_draft_job_criteria_provider_failure_is_a_safe_typed_failure(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    tenant, user, _password, membership = tenant_and_user
+    await db_session.commit()
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    llm = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        jd_draft_error=ModelUnavailableError("simulated outage"),
+    )
+    result = await _run(
+        db_session, llm, tenant_id=tenant.id, conversation=conversation, message="JD mətni"
+    )
+    assert result.outcome == AgentTurnOutcome.JOB_DRAFT_FAILED
+    assert result.tool_results == []
+
+
+async def test_draft_job_criteria_repeated_schema_invalid_is_a_safe_typed_failure(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    from meyar.agent.schemas import JDCriteriaDraft
+
+    tenant, user, _password, membership = tenant_and_user
+    await db_session.commit()
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    llm = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        jd_draft=JDCriteriaDraft(title="unused"),
+        jd_draft_fail_first_n_calls=99,
+    )
+    result = await _run(
+        db_session, llm, tenant_id=tenant.id, conversation=conversation, message="JD mətni"
+    )
+    assert result.outcome == AgentTurnOutcome.JOB_DRAFT_FAILED
+    assert result.tool_results == []

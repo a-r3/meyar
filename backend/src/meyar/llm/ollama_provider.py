@@ -7,10 +7,12 @@ from pydantic import ValidationError
 from meyar.agent.prompts import (
     AGENT_SYSTEM_PROMPT,
     GROUNDED_SELECTION_SYSTEM_PROMPT,
+    JD_CRITERIA_DRAFT_SYSTEM_PROMPT,
     build_agent_user_prompt,
     build_grounded_selection_user_prompt,
+    build_jd_criteria_draft_user_prompt,
 )
-from meyar.agent.schemas import AgentDecision, GroundedFact, GroundedSelection
+from meyar.agent.schemas import AgentDecision, GroundedFact, GroundedSelection, JDCriteriaDraft
 from meyar.extraction.identity_prompts import IDENTITY_SYSTEM_PROMPT
 from meyar.extraction.prompts import SYSTEM_PROMPT, build_user_prompt
 from meyar.extraction.view import ProfessionalDocumentView
@@ -170,6 +172,23 @@ class OllamaLLMProvider:
             ) from exc
         return selection, provenance
 
+    async def draft_job_criteria(
+        self, jd_text: str, *, repair: bool = False
+    ) -> tuple[JDCriteriaDraft, LLMResultProvenance]:
+        content, provenance = await self._chat(
+            system_prompt=JD_CRITERIA_DRAFT_SYSTEM_PROMPT,
+            user_prompt=build_jd_criteria_draft_user_prompt(jd_text=jd_text, repair=repair),
+            schema=JDCriteriaDraft.model_json_schema(),
+            think=False,
+        )
+        try:
+            draft = JDCriteriaDraft.model_validate(json.loads(content))
+        except (json.JSONDecodeError, ValidationError) as exc:
+            raise ModelSchemaInvalidError(
+                "Model output failed JDCriteriaDraft structured-schema validation."
+            ) from exc
+        return draft, provenance
+
     async def _chat(
         self,
         *,
@@ -189,7 +208,8 @@ class OllamaLLMProvider:
             "options": {"temperature": 0.0},
         }
         # think is omitted (Ollama/model default) unless a call site opts in
-        # explicitly — see decide_agent_action/select_grounded_facts (D-039).
+        # explicitly — see decide_agent_action/select_grounded_facts/
+        # draft_job_criteria, the agent module's own call sites (D-039/D-042).
         # Every other call site (extraction, identity, planner) must keep
         # its exact pre-D-039 request shape: accepted, previously-verified
         # AI behavior outside Slice 2's scope, never altered as a side

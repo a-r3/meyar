@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}MEYAR AI{% endblock %}
+{% import "_criteria_rows.html" as criteria_form %}
 {% macro fact_section(title, items) %}
 <section class="panel profile-section">
   <h3>{{ title }}</h3>
@@ -16,7 +17,12 @@
 
 {% if turns %}
 <section class="panel agent-conversation" aria-label="Söhbət tarixçəsi">
-  <h2>Söhbət</h2>
+  <div class="page-heading"><h2>Söhbət</h2>
+    <form method="post" action="/ui/agent/reset" class="stack-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button class="button button-secondary" type="submit">Yeni söhbət</button>
+    </form>
+  </div>
   <ol class="agent-turn-list">
     {% for turn in turns %}
     <li class="agent-turn agent-turn-{{ turn.role }}">
@@ -32,27 +38,21 @@
   <form method="post" action="/ui/agent" class="stack-form">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <label for="message">Mesajınız</label>
-    <textarea id="message" name="message" rows="3" maxlength="4000" required placeholder="Məsələn: Python bilən namizədləri göstər"></textarea>
+    <textarea id="message" name="message" rows="3" maxlength="4000" required placeholder="Məsələn: Python bilən namizədləri göstər, ya da bir vakansiya elanını buraya yapışdırın"></textarea>
     <button class="button" type="submit">Göndər</button>
   </form>
 </section>
 
 {% if latest %}
-{% set outcome_text = agent_turn_outcome_message(latest.outcome, latest.message) %}
-{% if outcome_text %}
-<section class="alert outcome-alert" data-outcome="{{ latest.outcome }}" role="status">
-  <p>{{ outcome_text }}</p>
+{% if latest.headline %}
+<section class="agent-message" data-outcome="{{ latest.outcome }}" role="status">
+  <span class="agent-turn-role">MEYAR AI</span>
+  <p>{{ latest.headline }}</p>
 </section>
 {% endif %}
 
 {% for tool_result in latest.tool_results %}
-  {% if tool_result.tool_name == "SEARCH_CANDIDATES" %}
-  <section class="alert outcome-alert" data-outcome="{{ tool_result.search_outcome.outcome }}" role="status">
-    <h2>{{ tool_result.search_outcome.title }}</h2>
-    <p>{{ tool_result.search_outcome.message }}</p>
-  </section>
-  {% if tool_result.search_outcome.executable %}
-  <p class="result-count">{{ tool_result.search_results|length }} namizəd tapıldı</p>
+  {% if tool_result.tool_name == "SEARCH_CANDIDATES" and tool_result.search_outcome.executable %}
   {% if not tool_result.search_results %}
   <div class="empty-state"><h2>Nəticə tapılmadı</h2><p>Sorğu etibarlı şəkildə icra olundu, lakin uyğun namizəd yoxdur.</p></div>
   {% endif %}
@@ -64,7 +64,7 @@
         <div class="card-heading">
           <div><h2>{{ item.full_name or "Ad məlumatı yoxdur" }}</h2></div>
           {% if tool_result.search_outcome.mode in ("SEMANTIC_ONLY", "HYBRID") %}
-          <span class="score-pill">Uyğunluq {{ "%.0f"|format(item.relevance_score * 100) }}%</span>
+          <span class="score-pill">Semantik yaxınlıq {{ "%.0f"|format(item.relevance_score * 100) }}%</span>
           {% endif %}
         </div>
         {% if item.professional_summary %}<p>{{ item.professional_summary }}</p>{% endif %}
@@ -80,11 +80,8 @@
     </article>
     {% endfor %}
   </div>
-  {% endif %}
   {% elif tool_result.tool_name == "GET_CANDIDATE_PROFILE" %}
-    {% if tool_result.not_found_ref %}
-    <div class="empty-state"><h2>Namizəd tapılmadı</h2><p>Göstərilən namizəd bu söhbətin son axtarış nəticələrində yoxdur.</p></div>
-    {% else %}
+    {% if not tool_result.not_found_ref %}
     <section class="panel">
       <div class="page-heading">
         <div><h2>{{ tool_result.profile.full_name or "Ad məlumatı yoxdur" }}</h2>{% if tool_result.profile.current_role %}<p class="lede">{{ tool_result.profile.current_role }}</p>{% endif %}</div>
@@ -101,9 +98,7 @@
     </div>
     {% endif %}
   {% elif tool_result.tool_name == "GET_CANDIDATE_EVIDENCE" %}
-    {% if tool_result.not_found_ref %}
-    <div class="empty-state"><h2>Namizəd tapılmadı</h2><p>Göstərilən namizəd bu söhbətin son axtarış nəticələrində yoxdur.</p></div>
-    {% else %}
+    {% if not tool_result.not_found_ref %}
     <section class="panel">
       <div class="page-heading">
         <h2>{{ tool_result.evidence.full_name or "Ad məlumatı yoxdur" }}{% if tool_result.evidence.topic %} — {{ tool_result.evidence.topic }}{% endif %}</h2>
@@ -120,6 +115,26 @@
         </ul>
       </article>
       {% endfor %}
+    </section>
+    {% endif %}
+  {% elif tool_result.tool_name == "DRAFT_JOB_CRITERIA" %}
+    {% set draft = tool_result.job_draft %}
+    {% if draft.must_have_rows or draft.preferred_rows %}
+    <section class="panel">
+      <form method="post" action="/ui/jobs" class="stack-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label for="jd-title">Vakansiya başlığı</label>
+        <input id="jd-title" name="title" type="text" required maxlength="255" value="{{ draft.title or "" }}">
+
+        <h3>Mütləq tələblər</h3>
+        {{ criteria_form.criterion_rows("must", draft.must_have_rows, kind_options) }}
+
+        <h3>Üstünlük tələbləri</h3>
+        {{ criteria_form.criterion_rows("pref", draft.preferred_rows, kind_options) }}
+
+        <p class="field-help">Bu, AI tərəfindən hazırlanmış qaralamadır — yekun qərar deyil. Göndərmədən əvvəl istənilən sətri düzəldin, silin və ya əlavə edin.</p>
+        <button class="button" type="submit">Vakansiyanı yarat</button>
+      </form>
     </section>
     {% endif %}
   {% endif %}

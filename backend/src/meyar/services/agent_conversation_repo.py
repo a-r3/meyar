@@ -51,3 +51,14 @@ async def save_conversation_state(
     conversation.turns = turns
     conversation.last_search_candidate_ids = last_search_candidate_ids
     await db.flush()
+
+
+async def reset_conversation(db: AsyncSession, conversation: AgentConversation) -> None:
+    """Slice 4 (issue #33): the "Yeni söhbət" capability — clears this
+    session's own server-held conversation state (turns and the ordinal
+    candidate_ref resolution table) without touching any other tenant/
+    candidate/job row. Same tenant/session scoping as every other call
+    site here; the caller resolves ``conversation`` via
+    get_or_create_conversation first, so it is always already this
+    request's own row."""
+    await save_conversation_state(db, conversation, turns=[], last_search_candidate_ids=[])
