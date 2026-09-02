@@ -636,7 +636,17 @@ async def build_agent_turn_view(
                         title=draft.title,
                         must_have_rows=[_criterion_row_view(c) for c in draft.must_have],
                         preferred_rows=[_criterion_row_view(c) for c in draft.preferred],
-                        dropped_count=draft.dropped_count,
+                        unsupported_must_have=[
+                            u.requirement
+                            for u in draft.unsupported
+                            if u.criterion_type == CriterionType.MUST_HAVE
+                        ],
+                        unsupported_preferred=[
+                            u.requirement
+                            for u in draft.unsupported
+                            if u.criterion_type == CriterionType.PREFERRED
+                        ],
+                        prohibited_count=draft.prohibited_count,
                     ),
                 )
             )
@@ -729,20 +739,33 @@ def _agent_turn_headline(
             draft = latest_view.job_draft
             assert draft is not None
             total = len(draft.must_have_rows) + len(draft.preferred_rows)
-            if total == 0:
+            unsupported_total = len(draft.unsupported_must_have) + len(draft.unsupported_preferred)
+            if total == 0 and unsupported_total == 0 and draft.prohibited_count == 0:
                 return (
                     "Bu mətndən konkret tələb müəyyən edilmədi. Aşağıdan əl ilə "
                     "kriteriya əlavə edə bilərsiniz."
                 )
-            dropped_note = (
-                f" ({draft.dropped_count} tələb siyasətə görə çıxarıldı.)"
-                if draft.dropped_count
-                else ""
-            )
+            # Both notes are safe, generic HR-facing text — never the
+            # matched sensitive term itself for prohibited_count (see
+            # AgentJobDraftToolResult docstring); unsupported_total's own
+            # requirement text is disclosed only in the review rows below,
+            # never restated in this one-line headline.
+            notes = []
+            if unsupported_total:
+                notes.append(
+                    f"{unsupported_total} tələb hazırda avtomatik qiymətləndirməyə daxil "
+                    "edilmədi (aşağıda görünür)"
+                )
+            if draft.prohibited_count:
+                notes.append(
+                    f"{draft.prohibited_count} tələb qadağan olunmuş/əlaqəsiz atributa görə "
+                    "daxil edilmədi"
+                )
+            note_text = f" ({'; '.join(notes)}.)" if notes else ""
             return (
                 f"\"{draft.title}\" üçün {len(draft.must_have_rows)} mütləq və "
                 f"{len(draft.preferred_rows)} üstünlük tələbi qaralandı. Nəzərdən keçirin, "
-                f"lazım gəldikdə düzəliş edin və təsdiqləyin.{dropped_note}"
+                f"lazım gəldikdə düzəliş edin və təsdiqləyin.{note_text}"
             )
     return agent_turn_outcome_message(result.outcome.value, None)
 

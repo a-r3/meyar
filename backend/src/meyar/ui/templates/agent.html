@@ -39,7 +39,11 @@
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <label for="message">Mesajınız</label>
     <textarea id="message" name="message" rows="3" maxlength="4000" required placeholder="Məsələn: Python bilən namizədləri göstər, ya da bir vakansiya elanını buraya yapışdırın"></textarea>
-    <button class="button" type="submit">Göndər</button>
+    <div class="button-row">
+      <button class="button" type="submit">Göndər</button>
+      <button class="button button-secondary" type="submit" name="intent" value="draft_job_criteria">JD-dən meyar hazırla</button>
+    </div>
+    <p class="field-help">Vakansiya elanını yapışdırıb "JD-dən meyar hazırla" düyməsini basın — bu, həmişə birbaşa kriteriya qaralaması yaradır.</p>
   </form>
 </section>
 
@@ -119,18 +123,34 @@
     {% endif %}
   {% elif tool_result.tool_name == "DRAFT_JOB_CRITERIA" %}
     {% set draft = tool_result.job_draft %}
-    {% if draft.must_have_rows or draft.preferred_rows %}
+    {% if draft.must_have_rows or draft.preferred_rows or draft.unsupported_must_have or draft.unsupported_preferred or draft.prohibited_count %}
     <section class="panel">
       <form method="post" action="/ui/jobs" class="stack-form">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="from_agent_draft" value="1">
         <label for="jd-title">Vakansiya başlığı</label>
         <input id="jd-title" name="title" type="text" required maxlength="255" value="{{ draft.title or "" }}">
 
         <h3>Mütləq tələblər</h3>
         {{ criteria_form.criterion_rows("must", draft.must_have_rows, kind_options) }}
+        {% if draft.unsupported_must_have %}
+        <div class="alert alert-warning">
+          <p>Bu tələblər avtomatik qiymətləndirməyə daxil edilmədi (sistem hazırda dəstəkləmir):</p>
+          <ul>{% for requirement in draft.unsupported_must_have %}<li>{{ requirement }}</li>{% endfor %}</ul>
+        </div>
+        {% endif %}
 
         <h3>Üstünlük tələbləri</h3>
         {{ criteria_form.criterion_rows("pref", draft.preferred_rows, kind_options) }}
+        {% if draft.unsupported_preferred %}
+        <div class="alert alert-warning">
+          <p>Bu tələblər avtomatik qiymətləndirməyə daxil edilmədi (sistem hazırda dəstəkləmir):</p>
+          <ul>{% for requirement in draft.unsupported_preferred %}<li>{{ requirement }}</li>{% endfor %}</ul>
+        </div>
+        {% endif %}
+        {% if draft.prohibited_count %}
+        <p class="alert alert-warning">{{ draft.prohibited_count }} tələb qadağan olunmuş/əlaqəsiz atributa görə avtomatik qiymətləndirməyə daxil edilmədi.</p>
+        {% endif %}
 
         <p class="field-help">Bu, AI tərəfindən hazırlanmış qaralamadır — yekun qərar deyil. Göndərmədən əvvəl istənilən sətri düzəldin, silin və ya əlavə edin.</p>
         <button class="button" type="submit">Vakansiyanı yarat</button>

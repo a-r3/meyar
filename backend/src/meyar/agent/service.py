@@ -34,12 +34,14 @@ from meyar.agent.schemas import (
     AgentToolResult,
     AgentTurnOutcome,
     AgentTurnResult,
+    DroppedJDCriterionReason,
     EvidenceMatchItem,
     GroundedCaveat,
     GroundedFact,
     GroundedSelection,
     JDCriteriaDraft,
     JDDraftCriterionItem,
+    UnsupportedJDCriterionItem,
 )
 from meyar.core.text import fold_az_ascii, normalize_azerbaijani_case, slugify_criterion_label
 from meyar.embedding.provider import EmbeddingProvider
@@ -557,19 +559,23 @@ async def _synthesize_grounded_answer(
 
 def _build_criterion_from_draft_item(
     item: JDDraftCriterionItem, *, criterion_type: CriterionType, used_ids: set[str]
-) -> CriterionIn | None:
+) -> tuple[CriterionIn | None, DroppedJDCriterionReason | None]:
     """Re-validates one MODEL-PRODUCED draft item into a real CriterionIn —
     the exact same schema/prohibited-attribute denylist the manual
     vacancy-creation form and the REST API already enforce (D-031 point 4:
     an agent tool-dispatch layer is a new PRODUCER of arguments, never a
-    new validator). Returns None (silently dropped, never shown) on any
-    validation failure — mirrors meyar.ui.service._parse_criterion_row's
-    kind-aware value/min_years shape, but drops instead of raising since
-    this is a best-effort DRAFT, not a form submission."""
+    new validator). Returns ``(None, reason)`` on validation failure —
+    never a silent drop (PR #42 owner correction, issue #33): the caller
+    discloses a PROHIBITED reason as a count only (the matched text itself
+    must never be redisplayed), and an UNSUPPORTED reason with the
+    original, already-confirmed-non-sensitive requirement text. Mirrors
+    meyar.ui.service._parse_criterion_row's kind-aware value/min_years
+    shape, but reports instead of raising since this is a best-effort
+    DRAFT, not a form submission."""
     value = None if item.kind == CriterionKind.EXPERIENCE else item.requirement
     min_years = item.min_years if item.kind == CriterionKind.EXPERIENCE else None
     try:
-        return CriterionIn(
+        criterion = CriterionIn(
             id=slugify_criterion_label(item.requirement, used_ids),
             kind=item.kind,
             type=criterion_type,
@@ -578,8 +584,22 @@ def _build_criterion_from_draft_item(
             min_years=min_years,
             weight=item.weight,
         )
-    except (ValidationError, ProhibitedCriterionError):
-        return None
+        return criterion, None
+    except ValidationError as exc:
+        # A model_validator raising ProhibitedCriterionError (itself a
+        # ValueError subclass) is always re-wrapped by pydantic into a
+        # generic ValidationError before it reaches this except clause —
+        # the original exception survives only inside each error's own
+        # ``ctx["error"]`` (verified against pydantic 2.11's actual
+        # behavior, not merely assumed). Unwrap it there to tell a
+        # sensitive-attribute match apart from every other validation
+        # failure (D-043, PR #42 owner correction, issue #33).
+        if any(
+            isinstance(error.get("ctx", {}).get("error"), ProhibitedCriterionError)
+            for error in exc.errors()
+        ):
+            return None, DroppedJDCriterionReason.PROHIBITED
+        return None, DroppedJDCriterionReason.UNSUPPORTED
 
 
 async def _dispatch_draft_job_criteria(
@@ -607,19 +627,26 @@ async def _dispatch_draft_job_criteria(
     used_ids: set[str] = set()
     must_have: list[CriterionIn] = []
     preferred: list[CriterionIn] = []
-    dropped_count = 0
+    unsupported: list[UnsupportedJDCriterionItem] = []
+    prohibited_count = 0
     for items, criterion_type, bucket in (
         (draft.must_have, CriterionType.MUST_HAVE, must_have),
         (draft.preferred, CriterionType.PREFERRED, preferred),
     ):
         for item in items:
-            criterion = _build_criterion_from_draft_item(
+            criterion, reason = _build_criterion_from_draft_item(
                 item, criterion_type=criterion_type, used_ids=used_ids
             )
-            if criterion is None:
-                dropped_count += 1
-            else:
+            if criterion is not None:
                 bucket.append(criterion)
+            elif reason == DroppedJDCriterionReason.PROHIBITED:
+                prohibited_count += 1
+            else:
+                unsupported.append(
+                    UnsupportedJDCriterionItem(
+                        requirement=item.requirement, criterion_type=criterion_type
+                    )
+                )
 
     return AgentToolResult(
         tool_name=AgentActionType.DRAFT_JOB_CRITERIA,
@@ -627,7 +654,8 @@ async def _dispatch_draft_job_criteria(
             title=draft.title,
             must_have=must_have,
             preferred=preferred,
-            dropped_count=dropped_count,
+            unsupported=unsupported,
+            prohibited_count=prohibited_count,
         ),
     )
 
@@ -708,11 +736,23 @@ async def run_agent_turn(
     embedding_provider: EmbeddingProvider | None,
     max_tool_calls: int,
     max_context_turns: int,
+    explicit_action: AgentActionType | None = None,
 ) -> AgentTurnResult:
     """One bounded orchestration turn. Never persists a mutation to any
     candidate/job/evaluation row — only this conversation's own
     session-scoped state (turns, last_search_candidate_ids). Caller is
-    responsible for the surrounding db.commit()/rollback()."""
+    responsible for the surrounding db.commit()/rollback().
+
+    ``explicit_action``: PR #42 owner correction (issue #33) — an explicit
+    first-class UI affordance (e.g. "JD-dən meyar hazırla") lets HR pin
+    this turn's action deterministically, bypassing ``llm.decide_agent_action``
+    entirely for the first decision so a small local model's unreliable
+    intent routing (documented D-042 point 6) can never misroute a pasted
+    JD to SEARCH_CANDIDATES. Only ``AgentActionType.DRAFT_JOB_CRITERIA`` is
+    supported today — the caller (meyar.ui.router) is the only source of
+    this value, never the model or an arbitrary client-supplied string."""
+    if explicit_action is not None and explicit_action != AgentActionType.DRAFT_JOB_CRITERIA:
+        raise ValueError(f"Unsupported explicit_action: {explicit_action}")
     turns: list[dict] = [*conversation.turns, {"role": "user", "text": user_message}]
     last_search_candidate_ids = list(conversation.last_search_candidate_ids)
     tool_results: list[AgentToolResult] = []
@@ -730,51 +770,64 @@ async def run_agent_turn(
     searched_queries: set[str] = set()
 
     while True:
-        decision: AgentDecision | None = None
-        for attempt in range(1, MAX_DECISION_ATTEMPTS + 1):
-            try:
-                decision, provenance = await llm.decide_agent_action(
-                    recent_turns=[(t["role"], t["text"]) for t in turns[-max_context_turns:]],
-                    last_tool_result_summary=last_tool_summary,
-                    available_candidate_refs=list(range(1, len(last_search_candidate_ids) + 1)),
-                    repair=attempt > 1,
-                )
-            except ModelSchemaInvalidError:
-                decision = None
-                continue
-            except (ModelTimeoutError, ModelUnavailableError, LLMProviderError):
-                # A follow-up "what next" decision failing after a tool
-                # already returned a real, grounded result is never a
-                # fatal turn failure — only the optional closing framing
-                # is missing (see D-036). A failure on the FIRST decision
-                # (tool_results still empty) remains a genuine failure.
-                result = _build_result(
-                    outcome=(
-                        AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
-                        if tool_results
-                        else AgentTurnOutcome.AGENT_PROVIDER_FAILURE
-                    ),
-                    message=None,
-                    tool_results=tool_results,
-                    tool_call_count=tool_calls_made,
-                    provenance=provenance,
-                )
-                return await _finish_turn(
-                    db,
-                    conversation,
-                    tenant_id=tenant_id,
-                    turns=turns,
-                    last_search_candidate_ids=last_search_candidate_ids,
-                    max_context_turns=max_context_turns,
-                    result=result,
-                )
-            if decision.action in (
-                AgentActionType.FINAL_ANSWER,
-                AgentActionType.CLARIFY,
-            ) and _looks_like_prompt_leak(decision.message or ""):
-                decision = None
-                continue
-            break
+        decision: AgentDecision | None
+        if explicit_action is not None:
+            # Deterministic first-class path: no model call, no routing
+            # ambiguity — see the explicit_action docstring above. Only
+            # ever taken once (DRAFT_JOB_CRITERIA is always turn-terminal,
+            # see below), so clearing it here is defensive, not load-bearing.
+            decision = AgentDecision(action=explicit_action)
+            explicit_action = None
+        else:
+            decision = None
+            for attempt in range(1, MAX_DECISION_ATTEMPTS + 1):
+                try:
+                    decision, provenance = await llm.decide_agent_action(
+                        recent_turns=[
+                            (t["role"], t["text"]) for t in turns[-max_context_turns:]
+                        ],
+                        last_tool_result_summary=last_tool_summary,
+                        available_candidate_refs=list(
+                            range(1, len(last_search_candidate_ids) + 1)
+                        ),
+                        repair=attempt > 1,
+                    )
+                except ModelSchemaInvalidError:
+                    decision = None
+                    continue
+                except (ModelTimeoutError, ModelUnavailableError, LLMProviderError):
+                    # A follow-up "what next" decision failing after a tool
+                    # already returned a real, grounded result is never a
+                    # fatal turn failure — only the optional closing framing
+                    # is missing (see D-036). A failure on the FIRST decision
+                    # (tool_results still empty) remains a genuine failure.
+                    result = _build_result(
+                        outcome=(
+                            AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
+                            if tool_results
+                            else AgentTurnOutcome.AGENT_PROVIDER_FAILURE
+                        ),
+                        message=None,
+                        tool_results=tool_results,
+                        tool_call_count=tool_calls_made,
+                        provenance=provenance,
+                    )
+                    return await _finish_turn(
+                        db,
+                        conversation,
+                        tenant_id=tenant_id,
+                        turns=turns,
+                        last_search_candidate_ids=last_search_candidate_ids,
+                        max_context_turns=max_context_turns,
+                        result=result,
+                    )
+                if decision.action in (
+                    AgentActionType.FINAL_ANSWER,
+                    AgentActionType.CLARIFY,
+                ) and _looks_like_prompt_leak(decision.message or ""):
+                    decision = None
+                    continue
+                break
 
         if decision is None:
             result = _build_result(

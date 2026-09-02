@@ -36,7 +36,7 @@ from enum import StrEnum
 from pydantic import BaseModel, Field, model_validator
 
 from meyar.schemas.candidate_profile import CandidateProfileExtraction, EvidenceRef
-from meyar.schemas.criteria import CriterionIn, CriterionKind
+from meyar.schemas.criteria import CriterionIn, CriterionKind, CriterionType
 from meyar.search.planner_schemas import PlannedCandidateSearchResponse
 
 AGENT_SCHEMA_VERSION = "agent-decision-schema-v1"
@@ -219,8 +219,9 @@ class JDDraftCriterionItem(BaseModel):
     is re-validated into a real ``CriterionIn`` (same prohibited-attribute
     denylist, same kind-specific shape rules) by
     meyar.agent.service._dispatch_draft_job_criteria before it is ever
-    shown to HR — an item that fails that check is dropped, never shown
-    or silently weakened."""
+    shown to HR — an item that fails that check never becomes a
+    CriterionIn, but is disclosed (see AgentJobDraftToolResult), never
+    silently discarded or weakened."""
 
     model_config = {"extra": "forbid"}
 
@@ -273,16 +274,54 @@ class JDCriteriaDraft(BaseModel):
     )
 
 
+class DroppedJDCriterionReason(StrEnum):
+    """Why a model-drafted JD requirement did not become a real
+    CriterionIn — see PR #42 owner correction (issue #33): a drafted
+    requirement must never simply vanish, but a PROHIBITED one's own text
+    is exactly what security policy forbids re-displaying, so the two
+    reasons are surfaced very differently (see UnsupportedJDCriterionItem
+    and AgentJobDraftToolResult.prohibited_count)."""
+
+    # A non-sensitive requirement that failed some other CriterionIn rule
+    # (for example an EXPERIENCE item the JD text gave no derivable
+    # duration for). Safe to disclose verbatim — HR must see it, per the
+    # ACAMS-style "not silently dropped" requirement.
+    UNSUPPORTED = "UNSUPPORTED"
+    # Matched the sensitive/irrelevant-attribute denylist
+    # (meyar.schemas.criteria.find_prohibited_term). The matched
+    # requirement's own text must never be re-displayed or persisted —
+    # only a count and a safe, generic HR-facing explanation.
+    PROHIBITED = "PROHIBITED"
+
+
+class UnsupportedJDCriterionItem(BaseModel):
+    """One non-sensitive JD requirement that did NOT become a real
+    CriterionIn — kept visible to HR (never persisted, never scored) so
+    it is disclosed rather than silently lost. ``requirement`` is the
+    model-drafted term itself, already confirmed non-sensitive (a
+    PROHIBITED item never reaches this shape — see
+    AgentJobDraftToolResult.prohibited_count)."""
+
+    model_config = {"extra": "forbid"}
+
+    requirement: str = Field(min_length=1, max_length=200)
+    criterion_type: CriterionType
+
+
 class AgentJobDraftToolResult(BaseModel):
     """DRAFT_JOB_CRITERIA's tool result — NEVER LLM-authored directly:
     must_have/preferred are real, already-validated CriterionIn rows (same
     schema/denylist the manual form and the REST API use), built by
-    meyar.agent.service from a JDCriteriaDraft with every item that failed
-    validation (prohibited attribute, malformed shape) silently dropped
-    rather than shown — dropped_count is the only trace of that, never
-    which term matched. Carries no candidate/tenant data. Only ever
-    attached on a genuine drafting success (possibly with zero criteria)
-    — a drafting call that never produced a usable result at all is the
+    meyar.agent.service from a JDCriteriaDraft. An item that fails
+    CriterionIn validation is never silently dropped: a non-sensitive
+    failure is disclosed verbatim in ``unsupported`` (HR sees exactly
+    which requirement will not participate in deterministic scoring); a
+    sensitive/prohibited-attribute match is counted in
+    ``prohibited_count`` only — its own text is never redisplayed,
+    matching the same denylist discipline the manual form and REST API
+    already enforce. Carries no candidate/tenant data. Only ever attached
+    on a genuine drafting success (possibly with zero criteria) — a
+    drafting call that never produced a usable result at all is the
     distinct AgentTurnOutcome.JOB_DRAFT_FAILED outcome with no
     tool_results at all, mirroring the existing AGENT_PROVIDER_FAILURE/
     MALFORMED_MODEL_OUTPUT precedent (D-036)."""
@@ -292,7 +331,8 @@ class AgentJobDraftToolResult(BaseModel):
     title: str | None = None
     must_have: list[CriterionIn] = Field(default_factory=list)
     preferred: list[CriterionIn] = Field(default_factory=list)
-    dropped_count: int = Field(default=0, ge=0)
+    unsupported: list[UnsupportedJDCriterionItem] = Field(default_factory=list)
+    prohibited_count: int = Field(default=0, ge=0)
 
 
 class AgentToolResult(BaseModel):

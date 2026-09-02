@@ -3441,3 +3441,100 @@ shared with `meyar.agent.service`). The login-redirect and nav changes
 are template/route-level and trivially reversible. `_looks_like_prompt_
 leak` is a narrow, additive guard around one existing decision-fetch
 loop.
+
+## D-043 — PR #42 owner correction (issue #33): deterministic JD intent,
+no-silent-drop disclosure, and Vacancies discovery removed from normal HR UI
+
+**Date:** 2026-09-02
+**Decision:** Owner UI review of PR #42 (D-042) found two product blockers
+and one navigation/exposure correction before merge; all three are
+resolved on the same `feat/agent-product-ux-jd-matching` branch, no new
+branch:
+
+1. **Deterministic JD entry — no prompt magic.** D-042 point 6 documented
+   that qwen3:1.7b sometimes fails to route an implicit (no explicit
+   lead-in) pasted JD to `DRAFT_JOB_CRITERIA`. Rather than expanding the
+   frozen regex/NL planner, `/ui/agent` (`meyar.ui.router.agent_turn`)
+   gained one new optional `Form` field, `intent`; the "JD-dən meyar
+   hazırla" button submits the fixed literal `intent=draft_job_criteria`.
+   `run_agent_turn` (`meyar.agent.service`) gained a matching
+   `explicit_action: AgentActionType | None` parameter: when set, the
+   very first decision of the turn is constructed directly
+   (`AgentDecision(action=explicit_action)`) and `llm.decide_agent_action`
+   is never called for that turn — no model call, no routing ambiguity,
+   no dependence on the small model inferring intent from arbitrary text.
+   Only `DRAFT_JOB_CRITERIA` is accepted; any other value raises
+   `ValueError` defensively (the caller is `meyar.ui.router`, never a
+   client-supplied action). Normal conversational routing (no `intent`
+   field) is completely unchanged — this is a second, parallel entry
+   point, not a modification of the existing planner/routing prompt.
+2. **No silent drop of JD requirements.** `AgentJobDraftToolResult.
+   dropped_count` (a single opaque integer) is replaced by two typed
+   signals in `meyar.agent.schemas`: `unsupported: list[
+   UnsupportedJDCriterionItem]` (a non-sensitive requirement `CriterionIn`
+   could not represent — e.g. an `EXPERIENCE` item the JD gave no
+   derivable duration for — carries the requirement's own, already-
+   confirmed-non-sensitive text) and `prohibited_count: int` (a
+   sensitive/denylist match — count only, the matched text is never
+   redisplayed, unchanged from the existing denylist discipline).
+   `meyar.agent.service._build_criterion_from_draft_item` distinguishes
+   the two by inspecting the `pydantic.ValidationError` `CriterionIn(...)`
+   raises: `ProhibitedCriterionError` (itself a `ValueError` subclass
+   raised inside a `model_validator`) is always re-wrapped by pydantic
+   before it reaches the caller — verified empirically against pydantic
+   2.11 — so the original exception is recovered from each error's own
+   `ctx["error"]`, not caught directly. The review form
+   (`meyar.ui.templates.agent.html`) renders `unsupported` rows as a
+   visible, non-submittable notice under each section ("bu tələb
+   avtomatik qiymətləndirməyə daxil edilmədi — sistem hazırda
+   dəstəkləmir") and a separate, generic `prohibited_count` notice —
+   neither ever becomes a `must_*`/`pref_*` form field, so neither can be
+   persisted by submitting the form. `_agent_turn_headline`
+   (`meyar.ui.service`) surfaces the same two safe counts in the one-line
+   summary.
+3. **Vacancies is no longer a normal HR navigation/secondary-tool
+   destination.** Removed from `base.html`'s secondary nav line and from
+   `home.html`'s quick-links feature card — the normal HR product surface
+   is exactly `MEYAR AI | Namizədlər | Çıxış` plus classic search
+   (unchanged, still secondary). `Job`/`JobCriteriaVersion`, `/ui/jobs`,
+   `/ui/jobs/new`, and the manual creation/archive/rank routes are
+   NOT deleted and NOT reduced in capability — they remain reachable by
+   direct URL as backend/supporting capability, per D-032's original
+   "backend stays, UI prominence changes" framing, now carried one step
+   further. Confirming the agent's JD-drafted review
+   (`POST /ui/jobs` with the review form's own hidden `from_agent_draft=1`
+   field, set only by `agent.html`, never by the unchanged manual
+   `job_new.html` form) still creates the `Job`/`JobCriteriaVersion`
+   through the exact same `create_job`/`create_criteria_version` calls,
+   but then renders straight into that criteria version's ranking result
+   (the new shared `meyar.ui.router._render_job_ranking`, factored out of
+   the existing manual "Namizədləri sırala" `rank_job` handler — same
+   `rank_candidates_for_job` call, no new scoring authority) instead of
+   redirecting to the de-emphasized `/ui/jobs` list. The manual
+   `/ui/jobs/new` → `POST /ui/jobs` path is completely unchanged (no
+   `from_agent_draft` field, so it still redirects to `/ui/jobs`).
+   `create_job_route`'s declared required scopes grew to include
+   `jobs:read`/`candidates:read`/`evaluations:write` alongside the
+   existing `jobs:write` so it may call the ranking service inline; every
+   HR role already holds all of these together
+   (`meyar.core.roles._FULL_HR_PERMISSIONS` is deliberately flat with no
+   partial-permission tier yet), so this is a declared-intent widening,
+   not a functional access change.
+
+**Why:** The owner's PR #42 review explicitly blocked merge on exactly
+these two product defects (unreliable JD routing requiring "prompt
+magic"; silent loss of JD requirements the deterministic schema could not
+represent) plus a UX-consistency instruction (Vacancies must not read as
+a normal HR destination once MEYAR AI is the primary surface) — this
+entry records the concrete fix for all three so the next owner pass has
+one coherent decision record rather than three untracked edits.
+
+**Reversibility:** Fully additive/route-level. `explicit_action` is an
+optional parameter with a `None` default — every existing caller
+(`_run` in tests, any future caller) is unaffected unless it opts in.
+`AgentJobDraftToolResult.dropped_count` is removed (not deprecated) since
+PR #42 was never merged — no external consumer exists yet. The nav/home
+template edits are two-line removals, trivially reversible. The
+`from_agent_draft`-gated ranking redirect only changes behavior for
+requests carrying that exact hidden field; the manual creation flow's
+tests (`tests/test_ui_job_creation.py`) pass unchanged.

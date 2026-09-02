@@ -83,9 +83,13 @@ async def test_agent_nav_link_present_on_authenticated_pages(
 async def test_primary_nav_is_agent_first_classic_tools_are_secondary(
     client: AsyncClient, tenant_and_user, local_ui_settings: Settings
 ) -> None:
-    """Slice 4 (issue #33, D-030): MEYAR AI + Namizədlər are the primary
-    HR navigation; classic search and Vacancies remain fully reachable but
-    de-emphasized (per D-032, not removed)."""
+    """Slice 4 (issue #33, D-030) + PR #42 owner correction (D-043): MEYAR
+    AI + Namizədlər are the primary HR navigation; classic search remains
+    reachable but de-emphasized (per D-032). Vacancies is NOT a normal
+    HR navigation/secondary-tool destination any more — the backend job/
+    ranking routes still exist (D-043), just never discoverable from
+    normal HR nav; a job is reached only via the agent's own JD-drafting
+    confirmation, which lands directly on its ranking result."""
     _tenant, user, password, _membership = tenant_and_user
     await _login_and_csrf(client, user.username, password)
     page = await client.get("/ui/agent")
@@ -95,9 +99,12 @@ async def test_primary_nav_is_agent_first_classic_tools_are_secondary(
     assert 'href="/ui/library"' in primary_nav.group(1)
     assert 'href="/ui/jobs"' not in primary_nav.group(1)
     assert 'href="/ui"' not in primary_nav.group(1)
-    # Still reachable, just not primary.
-    assert 'href="/ui/jobs"' in page.text
+    # Classic search is still reachable via the secondary line; Vacancies
+    # is not present anywhere in normal HR navigation.
     assert 'href="/ui">Klassik axtarış' in page.text
+    secondary_nav = re.search(r'<nav class="nav-secondary".*?</nav>', page.text, re.S)
+    assert secondary_nav is not None
+    assert 'href="/ui/jobs"' not in secondary_nav.group(0)
 
 
 async def test_search_candidates_turn_renders_grounded_results_not_model_text(
@@ -675,7 +682,171 @@ async def test_draft_job_criteria_drops_prohibited_item_and_notes_it(
     # appear verbatim in the HR user's own echoed message above, which is
     # untrusted text shown as-is — that is not a policy leak).
     assert 'value="kişi"' not in response.text
-    assert "1 tələb siyasətə görə çıxarıldı" in response.text
+    assert "1 tələb qadağan olunmuş/əlaqəsiz atributa görə" in response.text
+
+
+async def test_draft_job_criteria_discloses_unsupported_requirement_visibly(
+    client: AsyncClient, tenant_and_user, local_ui_settings: Settings
+) -> None:
+    """D-043 (PR #42 owner correction, issue #33): a non-sensitive
+    requirement CriterionIn cannot represent (here an EXPERIENCE item with
+    no derivable duration) must be visibly disclosed to HR, not silently
+    dropped — and must never appear as a persistable form row."""
+    from meyar.agent.schemas import JDCriteriaDraft, JDDraftCriterionItem
+    from meyar.schemas.criteria import CriterionKind
+
+    _tenant, user, password, _membership = tenant_and_user
+    fake = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        jd_draft=JDCriteriaDraft(
+            title="Rol",
+            must_have=[
+                JDDraftCriterionItem(kind=CriterionKind.SKILL, requirement="Python"),
+                JDDraftCriterionItem(
+                    kind=CriterionKind.EXPERIENCE, requirement="ACAMS sertifikatı təcrübəsi"
+                ),
+            ],
+        ),
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake
+    csrf = await _login_and_csrf(client, user.username, password)
+    response = await client.post(
+        "/ui/agent", data={"message": "JD mətni", "csrf_token": csrf}
+    )
+    assert response.status_code == 200
+    assert 'value="Python"' in response.text
+    assert "ACAMS sertifikatı təcrübəsi" in response.text
+    assert 'value="ACAMS sertifikatı təcrübəsi"' not in response.text
+    assert "avtomatik qiymətləndirməyə daxil edilmədi" in response.text
+
+
+async def test_draft_job_criteria_explicit_intent_routes_without_magic_wording(
+    client: AsyncClient, tenant_and_user, local_ui_settings: Settings
+) -> None:
+    """The "JD-dən meyar hazırla" affordance (intent=draft_job_criteria)
+    must reach the review form deterministically for arbitrary pasted
+    text with no explicit lead-in phrase and no routing-decision model
+    call at all — agent_decision is deliberately left unset so a
+    fallback to model routing would fail loudly."""
+    from meyar.agent.schemas import JDCriteriaDraft, JDDraftCriterionItem
+    from meyar.schemas.criteria import CriterionKind
+
+    _tenant, user, password, _membership = tenant_and_user
+    fake = FakeLLMProvider(
+        jd_draft=JDCriteriaDraft(
+            title="Rol",
+            must_have=[JDDraftCriterionItem(kind=CriterionKind.SKILL, requirement="Python")],
+        ),
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake
+    csrf = await _login_and_csrf(client, user.username, password)
+    jd_text = "Heç bir açar söz olmadan mətn. Python bilməlidir."
+    response = await client.post(
+        "/ui/agent",
+        data={"message": jd_text, "intent": "draft_job_criteria", "csrf_token": csrf},
+    )
+    assert response.status_code == 200
+    assert 'value="Python"' in response.text
+    assert '<form method="post" action="/ui/jobs"' in response.text
+    assert fake.agent_call_count == 0
+
+
+async def test_draft_job_criteria_explicit_intent_never_becomes_a_search(
+    client: AsyncClient, tenant_and_user, local_ui_settings: Settings
+) -> None:
+    """Even if the (unused) routing decision would have misrouted this
+    text to SEARCH_CANDIDATES, the explicit intent must still deterministically
+    draft criteria — never a candidate-search result."""
+    from meyar.agent.schemas import JDCriteriaDraft, JDDraftCriterionItem
+    from meyar.schemas.criteria import CriterionKind
+
+    _tenant, user, password, _membership = tenant_and_user
+    jd_text = "Vakansiya: Backend Mühəndisi. Python bilməlidir."
+    fake = FakeLLMProvider(
+        agent_decision=AgentDecision(
+            action=AgentActionType.SEARCH_CANDIDATES, search_query=jd_text
+        ),
+        jd_draft=JDCriteriaDraft(
+            title="Backend Mühəndisi",
+            must_have=[JDDraftCriterionItem(kind=CriterionKind.SKILL, requirement="Python")],
+        ),
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake
+    csrf = await _login_and_csrf(client, user.username, password)
+    response = await client.post(
+        "/ui/agent",
+        data={"message": jd_text, "intent": "draft_job_criteria", "csrf_token": csrf},
+    )
+    assert response.status_code == 200
+    assert '<form method="post" action="/ui/jobs"' in response.text
+    assert "namizəd tapıldı" not in response.text
+    assert fake.agent_call_count == 0
+    assert fake.call_count == 0
+
+
+async def test_confirming_agent_drafted_criteria_lands_on_ranking_not_jobs_list(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
+) -> None:
+    """D-043 (PR #42 owner correction, issue #33): confirming the agent's
+    JD-drafted criteria creates the Job internally (unchanged persistence
+    path) but lands directly on its ranking/result context — never a bare
+    redirect to the de-emphasized vacancy list. Only accepted criteria
+    (Python here) were ever persisted or scored."""
+    from meyar.agent.schemas import JDCriteriaDraft, JDDraftCriterionItem
+    from meyar.schemas.criteria import CriterionKind
+
+    tenant, user, password, _membership = tenant_and_user
+    await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=_profile("Python")
+    )
+    await db_session.commit()
+
+    fake = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        jd_draft=JDCriteriaDraft(
+            title="Baş Backend Mühəndisi",
+            must_have=[JDDraftCriterionItem(kind=CriterionKind.SKILL, requirement="Python")],
+        ),
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake
+    csrf = await _login_and_csrf(client, user.username, password)
+    jd_text = "Baş Backend Mühəndisi axtarırıq. Python bilməlidir."
+    draft_response = await client.post(
+        "/ui/agent", data={"message": jd_text, "csrf_token": csrf}
+    )
+    assert draft_response.status_code == 200
+    match = re.search(r'name="from_agent_draft" value="1"', draft_response.text)
+    assert match is not None
+
+    create = await client.post(
+        "/ui/jobs",
+        data={
+            "csrf_token": csrf,
+            "from_agent_draft": "1",
+            "title": "Baş Backend Mühəndisi",
+            "must_kind_0": "SKILL",
+            "must_requirement_0": "Python",
+            "must_min_years_0": "",
+            "must_weight_0": "1",
+        },
+        follow_redirects=False,
+    )
+    # Rendered directly (never a 303 redirect to /ui/jobs).
+    assert create.status_code == 200
+    assert "Reytinq nəticələri" in create.text
+    assert "Baş Backend Mühəndisi" in create.text
+
+    from sqlalchemy import select
+
+    from meyar.models.job import Job
+
+    jobs = (
+        await db_session.execute(select(Job).where(Job.tenant_id == tenant.id))
+    ).scalars().all()
+    assert len(jobs) == 1
 
 
 async def test_draft_job_criteria_provider_failure_renders_safe_message(

@@ -520,6 +520,13 @@ async def agent_turn(
     request: Request,
     message: str = Form(..., min_length=1, max_length=4000),
     csrf_token: str = Form(...),
+    # PR #42 owner correction (issue #33): the first-class "JD-dən meyar
+    # hazırla" button submits this fixed value so the JD-drafting path is
+    # deterministic — never relying on a small local model to infer
+    # DRAFT_JOB_CRITERIA routing from arbitrary pasted text (D-042 point
+    # 6). Only this one literal value is ever recognized; any other/absent
+    # value falls back to normal model-routed conversation, unchanged.
+    intent: str | None = Form(default=None, max_length=32),
     ctx: UIContext = Depends(require_ui_scopes("candidates:read")),
     db: AsyncSession = Depends(get_db),
     llm: LLMProvider = Depends(get_llm_provider),
@@ -528,6 +535,7 @@ async def agent_turn(
     settings: Settings = Depends(get_settings),
 ) -> HTMLResponse:
     verify_csrf(ctx.csrf_token, csrf_token)
+    from meyar.agent.schemas import AgentActionType
     from meyar.agent.service import run_agent_turn
     from meyar.services.agent_conversation_repo import get_or_create_conversation
     from meyar.ui.service import build_agent_turn_view
@@ -538,6 +546,9 @@ async def agent_turn(
     # Same "current date is a trusted-runtime value, never user/model
     # supplied" boundary as /ui/search (docs/DECISIONS.md D-023).
     as_of_date = date.today()
+    explicit_action = (
+        AgentActionType.DRAFT_JOB_CRITERIA if intent == "draft_job_criteria" else None
+    )
     try:
         result = await run_agent_turn(
             db,
@@ -550,6 +561,7 @@ async def agent_turn(
             embedding_provider=embedding_provider,
             max_tool_calls=settings.agent_max_tool_calls,
             max_context_turns=settings.agent_max_context_turns,
+            explicit_action=explicit_action,
         )
         latest = await build_agent_turn_view(db, tenant_id=ctx.tenant_id, result=result)
         await db.commit()
@@ -885,12 +897,25 @@ async def job_new_form(
 async def create_job_route(
     request: Request,
     csrf_token: str = Form(...),
-    ctx: UIContext = Depends(require_ui_scopes("jobs:write")),
+    # PR #42 owner correction (issue #33): every HR role already holds
+    # every one of these scopes together (meyar.core.roles — deliberately
+    # flat, no partial-permission tier exists yet), so declaring them here
+    # is honest-intent, not a functional access change. Needed because a
+    # job created from the agent's JD-confirmation flow renders straight
+    # into the ranking result below instead of a bare redirect.
+    ctx: UIContext = Depends(
+        require_ui_scopes("jobs:write", "jobs:read", "candidates:read", "evaluations:write")
+    ),
     db: AsyncSession = Depends(get_db),
 ) -> Response:
     verify_csrf(ctx.csrf_token, csrf_token)
     form = await request.form()
     title = str(form.get("title", ""))
+    # Set only by the agent's JD-confirmation review form (meyar.ui.
+    # templates.agent.html) — never by the classic manual /ui/jobs/new
+    # form, whose own redirect-to-jobs-list behavior is unchanged. See
+    # docs/DECISIONS.md D-043.
+    from_agent_draft = str(form.get("from_agent_draft", "")) == "1"
     must_have_rows = [_job_form_row(form, "must", i) for i in range(CRITERION_ROW_COUNT)]
     preferred_rows = [_job_form_row(form, "pref", i) for i in range(CRITERION_ROW_COUNT)]
 
@@ -997,23 +1022,31 @@ async def create_job_route(
             ),
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
+    if from_agent_draft:
+        # D-043 (PR #42 owner correction, issue #33): the agent-first JD
+        # flow ends on the ranking/result context it exists to produce,
+        # never on the de-emphasized vacancy list — one confirmation, one
+        # landing page. Reuses the exact same deterministic ranking
+        # service/render as the manual "Namizədləri sırala" action below;
+        # no new scoring authority.
+        return await _render_job_ranking(
+            request, ctx, db, job_criteria_version_id=version.id
+        )
     return RedirectResponse("/ui/jobs", status_code=status.HTTP_303_SEE_OTHER)
 
 
-@router.post("/jobs/{job_criteria_version_id}/rank", response_class=HTMLResponse)
-async def rank_job(
+async def _render_job_ranking(
     request: Request,
+    ctx: UIContext,
+    db: AsyncSession,
+    *,
     job_criteria_version_id: uuid.UUID,
-    csrf_token: str = Form(...),
-    ctx: UIContext = Depends(
-        require_ui_scopes("jobs:read", "candidates:read", "evaluations:write")
-    ),
-    db: AsyncSession = Depends(get_db),
 ) -> HTMLResponse:
-    verify_csrf(ctx.csrf_token, csrf_token)
-    # Same UI-boundary rule as /search — no manual date input; today's
-    # date is injected here and threaded explicitly into the deterministic
-    # ranking service. See docs/DECISIONS.md D-023.
+    """Shared by the manual "Namizədləri sırala" action (rank_job) and
+    create_job_route's agent-JD-confirmation path (D-043) — one
+    deterministic ranking render, never duplicated. Same UI-boundary rule
+    as /search: no manual date input; today's date is injected here and
+    threaded explicitly into the deterministic ranking service (D-023)."""
     evaluation_as_of_date = date.today()
     try:
         ranking = await rank_candidates_for_job(
@@ -1074,6 +1107,22 @@ async def rank_job(
         request,
         "ranking_results.html",
         _context(ctx, ranking=ranking, results=results, job_title=job_title),
+    )
+
+
+@router.post("/jobs/{job_criteria_version_id}/rank", response_class=HTMLResponse)
+async def rank_job(
+    request: Request,
+    job_criteria_version_id: uuid.UUID,
+    csrf_token: str = Form(...),
+    ctx: UIContext = Depends(
+        require_ui_scopes("jobs:read", "candidates:read", "evaluations:write")
+    ),
+    db: AsyncSession = Depends(get_db),
+) -> HTMLResponse:
+    verify_csrf(ctx.csrf_token, csrf_token)
+    return await _render_job_ranking(
+        request, ctx, db, job_criteria_version_id=job_criteria_version_id
     )
 
 

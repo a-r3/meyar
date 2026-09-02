@@ -157,6 +157,7 @@ h3 { font-size: 1rem; }
   box-shadow: var(--shadow-subtle);
 }
 .stack-form { display: grid; gap: 12px; }
+.button-row { display: flex; gap: 12px; flex-wrap: wrap; }
 .radio-option {
   display: flex;
   align-items: center;

@@ -195,7 +195,15 @@ class AgentJobDraftView(BaseModel):
     title: str | None
     must_have_rows: list[CriterionRowView] = Field(default_factory=list)
     preferred_rows: list[CriterionRowView] = Field(default_factory=list)
-    dropped_count: int = 0
+    # Non-sensitive requirements the deterministic validator could not turn
+    # into a real criterion — disclosed verbatim (never silently dropped),
+    # split by section so each renders under its own heading. See PR #42
+    # owner correction (issue #33).
+    unsupported_must_have: list[str] = Field(default_factory=list)
+    unsupported_preferred: list[str] = Field(default_factory=list)
+    # Count only — a prohibited/sensitive-attribute match's own text must
+    # never be redisplayed (docs/SECURITY_PRIVACY.md).
+    prohibited_count: int = 0
 
 
 class AgentToolResultView(BaseModel):
