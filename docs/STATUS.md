@@ -836,15 +836,28 @@ Evaluation's persisted `candidate_profile_version_id`/
 ## In progress
 **M8 Slice 4 — Agent Product UX & JD Matching (#33)**: implementation
 complete on `feat/agent-product-ux-jd-matching` (from synced `main`
-`8c1782f`), PR #42 opened against `main`, **corrected per owner UI review
-(D-043) and still awaiting owner re-review before merge — not merged, not
-self-accepted per the task's own instruction.**
+`8c1782f`), PR #42 opened against `main`, **corrected per two rounds of
+owner UI review (D-043 functional, D-044 presentation) and still awaiting
+owner re-review before merge — not merged, not self-accepted per the
+task's own instruction.**
 MEYAR AI is now the primary post-login HR surface (`_finalize_human_login`
-redirects to `/ui/agent`; top nav is `MEYAR AI | Namizədlər | Çıxış`,
-classic search remains reachable via a de-emphasized secondary nav line —
-**Vacancies is no longer shown as a normal HR nav/secondary-tool
-destination at all (D-043); `/ui/jobs` and friends remain fully
-functional as backend/supporting capability, reachable by direct URL**).
+redirects to `/ui/agent`; top nav — and the brand/logo link, and every
+page's own "home" link — is exactly `MEYAR AI | Namizədlər | Çıxış`, no
+secondary nav row at all any more (D-044): **neither Vacancies (D-043)
+nor classic search (D-044) is a normal HR nav/discovery destination**;
+`/ui/jobs`, `/ui/search`-family routes remain fully functional as
+backend/supporting capability, reachable by direct URL only). **D-044
+also unifies the composer** (one mode `<select>` — "Adi söhbət" /
+"Vakansiya elanını analiz et" — plus one send button, JS-guarded against
+an empty submit instead of the browser's native English validation
+popup), **restructures the conversation feed so each turn's user message,
+assistant explanation, and result cards render as one block with the
+composer strictly after it** (previously the composer sat between
+history and the live turn's own results), **replaces developer-taxonomy
+strings** (`"skill: Python"` → plain "Python"; evidence citations →
+`"CV, səhifə N — "quote""`, deduplicated), and **gives three tool types
+their own deterministic, evidence-grounded headline sentence** instead of
+the generic "Nəticələr aşağıdadır." filler.
 New `AgentActionType.DRAFT_JOB_CRITERIA`: HR pastes/describes a JD, a new
 bounded `LLMProvider.draft_job_criteria` call drafts a structured criteria
 set restricted to the manual form's five `CriterionKind`s, every item is
@@ -854,8 +867,9 @@ check is never silently dropped** — a non-sensitive failure is disclosed
 verbatim in the review (`AgentJobDraftToolResult.unsupported`); a
 sensitive/prohibited match is a safe count only
 (`prohibited_count`, matched text never redisplayed). **D-043 also adds a
-first-class deterministic JD entry point**: the "JD-dən meyar hazırla"
-button submits `intent=draft_job_criteria`, which makes
+first-class deterministic JD entry point**: the composer's "Vakansiya
+elanını analiz et" mode (a `<select>` option since D-044, originally a
+second submit button) submits `intent=draft_job_criteria`, which makes
 `run_agent_turn(..., explicit_action=AgentActionType.DRAFT_JOB_CRITERIA)`
 skip `llm.decide_agent_action` entirely for that turn — no model call, no
 routing ambiguity, immune to the qwen3:1.7b misrouting limitation below.
@@ -897,10 +911,13 @@ search-planner call fails typed/non-fabricating, never silently produces
 a wrong result), and `draft_job_criteria` itself was independently
 verified end-to-end against the real model, including through the full
 validation/dispatch pipeline, producing a correctly structured,
-denylist-clean draft. Quality gates: `ruff` clean, `mypy src` clean (136
-files), `alembic heads` unchanged (no migration — purely additive
-schema/service/template layer), full `pytest` suite passed, `scripts/
-scan-tracked-tree.sh` clean. See D-042, D-043.
+denylist-clean draft; the D-044 presentation pass was independently
+re-verified the same way (live browser session against real
+`qwen3:1.7b`, not only `FakeLLMProvider` fixtures) — see D-044 for the
+exact screenshots/assertions. Quality gates: `ruff` clean, `mypy src`
+clean (136 files), `alembic heads` unchanged (no migration — purely
+additive schema/service/template layer), full `pytest` suite passed,
+`scripts/scan-tracked-tree.sh` clean. See D-042, D-043, D-044.
 
 **M8 Slice 3 — Evidence Capability Completion (#32)**: **MERGED as PR #41
 (`8c1782f`, squash); issue #32 closed.** Closes the D-027-identified
@@ -1180,7 +1197,7 @@ due date because the official timeline has not been supplied.
 | M5 — Security, Target-Mac Validation & MVP Acceptance | Slice 13 + target-Mac benchmark | OPEN — issue #20 open; PR #22 merged at `a709ce1` implementing Pass 1 (original CV, no-exfiltration, backup/restore, audit guard, multilingual evidence) with `Refs #20`; Mac Mini benchmark execution on the now owner-confirmed target hardware remains the sole open mandatory gate |
 | M6 — Operational CV Intake & Reconciliation | Slice 14 | CLOSED — Slice 14 merged (PR #24 at `f6e31ff`), issue #23 closed; owner-approved closure |
 | M7 — HR UI & Presentation Readiness | HR UI productization (chore, issue #27) | OPEN — branch `feat/hr-ui-productization`, PR #29 open, pending final owner visual check; Job lifecycle implemented; see D-023 through D-029 |
-| M8 — Bounded Local-AI HR Agent Platform | Slices 1–5 (issues #30–#34) | OPEN — Slice 1 (#30), Slice 2 (#31), Slice 3 (#32) merged (PR #41 at `8c1782f`); Slice 4 (#33) implementation corrected per owner review (D-043), branch `feat/agent-product-ux-jd-matching`, PR #42 open, awaiting owner re-review before merge |
+| M8 — Bounded Local-AI HR Agent Platform | Slices 1–5 (issues #30–#34) | OPEN — Slice 1 (#30), Slice 2 (#31), Slice 3 (#32) merged (PR #41 at `8c1782f`); Slice 4 (#33) implementation corrected per two owner review rounds (D-043 functional, D-044 presentation), branch `feat/agent-product-ux-jd-matching`, PR #42 open, awaiting owner re-review before merge |
 | M9 — Deployment, Benchmark & Integration Readiness | Slices 6–8 (issues #35–#37) | OPEN — created 2026-09-01 per D-030/D-031/D-032; no implementation started; does not supersede or close M5/#20 |
 
 ## Official requirement gap matrix

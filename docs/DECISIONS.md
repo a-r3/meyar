@@ -3538,3 +3538,131 @@ template edits are two-line removals, trivially reversible. The
 `from_agent_draft`-gated ranking redirect only changes behavior for
 requests carrying that exact hidden field; the manual creation flow's
 tests (`tests/test_ui_job_creation.py`) pass unchanged.
+
+## D-044 — PR #42 owner UX re-review (issue #33): chat hierarchy, unified
+composer, HR-facing copy, evidence dedup, deterministic headlines, nav trim
+
+**Date:** 2026-09-03
+**Decision:** A second owner UI pass on PR #42 found the product still
+"feels like a developer form" despite D-043's functional corrections.
+Presentation-only fixes, same branch, no agent/scoring/security
+architecture change:
+
+1. **Chat hierarchy.** `meyar.ui.router.agent_workspace`/`agent_turn` now
+   pass `history_turns` (all PRIOR turns, plain text bubbles) and
+   `latest_user_message` (the just-submitted text) separately from
+   `latest` (the rich `AgentTurnView`). `agent.html` renders one
+   unified `<ol>`: history bubbles, then the just-submitted user message,
+   then the assistant's headline AND its cards in the SAME `<li>` —
+   the composer renders only after all of that, never sandwiched between
+   a turn's own text and its results. A turn's own `(user, assistant)`
+   pair is spliced out of `history_turns` (`all_turns[:-2]`) exactly when
+   `run_agent_turn` actually persisted one (the `try` succeeded); on the
+   provider-failure path nothing was persisted, so `history_turns` stays
+   the untouched full list and `latest_user_message` is the raw submitted
+   `message` (previously lost entirely on that path — now shown, same
+   hierarchy, still safe/generic assistant text). Net effect: the
+   previous architecture's live turn was ALWAYS duplicated (once as a
+   plain history bubble, once again in a separate outcome banner) —
+   `test_user_message_and_model_message_are_html_escaped_in_render` is
+   updated from asserting the payload appears 3× to 2× to reflect this
+   deduplication.
+2. **One AI composer.** The two-submit-button form is replaced by one
+   `<select name="intent">` (values `""` / `draft_job_criteria`, labels
+   "Adi söhbət" / "Vakansiya elanını analiz et") plus one `Göndər`
+   button — `meyar.ui.router.agent_turn`'s existing `intent` handling is
+   unchanged (still the only source of `explicit_action`, still never
+   inferred from routing). The textarea's `required` attribute is
+   removed; a new `meyar.ui.static.agent-composer.js` (same progressive-
+   enhancement pattern as the existing `job-form.js`) disables the send
+   button while the message is empty/whitespace-only, so an empty
+   submission never triggers the browser's own native-language "Please
+   fill out this field" popup — the server's existing generic
+   `Form(min_length=1)` → "Forma məlumatlarını yoxlayın." error page
+   remains the authoritative fallback if JS is unavailable.
+3. **HR-facing copy.** `meyar.ui.service._format_filter_match_label`
+   replaces `f"{item.category}: {item.value}"` (literally
+   `"skill: Python"`) for `required_matches`/`preferred_matches` — every
+   category except `min_total_experience_years` now renders as just the
+   already-self-descriptive value; the experience category gets a
+   `"{value} il təcrübə"` unit suffix. `GET_CANDIDATE_EVIDENCE` match
+   headings change from `"{category_label}: {title}"` to `"Uyğun gələn
+   tələb: {title} ({category_label})"` (category demoted to parenthetical
+   meta, mirroring `ranking_results.html`'s existing
+   `label <span class="meta">(kind)</span>` convention).
+4. **Evidence dedup + citation text.** `meyar.ui.service._evidence_views`
+   now deduplicates by `(page, quote)` before truncating to `maximum` — a
+   candidate whose CV evidence is cited by several extracted facts no
+   longer shows the identical quote repeated. A new shared macro
+   (`meyar.ui.templates._evidence_list.evidence_items`) renders every
+   evidence list as `"CV, səhifə {page} — "{quote}""` — never `"Səhifə
+   {page}, blok {block_index}"` — reused by `agent.html`,
+   `search_results.html`, and `candidate_detail.html` so all three
+   surfaces read identically; `block_index` stays on
+   `EvidenceLocationView` for internal provenance, it is simply never
+   the thing HR reads.
+5. **Deterministic headline copy.** `meyar.ui.service._agent_turn_headline`
+   gains three improvements, all still server-authored from already-
+   computed, non-model data (no new LLM call): SEARCH_CANDIDATES now
+   reads `"{top matched requirement} tələbinə uyğun {count} namizəd
+   tapdım."` (built from the top result's own `required_matches`/
+   `preferred_matches`, item 3's HR phrasing) with a distinct zero-result
+   sentence ("Bu tələbə uyğun namizəd tapılmadı.") instead of "0 namizəd
+   tapıldı."; GET_CANDIDATE_PROFILE reads `"{full_name} üçün profil
+   məlumatları aşağıdadır."`; GET_CANDIDATE_EVIDENCE reads `"{full_name}
+   üzrə {topic} sübutlar aşağıdadır."` when matches exist, or an explicit
+   `"{full_name} üzrə bu mövzuda profildə açıq sübut yoxdur."` when they
+   don't — replacing the previous generic "Nəticələr aşağıdadır." filler
+   for these two tool types entirely (they had no dedicated branch
+   before, only the outcome fallback).
+6. **Navigation trimmed further.** `base.html`'s secondary nav
+   (`Klassik axtarış`, the only entry left after D-043 removed
+   Vakansiyalar) is removed outright — normal HR navigation/discovery is
+   now exactly `MEYAR AI | Namizədlər | Çıxış`. The brand/logo link and
+   `error.html`'s "Əsas səhifə" link now point at `/ui/agent` (was `/ui`)
+   so no page's own chrome quietly re-offers classic search as "home."
+   `/ui` itself is untouched and still fully reachable by direct URL
+   (D-032/D-043's "backend/supporting capability stays" framing, applied
+   one step further) — `search_results.html`/`search_clarification.html`'s
+   own in-page "new query" links, which loop within that already-de-
+   emphasized surface rather than re-introducing discovery, are
+   unchanged.
+7. **JD confirmation copy.** The review form's submit button on
+   `agent.html` reads "Tələbləri təsdiqlə və namizədləri sırala" instead
+   of "Vakansiyanı yarat" — the vacancy-CRUD framing is gone from the
+   one HR-facing verb in the agent flow, while `POST /ui/jobs` and the
+   `Job`/`JobCriteriaVersion` persistence it drives (D-043) are
+   byte-for-byte unchanged; the manual `job_new.html` form keeps its own
+   "Vakansiya yarat" copy, since that page is explicitly the
+   backend/supporting surface, not the primary HR product concept.
+
+Verified against the real local `qwen3:1.7b` (not only `FakeLLMProvider`
+fixtures): a live browser session (Chromium via the Claude-in-Chrome
+extension) logged in as the seeded demo HR user, submitted a plain-
+language search and a JD-analysis-mode message, and visually confirmed
+items 1/3/4/5 together in one screenshot — the just-submitted user
+message, the deterministic "Python tələbinə uyğun 1 namizəd tapdım."
+headline, the "Məcburi uyğunluqlar: Python" line (no "skill:" prefix),
+and three deduplicated "CV, səhifə 1 — "..."" evidence citations, all in
+one turn block immediately above the composer. A second live JD-analysis
+call surfaced a genuine `qwen3:1.7b`-drafted EXPERIENCE item with no
+derivable duration, independently confirming the D-043 unsupported-item
+disclosure path end-to-end with real (not fixture-forced) model output,
+rendered under the new "Tələbləri təsdiqlə və namizədləri sırala" button.
+
+**Why:** The owner's second UI pass explicitly accepted the D-043
+architecture/backend behavior and scoped this pass to presentation only:
+chat hierarchy, composer unification, HR language, evidence readability,
+headline quality, and navigation — with an explicit "do not add new
+functionality, do not change scoring/planner/evidence authority/auth/
+tenant rules/persistence" boundary, which every change above respects
+(no new tool, no new persisted field, no new route beyond the existing
+`intent` value already wired in D-043).
+
+**Reversibility:** Template/presentation-layer and one new pure
+formatting/dedup function each in `meyar.ui.service` — no schema, no
+migration, no change to `AgentTurnResult`/`AgentToolResult`/persistence.
+`agent-composer.js` is additive and inert if the browser blocks
+JavaScript (the button just stays enabled, falling back to existing
+server-side validation). The nav/brand-link changes are single-line
+template edits.

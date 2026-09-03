@@ -743,9 +743,10 @@ async def run_agent_turn(
     session-scoped state (turns, last_search_candidate_ids). Caller is
     responsible for the surrounding db.commit()/rollback().
 
-    ``explicit_action``: PR #42 owner correction (issue #33) — an explicit
-    first-class UI affordance (e.g. "JD-dən meyar hazırla") lets HR pin
-    this turn's action deterministically, bypassing ``llm.decide_agent_action``
+    ``explicit_action``: PR #42 owner correction (issue #33, D-043/D-044)
+    — an explicit first-class UI affordance (the composer's "Vakansiya
+    elanını analiz et" mode) lets HR pin this turn's action
+    deterministically, bypassing ``llm.decide_agent_action``
     entirely for the first decision so a small local model's unreliable
     intent routing (documented D-042 point 6) can never misroute a pasted
     JD to SEARCH_CANDIDATES. Only ``AgentActionType.DRAFT_JOB_CRITERIA`` is

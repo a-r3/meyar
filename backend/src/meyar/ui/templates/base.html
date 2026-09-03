@@ -8,7 +8,7 @@
 </head>
 <body>
   <header class="site-header">
-    <a class="brand" href="/ui">MEYAR</a>
+    <a class="brand" href="{{ '/ui/agent' if authenticated else '/ui/login' }}">MEYAR</a>
     {% if authenticated %}
     <nav aria-label="Əsas naviqasiya">
       <a href="/ui/agent">MEYAR AI</a>
@@ -23,12 +23,6 @@
   <main class="page-shell">
     {% block content %}{% endblock %}
   </main>
-  {% if authenticated %}
-  <nav class="nav-secondary" aria-label="Əlavə alətlər">
-    <span>Digər alətlər:</span>
-    <a href="/ui">Klassik axtarış</a>
-  </nav>
-  {% endif %}
   <footer>MEYAR qərar dəstəyi təqdim edir. Yekun qərarı insan verir.</footer>
   {% block scripts %}{% endblock %}
 </body>

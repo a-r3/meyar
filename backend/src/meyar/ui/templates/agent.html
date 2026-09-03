@@ -1,60 +1,15 @@
 {% extends "base.html" %}
 {% block title %}MEYAR AI{% endblock %}
 {% import "_criteria_rows.html" as criteria_form %}
+{% import "_evidence_list.html" as evidence_partial %}
 {% macro fact_section(title, items) %}
 <section class="panel profile-section">
   <h3>{{ title }}</h3>
   {% if not items %}<p class="muted">Məlumat yoxdur.</p>{% endif %}
-  {% for item in items %}<article class="fact"><h4>{{ item.title }}</h4>{% if item.detail %}<p>{{ item.detail }}</p>{% endif %}{% if item.evidence %}<details><summary>Sübut</summary><ul class="evidence-list">{% for evidence in item.evidence %}<li>Səhifə {{ evidence.page }}, blok {{ evidence.block_index }}{% if evidence.snippet %}: “{{ evidence.snippet }}”{% endif %}</li>{% endfor %}</ul></details>{% endif %}</article>{% endfor %}
+  {% for item in items %}<article class="fact"><h4>{{ item.title }}</h4>{% if item.detail %}<p>{{ item.detail }}</p>{% endif %}{% if item.evidence %}<details><summary>Sübut</summary>{{ evidence_partial.evidence_items(item.evidence) }}</details>{% endif %}</article>{% endfor %}
 </section>
 {% endmacro %}
-{% block content %}
-<section class="hero">
-  <p class="eyebrow">MEYAR AI</p>
-  <h1>Namizədlər haqqında söhbət edin</h1>
-  <p class="lede">Nə axtardığınızı öz sözlərinizlə yazın; nəticələr həmişə sübutla əsaslandırılır. Yekun qərarı insan verir.</p>
-</section>
-
-{% if turns %}
-<section class="panel agent-conversation" aria-label="Söhbət tarixçəsi">
-  <div class="page-heading"><h2>Söhbət</h2>
-    <form method="post" action="/ui/agent/reset" class="stack-form">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <button class="button button-secondary" type="submit">Yeni söhbət</button>
-    </form>
-  </div>
-  <ol class="agent-turn-list">
-    {% for turn in turns %}
-    <li class="agent-turn agent-turn-{{ turn.role }}">
-      <span class="agent-turn-role">{{ "Siz" if turn.role == "user" else "MEYAR AI" }}</span>
-      <p class="untrusted-text">{{ turn.text }}</p>
-    </li>
-    {% endfor %}
-  </ol>
-</section>
-{% endif %}
-
-<section class="panel search-panel">
-  <form method="post" action="/ui/agent" class="stack-form">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <label for="message">Mesajınız</label>
-    <textarea id="message" name="message" rows="3" maxlength="4000" required placeholder="Məsələn: Python bilən namizədləri göstər, ya da bir vakansiya elanını buraya yapışdırın"></textarea>
-    <div class="button-row">
-      <button class="button" type="submit">Göndər</button>
-      <button class="button button-secondary" type="submit" name="intent" value="draft_job_criteria">JD-dən meyar hazırla</button>
-    </div>
-    <p class="field-help">Vakansiya elanını yapışdırıb "JD-dən meyar hazırla" düyməsini basın — bu, həmişə birbaşa kriteriya qaralaması yaradır.</p>
-  </form>
-</section>
-
-{% if latest %}
-{% if latest.headline %}
-<section class="agent-message" data-outcome="{{ latest.outcome }}" role="status">
-  <span class="agent-turn-role">MEYAR AI</span>
-  <p>{{ latest.headline }}</p>
-</section>
-{% endif %}
-
+{% macro turn_cards(latest) %}
 {% for tool_result in latest.tool_results %}
   {% if tool_result.tool_name == "SEARCH_CANDIDATES" and tool_result.search_outcome.executable %}
   {% if not tool_result.search_results %}
@@ -75,9 +30,7 @@
         {% if item.required_matches %}<p><strong>Məcburi uyğunluqlar:</strong> {{ item.required_matches|join(", ") }}</p>{% endif %}
         {% if item.preferred_matches %}<p><strong>Üstünlük uyğunluqları:</strong> {{ item.preferred_matches|join(", ") }}</p>{% endif %}
         {% if item.evidence %}
-        <details><summary>Sübut yerləri</summary><ul class="evidence-list">
-          {% for evidence in item.evidence %}<li>Səhifə {{ evidence.page }}, blok {{ evidence.block_index }}{% if evidence.snippet %}: “{{ evidence.snippet }}”{% endif %}</li>{% endfor %}
-        </ul></details>
+        <details><summary>Sübut yerləri</summary>{{ evidence_partial.evidence_items(item.evidence) }}</details>
         {% endif %}
         <a class="text-link" href="/ui/candidates/{{ item.candidate_id }}">Namizəd profilini aç</a>
       </div>
@@ -113,10 +66,8 @@
       {% endif %}
       {% for match in tool_result.evidence.matches %}
       <article class="fact">
-        <h4>{{ match.category_label }}: {{ match.title }}</h4>
-        <ul class="evidence-list">
-          {% for evidence in match.evidence %}<li>Səhifə {{ evidence.page }}, blok {{ evidence.block_index }}{% if evidence.snippet %}: “{{ evidence.snippet }}”{% endif %}</li>{% endfor %}
-        </ul>
+        <h4>Uyğun gələn tələb: {{ match.title }} <span class="meta">({{ match.category_label }})</span></h4>
+        {{ evidence_partial.evidence_items(match.evidence) }}
       </article>
       {% endfor %}
     </section>
@@ -153,11 +104,65 @@
         {% endif %}
 
         <p class="field-help">Bu, AI tərəfindən hazırlanmış qaralamadır — yekun qərar deyil. Göndərmədən əvvəl istənilən sətri düzəldin, silin və ya əlavə edin.</p>
-        <button class="button" type="submit">Vakansiyanı yarat</button>
+        <button class="button" type="submit">Tələbləri təsdiqlə və namizədləri sırala</button>
       </form>
     </section>
     {% endif %}
   {% endif %}
 {% endfor %}
+{% endmacro %}
+{% block content %}
+<section class="hero">
+  <p class="eyebrow">MEYAR AI</p>
+  <h1>Namizədlər haqqında söhbət edin</h1>
+  <p class="lede">Nə axtardığınızı öz sözlərinizlə yazın; nəticələr həmişə sübutla əsaslandırılır. Yekun qərarı insan verir.</p>
+</section>
+
+{% if history_turns or latest %}
+<section class="panel agent-conversation" aria-label="Söhbət tarixçəsi">
+  <div class="page-heading"><h2>Söhbət</h2>
+    <form method="post" action="/ui/agent/reset" class="stack-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button class="button button-secondary" type="submit">Yeni söhbət</button>
+    </form>
+  </div>
+  <ol class="agent-turn-list">
+    {% for turn in history_turns %}
+    <li class="agent-turn agent-turn-{{ turn.role }}">
+      <span class="agent-turn-role">{{ "Siz" if turn.role == "user" else "MEYAR AI" }}</span>
+      <p class="untrusted-text">{{ turn.text }}</p>
+    </li>
+    {% endfor %}
+    {% if latest %}
+    <li class="agent-turn agent-turn-user">
+      <span class="agent-turn-role">Siz</span>
+      <p class="untrusted-text">{{ latest_user_message }}</p>
+    </li>
+    <li class="agent-turn agent-turn-assistant" data-outcome="{{ latest.outcome }}">
+      <span class="agent-turn-role">MEYAR AI</span>
+      {% if latest.headline %}<p>{{ latest.headline }}</p>{% endif %}
+      {{ turn_cards(latest) }}
+    </li>
+    {% endif %}
+  </ol>
+</section>
 {% endif %}
+
+<section class="panel search-panel">
+  <form method="post" action="/ui/agent" class="stack-form" id="agent-composer">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label for="message">Mesajınız</label>
+    <textarea id="message" name="message" rows="3" maxlength="4000" placeholder="Məsələn: Python bilən namizədləri göstər, ya da bir vakansiya elanını buraya yapışdırın"></textarea>
+    <div class="button-row">
+      <select id="intent" name="intent" aria-label="Rejim">
+        <option value="">Adi söhbət</option>
+        <option value="draft_job_criteria">Vakansiya elanını analiz et</option>
+      </select>
+      <button id="composer-send" class="button" type="submit">Göndər</button>
+    </div>
+  </form>
+</section>
+{% endblock %}
+{% block scripts %}
+<script src="/ui/static/agent-composer.js" defer></script>
 {% endblock %}

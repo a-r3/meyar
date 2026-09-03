@@ -105,6 +105,20 @@ def _validated_filter(value: str | None, allowed: frozenset[str], label: str) ->
     return normalized
 
 
+def _format_filter_match_label(category: str, value: str) -> str:
+    """HR-facing phrasing for one matched search filter — never the raw
+    internal category key a `RequiredFilterMatch`/`PreferredFilterMatch`
+    carries (e.g. category="skill" reads as developer taxonomy, not HR
+    language; see D-044, PR #42 owner UX correction). The matched value
+    itself (a skill/certification/language/education name) is already
+    self-descriptive to an HR reader, so most categories need no prefix
+    at all — only the numeric experience-years category needs a unit
+    appended to stay readable."""
+    if category == "min_total_experience_years":
+        return f"{value} il təcrübə"
+    return value
+
+
 def _identity_values(version: CandidateIdentityVersion | None) -> tuple[str | None, ...]:
     if version is None or version.identity_content is None:
         return None, None, None
@@ -122,14 +136,28 @@ def _identity_values(version: CandidateIdentityVersion | None) -> tuple[str | No
 def _evidence_views(
     evidence: list[EvidenceRef], *, snippets: bool, maximum: int = 4
 ) -> list[EvidenceLocationView]:
-    return [
-        EvidenceLocationView(
-            page=item.page,
-            block_index=item.block_index,
-            snippet=(item.quote[:240] if snippets else None),
+    """Deduplicates by (page, quote) before truncating to ``maximum`` — an
+    HR user must never see the identical citation repeated (distinct
+    ``EvidenceRef`` entries can legitimately point at the same quoted
+    sentence for different extracted facts). ``block_index`` is still
+    carried on each view for internal provenance (never dropped from the
+    data), it is simply never the thing HR reads — see
+    meyar.ui.templates for the display text (D-044, PR #42 owner UX
+    correction)."""
+    seen: set[tuple[int, str]] = set()
+    views: list[EvidenceLocationView] = []
+    for item in evidence:
+        quote = item.quote[:240] if snippets else None
+        key = (item.page, quote or "")
+        if key in seen:
+            continue
+        seen.add(key)
+        views.append(
+            EvidenceLocationView(page=item.page, block_index=item.block_index, snippet=quote)
         )
-        for item in evidence[:maximum]
-    ]
+        if len(views) >= maximum:
+            break
+    return views
 
 
 def _facts(profile: CandidateProfileExtraction) -> dict[str, list[ProfileFactView]]:
@@ -554,10 +582,12 @@ async def build_search_result_views(
                 semantic_score=result.semantic_score,
                 profile_version_id=result.candidate_profile_version_id,
                 required_matches=[
-                    f"{item.category}: {item.value}" for item in result.required_filters_matched
+                    _format_filter_match_label(item.category, item.value)
+                    for item in result.required_filters_matched
                 ],
                 preferred_matches=[
-                    f"{item.category}: {item.value}" for item in result.preferred_filters_matched
+                    _format_filter_match_label(item.category, item.value)
+                    for item in result.preferred_filters_matched
                 ],
                 professional_summary=summary,
                 evidence=evidence,
@@ -733,8 +763,37 @@ def _agent_turn_headline(
             outcome = latest_view.search_outcome
             assert outcome is not None
             if outcome.executable:
-                return f"{len(latest_view.search_results)} namizəd tapıldı."
+                count = len(latest_view.search_results)
+                if count == 0:
+                    return "Bu tələbə uyğun namizəd tapılmadı."
+                # The leading matched requirement of the top result — built
+                # purely from already-computed, HR-phrased filter matches
+                # (never model-authored text) so the sentence names what
+                # was actually searched for without a second LLM call.
+                top = latest_view.search_results[0]
+                combined_matches = top.required_matches + top.preferred_matches
+                term = combined_matches[0] if combined_matches else None
+                if term:
+                    return f"{term} tələbinə uyğun {count} namizəd tapdım."
+                return f"{count} namizəd tapdım."
             return outcome.message
+        if latest_view.tool_name == AgentActionType.GET_CANDIDATE_PROFILE.value:
+            profile = latest_view.profile
+            if profile is not None:
+                name = profile.full_name or "Namizəd"
+                return f"{name} üçün profil məlumatları aşağıdadır."
+        if latest_view.tool_name == AgentActionType.GET_CANDIDATE_EVIDENCE.value:
+            evidence_view = latest_view.evidence
+            if evidence_view is not None:
+                name = evidence_view.full_name or "Namizəd"
+                if evidence_view.matches:
+                    topic_suffix = f" {evidence_view.topic}" if evidence_view.topic else ""
+                    return f"{name} üzrə{topic_suffix} sübutlar aşağıdadır."
+                # Explicit insufficient-evidence wording — never the
+                # generic "Nəticələr aşağıdadır." filler for a real "no
+                # evidence found" result (D-044, PR #42 owner UX
+                # correction).
+                return f"{name} üzrə bu mövzuda profildə açıq sübut yoxdur."
         if latest_view.tool_name == AgentActionType.DRAFT_JOB_CRITERIA.value:
             draft = latest_view.job_draft
             assert draft is not None

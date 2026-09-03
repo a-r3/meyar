@@ -1,0 +1,5 @@
+{% macro evidence_items(evidence) %}
+<ul class="evidence-list">
+  {% for item in evidence %}<li>CV, səhifə {{ item.page }}{% if item.snippet %} — “{{ item.snippet }}”{% endif %}</li>{% endfor %}
+</ul>
+{% endmacro %}

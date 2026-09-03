@@ -508,8 +508,9 @@ async def agent_workspace(
         "agent.html",
         _context(
             ctx,
-            turns=_agent_turn_log_views(conversation),
+            history_turns=_agent_turn_log_views(conversation),
             latest=None,
+            latest_user_message=None,
             kind_options=CRITERION_KIND_OPTIONS,
         ),
     )
@@ -520,12 +521,13 @@ async def agent_turn(
     request: Request,
     message: str = Form(..., min_length=1, max_length=4000),
     csrf_token: str = Form(...),
-    # PR #42 owner correction (issue #33): the first-class "JD-dən meyar
-    # hazırla" button submits this fixed value so the JD-drafting path is
-    # deterministic — never relying on a small local model to infer
-    # DRAFT_JOB_CRITERIA routing from arbitrary pasted text (D-042 point
-    # 6). Only this one literal value is ever recognized; any other/absent
-    # value falls back to normal model-routed conversation, unchanged.
+    # PR #42 owner correction (issue #33, D-043/D-044): the composer's
+    # "Vakansiya elanını analiz et" mode option submits this fixed value
+    # so the JD-drafting path is deterministic — never relying on a small
+    # local model to infer DRAFT_JOB_CRITERIA routing from arbitrary
+    # pasted text (D-042 point 6). Only this one literal value is ever
+    # recognized; any other/absent value (the default "Adi söhbət" mode)
+    # falls back to normal model-routed conversation, unchanged.
     intent: str | None = Form(default=None, max_length=32),
     ctx: UIContext = Depends(require_ui_scopes("candidates:read")),
     db: AsyncSession = Depends(get_db),
@@ -577,25 +579,41 @@ async def agent_turn(
         conversation = await get_or_create_conversation(
             db, tenant_id=ctx.tenant_id, browser_session_id=ctx.session_id
         )
+        # D-044 (PR #42 owner UX correction): nothing was persisted for
+        # this failed attempt (the exception happened before
+        # run_agent_turn's own _finish_turn), so `conversation.turns`
+        # does not contain it — show the HR user's own just-submitted
+        # text directly rather than losing it, still adjacent to its own
+        # explanation (chat-hierarchy requirement) instead of history
+        # being silently missing a turn.
         return _render(
             request,
             "agent.html",
             _context(
                 ctx,
-                turns=_agent_turn_log_views(conversation),
+                history_turns=_agent_turn_log_views(conversation),
                 latest=latest,
+                latest_user_message=message,
                 kind_options=CRITERION_KIND_OPTIONS,
             ),
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
 
+    # D-044: run_agent_turn always persists exactly one new (user,
+    # assistant) pair via its own _finish_turn when it returns without
+    # raising — split it off history so it renders once, adjacent to its
+    # own rich `latest` cards, instead of duplicated as a plain text
+    # bubble AND a rich block separated by the composer.
+    all_turns = _agent_turn_log_views(conversation)
+    history_turns = all_turns[:-2] if len(all_turns) >= 2 else []
     return _render(
         request,
         "agent.html",
         _context(
             ctx,
-            turns=_agent_turn_log_views(conversation),
+            history_turns=history_turns,
             latest=latest,
+            latest_user_message=message,
             kind_options=CRITERION_KIND_OPTIONS,
         ),
     )
