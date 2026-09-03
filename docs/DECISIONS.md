@@ -3312,3 +3312,357 @@ presence check — closing that would require semantic judgment. This is
 now the smallest remaining gap after three correctness passes, and it is
 inherent to any purely deterministic, non-LLM text-matching approach, not
 a shortcut taken in this fix.
+
+## D-042 — Slice 4 (issue #33): agent-first product UX + JD → criteria
+drafting, and two real-Ollama findings
+
+**Date:** 2026-09-02
+**Decision:** Implements M8 Slice 4 (issue #33, per D-030/D-031/D-032) on
+`feat/agent-product-ux-jd-matching` from synced `main` (`8c1782f`).
+
+1. **MEYAR AI is now the primary post-login HR surface.** Top-level nav is
+   `MEYAR AI | Namizədlər | Çıxış`; classic NL search (`/ui`) and
+   Vacancies (`/ui/jobs`) remain fully reachable via a de-emphasized
+   secondary nav line ("Digər alətlər") rather than being removed, per
+   D-032 point 2. Human login (`_finalize_human_login`) now redirects to
+   `/ui/agent` instead of `/ui` — the only behavior change to the login
+   flow itself; six existing redirect-target test assertions updated
+   accordingly.
+2. **Conversation UX consolidation.** A new `AgentTurnView.headline`
+   (`meyar.ui.service._agent_turn_headline`), computed once server-side,
+   replaces the previous two-tier "generic outcome banner" +
+   "tool-specific outcome banner" stack — one meaningful assistant message
+   first, supporting cards/evidence second, no duplicated success/status
+   text. A non-executable search outcome's own explanation still IS that
+   headline (not redundant — it is the only informative content in that
+   case). New `POST /ui/agent/reset` ("Yeni söhbət") clears this browser
+   session's own `AgentConversation` (turns + `last_search_candidate_ids`)
+   via a new `meyar.services.agent_conversation_repo.reset_conversation`
+   — tenant/session-scoped exactly like every other conversation call
+   site, never touches another session/tenant.
+3. **Candidate presentation:** the semantic-similarity pill (previously
+   unconditional "Uyğunluq %" on `/ui/search`, and already mode-gated but
+   identically labeled on `/ui/agent`) is relabeled "Semantik yaxınlıq %"
+   on both surfaces and now consistently hidden outside SEMANTIC_ONLY/
+   HYBRID search modes — a plain structured/discovery result never shows
+   a percentage that could read as a compatibility score. The real 0–100
+   deterministic score stays exactly where it already correctly lived
+   (`ranking_results.html`, `rank_candidates_for_job` only) — unchanged.
+4. **JD → structured criteria draft → human review → deterministic rank.**
+   New `AgentActionType.DRAFT_JOB_CRITERIA`: the model signals only that
+   the message is a JD (no argument on `AgentDecision` itself — the
+   server uses the user's own already-known message text as the JD input
+   for a second, narrower LLM call, `LLMProvider.draft_job_criteria`,
+   deliberately never asking the model to reproduce the JD inside its own
+   output schema — the D-035 Ollama `maxLength`-in-output-schema failure
+   mode this avoids). The model drafts a `JDCriteriaDraft` (title +
+   bounded must-have/preferred lists, restricted to the same five
+   `CriterionKind`s the manual form already offers); every item is
+   re-validated into a real `CriterionIn` server-side (same schema +
+   prohibited-attribute denylist as the manual form/REST API — D-031
+   point 4, no exception), and any item that fails is silently dropped
+   (never shown, `dropped_count` surfaced) rather than weakened. The
+   result renders as an editable review form (shared Jinja macro,
+   `_criteria_rows.html`, extracted out of `job_new.html` so both surfaces
+   render criteria rows identically) that posts through the EXISTING,
+   unchanged `POST /ui/jobs` — nothing is persisted by drafting alone.
+   Ranking after creation reuses the existing `/ui/jobs` "Namizədləri
+   sırala" action unchanged: no manual evaluation-date input, today's date
+   injected at the UI boundary exactly as `/ui/search` already does, and
+   the effective evaluation date is already displayed on
+   `ranking_results.html`. No new vacancy-CRUD surface area; `Job`/
+   `JobCriteriaVersion`/scoring untouched. `AgentTurnOutcome.
+   JOB_DRAFT_FAILED` (bounded retry, then this outcome with empty
+   `tool_results`) covers the drafting call itself never producing a
+   usable result — mirrors the existing AGENT_PROVIDER_FAILURE/
+   MALFORMED_MODEL_OUTPUT precedent (D-036).
+5. **D-031 sunset condition NOT acted on this slice.** Issue #33/D-031
+   point 3 makes the fast-path sunset an owner-evaluated decision, not
+   automatic. This slice implements the agent-first JD/criteria flow the
+   sunset evaluation depends on but does not itself judge "accepted
+   functional parity" — that determination is left to the owner's UI
+   review (see the accompanying `## HUMAN ACTION REQUIRED`); D-026's fast
+   path is untouched.
+6. **Two real findings from live-Ollama acceptance testing** (qwen3:1.7b,
+   the same integration-verified model as D-039/D-040), matching the
+   established Slice 2 pattern (D-035 through D-040) of bugs no
+   `FakeLLMProvider`-based test can surface:
+   - **Prompt-leak defect (real, fixed structurally).** The model can
+     copy one of `AGENT_SYSTEM_PROMPT`'s own English instructional
+     sentences verbatim into `AgentDecision.message` for CLARIFY/
+     FINAL_ANSWER, instead of authoring real content — a raw
+     planner-internals leak into HR-facing text that D-035's "the
+     model's message is safe to show verbatim" boundary did not
+     anticipate. Fixed with `meyar.agent.service._looks_like_prompt_leak`
+     — an exact/near-exact containment check against the fixed prompt
+     text (not a fuzzy heuristic) — treated exactly like schema-invalid
+     output: bounded retry (`MAX_DECISION_ATTEMPTS`), then the existing
+     deterministic `MALFORMED_MODEL_OUTPUT` fallback. Reproduced live
+     post-fix: the guard correctly rejected a repeat leak and rendered
+     only the safe fallback text, never the leaked sentence. Two new
+     regression tests (`test_prompt_leaking_clarify_message_is_rejected_
+     and_retried`, `test_prompt_leak_persisting_through_every_retry_
+     falls_back_safely`).
+   - **Known, documented model-quality limitation (not fixed further this
+     slice).** `AGENT_PROMPT_VERSION` was bumped to
+     `agent-orchestrator-prompt-v3` (DRAFT_JOB_CRITERIA added, then its
+     disambiguation against SEARCH_CANDIDATES sharpened once) after live
+     testing showed qwen3:1.7b sometimes still routes a raw pasted JD to
+     SEARCH_CANDIDATES instead of DRAFT_JOB_CRITERIA when the message
+     carries no explicit trigger verb — the same class of small-local-
+     model intent-classification limitation the project already documents
+     honestly elsewhere (D-025's "AI tələbi tam anlaya bilmədi" framing).
+     Both branches remain fully safe regardless of which the model picks:
+     a misrouted JD either fails its own search-planner call (typed
+     `PLANNER_PROVIDER_FAILURE`/`MODEL_TIMEOUT`, never a fabricated
+     result) or, when routed correctly, drafts and validates exactly as
+     designed — confirmed live for both outcomes. HR can reliably reach
+     DRAFT_JOB_CRITERIA today with an explicit lead-in (e.g. "Bu elan
+     üçün kriteriyalar hazırla: ..."); further routing-accuracy tuning
+     (a bigger model, or — if ever justified by a DECISIONS.md entry — a
+     bounded deterministic pre-classifier) is deferred, not silently
+     attempted, per this slice's bounded-cycle scope.
+
+**Why:** Issue #33 requires MEYAR AI to become the primary HR surface with
+a bounded JD → draft → confirm → deterministic-rank flow, while explicitly
+prohibiting new vacancy-CRUD growth, any LLM scoring authority, and
+manual evaluation-date input — this decision records the concrete design
+(schema shape, validation boundary, reuse of existing job/ranking
+services) and the two real defects/limitations only live-model testing
+could surface, consistent with the Slice 2 precedent of documenting such
+findings rather than only the intended design.
+
+**Reversibility:** Fully additive at the schema/service layer (`agent/
+schemas.py`, new tool result/outcome variants) — no migration, no change
+to `Job`/`JobCriteriaVersion`/scoring/evaluation. `meyar.core.text.
+slugify_criterion_label` is a pure extraction of previously-private
+`meyar.ui.service._slugify_criterion_label` logic (same behavior, now
+shared with `meyar.agent.service`). The login-redirect and nav changes
+are template/route-level and trivially reversible. `_looks_like_prompt_
+leak` is a narrow, additive guard around one existing decision-fetch
+loop.
+
+## D-043 — PR #42 owner correction (issue #33): deterministic JD intent,
+no-silent-drop disclosure, and Vacancies discovery removed from normal HR UI
+
+**Date:** 2026-09-02
+**Decision:** Owner UI review of PR #42 (D-042) found two product blockers
+and one navigation/exposure correction before merge; all three are
+resolved on the same `feat/agent-product-ux-jd-matching` branch, no new
+branch:
+
+1. **Deterministic JD entry — no prompt magic.** D-042 point 6 documented
+   that qwen3:1.7b sometimes fails to route an implicit (no explicit
+   lead-in) pasted JD to `DRAFT_JOB_CRITERIA`. Rather than expanding the
+   frozen regex/NL planner, `/ui/agent` (`meyar.ui.router.agent_turn`)
+   gained one new optional `Form` field, `intent`; the "JD-dən meyar
+   hazırla" button submits the fixed literal `intent=draft_job_criteria`.
+   `run_agent_turn` (`meyar.agent.service`) gained a matching
+   `explicit_action: AgentActionType | None` parameter: when set, the
+   very first decision of the turn is constructed directly
+   (`AgentDecision(action=explicit_action)`) and `llm.decide_agent_action`
+   is never called for that turn — no model call, no routing ambiguity,
+   no dependence on the small model inferring intent from arbitrary text.
+   Only `DRAFT_JOB_CRITERIA` is accepted; any other value raises
+   `ValueError` defensively (the caller is `meyar.ui.router`, never a
+   client-supplied action). Normal conversational routing (no `intent`
+   field) is completely unchanged — this is a second, parallel entry
+   point, not a modification of the existing planner/routing prompt.
+2. **No silent drop of JD requirements.** `AgentJobDraftToolResult.
+   dropped_count` (a single opaque integer) is replaced by two typed
+   signals in `meyar.agent.schemas`: `unsupported: list[
+   UnsupportedJDCriterionItem]` (a non-sensitive requirement `CriterionIn`
+   could not represent — e.g. an `EXPERIENCE` item the JD gave no
+   derivable duration for — carries the requirement's own, already-
+   confirmed-non-sensitive text) and `prohibited_count: int` (a
+   sensitive/denylist match — count only, the matched text is never
+   redisplayed, unchanged from the existing denylist discipline).
+   `meyar.agent.service._build_criterion_from_draft_item` distinguishes
+   the two by inspecting the `pydantic.ValidationError` `CriterionIn(...)`
+   raises: `ProhibitedCriterionError` (itself a `ValueError` subclass
+   raised inside a `model_validator`) is always re-wrapped by pydantic
+   before it reaches the caller — verified empirically against pydantic
+   2.11 — so the original exception is recovered from each error's own
+   `ctx["error"]`, not caught directly. The review form
+   (`meyar.ui.templates.agent.html`) renders `unsupported` rows as a
+   visible, non-submittable notice under each section ("bu tələb
+   avtomatik qiymətləndirməyə daxil edilmədi — sistem hazırda
+   dəstəkləmir") and a separate, generic `prohibited_count` notice —
+   neither ever becomes a `must_*`/`pref_*` form field, so neither can be
+   persisted by submitting the form. `_agent_turn_headline`
+   (`meyar.ui.service`) surfaces the same two safe counts in the one-line
+   summary.
+3. **Vacancies is no longer a normal HR navigation/secondary-tool
+   destination.** Removed from `base.html`'s secondary nav line and from
+   `home.html`'s quick-links feature card — the normal HR product surface
+   is exactly `MEYAR AI | Namizədlər | Çıxış` plus classic search
+   (unchanged, still secondary). `Job`/`JobCriteriaVersion`, `/ui/jobs`,
+   `/ui/jobs/new`, and the manual creation/archive/rank routes are
+   NOT deleted and NOT reduced in capability — they remain reachable by
+   direct URL as backend/supporting capability, per D-032's original
+   "backend stays, UI prominence changes" framing, now carried one step
+   further. Confirming the agent's JD-drafted review
+   (`POST /ui/jobs` with the review form's own hidden `from_agent_draft=1`
+   field, set only by `agent.html`, never by the unchanged manual
+   `job_new.html` form) still creates the `Job`/`JobCriteriaVersion`
+   through the exact same `create_job`/`create_criteria_version` calls,
+   but then renders straight into that criteria version's ranking result
+   (the new shared `meyar.ui.router._render_job_ranking`, factored out of
+   the existing manual "Namizədləri sırala" `rank_job` handler — same
+   `rank_candidates_for_job` call, no new scoring authority) instead of
+   redirecting to the de-emphasized `/ui/jobs` list. The manual
+   `/ui/jobs/new` → `POST /ui/jobs` path is completely unchanged (no
+   `from_agent_draft` field, so it still redirects to `/ui/jobs`).
+   `create_job_route`'s declared required scopes grew to include
+   `jobs:read`/`candidates:read`/`evaluations:write` alongside the
+   existing `jobs:write` so it may call the ranking service inline; every
+   HR role already holds all of these together
+   (`meyar.core.roles._FULL_HR_PERMISSIONS` is deliberately flat with no
+   partial-permission tier yet), so this is a declared-intent widening,
+   not a functional access change.
+
+**Why:** The owner's PR #42 review explicitly blocked merge on exactly
+these two product defects (unreliable JD routing requiring "prompt
+magic"; silent loss of JD requirements the deterministic schema could not
+represent) plus a UX-consistency instruction (Vacancies must not read as
+a normal HR destination once MEYAR AI is the primary surface) — this
+entry records the concrete fix for all three so the next owner pass has
+one coherent decision record rather than three untracked edits.
+
+**Reversibility:** Fully additive/route-level. `explicit_action` is an
+optional parameter with a `None` default — every existing caller
+(`_run` in tests, any future caller) is unaffected unless it opts in.
+`AgentJobDraftToolResult.dropped_count` is removed (not deprecated) since
+PR #42 was never merged — no external consumer exists yet. The nav/home
+template edits are two-line removals, trivially reversible. The
+`from_agent_draft`-gated ranking redirect only changes behavior for
+requests carrying that exact hidden field; the manual creation flow's
+tests (`tests/test_ui_job_creation.py`) pass unchanged.
+
+## D-044 — PR #42 owner UX re-review (issue #33): chat hierarchy, unified
+composer, HR-facing copy, evidence dedup, deterministic headlines, nav trim
+
+**Date:** 2026-09-03
+**Decision:** A second owner UI pass on PR #42 found the product still
+"feels like a developer form" despite D-043's functional corrections.
+Presentation-only fixes, same branch, no agent/scoring/security
+architecture change:
+
+1. **Chat hierarchy.** `meyar.ui.router.agent_workspace`/`agent_turn` now
+   pass `history_turns` (all PRIOR turns, plain text bubbles) and
+   `latest_user_message` (the just-submitted text) separately from
+   `latest` (the rich `AgentTurnView`). `agent.html` renders one
+   unified `<ol>`: history bubbles, then the just-submitted user message,
+   then the assistant's headline AND its cards in the SAME `<li>` —
+   the composer renders only after all of that, never sandwiched between
+   a turn's own text and its results. A turn's own `(user, assistant)`
+   pair is spliced out of `history_turns` (`all_turns[:-2]`) exactly when
+   `run_agent_turn` actually persisted one (the `try` succeeded); on the
+   provider-failure path nothing was persisted, so `history_turns` stays
+   the untouched full list and `latest_user_message` is the raw submitted
+   `message` (previously lost entirely on that path — now shown, same
+   hierarchy, still safe/generic assistant text). Net effect: the
+   previous architecture's live turn was ALWAYS duplicated (once as a
+   plain history bubble, once again in a separate outcome banner) —
+   `test_user_message_and_model_message_are_html_escaped_in_render` is
+   updated from asserting the payload appears 3× to 2× to reflect this
+   deduplication.
+2. **One AI composer.** The two-submit-button form is replaced by one
+   `<select name="intent">` (values `""` / `draft_job_criteria`, labels
+   "Adi söhbət" / "Vakansiya elanını analiz et") plus one `Göndər`
+   button — `meyar.ui.router.agent_turn`'s existing `intent` handling is
+   unchanged (still the only source of `explicit_action`, still never
+   inferred from routing). The textarea's `required` attribute is
+   removed; a new `meyar.ui.static.agent-composer.js` (same progressive-
+   enhancement pattern as the existing `job-form.js`) disables the send
+   button while the message is empty/whitespace-only, so an empty
+   submission never triggers the browser's own native-language "Please
+   fill out this field" popup — the server's existing generic
+   `Form(min_length=1)` → "Forma məlumatlarını yoxlayın." error page
+   remains the authoritative fallback if JS is unavailable.
+3. **HR-facing copy.** `meyar.ui.service._format_filter_match_label`
+   replaces `f"{item.category}: {item.value}"` (literally
+   `"skill: Python"`) for `required_matches`/`preferred_matches` — every
+   category except `min_total_experience_years` now renders as just the
+   already-self-descriptive value; the experience category gets a
+   `"{value} il təcrübə"` unit suffix. `GET_CANDIDATE_EVIDENCE` match
+   headings change from `"{category_label}: {title}"` to `"Uyğun gələn
+   tələb: {title} ({category_label})"` (category demoted to parenthetical
+   meta, mirroring `ranking_results.html`'s existing
+   `label <span class="meta">(kind)</span>` convention).
+4. **Evidence dedup + citation text.** `meyar.ui.service._evidence_views`
+   now deduplicates by `(page, quote)` before truncating to `maximum` — a
+   candidate whose CV evidence is cited by several extracted facts no
+   longer shows the identical quote repeated. A new shared macro
+   (`meyar.ui.templates._evidence_list.evidence_items`) renders every
+   evidence list as `"CV, səhifə {page} — "{quote}""` — never `"Səhifə
+   {page}, blok {block_index}"` — reused by `agent.html`,
+   `search_results.html`, and `candidate_detail.html` so all three
+   surfaces read identically; `block_index` stays on
+   `EvidenceLocationView` for internal provenance, it is simply never
+   the thing HR reads.
+5. **Deterministic headline copy.** `meyar.ui.service._agent_turn_headline`
+   gains three improvements, all still server-authored from already-
+   computed, non-model data (no new LLM call): SEARCH_CANDIDATES now
+   reads `"{top matched requirement} tələbinə uyğun {count} namizəd
+   tapdım."` (built from the top result's own `required_matches`/
+   `preferred_matches`, item 3's HR phrasing) with a distinct zero-result
+   sentence ("Bu tələbə uyğun namizəd tapılmadı.") instead of "0 namizəd
+   tapıldı."; GET_CANDIDATE_PROFILE reads `"{full_name} üçün profil
+   məlumatları aşağıdadır."`; GET_CANDIDATE_EVIDENCE reads `"{full_name}
+   üzrə {topic} sübutlar aşağıdadır."` when matches exist, or an explicit
+   `"{full_name} üzrə bu mövzuda profildə açıq sübut yoxdur."` when they
+   don't — replacing the previous generic "Nəticələr aşağıdadır." filler
+   for these two tool types entirely (they had no dedicated branch
+   before, only the outcome fallback).
+6. **Navigation trimmed further.** `base.html`'s secondary nav
+   (`Klassik axtarış`, the only entry left after D-043 removed
+   Vakansiyalar) is removed outright — normal HR navigation/discovery is
+   now exactly `MEYAR AI | Namizədlər | Çıxış`. The brand/logo link and
+   `error.html`'s "Əsas səhifə" link now point at `/ui/agent` (was `/ui`)
+   so no page's own chrome quietly re-offers classic search as "home."
+   `/ui` itself is untouched and still fully reachable by direct URL
+   (D-032/D-043's "backend/supporting capability stays" framing, applied
+   one step further) — `search_results.html`/`search_clarification.html`'s
+   own in-page "new query" links, which loop within that already-de-
+   emphasized surface rather than re-introducing discovery, are
+   unchanged.
+7. **JD confirmation copy.** The review form's submit button on
+   `agent.html` reads "Tələbləri təsdiqlə və namizədləri sırala" instead
+   of "Vakansiyanı yarat" — the vacancy-CRUD framing is gone from the
+   one HR-facing verb in the agent flow, while `POST /ui/jobs` and the
+   `Job`/`JobCriteriaVersion` persistence it drives (D-043) are
+   byte-for-byte unchanged; the manual `job_new.html` form keeps its own
+   "Vakansiya yarat" copy, since that page is explicitly the
+   backend/supporting surface, not the primary HR product concept.
+
+Verified against the real local `qwen3:1.7b` (not only `FakeLLMProvider`
+fixtures): a live browser session (Chromium via the Claude-in-Chrome
+extension) logged in as the seeded demo HR user, submitted a plain-
+language search and a JD-analysis-mode message, and visually confirmed
+items 1/3/4/5 together in one screenshot — the just-submitted user
+message, the deterministic "Python tələbinə uyğun 1 namizəd tapdım."
+headline, the "Məcburi uyğunluqlar: Python" line (no "skill:" prefix),
+and three deduplicated "CV, səhifə 1 — "..."" evidence citations, all in
+one turn block immediately above the composer. A second live JD-analysis
+call surfaced a genuine `qwen3:1.7b`-drafted EXPERIENCE item with no
+derivable duration, independently confirming the D-043 unsupported-item
+disclosure path end-to-end with real (not fixture-forced) model output,
+rendered under the new "Tələbləri təsdiqlə və namizədləri sırala" button.
+
+**Why:** The owner's second UI pass explicitly accepted the D-043
+architecture/backend behavior and scoped this pass to presentation only:
+chat hierarchy, composer unification, HR language, evidence readability,
+headline quality, and navigation — with an explicit "do not add new
+functionality, do not change scoring/planner/evidence authority/auth/
+tenant rules/persistence" boundary, which every change above respects
+(no new tool, no new persisted field, no new route beyond the existing
+`intent` value already wired in D-043).
+
+**Reversibility:** Template/presentation-layer and one new pure
+formatting/dedup function each in `meyar.ui.service` — no schema, no
+migration, no change to `AgentTurnResult`/`AgentToolResult`/persistence.
+`agent-composer.js` is additive and inert if the browser blocks
+JavaScript (the button just stays enabled, falling back to existing
+server-side validation). The nav/brand-link changes are single-line
+template edits.

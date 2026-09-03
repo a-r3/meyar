@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_evidence_list.html" as evidence_partial %}
 {% block title %}Axtarış nəticələri — MEYAR{% endblock %}
 {% block content %}
 <div class="page-heading">
@@ -27,15 +28,15 @@
     <div class="result-body">
       <div class="card-heading">
         <div><h2>{{ item.full_name or "Ad məlumatı yoxdur" }}</h2></div>
-        <span class="score-pill">Uyğunluq {{ "%.0f"|format(item.relevance_score * 100) }}%</span>
+        {% if outcome.mode in ("SEMANTIC_ONLY", "HYBRID") %}
+        <span class="score-pill">Semantik yaxınlıq {{ "%.0f"|format(item.relevance_score * 100) }}%</span>
+        {% endif %}
       </div>
       {% if item.professional_summary %}<p>{{ item.professional_summary }}</p>{% endif %}
       {% if item.required_matches %}<p><strong>Məcburi uyğunluqlar:</strong> {{ item.required_matches|join(", ") }}</p>{% endif %}
       {% if item.preferred_matches %}<p><strong>Üstünlük uyğunluqları:</strong> {{ item.preferred_matches|join(", ") }}</p>{% endif %}
       {% if item.evidence %}
-      <details><summary>Sübut yerləri</summary><ul class="evidence-list">
-        {% for evidence in item.evidence %}<li>Səhifə {{ evidence.page }}, blok {{ evidence.block_index }}{% if evidence.snippet %}: “{{ evidence.snippet }}”{% endif %}</li>{% endfor %}
-      </ul></details>
+      <details><summary>Sübut yerləri</summary>{{ evidence_partial.evidence_items(item.evidence) }}</details>
       {% endif %}
       <a class="text-link" href="/ui/candidates/{{ item.candidate_id }}">Namizəd profilini aç</a>
     </div>

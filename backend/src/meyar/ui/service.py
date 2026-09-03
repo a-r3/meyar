@@ -1,6 +1,5 @@
 import hashlib
 import json
-import re
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass
@@ -10,7 +9,7 @@ from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.agent.schemas import AgentActionType, AgentTurnResult
-from meyar.core.text import fold_az_ascii, normalize_azerbaijani_case
+from meyar.core.text import normalize_azerbaijani_case, slugify_criterion_label
 from meyar.ingestion.parser import CanonicalDocumentContent
 from meyar.models.candidate import Candidate
 from meyar.models.candidate_document import (
@@ -54,6 +53,8 @@ from meyar.services.candidate_profile_repo import (
 from meyar.services.candidate_repo import get_candidate
 from meyar.ui.presentation import (
     AGENT_EVIDENCE_CATEGORY_LABELS,
+    CRITERION_KIND_LABELS,
+    agent_turn_outcome_message,
     join_nonempty,
     planner_outcome_view,
 )
@@ -61,6 +62,7 @@ from meyar.ui.view_models import (
     AgentCandidateProfileView,
     AgentEvidenceMatchView,
     AgentEvidenceView,
+    AgentJobDraftView,
     AgentToolResultView,
     AgentTurnView,
     CandidateDetailView,
@@ -69,6 +71,7 @@ from meyar.ui.view_models import (
     CandidateLibraryItemView,
     CandidateLibraryPageView,
     CandidateSearchResultView,
+    CriterionRowView,
     DocumentPreviewPageView,
     EvaluationHistoryView,
     EvidenceLocationView,
@@ -102,6 +105,20 @@ def _validated_filter(value: str | None, allowed: frozenset[str], label: str) ->
     return normalized
 
 
+def _format_filter_match_label(category: str, value: str) -> str:
+    """HR-facing phrasing for one matched search filter — never the raw
+    internal category key a `RequiredFilterMatch`/`PreferredFilterMatch`
+    carries (e.g. category="skill" reads as developer taxonomy, not HR
+    language; see D-044, PR #42 owner UX correction). The matched value
+    itself (a skill/certification/language/education name) is already
+    self-descriptive to an HR reader, so most categories need no prefix
+    at all — only the numeric experience-years category needs a unit
+    appended to stay readable."""
+    if category == "min_total_experience_years":
+        return f"{value} il təcrübə"
+    return value
+
+
 def _identity_values(version: CandidateIdentityVersion | None) -> tuple[str | None, ...]:
     if version is None or version.identity_content is None:
         return None, None, None
@@ -119,14 +136,28 @@ def _identity_values(version: CandidateIdentityVersion | None) -> tuple[str | No
 def _evidence_views(
     evidence: list[EvidenceRef], *, snippets: bool, maximum: int = 4
 ) -> list[EvidenceLocationView]:
-    return [
-        EvidenceLocationView(
-            page=item.page,
-            block_index=item.block_index,
-            snippet=(item.quote[:240] if snippets else None),
+    """Deduplicates by (page, quote) before truncating to ``maximum`` — an
+    HR user must never see the identical citation repeated (distinct
+    ``EvidenceRef`` entries can legitimately point at the same quoted
+    sentence for different extracted facts). ``block_index`` is still
+    carried on each view for internal provenance (never dropped from the
+    data), it is simply never the thing HR reads — see
+    meyar.ui.templates for the display text (D-044, PR #42 owner UX
+    correction)."""
+    seen: set[tuple[int, str]] = set()
+    views: list[EvidenceLocationView] = []
+    for item in evidence:
+        quote = item.quote[:240] if snippets else None
+        key = (item.page, quote or "")
+        if key in seen:
+            continue
+        seen.add(key)
+        views.append(
+            EvidenceLocationView(page=item.page, block_index=item.block_index, snippet=quote)
         )
-        for item in evidence[:maximum]
-    ]
+        if len(views) >= maximum:
+            break
+    return views
 
 
 def _facts(profile: CandidateProfileExtraction) -> dict[str, list[ProfileFactView]]:
@@ -551,16 +582,28 @@ async def build_search_result_views(
                 semantic_score=result.semantic_score,
                 profile_version_id=result.candidate_profile_version_id,
                 required_matches=[
-                    f"{item.category}: {item.value}" for item in result.required_filters_matched
+                    _format_filter_match_label(item.category, item.value)
+                    for item in result.required_filters_matched
                 ],
                 preferred_matches=[
-                    f"{item.category}: {item.value}" for item in result.preferred_filters_matched
+                    _format_filter_match_label(item.category, item.value)
+                    for item in result.preferred_filters_matched
                 ],
                 professional_summary=summary,
                 evidence=evidence,
             )
         )
     return views
+
+
+def _criterion_row_view(criterion: CriterionIn) -> CriterionRowView:
+    return CriterionRowView(
+        kind=criterion.kind.value,
+        kind_label=CRITERION_KIND_LABELS.get(criterion.kind.value, criterion.kind.value),
+        requirement=criterion.label,
+        min_years=f"{criterion.min_years:g}" if criterion.min_years is not None else "",
+        weight=f"{criterion.weight:g}",
+    )
 
 
 async def _agent_candidate_profile_view(
@@ -611,6 +654,30 @@ async def build_agent_turn_view(
                         result_count=search_response.result_count if search_response else None,
                     ),
                     search_results=search_results,
+                )
+            )
+        elif tool_result.tool_name == AgentActionType.DRAFT_JOB_CRITERIA:
+            assert tool_result.job_draft is not None
+            draft = tool_result.job_draft
+            tool_result_views.append(
+                AgentToolResultView(
+                    tool_name=tool_result.tool_name.value,
+                    job_draft=AgentJobDraftView(
+                        title=draft.title,
+                        must_have_rows=[_criterion_row_view(c) for c in draft.must_have],
+                        preferred_rows=[_criterion_row_view(c) for c in draft.preferred],
+                        unsupported_must_have=[
+                            u.requirement
+                            for u in draft.unsupported
+                            if u.criterion_type == CriterionType.MUST_HAVE
+                        ],
+                        unsupported_preferred=[
+                            u.requirement
+                            for u in draft.unsupported
+                            if u.criterion_type == CriterionType.PREFERRED
+                        ],
+                        prohibited_count=draft.prohibited_count,
+                    ),
                 )
             )
         elif tool_result.tool_name == AgentActionType.GET_CANDIDATE_PROFILE:
@@ -671,8 +738,95 @@ async def build_agent_turn_view(
                 )
             )
     return AgentTurnView(
-        outcome=result.outcome.value, message=result.message, tool_results=tool_result_views
+        outcome=result.outcome.value,
+        message=result.message,
+        headline=_agent_turn_headline(result, tool_result_views),
+        tool_results=tool_result_views,
     )
+
+
+def _agent_turn_headline(
+    result: AgentTurnResult, tool_result_views: list[AgentToolResultView]
+) -> str:
+    """One deterministic, HR-facing leading sentence for a live turn —
+    never a second, overlapping status banner alongside it (D-030
+    conversational-UX requirement). Priority: a real model-authored
+    FINAL_ANSWER/CLARIFY framing or D-038 grounded-synthesis sentence
+    always wins (it IS the meaningful assistant message); otherwise a
+    fixed, deterministic summary derived from the turn's own single most
+    recent tool result; otherwise the generic per-outcome fallback."""
+    if result.message:
+        return result.message
+    if tool_result_views:
+        latest_view = tool_result_views[-1]
+        if latest_view.tool_name == AgentActionType.SEARCH_CANDIDATES.value:
+            outcome = latest_view.search_outcome
+            assert outcome is not None
+            if outcome.executable:
+                count = len(latest_view.search_results)
+                if count == 0:
+                    return "Bu tələbə uyğun namizəd tapılmadı."
+                # The leading matched requirement of the top result — built
+                # purely from already-computed, HR-phrased filter matches
+                # (never model-authored text) so the sentence names what
+                # was actually searched for without a second LLM call.
+                top = latest_view.search_results[0]
+                combined_matches = top.required_matches + top.preferred_matches
+                term = combined_matches[0] if combined_matches else None
+                if term:
+                    return f"{term} tələbinə uyğun {count} namizəd tapdım."
+                return f"{count} namizəd tapdım."
+            return outcome.message
+        if latest_view.tool_name == AgentActionType.GET_CANDIDATE_PROFILE.value:
+            profile = latest_view.profile
+            if profile is not None:
+                name = profile.full_name or "Namizəd"
+                return f"{name} üçün profil məlumatları aşağıdadır."
+        if latest_view.tool_name == AgentActionType.GET_CANDIDATE_EVIDENCE.value:
+            evidence_view = latest_view.evidence
+            if evidence_view is not None:
+                name = evidence_view.full_name or "Namizəd"
+                if evidence_view.matches:
+                    topic_suffix = f" {evidence_view.topic}" if evidence_view.topic else ""
+                    return f"{name} üzrə{topic_suffix} sübutlar aşağıdadır."
+                # Explicit insufficient-evidence wording — never the
+                # generic "Nəticələr aşağıdadır." filler for a real "no
+                # evidence found" result (D-044, PR #42 owner UX
+                # correction).
+                return f"{name} üzrə bu mövzuda profildə açıq sübut yoxdur."
+        if latest_view.tool_name == AgentActionType.DRAFT_JOB_CRITERIA.value:
+            draft = latest_view.job_draft
+            assert draft is not None
+            total = len(draft.must_have_rows) + len(draft.preferred_rows)
+            unsupported_total = len(draft.unsupported_must_have) + len(draft.unsupported_preferred)
+            if total == 0 and unsupported_total == 0 and draft.prohibited_count == 0:
+                return (
+                    "Bu mətndən konkret tələb müəyyən edilmədi. Aşağıdan əl ilə "
+                    "kriteriya əlavə edə bilərsiniz."
+                )
+            # Both notes are safe, generic HR-facing text — never the
+            # matched sensitive term itself for prohibited_count (see
+            # AgentJobDraftToolResult docstring); unsupported_total's own
+            # requirement text is disclosed only in the review rows below,
+            # never restated in this one-line headline.
+            notes = []
+            if unsupported_total:
+                notes.append(
+                    f"{unsupported_total} tələb hazırda avtomatik qiymətləndirməyə daxil "
+                    "edilmədi (aşağıda görünür)"
+                )
+            if draft.prohibited_count:
+                notes.append(
+                    f"{draft.prohibited_count} tələb qadağan olunmuş/əlaqəsiz atributa görə "
+                    "daxil edilmədi"
+                )
+            note_text = f" ({'; '.join(notes)}.)" if notes else ""
+            return (
+                f"\"{draft.title}\" üçün {len(draft.must_have_rows)} mütləq və "
+                f"{len(draft.preferred_rows)} üstünlük tələbi qaralandı. Nəzərdən keçirin, "
+                f"lazım gəldikdə düzəliş edin və təsdiqləyin.{note_text}"
+            )
+    return agent_turn_outcome_message(result.outcome.value, None)
 
 
 async def list_job_views(
@@ -891,8 +1045,6 @@ CRITERION_KIND_OPTIONS: tuple[tuple[str, str], ...] = (
 )
 DEFAULT_CRITERION_WEIGHT = "1"
 
-_CRITERION_ID_FALLBACK = "meyar"
-
 
 @dataclass(frozen=True)
 class CriterionRowInput:
@@ -900,22 +1052,6 @@ class CriterionRowInput:
     requirement: str
     min_years: str
     weight: str
-
-
-def _slugify_criterion_label(label: str, used_ids: set[str]) -> str:
-    """A stable, ASCII-only criterion id derived from the HR-entered
-    requirement text. The HR user never types or sees a raw id/UUID (owner
-    visual-inspection Blocker 2: 'no raw UUID entry by the HR user') — it
-    exists only as the deterministic policy engine's internal join key."""
-    ascii_text = fold_az_ascii(label).lower()
-    base = re.sub(r"[^a-z0-9]+", "_", ascii_text).strip("_")[:60] or _CRITERION_ID_FALLBACK
-    candidate = base
-    suffix = 2
-    while candidate in used_ids:
-        candidate = f"{base}_{suffix}"[:64]
-        suffix += 1
-    used_ids.add(candidate)
-    return candidate
 
 
 def _first_pydantic_message(exc: ValidationError) -> str:
@@ -971,7 +1107,7 @@ def _parse_criterion_row(
 
     try:
         return CriterionIn(
-            id=_slugify_criterion_label(requirement, used_ids),
+            id=slugify_criterion_label(requirement, used_ids),
             kind=kind,
             type=criterion_type,
             label=requirement,

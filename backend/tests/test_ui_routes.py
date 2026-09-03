@@ -989,3 +989,35 @@ async def test_reason_codes_and_search_mode_not_shown_in_search_results(
     assert "SKILL_SPECIFIC_EXPERIENCE_DURATION_UNSUPPORTED" not in response.text
     assert "Səbəb kodları" not in response.text
     assert "Rejim" not in response.text
+
+
+async def test_structured_only_search_never_shows_a_score_pill(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
+) -> None:
+    """Slice 4 (issue #33, D-030): a plain structured search has no real
+    similarity/compatibility signal to show on a generic candidate card —
+    the pill (previously mislabeled "Uyğunluq %" unconditionally) must be
+    absent entirely, not merely relabeled, outside a SEMANTIC_ONLY/HYBRID
+    search or a real deterministic evaluation context."""
+    tenant, user, password, _membership = tenant_and_user
+    await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=_profile("Python")
+    )
+    await db_session.commit()
+
+    fake = FakeLLMProvider(
+        planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"]))
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake
+    csrf = await _login_and_csrf(client, user.username, password)
+    response = await client.post(
+        "/ui/search",
+        data={"query": "Python bilən namizədləri göstər.", "csrf_token": csrf},
+    )
+    assert response.status_code == 200
+    assert "score-pill" not in response.text
+    assert "Uyğunluq" not in response.text
+    assert "Semantik yaxınlıq" not in response.text

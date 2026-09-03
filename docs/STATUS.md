@@ -834,9 +834,93 @@ Evaluation's persisted `candidate_profile_version_id`/
 `job_criteria_version_id` verified to equal the exact input versions.
 
 ## In progress
-**M8 Slice 3 — Evidence Capability Completion (#32)**: implementation
-complete on `feat/evidence-capability-completion`, PR opened against
-`main`, **pending owner review — not merged.** Closes the D-027-identified
+**M8 Slice 4 — Agent Product UX & JD Matching (#33)**: implementation
+complete on `feat/agent-product-ux-jd-matching` (from synced `main`
+`8c1782f`), PR #42 opened against `main`, **corrected per two rounds of
+owner UI review (D-043 functional, D-044 presentation) and still awaiting
+owner re-review before merge — not merged, not self-accepted per the
+task's own instruction.**
+MEYAR AI is now the primary post-login HR surface (`_finalize_human_login`
+redirects to `/ui/agent`; top nav — and the brand/logo link, and every
+page's own "home" link — is exactly `MEYAR AI | Namizədlər | Çıxış`, no
+secondary nav row at all any more (D-044): **neither Vacancies (D-043)
+nor classic search (D-044) is a normal HR nav/discovery destination**;
+`/ui/jobs`, `/ui/search`-family routes remain fully functional as
+backend/supporting capability, reachable by direct URL only). **D-044
+also unifies the composer** (one mode `<select>` — "Adi söhbət" /
+"Vakansiya elanını analiz et" — plus one send button, JS-guarded against
+an empty submit instead of the browser's native English validation
+popup), **restructures the conversation feed so each turn's user message,
+assistant explanation, and result cards render as one block with the
+composer strictly after it** (previously the composer sat between
+history and the live turn's own results), **replaces developer-taxonomy
+strings** (`"skill: Python"` → plain "Python"; evidence citations →
+`"CV, səhifə N — "quote""`, deduplicated), and **gives three tool types
+their own deterministic, evidence-grounded headline sentence** instead of
+the generic "Nəticələr aşağıdadır." filler.
+New `AgentActionType.DRAFT_JOB_CRITERIA`: HR pastes/describes a JD, a new
+bounded `LLMProvider.draft_job_criteria` call drafts a structured criteria
+set restricted to the manual form's five `CriterionKind`s, every item is
+re-validated into a real `CriterionIn` (same denylist/schema as the
+manual form and REST API). **D-043 correction: an item that fails that
+check is never silently dropped** — a non-sensitive failure is disclosed
+verbatim in the review (`AgentJobDraftToolResult.unsupported`); a
+sensitive/prohibited match is a safe count only
+(`prohibited_count`, matched text never redisplayed). **D-043 also adds a
+first-class deterministic JD entry point**: the composer's "Vakansiya
+elanını analiz et" mode (a `<select>` option since D-044, originally a
+second submit button) submits `intent=draft_job_criteria`, which makes
+`run_agent_turn(..., explicit_action=AgentActionType.DRAFT_JOB_CRITERIA)`
+skip `llm.decide_agent_action` entirely for that turn — no model call, no
+routing ambiguity, immune to the qwen3:1.7b misrouting limitation below.
+The review form (new shared `_criteria_rows.html` macro, also now used by
+`job_new.html`) posts through the existing `POST /ui/jobs` — nothing
+persisted until HR confirms, and **confirming from the agent's own review
+form now lands directly on the ranking result** (new shared
+`meyar.ui.router._render_job_ranking`, same `rank_candidates_for_job` call
+the manual "Namizədləri sırala" action already used — no new scoring
+authority) instead of a bare redirect to the de-emphasized jobs list; the
+unchanged manual `/ui/jobs/new` path still redirects to `/ui/jobs` as
+before. Conversation UX consolidated: one deterministic server-computed
+`headline` replaces the previous two-tier duplicate status-banner stack;
+new `POST /ui/agent/reset` ("Yeni söhbət") clears only the caller's own
+session-scoped `AgentConversation`. The semantic-similarity pill is
+relabeled "Semantik yaxınlıq %" and consistently hidden outside
+SEMANTIC_ONLY/HYBRID search modes on both `/ui/search` and `/ui/agent` —
+the real 0–100 deterministic score stays exactly where it already lived
+(`ranking_results.html` only). D-031's fast-path sunset condition is NOT
+acted on this slice — that owner-evaluated judgment is left to the
+accompanying UI review, per issue #33/D-031 point 3.
+Real-Ollama acceptance testing (qwen3:1.7b, same model as D-039/D-040)
+found and fixed a genuine defect: the model can echo
+`AGENT_SYSTEM_PROMPT`'s own instruction text verbatim into a CLARIFY/
+FINAL_ANSWER message — fixed structurally with
+`meyar.agent.service._looks_like_prompt_leak` (exact containment check,
+not a heuristic), reusing the existing bounded-retry-then-
+`MALFORMED_MODEL_OUTPUT`-fallback path; confirmed live post-fix that a
+repeat leak is rejected and only the safe fallback text renders. The same
+testing also surfaced a known, documented model-quality limitation (not
+a code defect): qwen3:1.7b sometimes still routes a raw pasted JD to
+SEARCH_CANDIDATES instead of DRAFT_JOB_CRITERIA when relying on
+conversational routing alone despite a sharpened disambiguation prompt
+(`AGENT_PROMPT_VERSION` -> `agent-orchestrator-prompt-v3`) — **the D-043
+explicit `intent` affordance is the product answer to this limitation,
+not a further prompt change**; both branches of the conversational path
+stay fully safe when misrouting happens (a misrouted JD's own
+search-planner call fails typed/non-fabricating, never silently produces
+a wrong result), and `draft_job_criteria` itself was independently
+verified end-to-end against the real model, including through the full
+validation/dispatch pipeline, producing a correctly structured,
+denylist-clean draft; the D-044 presentation pass was independently
+re-verified the same way (live browser session against real
+`qwen3:1.7b`, not only `FakeLLMProvider` fixtures) — see D-044 for the
+exact screenshots/assertions. Quality gates: `ruff` clean, `mypy src`
+clean (136 files), `alembic heads` unchanged (no migration — purely
+additive schema/service/template layer), full `pytest` suite passed,
+`scripts/scan-tracked-tree.sh` clean. See D-042, D-043, D-044.
+
+**M8 Slice 3 — Evidence Capability Completion (#32)**: **MERGED as PR #41
+(`8c1782f`, squash); issue #32 closed.** Closes the D-027-identified
 `SkillItem`/`EmploymentItem` grounding gap: `CandidateProfileExtraction`
 gains optional `skill_experience` (skill <-> attributable employment-period
 grounding) and `domain_experience` (explicit sector/domain evidence,
@@ -1113,7 +1197,7 @@ due date because the official timeline has not been supplied.
 | M5 — Security, Target-Mac Validation & MVP Acceptance | Slice 13 + target-Mac benchmark | OPEN — issue #20 open; PR #22 merged at `a709ce1` implementing Pass 1 (original CV, no-exfiltration, backup/restore, audit guard, multilingual evidence) with `Refs #20`; Mac Mini benchmark execution on the now owner-confirmed target hardware remains the sole open mandatory gate |
 | M6 — Operational CV Intake & Reconciliation | Slice 14 | CLOSED — Slice 14 merged (PR #24 at `f6e31ff`), issue #23 closed; owner-approved closure |
 | M7 — HR UI & Presentation Readiness | HR UI productization (chore, issue #27) | OPEN — branch `feat/hr-ui-productization`, PR #29 open, pending final owner visual check; Job lifecycle implemented; see D-023 through D-029 |
-| M8 — Bounded Local-AI HR Agent Platform | Slices 1–5 (issues #30–#34) | OPEN — Slice 1 (#30) and Slice 2 (#31) merged; Slice 3 (#32) implementation complete, PR open, pending review |
+| M8 — Bounded Local-AI HR Agent Platform | Slices 1–5 (issues #30–#34) | OPEN — Slice 1 (#30), Slice 2 (#31), Slice 3 (#32) merged (PR #41 at `8c1782f`); Slice 4 (#33) implementation corrected per two owner review rounds (D-043 functional, D-044 presentation), branch `feat/agent-product-ux-jd-matching`, PR #42 open, awaiting owner re-review before merge |
 | M9 — Deployment, Benchmark & Integration Readiness | Slices 6–8 (issues #35–#37) | OPEN — created 2026-09-01 per D-030/D-031/D-032; no implementation started; does not supersede or close M5/#20 |
 
 ## Official requirement gap matrix

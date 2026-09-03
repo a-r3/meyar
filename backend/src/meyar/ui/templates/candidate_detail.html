@@ -1,10 +1,11 @@
 {% extends "base.html" %}
+{% import "_evidence_list.html" as evidence_partial %}
 {% block title %}Namizəd detalı — MEYAR{% endblock %}
 {% macro fact_section(title, items) %}
 <section class="panel profile-section">
   <h2>{{ title }}</h2>
   {% if not items %}<p class="muted">Məlumat yoxdur.</p>{% endif %}
-  {% for item in items %}<article class="fact"><h3>{{ item.title }}</h3>{% if item.detail %}<p>{{ item.detail }}</p>{% endif %}{% if item.evidence %}<details><summary>Sübut</summary><ul class="evidence-list">{% for evidence in item.evidence %}<li>Səhifə {{ evidence.page }}, blok {{ evidence.block_index }}{% if evidence.snippet %}: “{{ evidence.snippet }}”{% endif %}</li>{% endfor %}</ul></details>{% endif %}</article>{% endfor %}
+  {% for item in items %}<article class="fact"><h3>{{ item.title }}</h3>{% if item.detail %}<p>{{ item.detail }}</p>{% endif %}{% if item.evidence %}<details><summary>Sübut</summary>{{ evidence_partial.evidence_items(item.evidence) }}</details>{% endif %}</article>{% endfor %}
 </section>
 {% endmacro %}
 {% block content %}

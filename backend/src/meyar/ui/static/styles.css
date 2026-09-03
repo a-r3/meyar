@@ -104,6 +104,18 @@ select:focus-visible, summary:focus-visible {
 .site-header .button-secondary:hover { background: var(--surface); color: var(--primary); }
 
 .page-shell { width: min(1180px, calc(100% - 32px)); margin: 34px auto 72px; }
+.nav-secondary {
+  width: min(1180px, calc(100% - 32px));
+  margin: 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  font-size: .85rem;
+  color: var(--text-muted);
+}
+.nav-secondary a { color: var(--text-muted); }
+.nav-secondary a:hover, .nav-secondary a:focus-visible { color: var(--primary); }
 footer {
   padding: 26px 16px;
   border-top: 1px solid var(--border);
@@ -145,6 +157,7 @@ h3 { font-size: 1rem; }
   box-shadow: var(--shadow-subtle);
 }
 .stack-form { display: grid; gap: 12px; }
+.button-row { display: flex; gap: 12px; flex-wrap: wrap; }
 .radio-option {
   display: flex;
   align-items: center;
@@ -475,3 +488,29 @@ tbody tr:hover { background: var(--surface-subtle); }
 .agent-turn .untrusted-text { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
 .agent-turn-user { margin-left: auto; background: var(--panel-alt, #f4f6fb); }
 .agent-turn-assistant { background: var(--panel, #fff); }
+.agent-message {
+  padding: 14px 18px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  margin-bottom: 20px;
+}
+.agent-message .agent-turn-role { margin-bottom: 4px; }
+.agent-message p { margin: 0; }
+.agent-message[data-outcome="PROHIBITED_REQUEST"],
+.agent-message[data-outcome="MALFORMED_MODEL_OUTPUT"],
+.agent-message[data-outcome="AGENT_PROVIDER_FAILURE"],
+.agent-message[data-outcome="JOB_DRAFT_FAILED"],
+.agent-message[data-outcome="TOOL_CALL_LIMIT_EXCEEDED"],
+.agent-message[data-outcome="CANDIDATE_REF_NOT_FOUND"] {
+  background: var(--status-danger-bg);
+  border-color: var(--status-danger-border);
+  color: var(--status-danger-text);
+}
+.agent-message[data-outcome="UNSUPPORTED_SEMANTICS"],
+.agent-message[data-outcome="AMBIGUOUS_REQUEST"],
+.agent-message[data-outcome="CLARIFICATION_REQUESTED"] {
+  background: var(--status-warning-bg);
+  border-color: var(--status-warning-border);
+  color: var(--status-warning-text);
+}

@@ -85,7 +85,7 @@ async def test_freshly_seeded_demo_credential_logs_in_over_real_http(
         follow_redirects=False,
     )
     assert response.status_code == 303
-    assert response.headers["location"] == "/ui"
+    assert response.headers["location"] == "/ui/agent"
     assert response.cookies.get("meyar_ui_session") is not None
 
     library = await client.get("/ui/library")
@@ -120,7 +120,7 @@ async def test_password_is_verified_exactly_not_normalized(
         follow_redirects=False,
     )
     assert exact.status_code == 303
-    assert exact.headers["location"] == "/ui"
+    assert exact.headers["location"] == "/ui/agent"
 
     for corrupted in (
         exact_password.strip(),
@@ -247,7 +247,7 @@ async def test_reset_then_reseed_cycle_produces_a_working_login(
         follow_redirects=False,
     )
     assert response.status_code == 303
-    assert response.headers["location"] == "/ui"
+    assert response.headers["location"] == "/ui/agent"
 
 
 async def test_no_plaintext_password_persisted_and_no_credential_in_audit(

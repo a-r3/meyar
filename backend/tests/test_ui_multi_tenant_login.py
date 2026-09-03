@@ -84,7 +84,7 @@ async def test_selecting_a_valid_membership_completes_login(
         follow_redirects=False,
     )
     assert response.status_code == 303
-    assert response.headers["location"] == "/ui"
+    assert response.headers["location"] == "/ui/agent"
     assert response.cookies.get("meyar_ui_session") is not None
 
     home = await client.get("/ui/library")
@@ -160,4 +160,4 @@ async def test_single_active_membership_still_auto_selects(
         follow_redirects=False,
     )
     assert response.status_code == 303
-    assert response.headers["location"] == "/ui"
+    assert response.headers["location"] == "/ui/agent"

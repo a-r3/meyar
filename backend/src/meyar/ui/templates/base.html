@@ -8,13 +8,11 @@
 </head>
 <body>
   <header class="site-header">
-    <a class="brand" href="/ui">MEYAR</a>
+    <a class="brand" href="{{ '/ui/agent' if authenticated else '/ui/login' }}">MEYAR</a>
     {% if authenticated %}
     <nav aria-label="Əsas naviqasiya">
       <a href="/ui/agent">MEYAR AI</a>
-      <a href="/ui">Namizəd axtarışı</a>
       <a href="/ui/library">Namizədlər</a>
-      <a href="/ui/jobs">Vakansiyalar</a>
     </nav>
     <form method="post" action="/ui/logout" class="logout-form">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
