@@ -41,9 +41,15 @@ from meyar.agent.schemas import (
     GroundedSelection,
     JDCriteriaDraft,
     JDDraftCriterionItem,
+    JDDraftCriterionKind,
     UnsupportedJDCriterionItem,
 )
-from meyar.core.text import fold_az_ascii, normalize_azerbaijani_case, slugify_criterion_label
+from meyar.core.text import (
+    combine_degree_and_field,
+    fold_az_ascii,
+    normalize_azerbaijani_case,
+    slugify_criterion_label,
+)
 from meyar.embedding.provider import EmbeddingProvider
 from meyar.llm.provider import (
     LLMProvider,
@@ -272,7 +278,7 @@ _EVIDENCE_CATEGORIES = (
     (
         "education",
         lambda item: (
-            " ".join(part for part in (item.degree, item.field_of_study) if part)
+            combine_degree_and_field(item.degree, item.field_of_study)
             or (item.institution or "Təhsil")
         ),
     ),
@@ -414,7 +420,7 @@ _PROFILE_FACT_CATEGORIES = (
     (
         "education",
         lambda item: (
-            " ".join(part for part in (item.degree, item.field_of_study) if part)
+            combine_degree_and_field(item.degree, item.field_of_study)
             or (item.institution or "Təhsil"),
             item.date,
         ),
@@ -527,7 +533,14 @@ def render_grounded_answer(selection: GroundedSelection, facts: list[GroundedFac
         clauses = [_render_fact_clause(fact) for fact in ordered_facts]
         sentences.append("Məlum faktlar: " + "; ".join(clauses) + ".")
     if selection.caveat == GroundedCaveat.DURATION_NOT_PROVEN:
-        sentences.append("Mövcud sübut konkret müddəti göstərmir.")
+        # Explicitly scoped to "bu mövzu üzrə" (regarding this topic/skill)
+        # — not a bare "no concrete duration", which read as though no
+        # dated evidence existed at all even when the facts sentence right
+        # above it already cites dated employment history. The caveat
+        # means the ASKED-ABOUT skill/topic's own duration is unproven,
+        # never that the CV has no dates (PR #42 owner correction, issue
+        # #33, D-045).
+        sentences.append("Mövcud sübut bu mövzu üzrə konkret təcrübə müddətini əsaslandırmır.")
     return " ".join(sentences)
 
 
@@ -571,13 +584,25 @@ def _build_criterion_from_draft_item(
     original, already-confirmed-non-sensitive requirement text. Mirrors
     meyar.ui.service._parse_criterion_row's kind-aware value/min_years
     shape, but reports instead of raising since this is a best-effort
-    DRAFT, not a form submission."""
-    value = None if item.kind == CriterionKind.EXPERIENCE else item.requirement
-    min_years = item.min_years if item.kind == CriterionKind.EXPERIENCE else None
+    DRAFT, not a form submission.
+
+    ``item.kind == JDDraftCriterionKind.OTHER`` is routed straight to
+    UNSUPPORTED here, deterministically — never via an incidental
+    CriterionIn validation failure — because OTHER, by construction, is
+    the model's own explicit signal that this requirement does not fit
+    any evaluator-supported kind (D-045); building a CriterionIn from it
+    would either fail unpredictably or, worse, misclassify a genuinely
+    unsupported requirement into a supported (and therefore scored)
+    criterion, which the deterministic scorer must never do."""
+    if item.kind == JDDraftCriterionKind.OTHER:
+        return None, DroppedJDCriterionReason.UNSUPPORTED
+    kind = CriterionKind(item.kind.value)
+    value = None if kind == CriterionKind.EXPERIENCE else item.requirement
+    min_years = item.min_years if kind == CriterionKind.EXPERIENCE else None
     try:
         criterion = CriterionIn(
             id=slugify_criterion_label(item.requirement, used_ids),
-            kind=item.kind,
+            kind=kind,
             type=criterion_type,
             label=item.requirement,
             value=value,
@@ -697,11 +722,19 @@ async def _finish_turn(
     max_context_turns: int,
     result: AgentTurnResult,
 ) -> AgentTurnResult:
-    """Persists this turn's own (outcome, message) — never pre-rendered
-    display text — so a past turn can always be redisplayed later through
-    the exact same deterministic outcome->text mapping the live turn uses
-    (meyar.ui.presentation.agent_turn_outcome_message), and is therefore
-    never blank even when ``result.message`` is None (see D-036)."""
+    """Persists this turn's own (outcome, message) as a first pass — the
+    router's own sync_last_turn_display_text (D-045) overwrites ``text``
+    with the actual rendered headline once one is available, right after
+    this call returns. This first pass alone still guarantees a past turn
+    is never blank even when ``result.message`` is None: redisplaying it
+    later always falls back through the same deterministic outcome->text
+    mapping the live turn uses (meyar.ui.presentation.
+    agent_turn_outcome_message) — see D-036. D-045 exists because that
+    fallback text is not always what the live turn actually showed (a
+    tool-result turn's live headline is a richer, separately computed
+    sentence — meyar.ui.service._agent_turn_headline); this call cannot
+    compute that richer headline itself, since it runs before the
+    router's post-tenant-lookup view-building step."""
     turns = [
         *turns,
         {"role": "assistant", "text": result.message or "", "outcome": result.outcome.value},

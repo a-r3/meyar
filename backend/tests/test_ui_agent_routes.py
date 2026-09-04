@@ -691,10 +691,17 @@ async def test_draft_job_criteria_drops_prohibited_item_and_notes_it(
 async def test_draft_job_criteria_discloses_unsupported_requirement_visibly(
     client: AsyncClient, tenant_and_user, local_ui_settings: Settings
 ) -> None:
-    """D-043 (PR #42 owner correction, issue #33): a non-sensitive
+    """D-043/D-045 (PR #42 owner correction, issue #33): a non-sensitive
     requirement CriterionIn cannot represent (here an EXPERIENCE item with
     no derivable duration) must be visibly disclosed to HR, not silently
-    dropped — and must never appear as a persistable form row."""
+    dropped — and must never appear as an editable, persistable CRITERION
+    row (a "must_requirement_N" field, which build_job_create_request
+    would validate and could turn into a real, scored criterion). D-045
+    does carry its own text into a dedicated, differently-named hidden
+    field (unsupported_must_have) so it survives confirmation onto the
+    ranking page — see test_unsupported_requirement_survives_confirmation_
+    and_scores_nothing below; that is a deliberate, separate contract,
+    not the thing this test guards against."""
     from meyar.agent.schemas import JDCriteriaDraft, JDDraftCriterionItem
     from meyar.schemas.criteria import CriterionKind
 
@@ -719,8 +726,11 @@ async def test_draft_job_criteria_discloses_unsupported_requirement_visibly(
     assert response.status_code == 200
     assert 'value="Python"' in response.text
     assert "ACAMS sertifikatı təcrübəsi" in response.text
-    assert 'value="ACAMS sertifikatı təcrübəsi"' not in response.text
-    assert "avtomatik qiymətləndirməyə daxil edilmədi" in response.text
+    # Never an editable "must_requirement_N" criterion-row value — only the
+    # dedicated, differently-named unsupported_must_have hidden field.
+    assert 'name="must_requirement_1" value="ACAMS sertifikatı təcrübəsi"' not in response.text
+    assert 'name="unsupported_must_have" value="ACAMS sertifikatı təcrübəsi"' in response.text
+    assert "Məlumat üçün — qiymətləndirməyə daxil edilmir" in response.text
 
 
 async def test_draft_job_criteria_explicit_intent_routes_without_magic_wording(
@@ -841,6 +851,84 @@ async def test_confirming_agent_drafted_criteria_lands_on_ranking_not_jobs_list(
     assert create.status_code == 200
     assert "Reytinq nəticələri" in create.text
     assert "Baş Backend Mühəndisi" in create.text
+
+
+async def test_unsupported_requirement_survives_confirmation_and_scores_nothing(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
+) -> None:
+    """D-045 (PR #42 owner correction, issue #33, item 6): a requirement
+    the model explicitly flagged as JDDraftCriterionKind.OTHER (real,
+    non-sensitive, outside the deterministic evaluator's five scoring
+    dimensions) must still be visible, clearly labeled informational/
+    not-scored, on the ranking page reached by confirming — never
+    silently dropped by the confirm action — while never becoming a
+    persisted Criterion or influencing the numeric score."""
+    from meyar.agent.schemas import JDCriteriaDraft, JDDraftCriterionItem, JDDraftCriterionKind
+    from meyar.schemas.criteria import CriterionKind
+
+    tenant, user, password, _membership = tenant_and_user
+    await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=_profile("Python")
+    )
+    await db_session.commit()
+
+    fake = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        jd_draft=JDCriteriaDraft(
+            title="Data Analitiki",
+            must_have=[JDDraftCriterionItem(kind=CriterionKind.SKILL, requirement="Python")],
+            preferred=[
+                JDDraftCriterionItem(
+                    kind=JDDraftCriterionKind.OTHER, requirement="Ezamiyyətə hazır olmaq"
+                )
+            ],
+        ),
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake
+    csrf = await _login_and_csrf(client, user.username, password)
+    draft_response = await client.post(
+        "/ui/agent",
+        data={"message": "Data Analitiki axtarırıq. Python bilməlidir.", "csrf_token": csrf},
+    )
+    assert draft_response.status_code == 200
+    assert 'name="unsupported_preferred" value="Ezamiyyətə hazır olmaq"' in draft_response.text
+
+    create = await client.post(
+        "/ui/jobs",
+        data={
+            "csrf_token": csrf,
+            "from_agent_draft": "1",
+            "unsupported_preferred": "Ezamiyyətə hazır olmaq",
+            "title": "Data Analitiki",
+            "must_kind_0": "SKILL",
+            "must_requirement_0": "Python",
+            "must_min_years_0": "",
+            "must_weight_0": "1",
+        },
+        follow_redirects=False,
+    )
+    assert create.status_code == 200
+    assert "Reytinq nəticələri" in create.text
+    # Survives confirmation: still visible, clearly informational/not-scored.
+    assert "Məlumat üçün — qiymətləndirməyə daxil edilmir" in create.text
+    assert "Ezamiyyətə hazır olmaq" in create.text
+    # Contributes nothing to score/ranking: only the real Python MUST_HAVE
+    # criterion was ever persisted or shown as a scored requirement.
+    from sqlalchemy import select
+
+    from meyar.models.job_criteria_version import JobCriteriaVersion
+
+    version = (
+        await db_session.execute(
+            select(JobCriteriaVersion).where(JobCriteriaVersion.tenant_id == tenant.id)
+        )
+    ).scalar_one()
+    labels = [c["label"] for c in version.criteria]
+    assert labels == ["Python"]
+    assert "Ezamiyyətə hazır olmaq" not in [c["label"] for c in version.criteria]
 
     from sqlalchemy import select
 

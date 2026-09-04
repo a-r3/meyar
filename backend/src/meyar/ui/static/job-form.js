@@ -9,8 +9,8 @@
  */
 (function () {
   var EXPERIENCE = "EXPERIENCE";
-  var APPLICABLE_PLACEHOLDER = "Minimum müddət (il)";
-  var NOT_APPLICABLE_PLACEHOLDER = "Tətbiq olunmur";
+  var APPLICABLE_PLACEHOLDER = "il";
+  var NOT_APPLICABLE_PLACEHOLDER = "—";
 
   function syncRow(select) {
     var row = select.closest("tr");

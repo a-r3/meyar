@@ -53,6 +53,32 @@ async def save_conversation_state(
     await db.flush()
 
 
+async def sync_last_turn_display_text(
+    db: AsyncSession, conversation: AgentConversation, *, text: str | None
+) -> None:
+    """Overwrites the just-persisted assistant turn's stored ``text`` with
+    the exact HR-facing headline that was actually rendered for the live
+    turn (meyar.ui.service._agent_turn_headline) — PR #42 owner correction
+    (issue #33, D-045): before this, run_agent_turn's own _finish_turn persisted
+    only the model's raw ``result.message`` (often empty for a plain
+    tool-result turn), while the live render used a richer, separately
+    computed per-tool headline. A later history re-render
+    (meyar.ui.presentation.agent_turn_outcome_message) then fell back to a
+    generic per-outcome message instead of reproducing what HR actually
+    saw live. Storing the live headline verbatim makes both renders
+    identical by construction — no second, divergent text-derivation path.
+    A no-op when there is no headline (never overwrites with an empty
+    value) or the last turn is not the assistant turn just written."""
+    if not text or not conversation.turns:
+        return
+    last = conversation.turns[-1]
+    if last.get("role") != "assistant":
+        return
+    turns = [*conversation.turns[:-1], {**last, "text": text}]
+    conversation.turns = turns
+    await db.flush()
+
+
 async def reset_conversation(db: AsyncSession, conversation: AgentConversation) -> None:
     """Slice 4 (issue #33): the "Yeni söhbət" capability — clears this
     session's own server-held conversation state (turns and the ordinal

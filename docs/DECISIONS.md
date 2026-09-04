@@ -3666,3 +3666,146 @@ migration, no change to `AgentTurnResult`/`AgentToolResult`/persistence.
 JavaScript (the button just stays enabled, falling back to existing
 server-side validation). The nav/brand-link changes are single-line
 template edits.
+
+## D-045 — PR #42 owner UX correction pass 3 (issue #33): turn-render
+consistency, grounded-copy dedup, requirement-attributable evidence,
+composer/criteria/ranking presentation, unsupported-requirement contract
+
+**Date:** 2026-09-05
+**Decision:** A third owner UI pass on PR #42, scoped to nine verified
+issues, no agent/scoring/security architecture change:
+
+1. **Turn-render consistency (root cause + fix).** The live turn's
+   headline (`meyar.ui.service._agent_turn_headline`, D-044 item 5) and
+   the value `meyar.agent.service._finish_turn` persisted for that same
+   turn (`result.message`, the raw model framing — empty for a plain
+   tool-result turn) were two independently computed values. A later
+   history re-render (`agent_turn_outcome_message`) then fell back to
+   the generic per-outcome table instead of reproducing the richer live
+   headline. Fixed by making the persisted text and the rendered
+   headline the same value: `meyar.services.agent_conversation_repo.
+   sync_last_turn_display_text` overwrites the just-persisted assistant
+   turn's `text` with `latest.headline` right after
+   `build_agent_turn_view` computes it, in `meyar.ui.router.agent_turn`.
+   D-036's original blank-bubble guard is untouched (the overwrite is a
+   no-op when there is no headline).
+2. **Grounded-copy dedup + duration precision.** A new shared
+   `meyar.core.text.combine_degree_and_field` joins an education item's
+   degree/field_of_study without repeating a field_of_study already
+   contained in degree (fixes "BSc Data Science Data Science" wherever
+   an education title is built: `meyar.ui.service._facts` — candidate
+   detail and the agent's GET_CANDIDATE_PROFILE view — and
+   `meyar.agent.service._PROFILE_FACT_CATEGORIES`/`_EVIDENCE_CATEGORIES`
+   — grounded-answer facts and evidence-topic matching). The
+   `GroundedCaveat.DURATION_NOT_PROVEN` sentence changes from "Mövcud
+   sübut konkret müddəti göstərmir." to "Mövcud sübut bu mövzu üzrə
+   konkret təcrübə müddətini əsaslandırmır." — explicitly scoped to the
+   asked-about topic/skill, so it never reads as "no dated evidence
+   exists at all" when a dated employment fact is cited in the same
+   message.
+3. **Requirement-attributable search evidence.** `meyar.ui.service.
+   build_search_result_views` previously flattened evidence from every
+   profile category (skills, employment, education, certifications,
+   languages, projects) regardless of which requirement matched — a
+   Python-only skill match could show unrelated education/employment
+   snippets as if they proved Python. A new
+   `_requirement_attributable_evidence` restricts evidence to the
+   profile entries that actually caused each `RequiredFilterMatch`/
+   `PreferredFilterMatch` (skill/certification/language/education matched
+   by the same case/diacritic-fold comparison `meyar.search.structured`
+   itself uses; `min_total_experience_years` — a genuine aggregate — is
+   attributed to every employment_history entry, never a different
+   category). Applies identically to classic `/ui/search` and the
+   agent's SEARCH_CANDIDATES tool result (both call the same function).
+4. **Composer productization.** `agent.html`'s composer is restyled from
+   a large full-width textarea + full-width native `<select>` + detached
+   button into one visually merged, rounded, chat-style input
+   (`.composer`/`.composer-toolbar` in `styles.css`): a compact pill
+   mode-select and a circular send button share one bordered container
+   with the textarea. The JD mode stays the same explicit
+   `<select name="intent">` (values `""`/`draft_job_criteria`) — no
+   prompt-detection/heuristic routing was added; only presentation
+   changed.
+5. **JD criteria review noise reduction.** `_criteria_rows.html`'s
+   duration column shows a muted "—" instead of a "Tətbiq olunmur"
+   disabled-input placeholder repeated on every non-EXPERIENCE row (and
+   "il" instead of "Minimum müddət (il)" when applicable — same for
+   `job-form.js`'s client-side toggle); the requirement-text column is
+   now the dominant column (`table-layout: fixed`, 46% width); weight
+   (`Əhəmiyyət`) is a narrow, small-type, muted column — still fully
+   editable, no longer visually competing with Növ/Tələb. No field name,
+   validation rule, or submitted value changed.
+6. **Unsupported-requirement contract.** Inspected the actual boundary:
+   `meyar.agent.schemas.JDDraftCriterionItem.kind` accepted the full
+   `CriterionKind` enum, so a genuinely out-of-scope, non-sensitive
+   requirement (e.g. relocation willingness, a driving license) had no
+   structural way to be flagged — the model would either omit it or
+   force it into a supported kind. A new `JDDraftCriterionKind` (SKILL/
+   EXPERIENCE/CERTIFICATION/EDUCATION/LANGUAGE/OTHER) — deliberately
+   NOT `CriterionKind` itself, which stays the deterministic evaluator's
+   own persisted scoring vocabulary — is the model's actual output type;
+   `OTHER` routes straight to `DroppedJDCriterionReason.UNSUPPORTED` in
+   `_build_criterion_from_draft_item`, deterministically, never via an
+   incidental `CriterionIn` validation failure. The prompt now instructs
+   the model to use `OTHER` for such requirements rather than omitting
+   or misclassifying them. "Survives confirmation": `agent.html`'s
+   unsupported-requirement disclosure now also renders one hidden
+   `unsupported_must_have`/`unsupported_preferred` input per item;
+   `create_job_route` reads them and threads them into
+   `_render_job_ranking` as `unsupported_requirements`, which
+   `ranking_results.html` renders as a page-level "Məlumat üçün —
+   qiymətləndirməyə daxil edilmir" (informational, not scored) notice —
+   still never validated as a criterion, never persisted to
+   `JobCriteriaVersion`, never touching `ranking`/`results`, so it
+   contributes nothing to score/ranking by construction while no longer
+   vanishing once the drafting turn scrolls past. German
+   language/Power BI remain ordinary supported LANGUAGE/SKILL criteria
+   with unchanged UNKNOWN-when-missing-evidence behavior — untouched by
+   this item.
+7. **Vacancy-admin exposure removed from ranking.** `ranking_results.
+   html`'s `<a class="back-link" href="/ui/jobs">← Vakansiyalar</a>` is
+   removed outright. Primary nav (`base.html`, unchanged since D-043/
+   D-044) remains exactly `MEYAR AI | Namizədlər | Çıxış`. `Job`/
+   `JobCriteriaVersion` backend and every existing route (`/ui/jobs`,
+   `/ui/jobs/{id}/rank`, `POST /ui/jobs`) are untouched and still fully
+   reachable by direct URL/link from elsewhere.
+8. **Ranking reading-hierarchy reorder.** Each candidate card's primary,
+   always-visible content is now: name → overall score pill + fit band
+   (+ MANUAL_REVIEW/INSUFFICIENT_EVIDENCE alert where applicable) → a
+   new `.criterion-status-list` (one row per criterion: HR label + kind,
+   status badge, and — newly rendered, previously absent from this page
+   entirely — that criterion's own evidence via the existing
+   `_evidence_list` macro, or an explicit "no evidence found" sentence
+   for UNKNOWN). Raw weight/uyğunluq-dərəcəsi/bal-töhfəsi numbers move
+   into a renamed, still-collapsed `<details>` ("Hesablama detalları")
+   below that — secondary, not hidden. `ScoreContributionView.evidence`
+   already existed (deterministic per-criterion evidence from the
+   evaluation engine) but was never rendered on this page before.
+   Evaluation date and the UNKNOWN/definitive-mismatch distinction are
+   unchanged.
+9. **Candidate detail.** No template change beyond item 2's shared
+   `_facts()` dedup fix, which already applies here (candidate detail
+   uses the same function). "CV-yə bax" (in-app preview) vs "Originalı
+   yüklə" (true download) stay separately implemented routes; no
+   UUID/parser/index/version internal identifier is rendered as visible
+   page text (only inside `href` attributes, e.g. the candidate/document
+   ids already required for the links to work).
+
+**Why:** Continuing the owner's iterative "fast-track MVP, presentation
+first, no new authority" correction pattern (D-043/D-044) — every fix
+above is either a genuine bug (item 1: two divergent text sources for
+one concept; item 2: a real string-concatenation duplication bug; item
+3: evidence not actually attributable to what it was shown under) or a
+presentation-only change (items 4/5/7/8/9), except item 6, which is a
+deliberately narrow, additive dispatch-layer type (JDDraftCriterionKind)
+that never touches the deterministic evaluator's own `CriterionKind`,
+scoring policy, or `JobCriteriaVersion` schema.
+
+**Reversibility:** No schema/migration change. `JDDraftCriterionKind` is
+a new enum scoped to `meyar.agent.schemas`/`meyar.agent.service` only —
+`CriterionKind` (evaluator/DB-facing) is unchanged. `sync_last_turn_
+display_text` only ever overwrites the `text` field of the just-written
+conversation-JSON turn already being committed in the same request: no
+new column, no new table. `unsupported_requirements` is a request-scoped
+list threaded through one render call, never persisted. Template/CSS/JS
+changes are presentation-only.

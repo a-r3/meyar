@@ -281,7 +281,7 @@ async def test_years_control_is_disabled_for_skill_criterion_rendered_ui(
     assert response.status_code == 200
     tag = _years_input_tag(response.text, "must_min_years_0")
     assert "disabled" in tag
-    assert 'placeholder="Tətbiq olunmur"' in tag
+    assert 'placeholder="—"' in tag
     assert 'value=""' in tag
     # The self-hosted enhancement script is wired to this exact hook class,
     # self-hosted (no external CDN), consistent with the UI CSP (script-src 'self').
@@ -293,9 +293,9 @@ async def test_years_control_is_enabled_for_experience_criterion_rendered_ui(
     client: AsyncClient, tenant_and_user, local_ui_settings: Settings
 ) -> None:
     """A row whose kind is EXPERIENCE must render the duration control
-    enabled with HR-facing 'Minimum müddət (il)' wording — verified via a
-    form re-render (a second, invalid row forces re-render while
-    preserving the first, valid EXPERIENCE row's posted values)."""
+    enabled with HR-facing 'il' wording — verified via a form re-render (a
+    second, invalid row forces re-render while preserving the first,
+    valid EXPERIENCE row's posted values)."""
     _tenant, user, password, _membership = tenant_and_user
     csrf = await _login_and_csrf(client, user.username, password)
     data = {"title": "Mixed Rows JD", "csrf_token": csrf}
@@ -320,7 +320,7 @@ async def test_years_control_is_enabled_for_experience_criterion_rendered_ui(
     assert response.status_code == 422
     tag = _years_input_tag(response.text, "must_min_years_0")
     assert "disabled" not in tag
-    assert 'placeholder="Minimum müddət (il)"' in tag
+    assert 'placeholder="il"' in tag
     assert 'value="5"' in tag
 
 

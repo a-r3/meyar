@@ -42,6 +42,27 @@ def fold_az_ascii(text: str) -> str:
 _SLUG_FALLBACK = "meyar"
 
 
+def combine_degree_and_field(degree: str | None, field_of_study: str | None) -> str | None:
+    """Join an education item's degree and field of study for display,
+    without repeating field_of_study when it is already part of degree
+    (e.g. degree="BSc Data Science", field_of_study="Data Science" must
+    render as "BSc Data Science", never "BSc Data Science Data Science").
+    Shared by every presentation surface that renders an education title —
+    candidate detail, the agent's profile/evidence tool results, and
+    grounded-answer synthesis (D-038) — so a fix here fixes all of them at
+    once (PR #42 owner correction, issue #33). Comparison is diacritic/
+    case-fold-insensitive so a typing-variance duplicate is still caught."""
+    degree = (degree or "").strip() or None
+    field_of_study = (field_of_study or "").strip() or None
+    if degree and field_of_study:
+        if fold_az_ascii(normalize_azerbaijani_case(field_of_study)) in fold_az_ascii(
+            normalize_azerbaijani_case(degree)
+        ):
+            return degree
+        return f"{degree} {field_of_study}"
+    return degree or field_of_study
+
+
 def slugify_criterion_label(label: str, used_ids: set[str]) -> str:
     """A stable, ASCII-only, collision-free id derived from free-text HR
     (or agent-drafted) requirement wording — shared by the manual

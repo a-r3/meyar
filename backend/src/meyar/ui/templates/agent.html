@@ -85,18 +85,18 @@
         <h3>Mütləq tələblər</h3>
         {{ criteria_form.criterion_rows("must", draft.must_have_rows, kind_options) }}
         {% if draft.unsupported_must_have %}
-        <div class="alert alert-warning">
-          <p>Bu tələblər avtomatik qiymətləndirməyə daxil edilmədi (sistem hazırda dəstəkləmir):</p>
-          <ul>{% for requirement in draft.unsupported_must_have %}<li>{{ requirement }}</li>{% endfor %}</ul>
+        <div class="alert alert-info">
+          <p><strong>Məlumat üçün — qiymətləndirməyə daxil edilmir:</strong> bu tələblər real və qeydə alınıb, lakin sistem hələ bu növ tələbi ölçə bilmir, ona görə bal/reytinqə təsir etmir:</p>
+          <ul>{% for requirement in draft.unsupported_must_have %}<li>{{ requirement }}<input type="hidden" name="unsupported_must_have" value="{{ requirement }}"></li>{% endfor %}</ul>
         </div>
         {% endif %}
 
         <h3>Üstünlük tələbləri</h3>
         {{ criteria_form.criterion_rows("pref", draft.preferred_rows, kind_options) }}
         {% if draft.unsupported_preferred %}
-        <div class="alert alert-warning">
-          <p>Bu tələblər avtomatik qiymətləndirməyə daxil edilmədi (sistem hazırda dəstəkləmir):</p>
-          <ul>{% for requirement in draft.unsupported_preferred %}<li>{{ requirement }}</li>{% endfor %}</ul>
+        <div class="alert alert-info">
+          <p><strong>Məlumat üçün — qiymətləndirməyə daxil edilmir:</strong> bu tələblər real və qeydə alınıb, lakin sistem hələ bu növ tələbi ölçə bilmir, ona görə bal/reytinqə təsir etmir:</p>
+          <ul>{% for requirement in draft.unsupported_preferred %}<li>{{ requirement }}<input type="hidden" name="unsupported_preferred" value="{{ requirement }}"></li>{% endfor %}</ul>
         </div>
         {% endif %}
         {% if draft.prohibited_count %}
@@ -148,17 +148,20 @@
 </section>
 {% endif %}
 
-<section class="panel search-panel">
-  <form method="post" action="/ui/agent" class="stack-form" id="agent-composer">
+<section class="composer-panel">
+  <form method="post" action="/ui/agent" class="composer" id="agent-composer">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <label for="message">Mesajınız</label>
-    <textarea id="message" name="message" rows="3" maxlength="4000" placeholder="Məsələn: Python bilən namizədləri göstər, ya da bir vakansiya elanını buraya yapışdırın"></textarea>
-    <div class="button-row">
-      <select id="intent" name="intent" aria-label="Rejim">
-        <option value="">Adi söhbət</option>
-        <option value="draft_job_criteria">Vakansiya elanını analiz et</option>
-      </select>
-      <button id="composer-send" class="button" type="submit">Göndər</button>
+    <label for="message" class="sr-only">Mesajınız</label>
+    <textarea id="message" name="message" rows="1" maxlength="4000" placeholder="Məsələn: Python bilən namizədləri göstər, ya da bir vakansiya elanını buraya yapışdırın"></textarea>
+    <div class="composer-toolbar">
+      <label class="composer-mode" for="intent">
+        <span class="sr-only">Rejim</span>
+        <select id="intent" name="intent" aria-label="Rejim">
+          <option value="">Adi söhbət</option>
+          <option value="draft_job_criteria">Vakansiya elanını analiz et</option>
+        </select>
+      </label>
+      <button id="composer-send" class="composer-send" type="submit" aria-label="Göndər">Göndər</button>
     </div>
   </form>
 </section>

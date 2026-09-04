@@ -942,14 +942,14 @@ def test_render_grounded_answer_duration_caveat_never_states_a_number() -> None:
         GroundedSelection(used_facts=[0], caveat=GroundedCaveat.DURATION_NOT_PROVEN), facts
     )
     assert rendered is not None
-    assert "Mövcud sübut konkret müddəti göstərmir." in rendered
+    assert "Mövcud sübut bu mövzu üzrə konkret təcrübə müddətini əsaslandırmır." in rendered
     assert not any(char.isdigit() for char in rendered.split("Mövcud sübut")[-1])
 
     # A caveat alone (nothing relevant selected) is also renderable.
     caveat_only = render_grounded_answer(
         GroundedSelection(used_facts=[], caveat=GroundedCaveat.DURATION_NOT_PROVEN), facts
     )
-    assert caveat_only == "Mövcud sübut konkret müddəti göstərmir."
+    assert caveat_only == "Mövcud sübut bu mövzu üzrə konkret təcrübə müddətini əsaslandırmır."
 
 
 async def test_grounded_experience_explanation_uses_only_supplied_facts(
@@ -1295,6 +1295,46 @@ async def test_draft_job_criteria_discloses_unsupported_non_sensitive_item(
         await db_session.execute(select(Job).where(Job.tenant_id == tenant.id))
     ).scalars().all()
     assert jobs == []
+
+
+async def test_draft_job_criteria_other_kind_is_unsupported_never_scored(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    """D-045 (PR #42 owner correction, issue #33, item 6): a requirement
+    the model explicitly flags as JDDraftCriterionKind.OTHER — real,
+    non-sensitive, but outside the deterministic evaluator's five scoring
+    dimensions — must be routed to UNSUPPORTED deterministically, never
+    coerced into a supported CriterionKind merely to score it, and must
+    never appear as a real criterion."""
+    from meyar.agent.schemas import JDCriteriaDraft, JDDraftCriterionItem, JDDraftCriterionKind
+    from meyar.schemas.criteria import CriterionKind, CriterionType
+
+    tenant, user, _password, membership = tenant_and_user
+    await db_session.commit()
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    llm = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        jd_draft=JDCriteriaDraft(
+            title="Rol",
+            must_have=[JDDraftCriterionItem(kind=CriterionKind.SKILL, requirement="Python")],
+            preferred=[
+                JDDraftCriterionItem(
+                    kind=JDDraftCriterionKind.OTHER, requirement="Ezamiyyətə hazır olmaq"
+                )
+            ],
+        ),
+    )
+    result = await _run(
+        db_session, llm, tenant_id=tenant.id, conversation=conversation, message="JD mətni"
+    )
+    draft = result.tool_results[0].job_draft
+    assert draft is not None
+    assert [c.label for c in draft.must_have] == ["Python"]
+    assert draft.preferred == []
+    assert draft.prohibited_count == 0
+    assert len(draft.unsupported) == 1
+    assert draft.unsupported[0].requirement == "Ezamiyyətə hazır olmaq"
+    assert draft.unsupported[0].criterion_type == CriterionType.PREFERRED
 
 
 # --- D-043 (PR #42 owner correction, issue #33): explicit_action deterministic routing ---

@@ -36,7 +36,7 @@ from enum import StrEnum
 from pydantic import BaseModel, Field, model_validator
 
 from meyar.schemas.candidate_profile import CandidateProfileExtraction, EvidenceRef
-from meyar.schemas.criteria import CriterionIn, CriterionKind, CriterionType
+from meyar.schemas.criteria import CriterionIn, CriterionType
 from meyar.search.planner_schemas import PlannedCandidateSearchResponse
 
 AGENT_SCHEMA_VERSION = "agent-decision-schema-v1"
@@ -208,13 +208,39 @@ class AgentEvidenceToolResult(BaseModel):
     matches: list[EvidenceMatchItem] = Field(default_factory=list, max_length=100)
 
 
+class JDDraftCriterionKind(StrEnum):
+    """The kinds a JD-drafting model may propose for one requirement —
+    the same five ``CriterionKind`` values the deterministic evaluator
+    scores, plus ``OTHER``: a requirement that is genuinely stated in the
+    JD text and already confirmed non-sensitive, but does not fit any of
+    the five evaluator-supported dimensions (for example: relocation
+    willingness, driving license, availability for shift work). ``OTHER``
+    never becomes a ``CriterionIn`` — it always maps to
+    ``DroppedJDCriterionReason.UNSUPPORTED`` in
+    meyar.agent.service._build_criterion_from_draft_item, deterministically,
+    never via an incidental validation failure. Deliberately NOT
+    meyar.schemas.criteria.CriterionKind itself: that enum is the
+    deterministic evaluator's own persisted scoring vocabulary and must
+    never grow a scoring-irrelevant member (PR #42 owner correction,
+    issue #33, D-045 — see 'Inspect the actual evaluator capability
+    boundary')."""
+
+    SKILL = "SKILL"
+    EXPERIENCE = "EXPERIENCE"
+    CERTIFICATION = "CERTIFICATION"
+    EDUCATION = "EDUCATION"
+    LANGUAGE = "LANGUAGE"
+    OTHER = "OTHER"
+
+
 class JDDraftCriterionItem(BaseModel):
     """One MODEL-PRODUCED candidate requirement drafted from a JD's own
     text — untrusted input, exactly like every other LLM-produced tool
-    argument (D-031 point 4). Restricted to the same five kinds the
-    existing manual vacancy-creation form offers
-    (meyar.ui.service.CRITERION_KIND_OPTIONS) — SKILL_EXPERIENCE/
-    DOMAIN_EXPERIENCE (D-041) are out of scope for JD drafting in this
+    argument (D-031 point 4). ``kind`` is restricted to
+    ``JDDraftCriterionKind`` — the same five kinds the existing manual
+    vacancy-creation form offers (meyar.ui.service.CRITERION_KIND_OPTIONS)
+    plus the explicit ``OTHER`` escape hatch (D-045) — SKILL_EXPERIENCE/
+    DOMAIN_EXPERIENCE (D-041) remain out of scope for JD drafting in this
     slice, not silently downgraded. Never persisted directly: every item
     is re-validated into a real ``CriterionIn`` (same prohibited-attribute
     denylist, same kind-specific shape rules) by
@@ -225,26 +251,15 @@ class JDDraftCriterionItem(BaseModel):
 
     model_config = {"extra": "forbid"}
 
-    kind: CriterionKind
+    kind: JDDraftCriterionKind
     # Both the HR-facing label AND the exact term the deterministic scorer
     # matches against candidate evidence — mirrors the single "Tələb"
     # field discipline the manual form already established (D-025) so a
     # drafted criterion can never disagree with its own displayed name.
+    # Still the human-readable requirement text when kind is OTHER.
     requirement: str = Field(min_length=1, max_length=200)
     min_years: float | None = Field(default=None, ge=0, le=60)
     weight: float = Field(default=1.0, ge=0, le=10)
-
-    @model_validator(mode="after")
-    def _validate_kind_supported(self) -> "JDDraftCriterionItem":
-        if self.kind not in (
-            CriterionKind.SKILL,
-            CriterionKind.EXPERIENCE,
-            CriterionKind.CERTIFICATION,
-            CriterionKind.EDUCATION,
-            CriterionKind.LANGUAGE,
-        ):
-            raise ValueError(f"JD drafting does not support criterion kind {self.kind.value}.")
-        return self
 
 
 # Bounds how many must-have/preferred rows one JD draft may propose per

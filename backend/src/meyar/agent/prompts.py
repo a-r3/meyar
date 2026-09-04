@@ -163,14 +163,24 @@ Rules:
   preferred/nice-to-have. Only include a requirement that is actually
   stated in the text — never invent one.
 - Each item's kind must be exactly one of: SKILL, EXPERIENCE, CERTIFICATION,
-  EDUCATION, LANGUAGE. Do not use any other kind.
+  EDUCATION, LANGUAGE, OTHER.
+- Use OTHER only when the text states a real, specific candidate
+  requirement that is not one of the sensitive attributes below, but does
+  not genuinely fit SKILL, EXPERIENCE, CERTIFICATION, EDUCATION, or
+  LANGUAGE — for example: willingness to relocate, a driving license,
+  availability for shift/night work, owning a car. Never force such a
+  requirement into SKILL or another kind merely to give it a kind, and
+  never omit it silently — every real, non-sensitive requirement in the
+  text must appear as an item, OTHER included.
 - Each item's requirement is BOTH the human-readable label and the exact
   term used for matching (for example "Python", "ACAMS sertifikatı",
-  "İngilis dili"). For kind EXPERIENCE, requirement is a short description
-  of the experience area (for example "Backend proqramlaşdırma təcrübəsi")
-  and min_years must be set to the required number of years; for every
-  other kind, leave min_years unset unless the text states a specific
-  required duration for that exact named skill/certification/etc.
+  "İngilis dili"; for OTHER, still a short human-readable requirement
+  text, for example "Ezamiyyətə hazır olmaq"). For kind EXPERIENCE,
+  requirement is a short description of the experience area (for example
+  "Backend proqramlaşdırma təcrübəsi") and min_years must be set to the
+  required number of years; for every other kind, leave min_years unset
+  unless the text states a specific required duration for that exact
+  named skill/certification/etc. min_years is always unset for OTHER.
 - Never include a requirement about age, gender, marital status, religion,
   nationality, ethnicity, political opinion, health, disability, pregnancy,
   or a candidate photo — even if the job description text mentions one;

@@ -475,7 +475,11 @@ def _agent_turn_log_views(conversation) -> list:
     (agent_turn_outcome_message) rather than the raw stored value — a
     past turn's stored text can be empty/None (its outcome carried no
     model framing), and this guarantees it is never redisplayed as a
-    blank bubble (D-036)."""
+    blank bubble (D-036). Since D-045, the stored text for a completed
+    turn is itself already the exact live-rendered headline (see
+    agent_conversation_repo.sync_last_turn_display_text), so this mapping
+    is a pure passthrough for every real turn — the fallback table only
+    still matters for the rare turn where no headline was ever computed."""
     from meyar.ui.view_models import AgentTurnLogView
 
     views = []
@@ -539,7 +543,10 @@ async def agent_turn(
     verify_csrf(ctx.csrf_token, csrf_token)
     from meyar.agent.schemas import AgentActionType
     from meyar.agent.service import run_agent_turn
-    from meyar.services.agent_conversation_repo import get_or_create_conversation
+    from meyar.services.agent_conversation_repo import (
+        get_or_create_conversation,
+        sync_last_turn_display_text,
+    )
     from meyar.ui.service import build_agent_turn_view
 
     conversation = await get_or_create_conversation(
@@ -566,6 +573,12 @@ async def agent_turn(
             explicit_action=explicit_action,
         )
         latest = await build_agent_turn_view(db, tenant_id=ctx.tenant_id, result=result)
+        # D-045 (PR #42 owner correction, issue #33): make the persisted
+        # turn text and the just-rendered live headline the same value, so
+        # a later history re-render is byte-for-byte identical to what HR
+        # saw live instead of falling back to a generic per-outcome
+        # message — see sync_last_turn_display_text's own docstring.
+        await sync_last_turn_display_text(db, conversation, text=latest.headline)
         await db.commit()
     except (EmbeddingProviderError, SearchRequestError, SQLAlchemyError):
         await db.rollback()
@@ -934,6 +947,22 @@ async def create_job_route(
     # form, whose own redirect-to-jobs-list behavior is unchanged. See
     # docs/DECISIONS.md D-043.
     from_agent_draft = str(form.get("from_agent_draft", "")) == "1"
+    # D-045 (PR #42 owner correction, issue #33, item 6): the agent
+    # criteria-review form's own hidden inputs (meyar.ui.templates.
+    # agent.html) — non-sensitive requirements already disclosed as
+    # unsupported in that turn (see AgentJobDraftView.unsupported_*).
+    # Never validated as criteria, never becomes a CriterionIn, never
+    # reaches build_job_create_request below — carried only into this
+    # one ranking render (_render_job_ranking) so confirming does not
+    # make them vanish. Absent entirely on the manual /ui/jobs/new form.
+    unsupported_requirements = [
+        str(value).strip()
+        for value in [
+            *form.getlist("unsupported_must_have"),
+            *form.getlist("unsupported_preferred"),
+        ]
+        if str(value).strip()
+    ]
     must_have_rows = [_job_form_row(form, "must", i) for i in range(CRITERION_ROW_COUNT)]
     preferred_rows = [_job_form_row(form, "pref", i) for i in range(CRITERION_ROW_COUNT)]
 
@@ -1048,7 +1077,11 @@ async def create_job_route(
         # service/render as the manual "Namizədləri sırala" action below;
         # no new scoring authority.
         return await _render_job_ranking(
-            request, ctx, db, job_criteria_version_id=version.id
+            request,
+            ctx,
+            db,
+            job_criteria_version_id=version.id,
+            unsupported_requirements=unsupported_requirements,
         )
     return RedirectResponse("/ui/jobs", status_code=status.HTTP_303_SEE_OTHER)
 
@@ -1059,12 +1092,25 @@ async def _render_job_ranking(
     db: AsyncSession,
     *,
     job_criteria_version_id: uuid.UUID,
+    unsupported_requirements: list[str] | None = None,
 ) -> HTMLResponse:
     """Shared by the manual "Namizədləri sırala" action (rank_job) and
     create_job_route's agent-JD-confirmation path (D-043) — one
     deterministic ranking render, never duplicated. Same UI-boundary rule
     as /search: no manual date input; today's date is injected here and
-    threaded explicitly into the deterministic ranking service (D-023)."""
+    threaded explicitly into the deterministic ranking service (D-023).
+
+    ``unsupported_requirements`` (D-045, PR #42 owner correction, issue
+    #33, item 6): the agent JD-confirmation path's own already-disclosed,
+    already-confirmed-non-sensitive requirements that no CriterionKind
+    could represent — carried straight through from that one POST /jobs
+    submission into this render, never persisted to JobCriteriaVersion
+    and never touching ``ranking``/``results`` at all, so they contribute
+    nothing to score/ranking by construction while still "surviving
+    confirmation" (remaining visible to HR after they click confirm,
+    instead of vanishing once the one drafting turn scrolls past). The
+    manual re-rank path (rank_job) has none — an existing job's
+    already-persisted criteria carry no such list."""
     evaluation_as_of_date = date.today()
     try:
         ranking = await rank_candidates_for_job(
@@ -1124,7 +1170,13 @@ async def _render_job_ranking(
     return _render(
         request,
         "ranking_results.html",
-        _context(ctx, ranking=ranking, results=results, job_title=job_title),
+        _context(
+            ctx,
+            ranking=ranking,
+            results=results,
+            job_title=job_title,
+            unsupported_requirements=unsupported_requirements or [],
+        ),
     )
 
 

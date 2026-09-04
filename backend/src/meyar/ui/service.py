@@ -2,6 +2,7 @@ import hashlib
 import json
 import uuid
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from pydantic import ValidationError
@@ -9,7 +10,12 @@ from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.agent.schemas import AgentActionType, AgentTurnResult
-from meyar.core.text import normalize_azerbaijani_case, slugify_criterion_label
+from meyar.core.text import (
+    combine_degree_and_field,
+    fold_az_ascii,
+    normalize_azerbaijani_case,
+    slugify_criterion_label,
+)
 from meyar.ingestion.parser import CanonicalDocumentContent
 from meyar.models.candidate import Candidate
 from meyar.models.candidate_document import (
@@ -39,7 +45,11 @@ from meyar.schemas.candidate_profile import CandidateProfileExtraction, Evidence
 from meyar.schemas.criteria import CriterionIn, CriterionKind, CriterionType
 from meyar.schemas.job import JobCreateRequest
 from meyar.scoring.schemas import BatchRankingResult
-from meyar.search.schemas import CandidateSearchResponse
+from meyar.search.schemas import (
+    CandidateSearchResponse,
+    PreferredFilterMatch,
+    RequiredFilterMatch,
+)
 from meyar.services.candidate_document_repo import (
     get_candidate_document,
     get_latest_canonical_document,
@@ -185,7 +195,8 @@ def _facts(profile: CandidateProfileExtraction) -> dict[str, list[ProfileFactVie
         ],
         "education": [
             ProfileFactView(
-                title=join_nonempty([item.degree, item.field_of_study]) or "Təhsil məlumatı",
+                title=combine_degree_and_field(item.degree, item.field_of_study)
+                or "Təhsil məlumatı",
                 detail=join_nonempty([item.institution, item.date]),
                 evidence=_evidence_views(item.evidence, snippets=True),
             )
@@ -536,6 +547,63 @@ async def _job_titles_by_id(
     return {job_id: title for job_id, title in rows}
 
 
+# A RequiredFilterMatch/PreferredFilterMatch.category -> the
+# CandidateProfileExtraction list it was matched against — mirrors the
+# exact matching semantics meyar.search.structured._skill_present/
+# _certification_present/_language_present/_education_present already
+# use to decide the match, so evidence shown under a matched requirement
+# is always attributable to the SAME profile entry that caused the match
+# (PR #42 owner correction, issue #33): an unrelated employment/education
+# snippet must never appear under a skill-only match.
+# min_total_experience_years is deliberately absent — it is an aggregate
+# over the whole employment history with no single attributable entry;
+# see _requirement_attributable_evidence below.
+_FILTER_MATCH_PROFILE_CATEGORY: dict[str, str] = {
+    "skill": "skills",
+    "certification": "certifications",
+    "language": "languages",
+    "education": "education",
+}
+
+
+def _profile_item_matches_value(category: str, item: object, folded_value: str) -> bool:
+    if category in ("skills", "certifications"):
+        title = item.name  # type: ignore[attr-defined]
+    elif category == "languages":
+        title = item.language  # type: ignore[attr-defined]
+    else:
+        title = combine_degree_and_field(item.degree, item.field_of_study) or ""  # type: ignore[attr-defined]
+    return fold_az_ascii(normalize_azerbaijani_case(title)) == folded_value
+
+
+def _requirement_attributable_evidence(
+    profile: CandidateProfileExtraction,
+    matched: Iterable[RequiredFilterMatch | PreferredFilterMatch],
+) -> list[EvidenceRef]:
+    """Evidence shown under a search result's matched requirements must be
+    attributable to those SPECIFIC requirements — never the candidate's
+    whole-profile evidence pool (PR #42 owner correction, issue #33): a
+    "Python" skill match must never surface unrelated education/employment
+    snippets as if they proved Python. min_total_experience_years is a
+    genuine aggregate over every employment_history entry, so each
+    entry's own evidence is attributable to it — never a different
+    category's evidence."""
+    refs: list[EvidenceRef] = []
+    for match in matched:
+        if match.category == "min_total_experience_years":
+            for entry in profile.employment_history:
+                refs.extend(entry.evidence)
+            continue
+        category = _FILTER_MATCH_PROFILE_CATEGORY.get(match.category)
+        if category is None:
+            continue
+        folded_value = fold_az_ascii(normalize_azerbaijani_case(match.value))
+        for entry in getattr(profile, category):
+            if _profile_item_matches_value(category, entry, folded_value):
+                refs.extend(entry.evidence)
+    return refs
+
+
 async def build_search_result_views(
     db: AsyncSession, *, tenant_id: uuid.UUID, response: CandidateSearchResponse
 ) -> list[CandidateSearchResultView]:
@@ -556,20 +624,11 @@ async def build_search_result_views(
                 profile = CandidateProfileExtraction.model_validate(profile_row.profile_content)
                 current_role, top_skills = _current_role_and_skills(profile)
                 summary = join_nonempty([current_role, ", ".join(top_skills) or None])
-                all_evidence = [
-                    reference
-                    for group in (
-                        profile.skills,
-                        profile.employment_history,
-                        profile.education,
-                        profile.certifications,
-                        profile.languages,
-                        profile.projects,
-                    )
-                    for item in group
-                    for reference in item.evidence
-                ]
-                evidence = _evidence_views(all_evidence, snippets=True, maximum=4)
+                attributable_evidence = _requirement_attributable_evidence(
+                    profile,
+                    [*result.required_filters_matched, *result.preferred_filters_matched],
+                )
+                evidence = _evidence_views(attributable_evidence, snippets=True, maximum=4)
             except ValidationError:
                 pass
         views.append(
