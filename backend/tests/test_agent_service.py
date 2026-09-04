@@ -1236,13 +1236,18 @@ async def test_draft_job_criteria_drops_prohibited_attribute_item(
         ),
     )
     result = await _run(
-        db_session, llm, tenant_id=tenant.id, conversation=conversation, message="JD mətni"
+        db_session,
+        llm,
+        tenant_id=tenant.id,
+        conversation=conversation,
+        message="Rol üçün namizəd kişi olmalıdır. Python bilməlidir.",
     )
     draft = result.tool_results[0].job_draft
     assert draft is not None
     assert [c.label for c in draft.must_have] == ["Python"]
     assert draft.prohibited_count == 1
     assert draft.unsupported == []
+    assert draft.ungrounded_count == 0
     rendered = result.model_dump_json()
     assert "kişi" not in rendered
 
@@ -1277,12 +1282,17 @@ async def test_draft_job_criteria_discloses_unsupported_non_sensitive_item(
         ),
     )
     result = await _run(
-        db_session, llm, tenant_id=tenant.id, conversation=conversation, message="JD mətni"
+        db_session,
+        llm,
+        tenant_id=tenant.id,
+        conversation=conversation,
+        message="Python bilməlidir. Backend təcrübəsi tələb olunur.",
     )
     draft = result.tool_results[0].job_draft
     assert draft is not None
     assert [c.label for c in draft.must_have] == ["Python"]
     assert draft.prohibited_count == 0
+    assert draft.ungrounded_count == 0
     assert len(draft.unsupported) == 1
     assert draft.unsupported[0].requirement == "Backend təcrübəsi"
     assert draft.unsupported[0].criterion_type == CriterionType.MUST_HAVE
@@ -1325,16 +1335,125 @@ async def test_draft_job_criteria_other_kind_is_unsupported_never_scored(
         ),
     )
     result = await _run(
-        db_session, llm, tenant_id=tenant.id, conversation=conversation, message="JD mətni"
+        db_session,
+        llm,
+        tenant_id=tenant.id,
+        conversation=conversation,
+        message="Python bilməlidir. Namizəd ezamiyyətə hazır olmalıdır.",
     )
     draft = result.tool_results[0].job_draft
     assert draft is not None
     assert [c.label for c in draft.must_have] == ["Python"]
     assert draft.preferred == []
     assert draft.prohibited_count == 0
+    assert draft.ungrounded_count == 0
     assert len(draft.unsupported) == 1
     assert draft.unsupported[0].requirement == "Ezamiyyətə hazır olmaq"
     assert draft.unsupported[0].criterion_type == CriterionType.PREFERRED
+
+
+# --- D-046 (PR #42 owner correction, issue #33): JD requirement grounding ---
+#
+# Real-Ollama acceptance testing (qwen3:1.7b) reproduced a genuine content-
+# fabrication defect distinct from D-042/D-045's routing/classification
+# findings: given a short, travel-readiness-only JD ("Namizəd ezamiyyətə
+# getməyə hazır olmalıdır"), the model can surface an entirely unrelated,
+# unstated requirement (reported as "Passing an exam") as if it were a
+# genuine JD requirement the system merely cannot score. These tests use
+# FakeLLMProvider (deterministic, no real model call) to pin the fix's
+# behavior; the real-Ollama reproduction itself is recorded in
+# docs/DECISIONS.md D-046, not re-run here (see also test_is_requirement_
+# grounded_in_jd_text_unit below for the pure grounding-function contract).
+
+
+def test_is_requirement_grounded_in_jd_text_unit() -> None:
+    """Direct, model-independent contract test for the deterministic
+    lexical grounding check itself (D-046) — the smallest unit of the
+    fix, independent of the full turn/dispatch pipeline exercised by the
+    other tests in this section."""
+    from meyar.agent.service import _is_requirement_grounded_in_jd_text
+
+    jd_text = (
+        "Vakansiya: Regional Satış Nümayəndəsi. "
+        "Namizəd ezamiyyətə getməyə hazır olmalıdır."
+    )
+    # Grounded: the requirement's own content words are actually in the JD
+    # text (Azerbaijani suffix variance tolerated by diacritic/case fold).
+    assert _is_requirement_grounded_in_jd_text("Ezamiyyətə hazır olmaq", jd_text)
+    assert _is_requirement_grounded_in_jd_text("ezamiyyət", jd_text)
+    # Ungrounded: the exact reported real-Ollama hallucination pattern —
+    # a plausible-sounding but entirely unstated requirement.
+    assert not _is_requirement_grounded_in_jd_text("Passing an exam", jd_text)
+    assert not _is_requirement_grounded_in_jd_text("İngilis dili", jd_text)
+    assert not _is_requirement_grounded_in_jd_text("CFA sertifikatı", jd_text)
+    # No content word at all (only connector words) carries no signal.
+    assert not _is_requirement_grounded_in_jd_text("olmaq üçün", jd_text)
+
+
+async def test_draft_job_criteria_drops_fabricated_unrelated_requirement(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    """Reproduces the reported real-Ollama defect end-to-end through
+    FakeLLMProvider: a travel-readiness-only JD, and a model draft that
+    (as qwen3:1.7b actually did) attaches a completely unrelated,
+    unstated requirement — here reproducing the reported "Passing an
+    exam" text verbatim as an OTHER item — alongside the one genuine,
+    grounded requirement. The fabricated item must never reach
+    ``unsupported`` (which HR reads as 'a real JD requirement the system
+    cannot score') and its own text must never appear anywhere in the
+    turn output — only a safe count (D-046)."""
+    from meyar.agent.schemas import JDCriteriaDraft, JDDraftCriterionItem, JDDraftCriterionKind
+    from meyar.schemas.criteria import CriterionKind, CriterionType
+
+    tenant, user, _password, membership = tenant_and_user
+    await db_session.commit()
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    jd_text = "Vakansiya: Kredit Analitiki. Namizəd ezamiyyətə getməyə hazır olmalıdır."
+    llm = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        jd_draft=JDCriteriaDraft(
+            title="Kredit Analitiki",
+            must_have=[
+                JDDraftCriterionItem(
+                    kind=JDDraftCriterionKind.OTHER, requirement="Ezamiyyətə hazır olmaq"
+                ),
+                # The reported real-Ollama hallucination: unrelated to any
+                # word in jd_text, but classified OTHER — the exact path
+                # that previously reached HR-visible "unsupported" with no
+                # grounding check at all.
+                JDDraftCriterionItem(
+                    kind=JDDraftCriterionKind.OTHER, requirement="Passing an exam"
+                ),
+            ],
+            preferred=[
+                # Same fabrication class, but on a kind that WOULD have
+                # built a real, scored CriterionIn — proving the grounding
+                # gate also guards the success path, not only OTHER.
+                JDDraftCriterionItem(kind=CriterionKind.LANGUAGE, requirement="İngilis dili"),
+            ],
+        ),
+    )
+    result = await _run(
+        db_session, llm, tenant_id=tenant.id, conversation=conversation, message=jd_text
+    )
+    draft = result.tool_results[0].job_draft
+    assert draft is not None
+    # The one genuine, grounded requirement survives as UNSUPPORTED
+    # (real OTHER-kind disclosure, unchanged D-045 contract).
+    assert len(draft.unsupported) == 1
+    assert draft.unsupported[0].requirement == "Ezamiyyətə hazır olmaq"
+    assert draft.unsupported[0].criterion_type == CriterionType.MUST_HAVE
+    # The two fabricated items never became a scored criterion and never
+    # entered the HR-visible "unsupported" disclosure — only a safe count.
+    assert draft.must_have == []
+    assert draft.preferred == []
+    assert draft.prohibited_count == 0
+    assert draft.ungrounded_count == 2
+    # No invented text anywhere in the turn output, exactly like the
+    # existing PROHIBITED non-leak discipline (D-043).
+    rendered = result.model_dump_json()
+    assert "Passing an exam" not in rendered
+    assert "İngilis dili" not in rendered
 
 
 # --- D-043 (PR #42 owner correction, issue #33): explicit_action deterministic routing ---

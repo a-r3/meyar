@@ -677,7 +677,11 @@ async def test_draft_job_criteria_drops_prohibited_item_and_notes_it(
     app.dependency_overrides[get_llm_provider] = lambda: fake
     csrf = await _login_and_csrf(client, user.username, password)
     response = await client.post(
-        "/ui/agent", data={"message": "Rol üçün namizəd kişi olmalıdır.", "csrf_token": csrf}
+        "/ui/agent",
+        data={
+            "message": "Rol üçün namizəd kişi olmalıdır. Python bilməlidir.",
+            "csrf_token": csrf,
+        },
     )
     assert response.status_code == 200
     assert 'value="Python"' in response.text
@@ -721,7 +725,11 @@ async def test_draft_job_criteria_discloses_unsupported_requirement_visibly(
     app.dependency_overrides[get_llm_provider] = lambda: fake
     csrf = await _login_and_csrf(client, user.username, password)
     response = await client.post(
-        "/ui/agent", data={"message": "JD mətni", "csrf_token": csrf}
+        "/ui/agent",
+        data={
+            "message": "Python bilməlidir. ACAMS sertifikatı üzrə təcrübə tələb olunur.",
+            "csrf_token": csrf,
+        },
     )
     assert response.status_code == 200
     assert 'value="Python"' in response.text
@@ -853,6 +861,52 @@ async def test_confirming_agent_drafted_criteria_lands_on_ranking_not_jobs_list(
     assert "Baş Backend Mühəndisi" in create.text
 
 
+async def test_draft_job_criteria_fabricated_requirement_never_rendered(
+    client: AsyncClient, tenant_and_user, local_ui_settings: Settings
+) -> None:
+    """D-046 (PR #42 owner correction, issue #33): real-Ollama acceptance
+    testing (qwen3:1.7b) found a travel-readiness-only JD surfacing an
+    entirely unrelated, unstated requirement (reported as "Passing an
+    exam") in the HR-facing review form as if it were a genuine JD
+    requirement. The fabricated item's own text must never reach the
+    rendered page — only a safe, generic count notice — while the one
+    genuinely grounded requirement still renders normally."""
+    from meyar.agent.schemas import JDCriteriaDraft, JDDraftCriterionItem, JDDraftCriterionKind
+
+    _tenant, user, password, _membership = tenant_and_user
+    fake = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        jd_draft=JDCriteriaDraft(
+            title="Kredit Analitiki",
+            must_have=[
+                JDDraftCriterionItem(
+                    kind=JDDraftCriterionKind.OTHER, requirement="Ezamiyyətə hazır olmaq"
+                ),
+                JDDraftCriterionItem(
+                    kind=JDDraftCriterionKind.OTHER, requirement="Passing an exam"
+                ),
+            ],
+        ),
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake
+    csrf = await _login_and_csrf(client, user.username, password)
+    response = await client.post(
+        "/ui/agent",
+        data={
+            "message": "Namizəd ezamiyyətə getməyə hazır olmalıdır.",
+            "csrf_token": csrf,
+        },
+    )
+    assert response.status_code == 200
+    # The genuinely grounded requirement is still disclosed as usual.
+    assert "Ezamiyyətə hazır olmaq" in response.text
+    # The fabricated requirement's own text never appears anywhere on the
+    # page — not as a form field, not in the disclosure notice, not in
+    # the echoed user message (which never contained it either).
+    assert "Passing an exam" not in response.text
+    assert "1 tələb JD mətnində aydın təsdiqlənmədiyi üçün çıxarıldı" in response.text
+
+
 async def test_unsupported_requirement_survives_confirmation_and_scores_nothing(
     client: AsyncClient,
     db_session: AsyncSession,
@@ -891,7 +945,13 @@ async def test_unsupported_requirement_survives_confirmation_and_scores_nothing(
     csrf = await _login_and_csrf(client, user.username, password)
     draft_response = await client.post(
         "/ui/agent",
-        data={"message": "Data Analitiki axtarırıq. Python bilməlidir.", "csrf_token": csrf},
+        data={
+            "message": (
+                "Data Analitiki axtarırıq. Python bilməlidir. "
+                "Namizəd ezamiyyətə hazır olmalıdır."
+            ),
+            "csrf_token": csrf,
+        },
     )
     assert draft_response.status_code == 200
     assert 'name="unsupported_preferred" value="Ezamiyyətə hazır olmaq"' in draft_response.text

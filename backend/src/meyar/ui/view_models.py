@@ -204,6 +204,11 @@ class AgentJobDraftView(BaseModel):
     # Count only — a prohibited/sensitive-attribute match's own text must
     # never be redisplayed (docs/SECURITY_PRIVACY.md).
     prohibited_count: int = 0
+    # Count only — a requirement that failed the deterministic JD-text
+    # grounding check (D-046) was never confirmed to actually be in HR's
+    # JD, so its own text must never be redisplayed either (that would
+    # itself misattribute invented content to the source document).
+    ungrounded_count: int = 0
 
 
 class AgentToolResultView(BaseModel):

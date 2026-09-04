@@ -736,6 +736,7 @@ async def build_agent_turn_view(
                             if u.criterion_type == CriterionType.PREFERRED
                         ],
                         prohibited_count=draft.prohibited_count,
+                        ungrounded_count=draft.ungrounded_count,
                     ),
                 )
             )
@@ -858,13 +859,19 @@ def _agent_turn_headline(
             assert draft is not None
             total = len(draft.must_have_rows) + len(draft.preferred_rows)
             unsupported_total = len(draft.unsupported_must_have) + len(draft.unsupported_preferred)
-            if total == 0 and unsupported_total == 0 and draft.prohibited_count == 0:
+            if (
+                total == 0
+                and unsupported_total == 0
+                and draft.prohibited_count == 0
+                and draft.ungrounded_count == 0
+            ):
                 return (
                     "Bu mətndən konkret tələb müəyyən edilmədi. Aşağıdan əl ilə "
                     "kriteriya əlavə edə bilərsiniz."
                 )
-            # Both notes are safe, generic HR-facing text — never the
-            # matched sensitive term itself for prohibited_count (see
+            # All three notes are safe, generic HR-facing text — never the
+            # matched sensitive term itself for prohibited_count, and never
+            # the unconfirmed drafted text itself for ungrounded_count (see
             # AgentJobDraftToolResult docstring); unsupported_total's own
             # requirement text is disclosed only in the review rows below,
             # never restated in this one-line headline.
@@ -878,6 +885,11 @@ def _agent_turn_headline(
                 notes.append(
                     f"{draft.prohibited_count} tələb qadağan olunmuş/əlaqəsiz atributa görə "
                     "daxil edilmədi"
+                )
+            if draft.ungrounded_count:
+                notes.append(
+                    f"{draft.ungrounded_count} tələb JD mətnində aydın təsdiqlənmədiyi üçün "
+                    "çıxarıldı"
                 )
             note_text = f" ({'; '.join(notes)}.)" if notes else ""
             return (

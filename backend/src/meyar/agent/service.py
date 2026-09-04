@@ -16,6 +16,7 @@ conversation's OWN server-held ``last_search_candidate_ids`` (see
 ``_resolve_candidate_ref``), so the model's own memory of what it was
 shown is never the authority for which candidate a tool call touches."""
 
+import re
 import uuid
 from datetime import date
 
@@ -86,6 +87,65 @@ MAX_JD_DRAFT_ATTEMPTS = 2
 
 def _fold(text: str) -> str:
     return fold_az_ascii(normalize_azerbaijani_case(text))
+
+
+# --- D-046 (PR #42 owner correction, issue #33): JD requirement grounding ---
+#
+# Real-Ollama acceptance testing surfaced a genuine content-fabrication
+# defect distinct from D-042/D-045's routing/classification findings: a
+# short or underspecified JD reliably gets a plausible-sounding but wholly
+# unstated requirement "filled in" from the model's own prior/training
+# knowledge about what a role "typically" requires (e.g. "İngilis dili"
+# fabricated onto a JD that never mentions language; the reported
+# "Passing an exam" fabricated onto a JD that only states travel
+# readiness). The JD_CRITERIA_DRAFT_SYSTEM_PROMPT already instructs "only
+# include a requirement that is actually stated in the text — never
+# invent one," and this is unreliable at this model size, matching the
+# project's established practice (D-042 point 6) of not expecting a
+# stronger prompt alone to fix a small-model behavior — so this is a
+# deterministic post-hoc check, not another prompt iteration.
+#
+# Generic connector/particle words carry no grounding signal either way
+# (they appear in nearly every requirement sentence regardless of actual
+# content) and are excluded before comparison.
+_GROUNDING_STOPWORDS = frozenset(
+    {
+        "ve", "ya", "ki", "bir", "bu", "da", "de", "ile", "ucun", "uzre",
+        "olan", "olmaq", "olmalidir", "olmalidi", "etmek", "edir", "gore",
+        "haqqinda", "arasinda", "hem", "yalniz", "cox", "daha", "kimi",
+        "the", "a", "an", "and", "or", "of", "to", "for", "in", "on", "with",
+    }
+)
+
+
+def _grounding_tokens(text: str) -> list[str]:
+    """Folded, stopword-filtered word/number tokens used only for the
+    requirement-grounding check below — deliberately coarser than
+    slugify_criterion_label (which must produce a stable id, not a
+    comparison signal)."""
+    folded = _fold(text)
+    words = re.findall(r"[a-z0-9]+", folded)
+    return [word for word in words if word not in _GROUNDING_STOPWORDS]
+
+
+def _is_requirement_grounded_in_jd_text(requirement: str, jd_text: str) -> bool:
+    """Deterministic lexical check that a model-drafted requirement is
+    actually traceable to the JD's own text, rather than fabricated. Fold-
+    tolerant (Azerbaijani suffix variance survives fold_az_ascii/
+    normalize_azerbaijani_case, e.g. "ezamiyyətə" vs "ezamiyyət") and
+    requires at least half of the requirement's own non-connector words to
+    appear as a substring of the JD text. A requirement with no comparable
+    content word at all (only connector words, or an empty token set)
+    is treated as ungrounded — a real JD requirement always names at
+    least one concrete term (a skill, a duration, a credential, an
+    activity), so the absence of any such term is itself signal, not a
+    false negative to guard against."""
+    tokens = _grounding_tokens(requirement)
+    if not tokens:
+        return False
+    jd_folded = _fold(jd_text)
+    matched = sum(1 for token in tokens if token in jd_folded)
+    return matched * 2 >= len(tokens)
 
 
 # Real-Ollama acceptance testing for Slice 4 (issue #33) surfaced a genuine
@@ -571,7 +631,11 @@ async def _synthesize_grounded_answer(
 
 
 def _build_criterion_from_draft_item(
-    item: JDDraftCriterionItem, *, criterion_type: CriterionType, used_ids: set[str]
+    item: JDDraftCriterionItem,
+    *,
+    criterion_type: CriterionType,
+    used_ids: set[str],
+    jd_text: str,
 ) -> tuple[CriterionIn | None, DroppedJDCriterionReason | None]:
     """Re-validates one MODEL-PRODUCED draft item into a real CriterionIn —
     the exact same schema/prohibited-attribute denylist the manual
@@ -580,8 +644,10 @@ def _build_criterion_from_draft_item(
     new validator). Returns ``(None, reason)`` on validation failure —
     never a silent drop (PR #42 owner correction, issue #33): the caller
     discloses a PROHIBITED reason as a count only (the matched text itself
-    must never be redisplayed), and an UNSUPPORTED reason with the
-    original, already-confirmed-non-sensitive requirement text. Mirrors
+    must never be redisplayed), an UNGROUNDED reason as a count only (the
+    text was never confirmed to actually be in HR's JD — D-046), and an
+    UNSUPPORTED reason with the original, already-confirmed-non-sensitive,
+    already-confirmed-grounded requirement text. Mirrors
     meyar.ui.service._parse_criterion_row's kind-aware value/min_years
     shape, but reports instead of raising since this is a best-effort
     DRAFT, not a form submission.
@@ -593,38 +659,56 @@ def _build_criterion_from_draft_item(
     any evaluator-supported kind (D-045); building a CriterionIn from it
     would either fail unpredictably or, worse, misclassify a genuinely
     unsupported requirement into a supported (and therefore scored)
-    criterion, which the deterministic scorer must never do."""
+    criterion, which the deterministic scorer must never do.
+
+    The grounding check (D-046) runs LAST and gates BOTH remaining
+    disclosure outcomes uniformly: a valid CriterionIn (which would be
+    shown as a real, scored criterion) and an UNSUPPORTED classification
+    (which discloses the requirement's own text to HR as a real JD
+    requirement the system merely cannot score) — a requirement reaching
+    either of those without a lexical trace in the JD text is reclassified
+    UNGROUNDED instead, count-only, never disclosed. PROHIBITED is an
+    unconditional early return above and is never reordered or gated by
+    this check — a doubly-bad item (both fabricated and sensitive) is
+    still counted PROHIBITED, exactly as before this check existed."""
+    criterion: CriterionIn | None
+    reason: DroppedJDCriterionReason | None
     if item.kind == JDDraftCriterionKind.OTHER:
-        return None, DroppedJDCriterionReason.UNSUPPORTED
-    kind = CriterionKind(item.kind.value)
-    value = None if kind == CriterionKind.EXPERIENCE else item.requirement
-    min_years = item.min_years if kind == CriterionKind.EXPERIENCE else None
-    try:
-        criterion = CriterionIn(
-            id=slugify_criterion_label(item.requirement, used_ids),
-            kind=kind,
-            type=criterion_type,
-            label=item.requirement,
-            value=value,
-            min_years=min_years,
-            weight=item.weight,
-        )
-        return criterion, None
-    except ValidationError as exc:
-        # A model_validator raising ProhibitedCriterionError (itself a
-        # ValueError subclass) is always re-wrapped by pydantic into a
-        # generic ValidationError before it reaches this except clause —
-        # the original exception survives only inside each error's own
-        # ``ctx["error"]`` (verified against pydantic 2.11's actual
-        # behavior, not merely assumed). Unwrap it there to tell a
-        # sensitive-attribute match apart from every other validation
-        # failure (D-043, PR #42 owner correction, issue #33).
-        if any(
-            isinstance(error.get("ctx", {}).get("error"), ProhibitedCriterionError)
-            for error in exc.errors()
-        ):
-            return None, DroppedJDCriterionReason.PROHIBITED
-        return None, DroppedJDCriterionReason.UNSUPPORTED
+        criterion, reason = None, DroppedJDCriterionReason.UNSUPPORTED
+    else:
+        kind = CriterionKind(item.kind.value)
+        value = None if kind == CriterionKind.EXPERIENCE else item.requirement
+        min_years = item.min_years if kind == CriterionKind.EXPERIENCE else None
+        try:
+            criterion = CriterionIn(
+                id=slugify_criterion_label(item.requirement, used_ids),
+                kind=kind,
+                type=criterion_type,
+                label=item.requirement,
+                value=value,
+                min_years=min_years,
+                weight=item.weight,
+            )
+            reason = None
+        except ValidationError as exc:
+            # A model_validator raising ProhibitedCriterionError (itself a
+            # ValueError subclass) is always re-wrapped by pydantic into a
+            # generic ValidationError before it reaches this except
+            # clause — the original exception survives only inside each
+            # error's own ``ctx["error"]`` (verified against pydantic
+            # 2.11's actual behavior, not merely assumed). Unwrap it there
+            # to tell a sensitive-attribute match apart from every other
+            # validation failure (D-043, PR #42 owner correction, issue
+            # #33).
+            if any(
+                isinstance(error.get("ctx", {}).get("error"), ProhibitedCriterionError)
+                for error in exc.errors()
+            ):
+                return None, DroppedJDCriterionReason.PROHIBITED
+            criterion, reason = None, DroppedJDCriterionReason.UNSUPPORTED
+    if not _is_requirement_grounded_in_jd_text(item.requirement, jd_text):
+        return None, DroppedJDCriterionReason.UNGROUNDED
+    return criterion, reason
 
 
 async def _dispatch_draft_job_criteria(
@@ -654,18 +738,21 @@ async def _dispatch_draft_job_criteria(
     preferred: list[CriterionIn] = []
     unsupported: list[UnsupportedJDCriterionItem] = []
     prohibited_count = 0
+    ungrounded_count = 0
     for items, criterion_type, bucket in (
         (draft.must_have, CriterionType.MUST_HAVE, must_have),
         (draft.preferred, CriterionType.PREFERRED, preferred),
     ):
         for item in items:
             criterion, reason = _build_criterion_from_draft_item(
-                item, criterion_type=criterion_type, used_ids=used_ids
+                item, criterion_type=criterion_type, used_ids=used_ids, jd_text=jd_text
             )
             if criterion is not None:
                 bucket.append(criterion)
             elif reason == DroppedJDCriterionReason.PROHIBITED:
                 prohibited_count += 1
+            elif reason == DroppedJDCriterionReason.UNGROUNDED:
+                ungrounded_count += 1
             else:
                 unsupported.append(
                     UnsupportedJDCriterionItem(
@@ -680,6 +767,7 @@ async def _dispatch_draft_job_criteria(
             must_have=must_have,
             preferred=preferred,
             unsupported=unsupported,
+            ungrounded_count=ungrounded_count,
             prohibited_count=prohibited_count,
         ),
     )

@@ -293,9 +293,9 @@ class DroppedJDCriterionReason(StrEnum):
     """Why a model-drafted JD requirement did not become a real
     CriterionIn — see PR #42 owner correction (issue #33): a drafted
     requirement must never simply vanish, but a PROHIBITED one's own text
-    is exactly what security policy forbids re-displaying, so the two
-    reasons are surfaced very differently (see UnsupportedJDCriterionItem
-    and AgentJobDraftToolResult.prohibited_count)."""
+    is exactly what security policy forbids re-displaying, so the reasons
+    are surfaced very differently (see UnsupportedJDCriterionItem and
+    AgentJobDraftToolResult.prohibited_count/ungrounded_count)."""
 
     # A non-sensitive requirement that failed some other CriterionIn rule
     # (for example an EXPERIENCE item the JD text gave no derivable
@@ -307,6 +307,18 @@ class DroppedJDCriterionReason(StrEnum):
     # requirement's own text must never be re-displayed or persisted —
     # only a count and a safe, generic HR-facing explanation.
     PROHIBITED = "PROHIBITED"
+    # Failed meyar.agent.service._is_requirement_grounded_in_jd_text: the
+    # requirement's own text has no meaningful lexical trace in the actual
+    # JD text supplied by HR — a real-Ollama finding (qwen3:1.7b, D-046):
+    # a short/underspecified JD reliably gets "filled in" with a
+    # plausible-sounding but entirely unstated item (the reported
+    # "Passing an exam" fabricated onto an unrelated travel-readiness
+    # requirement). Never disclosed verbatim — unlike UNSUPPORTED, this
+    # requirement was never confirmed to actually be in the JD, so
+    # presenting its own text would itself misattribute invented content
+    # to HR's own source document; only a safe count is exposed (see
+    # AgentJobDraftToolResult.ungrounded_count).
+    UNGROUNDED = "UNGROUNDED"
 
 
 class UnsupportedJDCriterionItem(BaseModel):
@@ -334,7 +346,12 @@ class AgentJobDraftToolResult(BaseModel):
     sensitive/prohibited-attribute match is counted in
     ``prohibited_count`` only — its own text is never redisplayed,
     matching the same denylist discipline the manual form and REST API
-    already enforce. Carries no candidate/tenant data. Only ever attached
+    already enforce. A requirement that failed the deterministic
+    JD-text grounding check (D-046 — see DroppedJDCriterionReason.
+    UNGROUNDED) is counted in ``ungrounded_count`` only, for the same
+    reason: its own text was never confirmed to actually be in HR's JD,
+    so redisplaying it would itself misattribute invented content to the
+    source document. Carries no candidate/tenant data. Only ever attached
     on a genuine drafting success (possibly with zero criteria) — a
     drafting call that never produced a usable result at all is the
     distinct AgentTurnOutcome.JOB_DRAFT_FAILED outcome with no
@@ -348,6 +365,7 @@ class AgentJobDraftToolResult(BaseModel):
     preferred: list[CriterionIn] = Field(default_factory=list)
     unsupported: list[UnsupportedJDCriterionItem] = Field(default_factory=list)
     prohibited_count: int = Field(default=0, ge=0)
+    ungrounded_count: int = Field(default=0, ge=0)
 
 
 class AgentToolResult(BaseModel):
