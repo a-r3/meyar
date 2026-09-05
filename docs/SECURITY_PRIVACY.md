@@ -63,6 +63,47 @@
   `FAILED`/`MANUAL_REVIEW_REQUIRED` `CandidateProfileVersion` — never a
   crash, never fabricated content.
 
+## Local-only Ollama operating contract
+
+Two distinct guarantees are in play, and they must not be conflated —
+closing the transport-egress defect above (D-047) only closes the first:
+
+**APPLICATION GUARANTEE (verified in this repository's test suite):**
+- Every MEYAR-constructed HTTP client used for Ollama inference,
+  embeddings, or health/readiness rejects a non-loopback
+  `MEYAR_OLLAMA_BASE_URL` at construction time (`require_loopback_url`).
+- Every such client is built with `trust_env=False`, so process
+  environment proxy configuration (`HTTP_PROXY`/`HTTPS_PROXY`/
+  `ALL_PROXY`) can never redirect a candidate-content request off-machine,
+  and this does not depend on `NO_PROXY` being set correctly.
+- Every such client has `follow_redirects=False`, so a redirect response
+  from the local Ollama daemon cannot carry a request outside the
+  approved boundary.
+
+**HOST/OLLAMA CONFIGURATION GUARANTEE (deployment-environment
+responsibility — a future deployment preflight must verify these before
+go-live, not this codebase):**
+- The Ollama daemon itself binds only to an approved local interface,
+  preferably loopback (`OLLAMA_HOST=127.0.0.1`, not `0.0.0.0`).
+- Cloud-backed Ollama behavior (any "Ollama Cloud"/hosted-model routing
+  the daemon supports) is disabled.
+- Only approved local models are available to the daemon — no
+  unapproved/unreviewed model can be pulled or invoked.
+- Model identity/digest is release-managed (pinned, reviewed model
+  versions — not "whatever `latest` resolves to on the day of a pull").
+- Host-level outbound-network denial (OS firewall egress rule blocking
+  the Ollama process, or the whole host, from reaching the public
+  internet) remains defense in depth underneath the application-layer
+  guarantee above — the application guarantee must not be treated as a
+  substitute for it.
+
+**NOT VERIFIED in this development environment:** daemon-level
+cloud-disable status, interface binding, model pinning/digest management,
+and host-level egress denial are all deployment/target-hardware concerns
+(see `docs/TARGET_MAC_BENCHMARK.md`) that cannot be checked from this
+repository's test suite — they require a deployment preflight against the
+actual target Ollama installation, not yet implemented.
+
 ## Threat model (MVP-relevant)
 
 | Threat | Mitigation |
@@ -77,7 +118,8 @@
 | Retry-induced duplicate work/cost | `Idempotency-Key` on unsafe writes where relevant |
 | Inference overload | Global concurrency semaphore around the `LLMProvider` call; per-tenant rate limit |
 | Candidate content leaving bank infrastructure via embeddings | Local-only embedding provider abstraction, same boundary pattern as `LLMProvider`; no external embedding API call anywhere in code |
-| Candidate content leaving the host machine via any outbound network call | Formally verified (Slice 13): static inventory confirms three `httpx.AsyncClient` construction sites exist in the app (`OllamaLLMProvider.health`, `OllamaLLMProvider._chat`, `OllamaEmbeddingProvider.embed`), all loopback-gated; a deterministic runtime guard (`test_no_exfiltration.py`) proves a representative extract+embed workflow, run through the real provider classes, never attempts a non-loopback request. Validated as an application-level, tested-configuration claim — not a physical-firewall/network-layer guarantee. |
+| Candidate content leaving the host machine via any outbound network call | Formally verified (Slice 13): static inventory confirms three call sites build a local-only HTTP client in the app (`OllamaLLMProvider.health`, `OllamaLLMProvider._chat`, `OllamaEmbeddingProvider.embed`), all loopback-gated; a deterministic runtime guard (`test_no_exfiltration.py`) proves a representative extract+embed workflow, run through the real provider classes, never attempts a non-loopback request. Validated as an application-level, tested-configuration claim — not a physical-firewall/network-layer guarantee. |
+| Candidate content leaving the host machine via process-environment proxy configuration (`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`), even when the logical request URL is loopback | D-047: all three client-construction sites above route through the single shared `meyar.llm.loopback.build_local_only_async_client` boundary, which passes `trust_env=False` — httpx's own environment-derived proxy selection (`_get_proxy_map`) is disabled outright, so the fix does not depend on `NO_PROXY` being set correctly. `follow_redirects` stays explicit `False` so a redirect response cannot carry a request outside the boundary either. Proven at the transport-configuration level (internal `_mounts`/`_trust_env` state, not just `request.url.host`) in `test_ollama_transport_proxy_isolation.py`. See "Local-only Ollama operating contract" below for the host/daemon-level guarantees this does not cover. |
 | Identity data (name/contact) leaking into scoring/ranking as a hidden signal | `CandidateIdentityVersion` is presentation-only by construction — matching/search/ranking inputs include only `CandidateProfile` fields, and Slice 11 resolves identity after backend order is fixed |
 | Untrusted local files treated as more trustworthy than uploads | Folder-discovered files go through the identical MIME/size/opaque-id validation path as direct upload — no separate, weaker code path |
 

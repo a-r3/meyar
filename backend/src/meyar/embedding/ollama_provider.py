@@ -8,7 +8,7 @@ from meyar.embedding.provider import (
     EmbeddingTimeoutError,
     EmbeddingUnavailableError,
 )
-from meyar.llm.loopback import require_loopback_url
+from meyar.llm.loopback import build_local_only_async_client, require_loopback_url
 
 # Labeled explicitly as a development/integration default — NOT an
 # approved final production embedding model. Final selection is blocked
@@ -47,7 +47,7 @@ class OllamaEmbeddingProvider:
     async def embed(self, text: str) -> EmbeddingResult:
         payload = {"model": self.model_name, "prompt": text}
         try:
-            async with httpx.AsyncClient(
+            async with build_local_only_async_client(
                 timeout=self._timeout_seconds, transport=self._transport
             ) as client:
                 resp = await client.post(f"{self._base_url}/api/embeddings", json=payload)

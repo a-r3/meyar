@@ -3946,3 +3946,104 @@ renamed. `_is_requirement_grounded_in_jd_text`/`_grounding_tokens` are
 new, narrowly-scoped pure functions in `meyar.agent.service`. Template/
 headline changes are the same additive notice pattern already
 established for `prohibited_count`. No schema/migration change.
+
+## D-047 — Local Ollama transport-egress P0: httpx `trust_env` proxy
+bypass of the loopback boundary
+
+**Date:** 2026-09-05
+**Decision:** Closes an internal-audit-reproduced P0 with the smallest
+security-focused change, no new branch (same task branch as D-046, PR
+#42 not yet accepted/merged), no API/scoring/evidence/agent/UI/migration/
+deployment change.
+
+1. **Root cause.** `require_loopback_url` validates `MEYAR_OLLAMA_BASE_URL`
+   as a logical URL string only. Every `httpx.AsyncClient` constructed for
+   Ollama traffic (`OllamaLLMProvider.health`, `OllamaLLMProvider._chat`,
+   `OllamaEmbeddingProvider.embed`) previously used httpx's default
+   `trust_env=True`. Verified directly against installed httpx 0.28.1
+   internals (`Client.__init__`'s `allow_env_proxies = trust_env and
+   transport is None`, feeding `_get_proxy_map`/`_mounts`): with
+   `trust_env=True` and `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` set in the
+   process environment and `NO_PROXY` absent or not covering `127.0.0.1`,
+   httpx populates `Client._mounts` with a proxy-routed transport that
+   `_transport_for_url` selects **ahead of** the client's own transport —
+   including an explicitly injected one — for a request whose logical URL
+   is still `127.0.0.1`. So a configured loopback endpoint could still be
+   silently re-routed to an attacker-controlled proxy purely by process
+   environment configuration, with no code-level indication. This is a
+   distinct defect from (and sits below) the existing logical-URL
+   loopback check, which cannot detect it — confirmed empirically:
+   `httpx.AsyncClient(timeout=5.0)` under `HTTP_PROXY` set nonempty
+   `_mounts`; `build_local_only_async_client(timeout=5.0)` under the same
+   env has empty `_mounts`.
+2. **Fix.** Added one shared construction boundary,
+   `meyar.llm.loopback.build_local_only_async_client`, used by all three
+   sites above (previously each called `httpx.AsyncClient(...)` directly).
+   It passes `trust_env=False` (disables all environment-derived proxy
+   selection outright — does not depend on `NO_PROXY` being correct) and
+   explicit `follow_redirects=False` (httpx's own default, made explicit
+   so a redirect response can never carry a request outside the
+   boundary). `OllamaLLMProvider.health` previously built its client with
+   no transport-injection support at all (`httpx.AsyncClient(timeout=5.0)`,
+   ignoring `self._transport`); it now passes `self._transport` through
+   like `_chat` already did, both to use the shared boundary and because
+   the audit's regression-test requirement ("health/readiness path if
+   separately constructed") is otherwise untestable without live network.
+   No route, schema, scoring, evidence, agent-behavior, UI, or migration
+   change.
+3. **Regression tests** (`tests/test_ollama_transport_proxy_isolation.py`,
+   18 new tests): assert directly on the constructed `httpx.AsyncClient`'s
+   internal `_trust_env`/`_mounts` state — not merely `request.url.host`,
+   which the audit correctly flagged as insufficient since the original
+   defect sits below that logical-URL layer — under `HTTP_PROXY`/
+   `HTTPS_PROXY`/`ALL_PROXY` individually, with `NO_PROXY` absent (the
+   exact audit scenario) and separately with `NO_PROXY=""`; a negative
+   control proves a naively-constructed `httpx.AsyncClient` is genuinely
+   vulnerable under the same env (mounts non-empty), so the fixed-path
+   assertions are not vacuous. Each of the three call sites (chat, embed,
+   health) is exercised end-to-end through the real provider classes
+   against `httpx.MockTransport`, under proxy env, both proving the fix
+   is actually wired in at every site and that request/response handling
+   is otherwise unchanged. Two redirect tests (one direct on the shared
+   boundary, one through `_chat`) prove a same-origin 302 is surfaced as
+   a failure/response rather than followed to an external `Location`.
+   Two tests prove the pre-existing non-loopback rejection
+   (`require_loopback_url`) still fails closed even under attacker-set
+   proxy env, i.e. the transport fix didn't weaken it.
+4. **Local-only Ollama operating contract** documented in
+   `docs/SECURITY_PRIVACY.md` ("Local-only Ollama operating contract"
+   section and an added threat-model row), explicitly distinguishing the
+   APPLICATION GUARANTEE this fix provides (loopback URL + no env-proxy
+   routing + no cross-boundary redirect, all test-verified here) from the
+   HOST/OLLAMA CONFIGURATION GUARANTEE a future deployment preflight must
+   separately verify (daemon interface binding, cloud-backed-Ollama
+   disabled, approved-model-only, release-managed model digest, host-level
+   egress denial as defense in depth) — none of which this repository's
+   test suite can check. Explicitly marked **NOT VERIFIED** in this
+   development environment; no Mac deployment tooling implemented (out of
+   this task's scope by the audit's own instruction).
+5. **Quality gates:** `ruff check .` clean, `uv run mypy src` clean (136
+   files), `uv run pytest -q` — 869 passed (851 pre-existing + 18 new),
+   0 failed, 0 skipped/xfailed, no test removed or disabled, `uv run
+   alembic heads` unchanged (single head, still `a1c5e9f2b6d3` — no
+   migration), `scripts/scan-tracked-tree.sh` clean.
+
+**Why:** The audit's own required invariant — reject non-loopback
+endpoints, ignore environment-derived proxy configuration, don't depend
+on `NO_PROXY`, don't follow cross-boundary redirects, preserve existing
+timeout/failure semantics and test transport injection — is a direct,
+narrowly-scoped security requirement with a verified reproduction path
+(installed httpx 0.28.1 internals, not a hypothetical), and the smallest
+correct fix is exactly the shared `trust_env=False` construction boundary
+the audit itself named as the expected direction, not a broader redesign.
+
+**Reversibility:** Fully additive/localized. `build_local_only_async_client`
+is a new function in `meyar/llm/loopback.py`; the three existing call
+sites now call it in place of `httpx.AsyncClient(...)` directly, with the
+same `timeout`/`transport` arguments (plus `self._transport` now honored
+in `health`, previously silently dropped) — no signature of any public
+provider method changed, no field added/removed on any schema, no
+migration. `test_no_exfiltration.py`'s docstring was updated to describe
+the now-shared construction boundary (no assertion changed). Nothing
+committed depends on any deployment-side change; the host/daemon
+operating-contract section is documentation only.

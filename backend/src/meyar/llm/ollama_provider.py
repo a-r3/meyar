@@ -17,7 +17,7 @@ from meyar.extraction.identity_prompts import IDENTITY_SYSTEM_PROMPT
 from meyar.extraction.prompts import SYSTEM_PROMPT, build_user_prompt
 from meyar.extraction.view import ProfessionalDocumentView
 from meyar.llm.concurrency import get_inference_semaphore
-from meyar.llm.loopback import require_loopback_url
+from meyar.llm.loopback import build_local_only_async_client, require_loopback_url
 from meyar.llm.provider import (
     LLMResultProvenance,
     ModelSchemaInvalidError,
@@ -60,7 +60,9 @@ class OllamaLLMProvider:
 
     async def health(self) -> dict:
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            async with build_local_only_async_client(
+                timeout=5.0, transport=self._transport
+            ) as client:
                 resp = await client.get(f"{self._base_url}/api/tags")
                 resp.raise_for_status()
                 tags = [m.get("name") for m in resp.json().get("models", [])]
@@ -219,7 +221,7 @@ class OllamaLLMProvider:
         semaphore = get_inference_semaphore(self._max_concurrency)
         try:
             async with semaphore:
-                async with httpx.AsyncClient(
+                async with build_local_only_async_client(
                     timeout=self._timeout_seconds, transport=self._transport
                 ) as client:
                     resp = await client.post(f"{self._base_url}/api/chat", json=payload)
