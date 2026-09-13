@@ -948,7 +948,17 @@ heads` unchanged (single head, still `a1c5e9f2b6d3` — no migration), full
 `pytest` suite passed (851 passed, +3 new tests vs D-045's 848 — the
 JD-grounding unit test plus two end-to-end fabricated-requirement
 regressions — none deleted/weakened), `scripts/scan-tracked-tree.sh`
-clean. See D-042, D-043, D-044, D-045, D-046.
+clean. A fifth pre-acceptance P0 pass (D-048) closes two reproduced
+candidate-factual authority defects without changing JD grounding,
+duration arithmetic, deterministic scoring, or the API: accepted
+professional facts now require claim-specific support from their own
+verified evidence, and unrestricted model prose has been removed from
+`FINAL_ANSWER`/`CLARIFY` in favor of closed response codes plus
+server-owned rendering. Legacy persisted assistant prose is ignored unless
+it carries the new server-authority marker. D-048 quality gates: focused
+suite 216 passed; `ruff` clean; `mypy src` clean (136 files); full `pytest`
+887 passed; Alembic remains at the single `a1c5e9f2b6d3` head; tracked-tree
+scan clean. See D-042, D-043, D-044, D-045, D-046, D-048.
 
 **M8 Slice 3 — Evidence Capability Completion (#32)**: **MERGED as PR #41
 (`8c1782f`, squash); issue #32 closed.** Closes the D-027-identified
@@ -1228,7 +1238,7 @@ due date because the official timeline has not been supplied.
 | M5 — Security, Target-Mac Validation & MVP Acceptance | Slice 13 + target-Mac benchmark | OPEN — issue #20 open; PR #22 merged at `a709ce1` implementing Pass 1 (original CV, no-exfiltration, backup/restore, audit guard, multilingual evidence) with `Refs #20`; Mac Mini benchmark execution on the now owner-confirmed target hardware remains the sole open mandatory gate |
 | M6 — Operational CV Intake & Reconciliation | Slice 14 | CLOSED — Slice 14 merged (PR #24 at `f6e31ff`), issue #23 closed; owner-approved closure |
 | M7 — HR UI & Presentation Readiness | HR UI productization (chore, issue #27) | OPEN — branch `feat/hr-ui-productization`, PR #29 open, pending final owner visual check; Job lifecycle implemented; see D-023 through D-029 |
-| M8 — Bounded Local-AI HR Agent Platform | Slices 1–5 (issues #30–#34) | OPEN — Slice 1 (#30), Slice 2 (#31), Slice 3 (#32) merged (PR #41 at `8c1782f`); Slice 4 (#33) implementation corrected per four owner review rounds (D-043 functional, D-044 presentation, D-045 turn-render/copy/evidence/composer/criteria/ranking/unsupported-requirement, D-046 JD-requirement grounding + test-count history), branch `feat/agent-product-ux-jd-matching`, PR #42 open, awaiting owner re-review before merge |
+| M8 — Bounded Local-AI HR Agent Platform | Slices 1–5 (issues #30–#34) | OPEN — Slice 1 (#30), Slice 2 (#31), Slice 3 (#32) merged (PR #41 at `8c1782f`); Slice 4 (#33) implementation corrected through D-048 (candidate-factual evidence and agent-authority P0), branch `feat/agent-product-ux-jd-matching`, PR #42 open and not accepted, awaiting owner re-review before merge |
 | M9 — Deployment, Benchmark & Integration Readiness | Slices 6–8 (issues #35–#37) | OPEN — created 2026-09-01 per D-030/D-031/D-032; no implementation started; does not supersede or close M5/#20 |
 
 ## Official requirement gap matrix

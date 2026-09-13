@@ -475,20 +475,27 @@ def _agent_turn_log_views(conversation) -> list:
     (agent_turn_outcome_message) rather than the raw stored value — a
     past turn's stored text can be empty/None (its outcome carried no
     model framing), and this guarantees it is never redisplayed as a
-    blank bubble (D-036). Since D-045, the stored text for a completed
+    blank bubble (D-036). Only text explicitly tagged with server authority
+    is replayed. Legacy rows may contain unrestricted model prose, so their
+    stored text is ignored and replaced by the fixed outcome fallback.
+    Since D-045, the stored text for a completed
     turn is itself already the exact live-rendered headline (see
     agent_conversation_repo.sync_last_turn_display_text), so this mapping
     is a pure passthrough for every real turn — the fallback table only
     still matters for the rare turn where no headline was ever computed."""
+    from meyar.services.agent_conversation_repo import ASSISTANT_TEXT_AUTHORITY_SERVER
     from meyar.ui.view_models import AgentTurnLogView
 
     views = []
     for turn in conversation.turns:
         role = turn.get("role", "user")
         if role == "assistant":
-            text = agent_turn_outcome_message(
-                turn.get("outcome", "ANSWERED"), turn.get("text") or None
+            trusted_text = (
+                turn.get("text")
+                if turn.get("text_authority") == ASSISTANT_TEXT_AUTHORITY_SERVER
+                else None
             )
+            text = agent_turn_outcome_message(turn.get("outcome", "ANSWERED"), trusted_text or None)
         else:
             text = turn.get("text", "")
         views.append(AgentTurnLogView(role=role, text=text))

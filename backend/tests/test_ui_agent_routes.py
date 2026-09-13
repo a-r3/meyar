@@ -7,10 +7,11 @@ import re
 import pytest
 from fakes import FakeLLMProvider
 from httpx import AsyncClient
+from pydantic import ValidationError
 from search_helpers import seed_candidate_with_profile
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meyar.agent.schemas import AgentActionType, AgentDecision
+from meyar.agent.schemas import AgentActionType, AgentDecision, AgentResponseCode
 from meyar.config import Settings, get_settings
 from meyar.llm.dependency import get_llm_provider
 from meyar.main import app
@@ -126,7 +127,9 @@ async def test_search_candidates_turn_renders_grounded_results_not_model_text(
                 action=AgentActionType.SEARCH_CANDIDATES,
                 search_query="Python bilən namizədləri göstər",
             ),
-            AgentDecision(action=AgentActionType.FINAL_ANSWER, message="Budur nəticələr."),
+            AgentDecision(
+                action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
+            ),
         ],
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake
@@ -136,7 +139,7 @@ async def test_search_candidates_turn_renders_grounded_results_not_model_text(
     )
     assert response.status_code == 200
     assert str(candidate.id) in response.text
-    assert "Budur nəticələr." in response.text
+    assert "Python tələbinə uyğun 1 namizəd tapdım." in response.text
 
 
 async def test_multi_turn_ordinal_reference_over_http(
@@ -158,7 +161,9 @@ async def test_multi_turn_ordinal_reference_over_http(
                 action=AgentActionType.SEARCH_CANDIDATES,
                 search_query="Python bilən namizədləri göstər",
             ),
-            AgentDecision(action=AgentActionType.FINAL_ANSWER, message="Budur nəticələr."),
+            AgentDecision(
+                action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
+            ),
         ],
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake_search
@@ -198,7 +203,9 @@ async def test_two_sessions_do_not_share_agent_conversation_state(
                 action=AgentActionType.SEARCH_CANDIDATES,
                 search_query="Python bilən namizədləri göstər",
             ),
-            AgentDecision(action=AgentActionType.FINAL_ANSWER, message="Budur nəticələr."),
+            AgentDecision(
+                action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
+            ),
         ],
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake_search
@@ -230,14 +237,16 @@ async def test_two_sessions_do_not_share_agent_conversation_state(
 async def test_user_message_and_model_message_are_html_escaped_in_render(
     client: AsyncClient, tenant_and_user, local_ui_settings: Settings
 ) -> None:
-    """Both the HR user's own typed text and the model's own framing
-    message are untrusted for HTML purposes — Jinja autoescape (the same
-    mechanism the rest of the UI relies on) must render them as inert
-    text, never live markup."""
+    """User text stays inert, while model response prose is impossible."""
     _tenant, user, password, _membership = tenant_and_user
     payload = "<script>alert(1)</script>"
+    with pytest.raises(ValidationError):
+        AgentDecision.model_validate({"action": "FINAL_ANSWER", "message": payload})
     fake = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.FINAL_ANSWER, message=payload)
+        agent_decision=AgentDecision(
+            action=AgentActionType.FINAL_ANSWER,
+            response_code=AgentResponseCode.GREETING,
+        )
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake
     csrf = await _login_and_csrf(client, user.username, password)
@@ -246,13 +255,33 @@ async def test_user_message_and_model_message_are_html_escaped_in_render(
     )
     assert response.status_code == 200
     assert payload not in response.text
-    # Escaped 2x: the user's own turn, and the assistant's turn — D-044
-    # (PR #42 owner UX correction) unified the live turn into one
-    # user->assistant->cards block instead of the previous architecture
-    # where the same assistant message rendered twice (once in a plain
-    # history bubble, once again in a separate outcome banner). Never
-    # raw markup anywhere, in either case.
-    assert response.text.count("&lt;script&gt;alert(1)&lt;/script&gt;") == 2
+    assert response.text.count("&lt;script&gt;alert(1)&lt;/script&gt;") == 1
+
+
+async def test_zero_tool_model_candidate_claim_and_hiring_recommendation_never_render_or_persist(
+    client: AsyncClient, tenant_and_user, local_ui_settings: Settings
+) -> None:
+    _tenant, user, password, _membership = tenant_and_user
+    invented = "The first candidate has 20 years of Python experience and should be hired."
+    with pytest.raises(ValidationError):
+        AgentDecision.model_validate({"action": "FINAL_ANSWER", "message": invented})
+    fake = FakeLLMProvider(agent_fail_first_n_calls=99)
+    fake._agent_decisions = [
+        AgentDecision(
+            action=AgentActionType.FINAL_ANSWER,
+            response_code=AgentResponseCode.ACKNOWLEDGEMENT,
+        )
+    ]
+    app.dependency_overrides[get_llm_provider] = lambda: fake
+    csrf = await _login_and_csrf(client, user.username, password)
+
+    response = await client.post("/ui/agent", data={"message": "Who is best?", "csrf_token": csrf})
+    assert response.status_code == 200
+    assert invented not in response.text
+
+    history = await client.get("/ui/agent")
+    assert history.status_code == 200
+    assert invented not in history.text
 
 
 async def test_agent_turn_csrf_required(
@@ -344,7 +373,9 @@ async def test_unscored_structured_discovery_has_no_misleading_percentage(
                 action=AgentActionType.SEARCH_CANDIDATES,
                 search_query="Python bilən namizədləri göstər",
             ),
-            AgentDecision(action=AgentActionType.FINAL_ANSWER, message="Budur nəticələr."),
+            AgentDecision(
+                action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
+            ),
         ],
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake
@@ -377,7 +408,9 @@ async def test_get_candidate_profile_success_never_renders_empty_bubble(
                 action=AgentActionType.SEARCH_CANDIDATES,
                 search_query="Python bilən namizədləri göstər",
             ),
-            AgentDecision(action=AgentActionType.FINAL_ANSWER, message="Budur nəticələr."),
+            AgentDecision(
+                action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
+            ),
         ],
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake_search
@@ -439,7 +472,9 @@ async def test_grounded_explanation_renders_as_meaningful_answer_with_evidence(
                 action=AgentActionType.SEARCH_CANDIDATES,
                 search_query="Python bilən namizədləri göstər",
             ),
-            AgentDecision(action=AgentActionType.FINAL_ANSWER, message="Budur nəticələr."),
+            AgentDecision(
+                action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
+            ),
         ],
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake_search
@@ -501,7 +536,9 @@ async def test_grounded_explanation_never_contains_unsupported_claim_over_http(
                 action=AgentActionType.SEARCH_CANDIDATES,
                 search_query="Python bilən namizədləri göstər",
             ),
-            AgentDecision(action=AgentActionType.FINAL_ANSWER, message="Budur nəticələr."),
+            AgentDecision(
+                action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
+            ),
         ],
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake_search
@@ -579,7 +616,9 @@ async def test_grounded_explanation_never_leaks_identity_to_model(
                 action=AgentActionType.SEARCH_CANDIDATES,
                 search_query="Python bilən namizədləri göstər",
             ),
-            AgentDecision(action=AgentActionType.FINAL_ANSWER, message="Budur nəticələr."),
+            AgentDecision(
+                action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
+            ),
         ],
     )
     app.dependency_overrides[get_llm_provider] = lambda: csrf_conv_setup
@@ -1035,7 +1074,9 @@ async def test_agent_reset_clears_this_sessions_conversation_state(
                 action=AgentActionType.SEARCH_CANDIDATES,
                 search_query="Python bilən namizədləri göstər",
             ),
-            AgentDecision(action=AgentActionType.FINAL_ANSWER, message="Budur nəticələr."),
+            AgentDecision(
+                action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
+            ),
         ],
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake_search
@@ -1083,7 +1124,9 @@ async def test_agent_reset_does_not_affect_another_sessions_conversation(
 
     tenant, user, password, _membership = tenant_and_user
     fake = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.FINAL_ANSWER, message="Salam!")
+        agent_decision=AgentDecision(
+            action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.GREETING
+        )
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake
     csrf_a = await _login_and_csrf(client, user.username, password)

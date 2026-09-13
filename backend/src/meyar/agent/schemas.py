@@ -9,6 +9,9 @@ arguments that do not belong to it. Every ``AgentDecision`` the LLM
 produces is untrusted input — see meyar.agent.service for the same
 tenant/schema/prohibited-attribute/evidence discipline applied to it as to
 any other LLM-produced tool argument (docs/DECISIONS.md D-031 point 4).
+``FINAL_ANSWER``/``CLARIFY`` carry only a closed ``AgentResponseCode``;
+the model has no free-text response field. The server owns every rendered
+sentence for those outcomes.
 
 Tool RESULT schemas below are never LLM-authored — they are the
 deterministic, already-tenant-scoped output of existing services
@@ -76,6 +79,28 @@ class AgentActionType(StrEnum):
     CLARIFY = "CLARIFY"
 
 
+class AgentResponseCode(StrEnum):
+    """Closed, non-factual conversational intents for FINAL_ANSWER/CLARIFY."""
+
+    GREETING = "GREETING"
+    ACKNOWLEDGEMENT = "ACKNOWLEDGEMENT"
+    NEED_MORE_DETAIL = "NEED_MORE_DETAIL"
+    CANDIDATE_REFERENCE_REQUIRED = "CANDIDATE_REFERENCE_REQUIRED"
+    UNSUPPORTED_REQUEST = "UNSUPPORTED_REQUEST"
+    HIRING_DECISION_REQUIRES_HUMAN = "HIRING_DECISION_REQUIRES_HUMAN"
+
+
+_FINAL_RESPONSE_CODES = frozenset({AgentResponseCode.GREETING, AgentResponseCode.ACKNOWLEDGEMENT})
+_CLARIFICATION_RESPONSE_CODES = frozenset(
+    {
+        AgentResponseCode.NEED_MORE_DETAIL,
+        AgentResponseCode.CANDIDATE_REFERENCE_REQUIRED,
+        AgentResponseCode.UNSUPPORTED_REQUEST,
+        AgentResponseCode.HIRING_DECISION_REQUIRES_HUMAN,
+    }
+)
+
+
 TOOL_ACTIONS = frozenset(
     {
         AgentActionType.SEARCH_CANDIDATES,
@@ -110,18 +135,17 @@ class AgentDecision(BaseModel):
     # never treated as instructions — matched as a case/diacritic-
     # insensitive substring against existing stored facts only.
     evidence_topic: str | None = Field(default=None, max_length=200)
-    # FINAL_ANSWER / CLARIFY only: short natural-language framing shown
-    # to the HR user. Never the sole source of a factual claim about a
-    # candidate — see meyar.agent.service and docs/DECISIONS.md D-035.
-    message: str | None = Field(default=None, max_length=2000)
+    # FINAL_ANSWER / CLARIFY only: a closed conversational intent. The
+    # server maps this to fixed copy; no model-authored prose can reach HR.
+    response_code: AgentResponseCode | None = None
 
     @model_validator(mode="after")
     def _validate_shape(self) -> "AgentDecision":
         if self.action == AgentActionType.SEARCH_CANDIDATES:
             if self.search_query is None:
                 raise ValueError("SEARCH_CANDIDATES requires search_query.")
-            if self.candidate_ref is not None or self.message is not None:
-                raise ValueError("SEARCH_CANDIDATES must not set candidate_ref or message.")
+            if self.candidate_ref is not None or self.response_code is not None:
+                raise ValueError("SEARCH_CANDIDATES must not set candidate_ref or response_code.")
             if self.evidence_topic is not None:
                 raise ValueError("SEARCH_CANDIDATES must not set evidence_topic.")
         elif self.action in (
@@ -130,8 +154,8 @@ class AgentDecision(BaseModel):
         ):
             if self.candidate_ref is None:
                 raise ValueError(f"{self.action} requires candidate_ref.")
-            if self.search_query is not None or self.message is not None:
-                raise ValueError(f"{self.action} must not set search_query or message.")
+            if self.search_query is not None or self.response_code is not None:
+                raise ValueError(f"{self.action} must not set search_query or response_code.")
             if (
                 self.action == AgentActionType.GET_CANDIDATE_PROFILE
                 and self.evidence_topic is not None
@@ -145,15 +169,15 @@ class AgentDecision(BaseModel):
                 self.search_query is not None
                 or self.candidate_ref is not None
                 or self.evidence_topic is not None
-                or self.message is not None
+                or self.response_code is not None
             ):
                 raise ValueError(
                     "DRAFT_JOB_CRITERIA must not set search_query, candidate_ref, "
-                    "evidence_topic, or message."
+                    "evidence_topic, or response_code."
                 )
         else:  # FINAL_ANSWER / CLARIFY
-            if self.message is None:
-                raise ValueError(f"{self.action} requires message.")
+            if self.response_code is None:
+                raise ValueError(f"{self.action} requires response_code.")
             if (
                 self.search_query is not None
                 or self.candidate_ref is not None
@@ -161,6 +185,15 @@ class AgentDecision(BaseModel):
             ):
                 raise ValueError(
                     f"{self.action} must not set search_query, candidate_ref, or evidence_topic."
+                )
+            allowed = (
+                _FINAL_RESPONSE_CODES
+                if self.action == AgentActionType.FINAL_ANSWER
+                else _CLARIFICATION_RESPONSE_CODES
+            )
+            if self.response_code not in allowed:
+                raise ValueError(
+                    f"{self.action} does not allow response_code={self.response_code}."
                 )
         return self
 
@@ -474,10 +507,9 @@ class GroundedSelection(BaseModel):
 
 class AgentTurnResult(BaseModel):
     """The full, safe result of one bounded orchestration turn. ``message``
-    is either (a) a model-authored FINAL_ANSWER/CLARIFY framing string
-    (D-035), or (b) a server-BUILT grounded-answer sentence assembled
-    entirely from GroundedFact values the model only selected/ordered
-    (D-038) — never free-standing model prose trusted at face value.
+    is fixed server-owned copy for FINAL_ANSWER/CLARIFY, or a server-built
+    grounded-answer sentence assembled entirely from GroundedFact values
+    the model only selected/ordered (D-038) — never model-authored prose.
     Every factual claim also always lives in ``tool_results`` itself
     (deterministic, evidence-grounded, server-rendered) regardless of
     what ``message`` says."""

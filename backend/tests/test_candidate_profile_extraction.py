@@ -1,3 +1,4 @@
+import uuid
 from pathlib import Path
 
 import pytest
@@ -5,14 +6,22 @@ from fakes import FakeLLMProvider
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meyar.extraction.evidence import EvidenceValidationError, verify_extraction_evidence
 from meyar.extraction.service import ExtractionPreconditionError, extract_candidate_profile
+from meyar.extraction.view import ModelInputBlock, ProfessionalDocumentView
 from meyar.llm.provider import ModelTimeoutError, ModelUnavailableError
 from meyar.schemas.candidate_profile import (
     CandidateProfileExtraction,
+    CertificationItem,
+    EducationItem,
     EmploymentItem,
     EvidenceRef,
+    LanguageItem,
+    ProjectItem,
     SkillItem,
 )
+from meyar.search.schemas import CandidateSearchRequest, RequiredFilters, SearchMode
+from meyar.search.service import search_candidates
 from meyar.services.candidate_document_repo import get_candidate_document
 from meyar.services.candidate_profile_repo import get_current_profile_version, get_profile_version
 
@@ -61,6 +70,194 @@ def _valid_extraction() -> CandidateProfileExtraction:
             )
         ],
     )
+
+
+def test_skill_claim_cannot_borrow_unrelated_real_evidence() -> None:
+    view = ProfessionalDocumentView(
+        canonical_document_id=uuid.uuid4(),
+        blocks=[ModelInputBlock(page=1, block_index=0, text="Advanced Excel")],
+    )
+    extraction = CandidateProfileExtraction(
+        skills=[
+            SkillItem(
+                name="Python",
+                evidence=[EvidenceRef(page=1, block_index=0, quote="Advanced Excel")],
+            )
+        ]
+    )
+
+    with pytest.raises(EvidenceValidationError) as exc_info:
+        verify_extraction_evidence(view, extraction)
+    assert exc_info.value.code == "CLAIM_EVIDENCE_UNSUPPORTED"
+
+
+@pytest.mark.parametrize("quote", ["No Python experience", "Python is not required"])
+def test_positive_skill_claim_cannot_use_explicitly_negated_evidence(quote: str) -> None:
+    view = ProfessionalDocumentView(
+        canonical_document_id=uuid.uuid4(),
+        blocks=[ModelInputBlock(page=1, block_index=0, text=quote)],
+    )
+    extraction = CandidateProfileExtraction(
+        skills=[
+            SkillItem(
+                name="Python",
+                evidence=[EvidenceRef(page=1, block_index=0, quote=quote)],
+            )
+        ]
+    )
+
+    with pytest.raises(EvidenceValidationError) as exc_info:
+        verify_extraction_evidence(view, extraction)
+    assert exc_info.value.code == "CLAIM_EVIDENCE_UNSUPPORTED"
+
+
+@pytest.mark.parametrize(
+    "quote",
+    [
+        "Production services developed with Python and PostgreSQL",
+        "Production services developed with Py and PostgreSQL",
+    ],
+)
+def test_proper_skill_evidence_and_curated_alias_still_verify(quote: str) -> None:
+    view = ProfessionalDocumentView(
+        canonical_document_id=uuid.uuid4(),
+        blocks=[ModelInputBlock(page=1, block_index=0, text=quote)],
+    )
+    extraction = CandidateProfileExtraction(
+        skills=[
+            SkillItem(
+                name="Python",
+                evidence=[EvidenceRef(page=1, block_index=0, quote=quote)],
+            )
+        ]
+    )
+
+    verify_extraction_evidence(view, extraction)
+
+
+@pytest.mark.parametrize(
+    ("quote", "extraction"),
+    [
+        (
+            "Backend Developer at Synthetic Co, 2021-2025",
+            CandidateProfileExtraction(
+                employment_history=[
+                    EmploymentItem(
+                        title="Backend Developer",
+                        organization="Synthetic Co",
+                        start_date="2021",
+                        end_date="2025",
+                        evidence=[
+                            EvidenceRef(
+                                page=1,
+                                block_index=0,
+                                quote="Backend Developer at Synthetic Co, 2021-2025",
+                            )
+                        ],
+                    )
+                ]
+            ),
+        ),
+        (
+            "Synthetic University — BSc, Computer Science, 2020",
+            CandidateProfileExtraction(
+                education=[
+                    EducationItem(
+                        institution="Synthetic University",
+                        degree="BSc",
+                        field_of_study="Computer Science",
+                        date="2020",
+                        evidence=[
+                            EvidenceRef(
+                                page=1,
+                                block_index=0,
+                                quote="Synthetic University — BSc, Computer Science, 2020",
+                            )
+                        ],
+                    )
+                ]
+            ),
+        ),
+        (
+            "AWS Certified Solutions Architect — Amazon — 2024",
+            CandidateProfileExtraction(
+                certifications=[
+                    CertificationItem(
+                        name="AWS Certified Solutions Architect",
+                        issuer="Amazon",
+                        date="2024",
+                        evidence=[
+                            EvidenceRef(
+                                page=1,
+                                block_index=0,
+                                quote="AWS Certified Solutions Architect — Amazon — 2024",
+                            )
+                        ],
+                    )
+                ]
+            ),
+        ),
+        (
+            "English — C1",
+            CandidateProfileExtraction(
+                languages=[
+                    LanguageItem(
+                        language="English",
+                        proficiency="C1",
+                        evidence=[EvidenceRef(page=1, block_index=0, quote="English — C1")],
+                    )
+                ]
+            ),
+        ),
+        (
+            "Built the synthetic fraud-monitoring dashboard",
+            CandidateProfileExtraction(
+                projects=[
+                    ProjectItem(
+                        description="Built the synthetic fraud-monitoring dashboard",
+                        evidence=[
+                            EvidenceRef(
+                                page=1,
+                                block_index=0,
+                                quote="Built the synthetic fraud-monitoring dashboard",
+                            )
+                        ],
+                    )
+                ]
+            ),
+        ),
+    ],
+)
+def test_material_fields_for_each_profile_fact_category_are_supported(
+    quote: str, extraction: CandidateProfileExtraction
+) -> None:
+    view = ProfessionalDocumentView(
+        canonical_document_id=uuid.uuid4(),
+        blocks=[ModelInputBlock(page=1, block_index=0, text=quote)],
+    )
+
+    verify_extraction_evidence(view, extraction)
+
+
+def test_language_proficiency_cannot_borrow_language_only_evidence() -> None:
+    quote = "English"
+    view = ProfessionalDocumentView(
+        canonical_document_id=uuid.uuid4(),
+        blocks=[ModelInputBlock(page=1, block_index=0, text=quote)],
+    )
+    extraction = CandidateProfileExtraction(
+        languages=[
+            LanguageItem(
+                language="English",
+                proficiency="C1",
+                evidence=[EvidenceRef(page=1, block_index=0, quote=quote)],
+            )
+        ]
+    )
+
+    with pytest.raises(EvidenceValidationError) as exc_info:
+        verify_extraction_evidence(view, extraction)
+    assert exc_info.value.code == "CLAIM_EVIDENCE_UNSUPPORTED"
 
 
 @pytest.fixture
@@ -195,6 +392,54 @@ async def test_nonexistent_evidence_page_rejected(
     assert version.status == "FAILED"
     assert version.error_code == "EVIDENCE_INVALID"
     assert version.profile_content is None
+
+
+async def test_unrelated_evidence_rejected_profile_cannot_produce_skill_search_match(
+    db_session: AsyncSession, candidate_with_parsed_cv
+) -> None:
+    tenant, _plaintext, candidate_id, document_id = candidate_with_parsed_cv
+    document = await get_candidate_document(
+        db_session,
+        tenant_id=tenant.id,
+        candidate_id=uuid.UUID(candidate_id),
+        document_id=uuid.UUID(document_id),
+    )
+    extraction = CandidateProfileExtraction(
+        skills=[
+            SkillItem(
+                name="Python",
+                evidence=[
+                    EvidenceRef(
+                        page=1,
+                        block_index=0,
+                        quote="SYNTHETIC TEST DATA - NOT A REAL PERSON",
+                    )
+                ],
+            )
+        ]
+    )
+    version = await extract_candidate_profile(
+        db_session,
+        FakeLLMProvider(extraction=extraction),
+        tenant_id=tenant.id,
+        candidate_id=uuid.UUID(candidate_id),
+        candidate_document=document,
+        model_provider_name="fake",
+        max_input_chars=20000,
+    )
+    await db_session.commit()
+
+    assert version.status == "FAILED"
+    assert version.error_code == "CLAIM_EVIDENCE_UNSUPPORTED"
+    response = await search_candidates(
+        db_session,
+        tenant_id=tenant.id,
+        request=CandidateSearchRequest(
+            mode=SearchMode.STRUCTURED_ONLY,
+            required_filters=RequiredFilters(skills=["Python"]),
+        ),
+    )
+    assert response.result_count == 0
 
 
 async def test_nonexistent_evidence_block_rejected(

@@ -625,13 +625,10 @@ def test_scenario_g_extraction_rejects_domain_claim_without_explicit_term() -> N
 
 
 def test_scenario_g_extraction_accepts_domain_claim_with_explicit_term() -> None:
+    quote = "Analyst, 2018-2021, 3 years in the banking sector at ABC Bank"
     view = ProfessionalDocumentView(
         canonical_document_id=uuid_mod.uuid4(),
-        blocks=[
-            ModelInputBlock(
-                page=1, block_index=0, text="Analyst, 3 years in the banking sector at ABC Bank"
-            )
-        ],
+        blocks=[ModelInputBlock(page=1, block_index=0, text=quote)],
     )
     extraction = CandidateProfileExtraction.model_validate(
         _profile(
@@ -646,7 +643,7 @@ def test_scenario_g_extraction_accepts_domain_claim_with_explicit_term() -> None
                         {
                             "page": 1,
                             "block_index": 0,
-                            "quote": "Analyst, 3 years in the banking sector at ABC Bank",
+                            "quote": quote,
                         }
                     ],
                 }
@@ -659,7 +656,7 @@ def test_scenario_g_extraction_accepts_domain_claim_with_explicit_term() -> None
                         {
                             "page": 1,
                             "block_index": 0,
-                            "quote": "Analyst, 3 years in the banking sector at ABC Bank",
+                            "quote": quote,
                         }
                     ],
                 }
@@ -812,7 +809,8 @@ def test_final_review_3_skill_cannot_borrow_employment_dates_from_a_different_qu
 def test_final_review_skill_interval_genuinely_grounded_is_accepted() -> None:
     """Positive case: the SAME quote states both the skill and its actual
     years — this must pass."""
-    view = _employment_view_block("Used Java from 2020 to 2025 on backend systems at Acme.")
+    quote = "Backend Developer at Acme used Java from 2020 to 2025 on backend systems."
+    view = _employment_view_block(quote)
     extraction = CandidateProfileExtraction.model_validate(
         _profile(
             employment_history=[
@@ -826,7 +824,7 @@ def test_final_review_skill_interval_genuinely_grounded_is_accepted() -> None:
                         {
                             "page": 1,
                             "block_index": 0,
-                            "quote": "Used Java from 2020 to 2025 on backend systems at Acme.",
+                            "quote": quote,
                         }
                     ],
                 }
@@ -835,7 +833,7 @@ def test_final_review_skill_interval_genuinely_grounded_is_accepted() -> None:
                 _skill_exp(
                     "Java",
                     0,
-                    "Used Java from 2020 to 2025 on backend systems at Acme.",
+                    quote,
                     start="2020",
                     end="2025",
                 )
@@ -952,7 +950,8 @@ def test_final_review_open_current_interval_grounding_requires_only_the_start_ye
     verification does not spuriously reject a genuinely open-ended claim;
     the deterministic explicit-evaluation_date computation itself is
     unchanged and covered separately (see Scenario E)."""
-    view = _employment_view_block("Java developer since 2020, ongoing.")
+    quote = "Java Developer at Acme since 2020, ongoing."
+    view = _employment_view_block(quote)
     extraction = CandidateProfileExtraction.model_validate(
         _profile(
             employment_history=[
@@ -966,7 +965,7 @@ def test_final_review_open_current_interval_grounding_requires_only_the_start_ye
                         {
                             "page": 1,
                             "block_index": 0,
-                            "quote": "Java developer since 2020, ongoing.",
+                            "quote": quote,
                         }
                     ],
                 }
@@ -975,7 +974,7 @@ def test_final_review_open_current_interval_grounding_requires_only_the_start_ye
                 _skill_exp(
                     "Java",
                     0,
-                    "Java developer since 2020, ongoing.",
+                    quote,
                     start="2020",
                     is_current=True,
                 )
@@ -1070,9 +1069,8 @@ def test_relational_3_subject_and_interval_in_the_same_accepted_span_is_valid() 
     """Positive counterpart: one of the item's evidence quotes ties the
     subject and the full claimed interval together — the presence of an
     ADDITIONAL, non-qualifying quote alongside it must not break this."""
-    view = _multi_block_view(
-        "Used Java from 2020 to 2025 on backend systems.", "Also mentored two junior engineers."
-    )
+    quote = "Backend Developer at Acme used Java from 2020 to 2025 on backend systems."
+    view = _multi_block_view(quote, "Also mentored two junior engineers.")
     extraction = CandidateProfileExtraction.model_validate(
         _profile(
             employment_history=[
@@ -1086,7 +1084,7 @@ def test_relational_3_subject_and_interval_in_the_same_accepted_span_is_valid() 
                         {
                             "page": 1,
                             "block_index": 0,
-                            "quote": "Used Java from 2020 to 2025 on backend systems.",
+                            "quote": quote,
                         }
                     ],
                 }
@@ -1102,7 +1100,7 @@ def test_relational_3_subject_and_interval_in_the_same_accepted_span_is_valid() 
                         {
                             "page": 1,
                             "block_index": 0,
-                            "quote": "Used Java from 2020 to 2025 on backend systems.",
+                            "quote": quote,
                         },
                         {
                             "page": 1,
@@ -1121,9 +1119,9 @@ def test_relational_4_multiple_relationally_grounded_periods_remain_aggregatable
     """Two separate skill_experience items, EACH relationally grounded in
     its own single quote, both pass extraction verification AND still
     aggregate correctly at evaluation time (2015-2018 + 2019-2022 = 5)."""
-    view = _multi_block_view(
-        "Used Java at Acme from 2015 to 2018.", "Used Java at Beta Corp from 2019 to 2022."
-    )
+    quote_a = "Engineer A used Java at Acme from 2015 to 2018."
+    quote_b = "Engineer B used Java at Beta Corp from 2019 to 2022."
+    view = _multi_block_view(quote_a, quote_b)
     profile_dict = _profile(
         skills=[{"name": "Java", "category": None, "evidence": _evidence("Java")}],
         employment_history=[
@@ -1134,7 +1132,7 @@ def test_relational_4_multiple_relationally_grounded_periods_remain_aggregatable
                 "end_date": "2018",
                 "is_current": False,
                 "evidence": [
-                    {"page": 1, "block_index": 0, "quote": "Used Java at Acme from 2015 to 2018."}
+                    {"page": 1, "block_index": 0, "quote": quote_a}
                 ],
             },
             {
@@ -1147,7 +1145,7 @@ def test_relational_4_multiple_relationally_grounded_periods_remain_aggregatable
                     {
                         "page": 1,
                         "block_index": 1,
-                        "quote": "Used Java at Beta Corp from 2019 to 2022.",
+                        "quote": quote_b,
                     }
                 ],
             },
@@ -1163,7 +1161,7 @@ def test_relational_4_multiple_relationally_grounded_periods_remain_aggregatable
                     {
                         "page": 1,
                         "block_index": 0,
-                        "quote": "Used Java at Acme from 2015 to 2018.",
+                        "quote": quote_a,
                     }
                 ],
             },
@@ -1177,7 +1175,7 @@ def test_relational_4_multiple_relationally_grounded_periods_remain_aggregatable
                     {
                         "page": 1,
                         "block_index": 1,
-                        "quote": "Used Java at Beta Corp from 2019 to 2022.",
+                        "quote": quote_b,
                     }
                 ],
             },
@@ -1200,7 +1198,8 @@ def test_relational_5_open_current_period_still_uses_explicit_evaluation_date() 
     extraction-time check (only the start year needs grounding), and the
     evaluator still resolves its duration deterministically from the
     explicit evaluation_as_of_date — never the wall clock."""
-    view = _employment_view_block("Java developer since 2020, ongoing role.")
+    quote = "Java Developer at Acme since 2020, ongoing role."
+    view = _employment_view_block(quote)
     profile_dict = _profile(
         skills=[{"name": "Java", "category": None, "evidence": _evidence("Java")}],
         employment_history=[
@@ -1214,7 +1213,7 @@ def test_relational_5_open_current_period_still_uses_explicit_evaluation_date() 
                     {
                         "page": 1,
                         "block_index": 0,
-                        "quote": "Java developer since 2020, ongoing role.",
+                        "quote": quote,
                     }
                 ],
             }
@@ -1230,7 +1229,7 @@ def test_relational_5_open_current_period_still_uses_explicit_evaluation_date() 
                     {
                         "page": 1,
                         "block_index": 0,
-                        "quote": "Java developer since 2020, ongoing role.",
+                        "quote": quote,
                     }
                 ],
             }

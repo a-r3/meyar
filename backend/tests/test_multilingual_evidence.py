@@ -55,6 +55,11 @@ _NAMES = {
     "ru": "Екатерина Смирнова",
     "en": "Jane Synthetic Doe",
 }
+_ROLE_TITLES = {
+    "az": "Baş proqramçı",
+    "ru": "Ведущий разработчик",
+    "en": "Lead Developer",
+}
 
 
 def _auth(plaintext: str) -> dict:
@@ -143,7 +148,7 @@ async def test_profile_extraction_round_trips_language_evidence_unchanged(
         ],
         employment_history=[
             EmploymentItem(
-                title="Lead Developer",
+                title=_ROLE_TITLES[language],
                 start_date="2021",
                 end_date="2025",
                 evidence=[EvidenceRef(page=1, block_index=0, quote=_SAMPLES[language])],

@@ -810,8 +810,8 @@ def _agent_turn_headline(
 ) -> str:
     """One deterministic, HR-facing leading sentence for a live turn —
     never a second, overlapping status banner alongside it (D-030
-    conversational-UX requirement). Priority: a real model-authored
-    FINAL_ANSWER/CLARIFY framing or D-038 grounded-synthesis sentence
+    conversational-UX requirement). Priority: fixed server-owned
+    FINAL_ANSWER/CLARIFY copy or a D-038 grounded-synthesis sentence
     always wins (it IS the meaningful assistant message); otherwise a
     fixed, deterministic summary derived from the turn's own single most
     recent tool result; otherwise the generic per-outcome fallback."""

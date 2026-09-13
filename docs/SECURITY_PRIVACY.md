@@ -46,10 +46,28 @@
 - Every extracted fact's evidence (page, block_index, quote) is
   re-verified against a freshly rebuilt `ProfessionalDocumentView` for
   the *exact* `CanonicalDocument` referenced — never trusted from model
-  output. A reference to a nonexistent page/block, a fabricated quote, or
-  (structurally impossible by construction) another document's content
-  fails validation and the extraction is persisted as `FAILED`, never as
-  a silently-accepted success.
+  output. Claim-specific validation then requires one attributable quote
+  to contain the material values of that fact: accepted skill alias (and
+  no supported explicit positive-skill negation), language plus claimed
+  proficiency, certification identity and other populated fields,
+  education's populated institution/degree/field/date, or employment's
+  populated role/employer/date/current relationship. Project descriptions
+  are likewise attributable to their own quote. A reference to a
+  nonexistent page/block, a fabricated or unrelated quote, or an
+  unsupported material value fails validation and the extraction is
+  persisted as `FAILED`, never as a silently-accepted success. Existing
+  deterministic interval-grounding and duration rules are separate and
+  unchanged.
+- Claim-specific support is deliberately deterministic lexical
+  attribution, not general natural-language entailment. Matching is
+  case/whitespace/Azerbaijani-diacritic normalized; skills additionally
+  use the same curated aliases as deterministic evaluation. Positive
+  skills fail closed for the enumerated obvious English `no`, `without`,
+  and `not required/known/used/...` constructions. Paraphrases, implicit
+  claims, complex scope, and unenumerated multilingual negation are not
+  inferred; where literal support cannot be established, the extraction
+  remains unverified rather than becoming positive evidence or a
+  deterministic `NOT_MATCHED` fact.
 - The extraction schema uses `extra="forbid"` and has no field for name/
   email/phone/age/gender/religion/ethnicity/marital status/health/
   photo/nationality — the model cannot smuggle a sensitive attribute into
@@ -62,6 +80,22 @@
   `EVIDENCE_INVALID`/`INPUT_TOO_LARGE` all fail safely to a stored
   `FAILED`/`MANUAL_REVIEW_REQUIRED` `CandidateProfileVersion` — never a
   crash, never fabricated content.
+
+## Agent candidate-factual authority
+
+- `AgentDecision` has no free-text answer field. `FINAL_ANSWER` and
+  `CLARIFY` carry only a closed non-factual response code which the server
+  maps to fixed copy. Candidate facts can reach HR only through typed,
+  tenant-scoped tool results or a server-built rendering of validated
+  `GroundedFact` values; the model may only select those fact ids.
+- Numeric candidate evaluation remains exclusively the deterministic
+  evaluation service's output. The agent does not calculate or author a
+  score. Hiring recommendations are not an agent output: the server-owned
+  response explicitly reserves the decision for an authorized human.
+- Persisted assistant text is replayed only when marked with server text
+  authority. Legacy conversation rows without that marker are rendered
+  from the fixed outcome mapping, preventing historical unrestricted model
+  prose from re-entering the UI.
 
 ## Local-only Ollama operating contract
 

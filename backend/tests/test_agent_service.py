@@ -14,6 +14,7 @@ from meyar.agent.schemas import (
     MAX_CANDIDATE_REF,
     AgentActionType,
     AgentDecision,
+    AgentResponseCode,
     AgentTurnOutcome,
 )
 from meyar.agent.service import run_agent_turn
@@ -108,7 +109,11 @@ def test_agent_decision_schema_rejects_mismatched_action_shape() -> None:
     with pytest.raises(ValidationError):
         AgentDecision(action=AgentActionType.SEARCH_CANDIDATES)  # missing search_query
     with pytest.raises(ValidationError):
-        AgentDecision(action=AgentActionType.FINAL_ANSWER, candidate_ref=1, message="hi")
+        AgentDecision(
+            action=AgentActionType.FINAL_ANSWER,
+            candidate_ref=1,
+            response_code=AgentResponseCode.ACKNOWLEDGEMENT,
+        )
     with pytest.raises(ValidationError):
         AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=0)
     with pytest.raises(ValidationError):
@@ -122,7 +127,40 @@ def test_agent_decision_schema_rejects_mismatched_action_shape() -> None:
     # Extra unknown field must be rejected (extra=forbid), same discipline as PlannerDraft.
     with pytest.raises(ValidationError):
         AgentDecision.model_validate(
-            {"action": "FINAL_ANSWER", "message": "hi", "unexpected_field": "x"}
+            {
+                "action": "FINAL_ANSWER",
+                "response_code": "ACKNOWLEDGEMENT",
+                "unexpected_field": "x",
+            }
+        )
+
+
+def test_final_answer_schema_rejects_model_authored_candidate_fact() -> None:
+    # The removed free-text channel is structural: schema-valid model
+    # output cannot carry a candidate assertion at all.
+    with pytest.raises(ValidationError):
+        AgentDecision.model_validate(
+            {
+                "action": "FINAL_ANSWER",
+                "message": "The first candidate has 20 years of Python experience.",
+            }
+        )
+
+
+def test_final_answer_schema_rejects_model_authored_hiring_recommendation() -> None:
+    with pytest.raises(ValidationError):
+        AgentDecision.model_validate(
+            {"action": "FINAL_ANSWER", "message": "The first candidate should be hired."}
+        )
+
+
+def test_clarify_schema_rejects_model_authored_candidate_fact() -> None:
+    with pytest.raises(ValidationError):
+        AgentDecision.model_validate(
+            {
+                "action": "CLARIFY",
+                "message": "The first candidate has 20 years of Python experience.",
+            }
         )
 
 
@@ -164,7 +202,9 @@ async def test_search_candidates_tool_is_tenant_scoped_and_evidence_grounded(
                 action=AgentActionType.SEARCH_CANDIDATES,
                 search_query="Python bilən namizədləri göstər",
             ),
-            AgentDecision(action=AgentActionType.FINAL_ANSWER, message="Nəticələr aşağıdadır."),
+            AgentDecision(
+                action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
+            ),
         ],
     )
     conversation = await _new_conversation(db_session, tenant, user, membership)
@@ -213,7 +253,9 @@ async def test_cross_tenant_search_result_never_leaks(
                 action=AgentActionType.SEARCH_CANDIDATES,
                 search_query="Python bilən namizədləri göstər",
             ),
-            AgentDecision(action=AgentActionType.FINAL_ANSWER, message="Nəticələr aşağıdadır."),
+            AgentDecision(
+                action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
+            ),
         ],
     )
     conversation = await _new_conversation(db_session, tenant, user, membership)
@@ -253,7 +295,9 @@ async def test_multi_turn_ordinal_reference_resolves_server_side(
                 action=AgentActionType.SEARCH_CANDIDATES,
                 search_query="Python bilən namizədləri göstər",
             ),
-            AgentDecision(action=AgentActionType.FINAL_ANSWER, message="Nəticələr aşağıdadır."),
+            AgentDecision(
+                action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
+            ),
         ],
     )
     conversation = await _new_conversation(db_session, tenant, user, membership)
@@ -497,6 +541,62 @@ async def test_model_unavailable_is_a_safe_typed_failure(
     assert result.outcome == AgentTurnOutcome.AGENT_PROVIDER_FAILURE
 
 
+async def test_zero_tool_final_answer_uses_only_server_owned_copy(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    tenant, user, _password, membership = tenant_and_user
+    await db_session.commit()
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    llm = FakeLLMProvider(
+        agent_decision=AgentDecision(
+            action=AgentActionType.FINAL_ANSWER,
+            response_code=AgentResponseCode.GREETING,
+        )
+    )
+
+    result = await _run(
+        db_session, llm, tenant_id=tenant.id, conversation=conversation, message="salam"
+    )
+
+    assert result.tool_call_count == 0
+    assert result.tool_results == []
+    assert result.message == (
+        "Salam! Namizəd axtarışı, profil sübutları və vakansiya meyarları ilə bağlı "
+        "kömək edə bilərəm."
+    )
+    await db_session.refresh(conversation)
+    assert conversation.turns[-1]["text"] == result.message
+    assert conversation.turns[-1]["text_authority"] == "SERVER_VALIDATED"
+
+
+async def test_hiring_request_uses_server_owned_human_decision_copy(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    tenant, user, _password, membership = tenant_and_user
+    await db_session.commit()
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    llm = FakeLLMProvider(
+        agent_decision=AgentDecision(
+            action=AgentActionType.CLARIFY,
+            response_code=AgentResponseCode.HIRING_DECISION_REQUIRES_HUMAN,
+        )
+    )
+
+    result = await _run(
+        db_session,
+        llm,
+        tenant_id=tenant.id,
+        conversation=conversation,
+        message="Who should be hired?",
+    )
+
+    assert result.tool_call_count == 0
+    assert result.message == (
+        "MEYAR sübutları və deterministik qiymətləndirməni təqdim edir; işə qəbul "
+        "qərarını səlahiyyətli insan verir."
+    )
+
+
 async def test_repeated_schema_invalid_output_is_a_safe_typed_failure(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
@@ -505,7 +605,11 @@ async def test_repeated_schema_invalid_output_is_a_safe_typed_failure(
     conversation = await _new_conversation(db_session, tenant, user, membership)
     llm = FakeLLMProvider(agent_fail_first_n_calls=99, agent_decision=None)
     # Give it a decisions list so the fake doesn't assert-fail on success path.
-    llm._agent_decisions = [AgentDecision(action=AgentActionType.FINAL_ANSWER, message="unused")]
+    llm._agent_decisions = [
+        AgentDecision(
+            action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
+        )
+    ]
     result = await _run(
         db_session, llm, tenant_id=tenant.id, conversation=conversation, message="salam"
     )
@@ -536,7 +640,7 @@ async def test_skill_specific_duration_is_never_silently_weakened(
             ),
             AgentDecision(
                 action=AgentActionType.CLARIFY,
-                message="Konkret bacarıq üzrə təcrübə müddətini sübut etmək mümkün deyil.",
+                response_code=AgentResponseCode.NEED_MORE_DETAIL,
             ),
         ],
     )
@@ -573,7 +677,9 @@ async def test_prohibited_attribute_in_search_query_is_rejected(
             AgentDecision(
                 action=AgentActionType.SEARCH_CANDIDATES, search_query="qadın namizədləri göstər"
             ),
-            AgentDecision(action=AgentActionType.CLARIFY, message="Bu meyar dəstəklənmir."),
+            AgentDecision(
+                action=AgentActionType.CLARIFY, response_code=AgentResponseCode.UNSUPPORTED_REQUEST
+            ),
         ],
     )
     conversation = await _new_conversation(db_session, tenant, user, membership)
@@ -718,7 +824,9 @@ async def test_no_result_model_failure_stays_a_safe_failure_with_no_tool_results
 
     llm_malformed = FakeLLMProvider(agent_fail_first_n_calls=99, agent_decision=None)
     llm_malformed._agent_decisions = [
-        AgentDecision(action=AgentActionType.FINAL_ANSWER, message="unused")
+        AgentDecision(
+            action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
+        )
     ]
     result = await _run(
         db_session, llm_malformed, tenant_id=tenant.id, conversation=conversation, message="salam"
@@ -746,14 +854,6 @@ async def test_stored_assistant_turn_is_never_blank_across_all_outcomes(
 
     for outcome in AgentTurnOutcome:
         text = agent_turn_outcome_message(outcome.value, None)
-        if outcome == AgentTurnOutcome.ANSWERED:
-            # Unreachable in practice — AgentDecision guarantees a real
-            # FINAL_ANSWER always carries a non-empty message — but even
-            # this default must never be relied upon by a stored turn;
-            # confirmed separately by test_successful_search_with_* and
-            # test_get_candidate_profile_success_has_no_empty_turn below,
-            # which never produce plain ANSWERED with message=None.
-            continue
         assert text, f"AgentTurnOutcome.{outcome.name} has no non-empty fallback text"
 
 
@@ -1087,11 +1187,7 @@ async def test_grounded_synthesis_does_not_disturb_ordinal_resolution(
     assert conversation.last_search_candidate_ids == [str(cid) for cid in ordered_ids]
 
 
-# --- Slice 4 (issue #33) real-Ollama acceptance finding: a small local
-# model can echo AGENT_SYSTEM_PROMPT's own instruction text verbatim into
-# a CLARIFY/FINAL_ANSWER message instead of authoring real content — a
-# raw planner-internals leak into HR-facing text. Guarded structurally in
-# meyar.agent.service._looks_like_prompt_leak. ---
+# --- Candidate-factuality P0: no model-authored response prose channel. ---
 
 
 async def test_prompt_leaking_clarify_message_is_rejected_and_retried(
@@ -1104,42 +1200,39 @@ async def test_prompt_leaking_clarify_message_is_rejected_and_retried(
     conversation = await _new_conversation(db_session, tenant, user, membership)
     leaked_sentence = AGENT_SYSTEM_PROMPT.splitlines()[3].strip()
     assert len(leaked_sentence) >= 40
+    with pytest.raises(ValidationError):
+        AgentDecision.model_validate({"action": "CLARIFY", "message": leaked_sentence})
     llm = FakeLLMProvider(
-        agent_decisions=[
-            AgentDecision(action=AgentActionType.CLARIFY, message=leaked_sentence),
-            AgentDecision(
-                action=AgentActionType.CLARIFY, message="Hansı namizədi nəzərdə tutursunuz?"
-            ),
-        ],
+        agent_decision=AgentDecision(
+            action=AgentActionType.CLARIFY,
+            response_code=AgentResponseCode.CANDIDATE_REFERENCE_REQUIRED,
+        )
     )
     result = await _run(
         db_session, llm, tenant_id=tenant.id, conversation=conversation, message="salam"
     )
     assert result.outcome == AgentTurnOutcome.CLARIFICATION_REQUESTED
-    assert result.message == "Hansı namizədi nəzərdə tutursunuz?"
+    assert result.message == (
+        "Əvvəlcə namizədləri axtarın, sonra nəticə sırasındakı namizədi göstərin."
+    )
     assert leaked_sentence not in (result.message or "")
-    assert llm.agent_call_count == 2
+    assert llm.agent_call_count == 1
 
 
 async def test_prompt_leak_persisting_through_every_retry_falls_back_safely(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
-    from meyar.agent.prompts import AGENT_SYSTEM_PROMPT
-
     tenant, user, _password, membership = tenant_and_user
     await db_session.commit()
     conversation = await _new_conversation(db_session, tenant, user, membership)
-    leaked_sentence = AGENT_SYSTEM_PROMPT.splitlines()[3].strip()
-    llm = FakeLLMProvider(
-        agent_decisions=[AgentDecision(action=AgentActionType.CLARIFY, message=leaked_sentence)],
-    )
-    result = await _run(
-        db_session, llm, tenant_id=tenant.id, conversation=conversation, message="salam"
-    )
-    assert result.outcome == AgentTurnOutcome.MALFORMED_MODEL_OUTPUT
-    assert result.message is None
-    rendered = result.model_dump_json()
-    assert leaked_sentence not in rendered
+    leaked_sentence = "The first candidate has 20 years of Python experience and should be hired."
+    conversation.turns = [{"role": "assistant", "text": leaked_sentence, "outcome": "ANSWERED"}]
+
+    from meyar.ui.router import _agent_turn_log_views
+
+    rendered = _agent_turn_log_views(conversation)
+    assert rendered[0].text == "Sorğu tamamlandı."
+    assert leaked_sentence not in rendered[0].text
 
 
 # --- Slice 4 (issue #33, D-030/D-032): DRAFT_JOB_CRITERIA ---

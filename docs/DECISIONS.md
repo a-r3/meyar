@@ -4047,3 +4047,64 @@ migration. `test_no_exfiltration.py`'s docstring was updated to describe
 the now-shared construction boundary (no assertion changed). Nothing
 committed depends on any deployment-side change; the host/daemon
 operating-contract section is documentation only.
+
+## D-048 — Candidate-factuality P0: claim-specific extraction evidence and closed agent text authority
+
+**Date:** 2026-09-13
+**Decision:** Close two audit-reproduced candidate-factuality defects on
+the existing PR #42 task branch. This change does not alter JD grounding,
+duration arithmetic, deterministic scoring policy, the API, or the local
+Ollama-only model boundary.
+
+1. **Accepted-extraction boundary.** A real quote existing in the cited
+   document is necessary but no longer sufficient. Before a professional
+   fact can enter a successful `CandidateProfileVersion`, one of that
+   item's own verified quotes must contain all populated material values
+   of the fact. Skills accept the same curated aliases used by
+   deterministic matching; language proficiency, certification identity,
+   education institution/degree/field/date, and employment
+   role/employer/date/current relationships are checked when populated.
+   The existing skill/domain interval checks remain separate and their
+   arithmetic is unchanged. Failure is `CLAIM_EVIDENCE_UNSUPPORTED`,
+   making the extraction `FAILED`; it cannot become positive search/
+   scoring evidence and is not converted into `NOT_MATCHED`.
+2. **Exact deterministic guarantee and limit.** Attribution uses
+   normalized literal whole-term matching, including Azerbaijani case/
+   diacritic folding and the existing curated skill aliases. A positive
+   skill mention is rejected for explicit English constructions matching
+   `no`, `without`, and enumerated `not required/known/used/possessed/...`
+   forms. This is intentionally not a claim of general entailment,
+   paraphrase resolution, negation scope, or multilingual contradiction
+   detection. Ambiguous/non-literal support fails closed as unverified.
+3. **Agent authority boundary.** `AgentDecision` no longer contains a
+   model-authored `message`. `FINAL_ANSWER`/`CLARIFY` select a closed
+   `AgentResponseCode`, and the server maps it to bounded non-candidate
+   copy. Candidate facts are rendered only from validated, tenant-scoped
+   tool results or server templates over model-selected `GroundedFact`
+   ids. The deterministic evaluator remains the only numeric authority;
+   hiring remains a human decision, represented by fixed server copy.
+4. **History boundary.** Newly persisted assistant turns carry an explicit
+   `SERVER_VALIDATED` text-authority marker. Re-rendering trusts stored
+   assistant text only with that marker; legacy unrestricted text falls
+   back to the deterministic outcome message, so an old model-authored
+   candidate claim cannot reappear after refresh.
+5. **Verification.** The focused extraction/evidence/search/evaluation/
+   agent/UI/prompt suite passes 216 tests. Full gates: `ruff check .`
+   clean, `mypy src` clean (136 source files), `pytest -q` 887 passed with
+   no failures/skips/xfails, one Alembic head (`a1c5e9f2b6d3`), and the
+   tracked-tree scan clean. No test was removed, skipped, xfailed, or
+   weakened.
+
+**Why:** The former evidence check proved only that a quote existed, so
+`Python` plus an `Advanced Excel` quote could be accepted and later
+deterministically match Python. Separately, schema-valid zero-tool
+`FINAL_ANSWER` prose could state invented experience and a hiring
+recommendation, then be rendered and persisted. Both violated the product
+authority model at the point where untrusted model output became accepted
+state or HR-facing text.
+
+**Reversibility:** The extraction checks and shared inverse alias view are
+localized deterministic validation. The agent schema replacement is
+closed and explicit; persisted JSON remains migration-free because legacy
+rows are handled conservatively at render time. No model, external
+service, database column, public route, scoring rule, or UI style changed.

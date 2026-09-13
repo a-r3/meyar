@@ -23,7 +23,7 @@ from datetime import date
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meyar.agent.prompts import AGENT_PROMPT_VERSION, AGENT_SYSTEM_PROMPT
+from meyar.agent.prompts import AGENT_PROMPT_VERSION
 from meyar.agent.schemas import (
     AGENT_POLICY_VERSION,
     AgentActionType,
@@ -31,6 +31,7 @@ from meyar.agent.schemas import (
     AgentEvidenceToolResult,
     AgentJobDraftToolResult,
     AgentProfileToolResult,
+    AgentResponseCode,
     AgentSearchToolResult,
     AgentToolResult,
     AgentTurnOutcome,
@@ -71,7 +72,10 @@ from meyar.schemas.criteria import (
 )
 from meyar.search.planner_service import plan_and_search_candidates
 from meyar.search.schemas import EmbeddingSearchConfig
-from meyar.services.agent_conversation_repo import save_conversation_state
+from meyar.services.agent_conversation_repo import (
+    ASSISTANT_TEXT_AUTHORITY_SERVER,
+    save_conversation_state,
+)
 from meyar.services.audit_repo import record_event
 from meyar.services.candidate_profile_repo import get_current_profile_version
 
@@ -148,23 +152,31 @@ def _is_requirement_grounded_in_jd_text(requirement: str, jd_text: str) -> bool:
     return matched * 2 >= len(tokens)
 
 
-# Real-Ollama acceptance testing for Slice 4 (issue #33) surfaced a genuine
-# small-local-model defect: instead of authoring a real clarifying
-# question, the model can copy one of AGENT_SYSTEM_PROMPT's own English
-# instructional sentences verbatim into AgentDecision.message — a raw
-# planner-internals leak into HR-facing text, which D-035's "the model's
-# message is safe to show verbatim" boundary did not anticipate. Guarded
-# structurally (an exact/near-exact containment check against the fixed
-# prompt text, not a fuzzy heuristic) rather than by a prompt instruction
-# alone, matching this module's D-038 precedent — a leak is treated
-# exactly like schema-invalid output: bounded retry, then the existing
-# deterministic MALFORMED_MODEL_OUTPUT fallback.
-_MIN_PROMPT_LEAK_LENGTH = 40
+_AGENT_RESPONSE_TEXT: dict[AgentResponseCode, str] = {
+    AgentResponseCode.GREETING: (
+        "Salam! Namizəd axtarışı, profil sübutları və vakansiya meyarları ilə bağlı "
+        "kömək edə bilərəm."
+    ),
+    AgentResponseCode.ACKNOWLEDGEMENT: "Sorğu tamamlandı.",
+    AgentResponseCode.NEED_MORE_DETAIL: (
+        "Sorğunu bir qədər dəqiqləşdirin: namizəd axtarışı, profil/sübut baxışı və ya "
+        "vakansiya meyarı hazırlamaq istədiyinizi qeyd edin."
+    ),
+    AgentResponseCode.CANDIDATE_REFERENCE_REQUIRED: (
+        "Əvvəlcə namizədləri axtarın, sonra nəticə sırasındakı namizədi göstərin."
+    ),
+    AgentResponseCode.UNSUPPORTED_REQUEST: (
+        "Bu sorğu mövcud MEYAR alətləri ilə təhlükəsiz şəkildə icra edilmir."
+    ),
+    AgentResponseCode.HIRING_DECISION_REQUIRES_HUMAN: (
+        "MEYAR sübutları və deterministik qiymətləndirməni təqdim edir; işə qəbul "
+        "qərarını səlahiyyətli insan verir."
+    ),
+}
 
 
-def _looks_like_prompt_leak(message: str) -> bool:
-    stripped = message.strip()
-    return len(stripped) >= _MIN_PROMPT_LEAK_LENGTH and stripped in AGENT_SYSTEM_PROMPT
+def _agent_response_text(code: AgentResponseCode) -> str:
+    return _AGENT_RESPONSE_TEXT[code]
 
 
 def _resolve_candidate_ref(
@@ -825,7 +837,12 @@ async def _finish_turn(
     router's post-tenant-lookup view-building step."""
     turns = [
         *turns,
-        {"role": "assistant", "text": result.message or "", "outcome": result.outcome.value},
+        {
+            "role": "assistant",
+            "text": result.message or "",
+            "outcome": result.outcome.value,
+            "text_authority": ASSISTANT_TEXT_AUTHORITY_SERVER,
+        },
     ][-max_context_turns:]
     await save_conversation_state(
         db,
@@ -943,12 +960,6 @@ async def run_agent_turn(
                         max_context_turns=max_context_turns,
                         result=result,
                     )
-                if decision.action in (
-                    AgentActionType.FINAL_ANSWER,
-                    AgentActionType.CLARIFY,
-                ) and _looks_like_prompt_leak(decision.message or ""):
-                    decision = None
-                    continue
                 break
 
         if decision is None:
@@ -974,6 +985,7 @@ async def run_agent_turn(
             )
 
         if decision.action in (AgentActionType.FINAL_ANSWER, AgentActionType.CLARIFY):
+            assert decision.response_code is not None
             outcome = (
                 AgentTurnOutcome.ANSWERED
                 if decision.action == AgentActionType.FINAL_ANSWER
@@ -981,7 +993,10 @@ async def run_agent_turn(
             )
             result = _build_result(
                 outcome=outcome,
-                message=decision.message,
+                # Once a tool has run, its validated result owns the
+                # answer headline. The closed response code is only useful
+                # for zero-tool generic conversation/clarification.
+                message=(None if tool_results else _agent_response_text(decision.response_code)),
                 tool_results=tool_results,
                 tool_call_count=tool_calls_made,
                 provenance=provenance,
@@ -1151,8 +1166,8 @@ async def run_agent_turn(
                 else tool_result.evidence.found  # type: ignore[union-attr]
             )
             # Never plain ANSWERED here — that outcome is reserved for a
-            # real model-authored FINAL_ANSWER message (guaranteed
-            # non-None by AgentDecision's own shape validator). A
+            # FINAL_ANSWER closed response code rendered as fixed server
+            # copy. A
             # successful profile/evidence lookup has no model framing at
             # all — instead, when found, attempt one bounded D-038
             # grounded-answer synthesis over this candidate's own facts;
