@@ -6,7 +6,7 @@ from datetime import date
 
 import pytest
 from fakes import FakeEmbeddingProvider, FakeLLMProvider
-from search_helpers import seed_candidate_with_profile, seed_embedding
+from search_helpers import seed_candidate_with_profile, seed_embedding, synthetic_evidence
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -49,7 +49,7 @@ def _config() -> EmbeddingSearchConfig:
 def _profile(skills: list[str]) -> dict:
     return {
         "skills": [
-            {"name": skill, "category": None, "evidence": _EVIDENCE}
+            {"name": skill, "category": None, "evidence": synthetic_evidence(skill)}
             for skill in skills
         ],
         "employment_history": [],

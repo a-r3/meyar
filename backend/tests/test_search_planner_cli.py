@@ -4,7 +4,7 @@ import uuid
 
 import pytest
 from fakes import FakeEmbeddingProvider, FakeLLMProvider
-from search_helpers import seed_candidate_with_profile
+from search_helpers import seed_candidate_with_profile, synthetic_evidence
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar import cli
@@ -41,7 +41,7 @@ def _config() -> EmbeddingSearchConfig:
 def _profile(skills: list[str]) -> dict:
     return {
         "skills": [
-            {"name": skill, "category": None, "evidence": _EVIDENCE}
+            {"name": skill, "category": None, "evidence": synthetic_evidence(skill)}
             for skill in skills
         ],
         "employment_history": [],

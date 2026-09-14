@@ -2,7 +2,11 @@ from datetime import date
 from decimal import Decimal
 
 import pytest
-from search_helpers import seed_candidate_with_profile, seed_next_profile_version
+from search_helpers import (
+    seed_candidate_with_profile,
+    seed_next_profile_version,
+    synthetic_evidence,
+)
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -52,7 +56,7 @@ def _skill(
 def _profile(*skills: str) -> dict:
     return {
         **EMPTY,
-        "skills": [{"name": skill, "evidence": EVIDENCE} for skill in skills],
+        "skills": [{"name": skill, "evidence": synthetic_evidence(skill)} for skill in skills],
     }
 
 
@@ -143,7 +147,7 @@ async def test_manual_review_tier_remains_ahead_of_insufficient_evidence(
                 "start_date": "ambiguous",
                 "end_date": "Present",
                 "is_current": True,
-                "evidence": EVIDENCE,
+                "evidence": synthetic_evidence("Engineer", "ambiguous", "Present", "present"),
             }
         ],
     }

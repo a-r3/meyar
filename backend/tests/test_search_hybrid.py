@@ -9,7 +9,7 @@ import uuid
 import pytest
 from fakes import FakeEmbeddingProvider
 from pydantic import ValidationError
-from search_helpers import seed_candidate_with_profile, seed_embedding
+from search_helpers import seed_candidate_with_profile, seed_embedding, synthetic_evidence
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.search.schemas import (
@@ -29,7 +29,8 @@ _EVIDENCE = [{"page": 1, "block_index": 0, "quote": "synthetic evidence"}]
 def _profile(skills: list[str] | None = None) -> dict:
     return {
         "skills": [
-            {"name": s, "category": None, "evidence": _EVIDENCE} for s in (skills or ["Python"])
+            {"name": s, "category": None, "evidence": synthetic_evidence(s)}
+            for s in (skills or ["Python"])
         ],
         "employment_history": [],
         "education": [],

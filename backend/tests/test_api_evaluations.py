@@ -5,7 +5,7 @@ from datetime import date
 from decimal import Decimal
 
 from httpx import AsyncClient
-from search_helpers import seed_candidate_with_profile
+from search_helpers import seed_candidate_with_profile, synthetic_evidence
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.schemas.criteria import CriterionIn, CriterionKind, CriterionType
@@ -44,7 +44,10 @@ def _skill(criterion_id: str, value: str, *, weight: float, criterion_type: Crit
 
 
 def _profile(*skills: str) -> dict:
-    return {**EMPTY, "skills": [{"name": skill, "evidence": EVIDENCE} for skill in skills]}
+    return {
+        **EMPTY,
+        "skills": [{"name": skill, "evidence": synthetic_evidence(skill)} for skill in skills],
+    }
 
 
 async def _job_with_criteria(db: AsyncSession, tenant_id, criteria: list[CriterionIn]):

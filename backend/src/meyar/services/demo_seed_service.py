@@ -59,10 +59,10 @@ from meyar.services.api_key_repo import create_api_key, revoke_active_api_keys_f
 from meyar.services.audit_repo import record_event
 from meyar.services.candidate_document_service import ingest_candidate_document
 from meyar.services.candidate_embedding_service import embed_candidate_profile
-from meyar.services.candidate_profile_repo import get_current_profile_version
 from meyar.services.candidate_repo import count_candidates_for_tenant, create_candidate
 from meyar.services.job_criteria_repo import create_criteria_version
 from meyar.services.job_repo import create_job
+from meyar.services.profile_authority import get_current_authorized_profile
 from meyar.services.tenant_membership_repo import (
     create_membership,
     get_membership_for_user_and_tenant,
@@ -1057,12 +1057,13 @@ async def seed_demo(
         jobs_created += 1
 
         for candidate_id in created_candidate_ids:
-            current_profile = await get_current_profile_version(
+            authorized = await get_current_authorized_profile(
                 db, tenant_id=tenant.id, candidate_id=candidate_id
             )
-            if current_profile is None or current_profile.status != "COMPLETED":
+            if authorized is None:
                 continue
-            await evaluate_and_score_candidate(
+            current_profile, _ = authorized
+            scored = await evaluate_and_score_candidate(
                 db,
                 tenant_id=tenant.id,
                 candidate_id=candidate_id,
@@ -1073,7 +1074,8 @@ async def seed_demo(
                 resolved_profile_version=current_profile,
                 resolved_criteria_version=criteria_version,
             )
-            evaluations_created += 1
+            if scored.evaluation.status == "COMPLETED":
+                evaluations_created += 1
 
     human_username, human_temp_password = await _bootstrap_demo_human_login(
         db, tenant_id=tenant.id

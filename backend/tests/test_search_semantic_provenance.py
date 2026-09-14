@@ -16,7 +16,12 @@ import math
 import uuid
 
 import pytest
-from search_helpers import current_source_sha256, seed_candidate_with_profile, seed_embedding
+from search_helpers import (
+    current_source_sha256,
+    seed_candidate_with_profile,
+    seed_embedding,
+    synthetic_evidence,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.embedding.provider import EmbeddingResult
@@ -31,7 +36,7 @@ _QUERY_VECTOR = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
 def _profile(skill: str = "Python") -> dict:
     return {
-        "skills": [{"name": skill, "category": None, "evidence": _EVIDENCE}],
+        "skills": [{"name": skill, "category": None, "evidence": synthetic_evidence(skill)}],
         "employment_history": [],
         "education": [],
         "certifications": [],

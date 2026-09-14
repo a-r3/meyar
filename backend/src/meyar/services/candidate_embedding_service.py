@@ -16,6 +16,7 @@ from meyar.services.candidate_embedding_repo import (
     get_embedding_version_by_source,
 )
 from meyar.services.candidate_profile_repo import get_current_profile_version
+from meyar.services.profile_authority import ProfileAuthorityError, authorize_profile_version
 
 
 class EmbeddingPreconditionError(Exception):
@@ -76,6 +77,12 @@ async def embed_candidate_profile(
             "The candidate's current profile version is not COMPLETED "
             f"(status={profile_version.status}).",
         )
+
+    try:
+        authorized = await authorize_profile_version(db, version=profile_version)
+    except ProfileAuthorityError as exc:
+        raise EmbeddingPreconditionError(exc.code, str(exc)) from exc
+    profile_content = authorized.model_dump(mode="json")
 
     # The canonical text and its hash must be computed BEFORE deciding
     # whether an existing embedding is reusable — reuse identity depends

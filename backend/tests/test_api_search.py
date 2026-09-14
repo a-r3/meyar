@@ -6,7 +6,7 @@ import uuid
 import pytest
 from fakes import FakeEmbeddingProvider
 from httpx import AsyncClient
-from search_helpers import seed_candidate_with_profile
+from search_helpers import seed_candidate_with_profile, synthetic_evidence
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.embedding.dependency import get_embedding_provider
@@ -34,7 +34,8 @@ def _profile(*skills: str) -> dict:
     return {
         **EMPTY_PROFILE,
         "skills": [
-            {"name": skill, "category": "Backend", "evidence": EVIDENCE} for skill in skills
+            {"name": skill, "category": "Backend", "evidence": synthetic_evidence(skill, "Backend")}
+            for skill in skills
         ],
     }
 

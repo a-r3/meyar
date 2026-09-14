@@ -4171,3 +4171,63 @@ fields each allowed unsupported content to cross that boundary.
 existing validators; consumer changes are call-site substitutions and
 presentation redaction only. No migration, stored-row mutation, public
 schema change, scoring-policy change, or duration-policy change.
+
+
+## D-050 — Canonical context and durable factual authority (issue #44)
+
+**Date:** 2026-09-14. **Status:** Local corrective implementation; PR #42
+remains not accepted. Supersedes D-049's claim of complete consumer coverage.
+
+**Problem:** The independent audit at `7b748f4` reproduced cropped-quote
+negation bypasses, overbroad negation, unproved current state, split domain
+interval support, wrong employment periods, unauthorized legacy embedding
+input, identity substring manufacture, and replay of older unsafe
+`SERVER_VALIDATED` text. The shared search fixture helper also repaired
+unsupported evidence silently, masking invalid positive fixtures.
+
+**Decision:**
+- Resolve evidence against its canonical page/block and every matching
+  quote occurrence. Claims still need a quoted material term, but contradiction
+  checks include up to 200 normalized source characters on each side.
+  Ambiguous occurrences must all support the claim. English local no/not/without
+  rules use token boundaries and stop at conjunction/clause boundaries;
+  notable/notification and negation of another conjoined subject remain valid.
+- Current state needs a positive marker in the attributed relationship,
+  including when a textual end date triggers the existing duration parser.
+  Ended/negative/closed relationships cannot authorize extending to as-of.
+  Domain subject and all interval fields must share positive evidence;
+  skill/job attribution additionally checks the referenced employment's
+  calendar bounds. Duration arithmetic itself is unchanged.
+- Embedding generation and reuse call the same profile authority as search
+  and evaluation. Folder readiness validates profile and identity; demo
+  readiness uses authorized profiles and completed evaluations.
+- Identity requires complete canonical email tokens, one coherent formatted
+  phone occurrence, and material name tokens with canonical boundaries.
+  Identity remains presentation-only.
+- New assistant display text persists `text_authority_version` equal to
+  `candidate-factuality-v2` alongside `SERVER_VALIDATED`. Only that combination
+  permits verbatim replay. Older/missing versions use fixed outcome copy.
+  This is an additive JSON field, not a database migration or historical
+  backfill; reads never mutate historical provenance.
+- Persistence test helpers preserve supplied claims/evidence exactly.
+  `synthetic_evidence(...)` is an explicit positive-fixture authoring helper,
+  never an automatic repair. Adversarial tests supply independent canonical
+  source and evidence, and exercise actual persisted consumers.
+
+**Limits:** Bounded lexical validation is not NLI. Unenumerated multilingual
+negation, distant context, complex grammatical scope and arbitrary semantic
+paraphrases are not inferred. Ambiguity may reject legitimate claims. One
+unsupported fact still rejects the whole profile: SAFE BUT PRODUCT-DEGRADING.
+No partial-claim persistence, JD binding, API or duration redesign is included.
+
+**Verification:** 59 new regressions; the focused new/identity/legacy-consumer
+suite passed 86 tests. Before correction, the original 37-case reproduction
+had 19 failures and 18 passes. Final `ruff check .` passed; `mypy src` passed
+for 138 source files; `pytest -q` passed 969 tests, with no skips or xfails.
+Alembic retains the single `a1c5e9f2b6d3` head. Tracked-tree scan and diff
+whitespace checks passed. AST comparison confirmed all 204 existing test
+functions in modified test files retain their assertions and decorators.
+An additional probe executed the actual `86d3e3f` parent JD-headline renderer
+and verified its unsafe output is suppressed on current history replay,
+without changing the stored turn. Model/provider tests use synthetic data
+and local fakes; no live model or Target-Mac benchmark was run.

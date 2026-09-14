@@ -101,6 +101,16 @@
   `FAILED`/`MANUAL_REVIEW_REQUIRED` `CandidateProfileVersion` — never a
   crash, never fabricated content.
 
+D-050 strengthens attribution: contradiction checks use a bounded canonical
+context (200 normalized characters around each attributed quote occurrence),
+with local token/clause scope. Current state must be explicit and positive;
+linked periods must fit the referenced employment occurrence. Domain intervals
+cannot borrow contradictory evidence. Email tokens and coherent phone
+occurrences replace substring/digit-concatenation attribution. Embedding
+generation/reuse and folder/demo readiness also enforce shared current
+authority. Historical rows remain immutable. This is bounded lexical
+validation, not general entailment or multilingual NLI.
+
 ## Agent candidate-factual authority
 
 - `AgentDecision` has no free-text answer field. `FINAL_ANSWER` and
@@ -112,8 +122,9 @@
   evaluation service's output. The agent does not calculate or author a
   score. Hiring recommendations are not an agent output: the server-owned
   response explicitly reserves the decision for an authorized human.
-- Persisted assistant text is replayed only when marked with server text
-  authority. Legacy conversation rows without that marker are rendered
+- Persisted assistant text is replayed only with both `SERVER_VALIDATED`
+  and current `text_authority_version=candidate-factuality-v2`. Legacy rows,
+  including older server-marked rows lacking that version, are rendered
   from the fixed outcome mapping, preventing historical unrestricted model
   prose from re-entering the UI.
 - `JDCriteriaDraft.title` remains untrusted draft content. It is retained

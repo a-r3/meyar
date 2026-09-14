@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.embedding.provider import EmbeddingProvider, EmbeddingProviderError
+from meyar.extraction.evidence import EvidenceValidationError
 from meyar.extraction.identity_service import (
     IdentityExtractionPreconditionError,
     extract_candidate_identity,
@@ -24,6 +25,8 @@ from meyar.services.candidate_identity_repo import get_latest_identity_version_f
 from meyar.services.candidate_profile_repo import get_latest_profile_version_for_document
 from meyar.services.folder_indexed_file_repo import list_folder_indexed_files
 from meyar.services.folder_indexer_service import FolderScanSummary, index_folder
+from meyar.services.identity_authority import authorize_identity_version
+from meyar.services.profile_authority import get_current_authorized_profile
 from meyar.storage.base import DocumentStorage
 
 
@@ -52,7 +55,8 @@ async def _is_ready(
     processing-status column/migration needed (see docs/DECISIONS.md
     D-021). READY means: this exact current document has a COMPLETED
     CandidateProfileVersion AND a COMPLETED CandidateIdentityVersion,
-    AND at least one CandidateEmbeddingVersion exists for that profile
+    both passing current evidence authority, AND at least one
+    CandidateEmbeddingVersion exists for that profile
     version. Returns the profile row too so callers that must proceed
     to extraction/embedding don't re-query it."""
     profile = await get_latest_profile_version_for_document(
@@ -65,6 +69,16 @@ async def _is_ready(
         db, tenant_id=tenant_id, candidate_document_id=candidate_document_id
     )
     if identity is None or identity.status != IDENTITY_STATUS_COMPLETED:
+        return False, profile
+
+    authorized = await get_current_authorized_profile(
+        db, tenant_id=tenant_id, candidate_id=candidate_id
+    )
+    if authorized is None or authorized[0].id != profile.id:
+        return False, profile
+    try:
+        await authorize_identity_version(db, version=identity)
+    except EvidenceValidationError:
         return False, profile
 
     embeddings = await list_embedding_versions_for_candidate(
@@ -154,7 +168,13 @@ async def _process_one_candidate_document(
         except (EmbeddingPreconditionError, EmbeddingProviderError):
             embedded = False
 
-    return profile_ok and identity_ok and embedded
+    if not (profile_ok and identity_ok and embedded):
+        return False
+    ready, _ = await _is_ready(
+        db, tenant_id=tenant_id, candidate_id=candidate_id,
+        candidate_document_id=candidate_document_id,
+    )
+    return ready
 
 
 async def process_pending_candidates(

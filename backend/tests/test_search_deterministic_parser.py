@@ -419,7 +419,13 @@ async def test_confirmed_explicit_separation_alternative_preserves_tenant_isolat
                 "start_date": "2018",
                 "end_date": None,
                 "is_current": True,
-                "evidence": [{"page": 1, "block_index": 0, "quote": "2018-present"}],
+                "evidence": [
+                    {
+                        "page": 1,
+                        "block_index": 0,
+                        "quote": "Backend Engineer at Synthetic Co 2018-present",
+                    }
+                ],
             }
         ],
     }

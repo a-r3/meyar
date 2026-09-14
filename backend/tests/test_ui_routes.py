@@ -45,14 +45,20 @@ def local_ui_settings() -> Settings:
     return settings
 
 
-def _profile(*skills: str, quote: str = "Synthetic evidence") -> dict:
+def _profile(*skills: str, quote: str | None = None) -> dict:
     return {
         **EMPTY_PROFILE,
         "skills": [
             {
                 "name": skill,
                 "category": "Backend",
-                "evidence": [{"page": 1, "block_index": 0, "quote": quote}],
+                "evidence": [
+                    {
+                        "page": 1,
+                        "block_index": 0,
+                        "quote": quote if quote is not None else f"{skill} Backend",
+                    }
+                ],
             }
             for skill in skills
         ],
@@ -130,7 +136,7 @@ async def test_actual_ui_chat_delegates_and_preserves_backend_order_with_escaped
     first, first_profile = await seed_candidate_with_profile(
         db_session,
         tenant_id=tenant.id,
-        profile_content=_profile("Python", quote=payload),
+        profile_content=_profile("Python", quote=f"Python Backend {payload}"),
     )
     second, second_profile = await seed_candidate_with_profile(
         db_session, tenant_id=tenant.id, profile_content=_profile("Python")
@@ -519,7 +525,7 @@ async def test_candidate_detail_escapes_identity_profile_and_evidence(
     candidate, profile = await seed_candidate_with_profile(
         db_session,
         tenant_id=tenant.id,
-        profile_content=_profile(payload, quote=payload),
+        profile_content=_profile(payload, quote=f"{payload} Backend"),
     )
     await _identity(
         db_session,

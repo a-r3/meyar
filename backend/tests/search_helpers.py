@@ -3,11 +3,9 @@ seeding pattern used in test_candidate_embedding.py (Slice 7) — never a
 real CV, always hand-seeded rows."""
 
 import uuid
-from copy import deepcopy
 from datetime import date
 from typing import Any
 
-from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.embedding.serializer import (
@@ -15,9 +13,6 @@ from meyar.embedding.serializer import (
     build_professional_embedding_text,
     compute_source_sha256,
 )
-from meyar.extraction.evidence import EvidenceValidationError, verify_extraction_evidence
-from meyar.extraction.view import ModelInputBlock, ProfessionalDocumentView
-from meyar.schemas.candidate_profile import CandidateProfileExtraction
 from meyar.services.candidate_document_repo import (
     create_candidate_document,
     create_canonical_document,
@@ -29,80 +24,14 @@ from meyar.services.candidate_repo import create_candidate
 DEFAULT_AS_OF_DATE = date(2026, 1, 1)
 
 
-def _material_quote(category: str, item: dict, profile: dict) -> str:
-    fields_by_category = {
-        "skills": ("name", "category"),
-        "employment_history": (
-            "title",
-            "organization",
-            "start_date",
-            "end_date",
-        ),
-        "education": ("institution", "degree", "field_of_study", "date"),
-        "certifications": ("name", "issuer", "date"),
-        "languages": ("language", "proficiency"),
-        "projects": ("description",),
-        "skill_experience": ("skill_name", "start_date", "end_date"),
-        "domain_experience": ("domain", "start_date", "end_date"),
-    }
-    values = [str(item[field]) for field in fields_by_category[category] if item.get(field)]
-    if item.get("is_current"):
-        values.append("current")
-    employment_index = item.get("employment_index")
-    if employment_index is not None and category in {"skill_experience", "domain_experience"}:
-        employment = profile["employment_history"][employment_index]
-        values.extend(
-            str(employment[field])
-            for field in ("title", "organization")
-            if employment.get(field)
-        )
-    return " | ".join(values)
+def synthetic_evidence(*parts: object) -> list[dict]:
+    """Explicitly author a synthetic positive quote for a non-evidence test.
 
-
-def _professional_view(profile_content: dict) -> ProfessionalDocumentView:
-    canonical = _canonical_content_from_profile(profile_content, fallback="synthetic")
-    return ProfessionalDocumentView(
-        canonical_document_id=uuid.uuid4(),
-        blocks=[
-            ModelInputBlock(
-                page=page["page"],
-                block_index=block["index"],
-                text=block["text"],
-            )
-            for page in canonical["pages"]
-            for block in page["blocks"]
-        ],
-    )
-
-
-def _authority_safe_profile_content(profile_content: dict | None) -> dict | None:
-    if profile_content is None:
-        return None
-    try:
-        extraction = CandidateProfileExtraction.model_validate(profile_content)
-    except ValidationError:
-        return profile_content
-    try:
-        verify_extraction_evidence(_professional_view(profile_content), extraction)
-        return profile_content
-    except EvidenceValidationError:
-        normalized = deepcopy(profile_content)
-        for category in (
-            "skills",
-            "employment_history",
-            "education",
-            "certifications",
-            "languages",
-            "projects",
-            "skill_experience",
-            "domain_experience",
-        ):
-            for item in normalized.get(category, []):
-                quote = _material_quote(category, item, normalized)
-                item["evidence"] = [
-                    {**ref, "quote": quote} for ref in item.get("evidence", [])
-                ]
-        return normalized
+    Never invoked by persistence helpers or on caller-supplied evidence.
+    Boundary tests must supply their own independent canonical text/quotes.
+    """
+    quote = " ".join(str(part) for part in parts if part is not None and part != "")
+    return [{"page": 1, "block_index": 0, "quote": quote}]
 
 
 def _canonical_content_from_profile(profile_content: dict | None, *, fallback: str) -> dict:
@@ -158,7 +87,7 @@ async def seed_candidate_with_profile(
     CandidateProfileVersion (v1) with the given content. Returns
     (candidate, profile_version)."""
     stored_profile_content = (
-        _authority_safe_profile_content(profile_content) if status == "COMPLETED" else None
+        profile_content if status == "COMPLETED" else None
     )
     candidate = await create_candidate(db_session, tenant_id=tenant_id)
     document = await create_candidate_document(
@@ -207,7 +136,7 @@ async def seed_next_profile_version(
 ):
     """Creates the NEXT CandidateProfileVersion for an existing candidate
     (e.g. v2), reusing a fresh document/canonical pair."""
-    stored_profile_content = _authority_safe_profile_content(profile_content)
+    stored_profile_content = profile_content
     assert stored_profile_content is not None
     document = await create_candidate_document(
         db_session,

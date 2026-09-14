@@ -975,6 +975,11 @@ focused suite 186 passed; `ruff` clean; `mypy src` clean (138 files); full
 clean. PR #42 remains open and not accepted; nothing was pushed or merged.
 See D-049.
 
+The independent re-audit at `7b748f4` disproved complete closure. D-050
+records the corrective canonical-context, current-state, period-attribution,
+embedding, identity-token, history-version and fixture-integrity changes.
+PR #42 remains not accepted; this work is local only, with no push or merge.
+
 **M8 Slice 3 — Evidence Capability Completion (#32)**: **MERGED as PR #41
 (`8c1782f`, squash); issue #32 closed.** Closes the D-027-identified
 `SkillItem`/`EmploymentItem` grounding gap: `CandidateProfileExtraction`

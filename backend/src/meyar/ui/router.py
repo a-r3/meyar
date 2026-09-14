@@ -469,21 +469,16 @@ async def search(
 
 
 def _agent_turn_log_views(conversation) -> list:
-    """User turns are the HR user's own (untrusted, shown verbatim) text.
-    Assistant turns are re-derived through the exact same deterministic
-    outcome->text mapping the live turn banner uses
-    (agent_turn_outcome_message) rather than the raw stored value — a
-    past turn's stored text can be empty/None (its outcome carried no
-    model framing), and this guarantees it is never redisplayed as a
-    blank bubble (D-036). Only text explicitly tagged with server authority
-    is replayed. Legacy rows may contain unrestricted model prose, so their
-    stored text is ignored and replaced by the fixed outcome fallback.
-    Since D-045, the stored text for a completed
-    turn is itself already the exact live-rendered headline (see
-    agent_conversation_repo.sync_last_turn_display_text), so this mapping
-    is a pure passthrough for every real turn — the fallback table only
-    still matters for the rare turn where no headline was ever computed."""
-    from meyar.services.agent_conversation_repo import ASSISTANT_TEXT_AUTHORITY_SERVER
+    """Replay only text rendered under the currently accepted server policy.
+
+    Older SERVER_VALIDATED markers do not prove current display authority.
+    Their text is replaced by fixed outcome copy, without mutating history.
+    User turns remain the HR user's own untrusted text.
+    """
+    from meyar.services.agent_conversation_repo import (
+        ASSISTANT_TEXT_AUTHORITY_SERVER,
+        ASSISTANT_TEXT_AUTHORITY_VERSION,
+    )
     from meyar.ui.view_models import AgentTurnLogView
 
     views = []
@@ -492,7 +487,10 @@ def _agent_turn_log_views(conversation) -> list:
         if role == "assistant":
             trusted_text = (
                 turn.get("text")
-                if turn.get("text_authority") == ASSISTANT_TEXT_AUTHORITY_SERVER
+                if (
+                    turn.get("text_authority") == ASSISTANT_TEXT_AUTHORITY_SERVER
+                    and turn.get("text_authority_version") == ASSISTANT_TEXT_AUTHORITY_VERSION
+                )
                 else None
             )
             text = agent_turn_outcome_message(turn.get("outcome", "ANSWERED"), trusted_text or None)

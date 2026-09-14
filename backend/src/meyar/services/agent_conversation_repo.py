@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meyar.models.agent_conversation import AgentConversation
 
 ASSISTANT_TEXT_AUTHORITY_SERVER = "SERVER_VALIDATED"
+ASSISTANT_TEXT_AUTHORITY_VERSION = "candidate-factuality-v2"
 
 
 async def get_conversation_by_session(
@@ -78,7 +79,12 @@ async def sync_last_turn_display_text(
         return
     turns = [
         *conversation.turns[:-1],
-        {**last, "text": text, "text_authority": ASSISTANT_TEXT_AUTHORITY_SERVER},
+        {
+            **last,
+            "text": text,
+            "text_authority": ASSISTANT_TEXT_AUTHORITY_SERVER,
+            "text_authority_version": ASSISTANT_TEXT_AUTHORITY_VERSION,
+        },
     ]
     conversation.turns = turns
     await db.flush()

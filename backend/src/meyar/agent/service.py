@@ -73,6 +73,7 @@ from meyar.search.planner_service import plan_and_search_candidates
 from meyar.search.schemas import EmbeddingSearchConfig
 from meyar.services.agent_conversation_repo import (
     ASSISTANT_TEXT_AUTHORITY_SERVER,
+    ASSISTANT_TEXT_AUTHORITY_VERSION,
     save_conversation_state,
 )
 from meyar.services.audit_repo import record_event
@@ -814,6 +815,7 @@ async def _finish_turn(
             "text": result.message or "",
             "outcome": result.outcome.value,
             "text_authority": ASSISTANT_TEXT_AUTHORITY_SERVER,
+            "text_authority_version": ASSISTANT_TEXT_AUTHORITY_VERSION,
         },
     ][-max_context_turns:]
     await save_conversation_state(

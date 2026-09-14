@@ -40,7 +40,13 @@ from meyar.services.candidate_repo import create_candidate
 from meyar.services.tenant_repo import create_tenant
 
 _PROFILE_V1_CONTENT = {
-    "skills": [{"name": "Python", "category": None}],
+    "skills": [
+        {
+            "name": "Python",
+            "category": None,
+            "evidence": [{"page": 1, "block_index": 0, "quote": "Python"}],
+        }
+    ],
     "employment_history": [
         {
             "title": "Backend Developer",
@@ -48,6 +54,9 @@ _PROFILE_V1_CONTENT = {
             "start_date": "2021",
             "end_date": "2025",
             "is_current": False,
+            "evidence": [
+                {"page": 1, "block_index": 0, "quote": "Backend Developer at Acme 2021-2025"}
+            ],
         }
     ],
     "education": [],
@@ -57,7 +66,13 @@ _PROFILE_V1_CONTENT = {
 }
 
 _PROFILE_V2_CONTENT = {
-    "skills": [{"name": "Rust", "category": None}],
+    "skills": [
+        {
+            "name": "Rust",
+            "category": None,
+            "evidence": [{"page": 1, "block_index": 0, "quote": "Rust"}],
+        }
+    ],
     "employment_history": [],
     "education": [],
     "certifications": [],
@@ -85,7 +100,16 @@ async def _seed_candidate_and_document(db_session: AsyncSession, tenant_id: uuid
         parser_name="test-parser",
         parser_version="1.0.0",
         language=None,
-        content={"pages": [{"page": 1, "blocks": [{"index": 0, "text": "Python developer."}]}]},
+        content={
+            "pages": [
+                {
+                    "page": 1,
+                    "blocks": [
+                        {"index": 0, "text": "Python. Rust. Backend Developer at Acme 2021-2025."}
+                    ],
+                }
+            ]
+        },
     )
     return candidate, document, canonical
 
