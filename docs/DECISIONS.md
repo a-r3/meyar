@@ -4231,3 +4231,46 @@ An additional probe executed the actual `86d3e3f` parent JD-headline renderer
 and verified its unsafe output is suppressed on current history replay,
 without changing the stored turn. Model/provider tests use synthetic data
 and local fakes; no live model or Target-Mac benchmark was run.
+
+## D-051 — Deterministic factual-authority scope completion (issue #44)
+
+**Date:** 2026-09-14. **Status:** Local corrective implementation; PR #42
+remains open and unaccepted.
+
+**Problem:** An independent audit of `6d12c0c` found five remaining bounded
+scope defects in D-050's token/span validator: `or` unconditionally terminated
+negation before a second coordinated subject; newline normalization erased a
+structural boundary; `not only` was treated as genuine negation; a repeated
+short quote could not distinguish historical negative and later positive
+occurrences; and the phone token grammar allowed a period to join separate
+numeric fragments.
+
+**Decision:**
+- Keep the existing token/span architecture. `or` stays inside a governing
+  `no`/`without`/`not` phrase, while ordinary positive `and`, contrastive
+  `but`/`however`, sentence punctuation, semicolons, and newlines terminate
+  scope. This is a bounded English lexical rule, not general NLP.
+- Treat `not only ... but also ...` as non-negative without exempting ordinary
+  `not` assertions such as `Python is not used`.
+- Preserve newlines during canonical context matching and polarity analysis;
+  flexible whitespace still allows a model quote to bind to the cited source.
+- Retain D-050's fail-closed repeated-occurrence invariant because
+  `EvidenceRef` contains page, block, and quote but no character offset. Every
+  identical occurrence of an ambiguous short quote must agree. A longer unique
+  quote can identify and authorize the later positive occurrence in the same
+  block; the validator never guesses which short occurrence was intended.
+- Define phone support as one complete phone-like lexical occurrence composed
+  of digit groups, optional leading `+`, balanced digit parentheses, spaces,
+  and hyphens. Periods, words, commas, extensions, and additional digits cannot
+  be concatenated into the requested identity. Identity remains presentation-
+  only.
+
+**Scope:** No schema/migration, JD source binding, API, duration arithmetic,
+deployment, scoring, search, agent orchestration, or persistence behavior was
+changed. The shared current-authority boundary automatically applies the
+correction to extraction, embedding, search, evaluation/cache reuse, ranking,
+agent tools, library/detail views, and assistant history presentation.
+
+**Verification:** Direct scope/idiom/boundary/repeated-occurrence/phone tests
+and a database-backed all-consumer quarantine regression were added. The final
+gate counts are recorded in the associated local commit report.

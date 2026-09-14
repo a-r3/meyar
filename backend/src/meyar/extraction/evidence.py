@@ -31,6 +31,15 @@ def _normalize_claim_text(text: str) -> str:
     return re.sub(r"\s+", " ", fold_az_ascii(normalize_azerbaijani_case(text))).strip()
 
 
+def _normalize_scope_text(text: str) -> str:
+    """Normalize claim text without erasing structural line boundaries."""
+    folded = fold_az_ascii(normalize_azerbaijani_case(text)).replace("\r\n", "\n")
+    folded = folded.replace("\r", "\n")
+    folded = re.sub(r"[^\S\n]+", " ", folded)
+    folded = re.sub(r" *\n+ *", "\n", folded)
+    return folded.strip()
+
+
 def _term_present(text: str, term: str) -> bool:
     normalized_text = _normalize_claim_text(text)
     normalized_term = _normalize_claim_text(term)
@@ -59,19 +68,24 @@ _CURRENT_EMPLOYMENT_TERMS = frozenset(
 )
 
 
-# The quote has no character offset. All occurrences in its cited block must
-# agree; an ambiguous cropped quote cannot choose the favorable occurrence.
+# EvidenceRef has no character offset. All occurrences of the supplied quote
+# in its cited block must agree; an ambiguous cropped quote cannot choose the
+# favorable occurrence. A longer unique quote can identify one occurrence.
 _CONTEXT_CHARS = 200
-_SCOPE_BOUNDARY = re.compile(r"[;!?]|\.(?=\s|$)|\b(?:but|however|and|or)\b")
+_SCOPE_BOUNDARY = re.compile(r"\n|[;!?]|\.(?=\s|$)|\b(?:but|however|and)\b")
+
+
+def _quote_pattern(quote: str) -> re.Pattern[str]:
+    words = _normalize_claim_text(quote).split()
+    return re.compile(r"\s+".join(re.escape(word) for word in words))
 
 
 def _source_spans(view: ProfessionalDocumentView, ref: EvidenceRef) -> list[tuple[str, int, int]]:
     verify_evidence(view, ref)
     block = next(b for b in view.blocks if b.page == ref.page and b.block_index == ref.block_index)
-    source = _normalize_claim_text(block.text)
-    quote = _normalize_claim_text(ref.quote)
+    source = _normalize_scope_text(block.text)
     spans = []
-    for match in re.finditer(re.escape(quote), source):
+    for match in _quote_pattern(ref.quote).finditer(source):
         start = max(0, match.start() - _CONTEXT_CHARS)
         end = min(len(source), match.end() + _CONTEXT_CHARS)
         while start < match.start() and source[start].isspace():
@@ -81,13 +95,21 @@ def _source_spans(view: ProfessionalDocumentView, ref: EvidenceRef) -> list[tupl
 
 
 def _negated_occurrence(text: str, start: int, end: int) -> bool:
-    # Conjunction/clause boundaries stop a neighboring subject's negation.
-    # These are bounded lexical constructions, never an entailment judge.
+    # Clause boundaries and positive ``and`` stop a neighboring subject's
+    # negation. ``or`` deliberately remains inside scope so bounded forms such
+    # as "no Java or Python" govern every coordinated subject. Contrastive
+    # ``but`` is a boundary. These are lexical constructions, never NLI.
     before = _SCOPE_BOUNDARY.split(text[:start])[-1]
     after = _SCOPE_BOUNDARY.split(text[end:])[0]
+    negative_prefix = re.search(r"(?<!\w)(?:no|without|not)\s+(?:\w+\s+){0,6}$", before)
+    if negative_prefix is not None and re.match(r"not\s+only\b", negative_prefix.group()):
+        negative_prefix = None
     return bool(
-        re.search(r"(?<!\w)(?:no|without|not)\s+(?:\w+\s+){0,4}$", before)
-        or re.match(r"\s+(?:experience\s+)?(?:(?:is|was|are|were)\s+)?not(?:\W|$)", after)
+        negative_prefix
+        or re.match(
+            r"\s+(?:experience\s+)?(?:(?:is|was|are|were)\s+)?not(?!\s+only\b)(?:\W|$)",
+            after,
+        )
         or re.match(r"\s+(?:is\s+)?(?:absent|unavailable)(?:\W|$)", after)
     )
 
@@ -95,7 +117,7 @@ def _negated_occurrence(text: str, start: int, end: int) -> bool:
 def _positive_term_present(
     text: str, terms: frozenset[str], *, span: tuple[int, int] | None = None
 ) -> bool:
-    normalized = _normalize_claim_text(text)
+    normalized = _normalize_scope_text(text)
     mentioned = False
     for term in sorted(terms):
         term = _normalize_claim_text(term)
@@ -560,7 +582,8 @@ def verify_extraction_evidence(
 _EMAIL_TOKEN = re.compile(
     r"(?<![\w.!#$%&'*+/=?^`{|}~@-])[\w.!#$%&'*+/=?^`{|}~-]+@[\w-]+(?:\.[\w-]+)+(?![\w@-])"
 )
-_PHONE_TOKEN = re.compile(r"(?<![\w+])\+?[0-9](?:[0-9() .-]*[0-9])?(?!\w)")
+_PHONE_GROUP = r"(?:\([0-9]+\)|[0-9]+)"
+_PHONE_TOKEN = re.compile(rf"(?<![\w+])\+?{_PHONE_GROUP}(?:[ -]{_PHONE_GROUP})*(?!\w)")
 
 
 def _digits(text: str) -> str:

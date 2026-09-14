@@ -51,14 +51,39 @@ def profile(category, quote, **fields):
         ("Python is not used", "Python", "Python", False),
         ("No Java but Python", "No Java but Python", "Python", True),
         ("No Java but Python", "Java", "Java", False),
+        ("No Java or Python experience", "No Java or Python experience", "Java", False),
+        ("No Java or Python experience", "No Java or Python experience", "Python", False),
+        ("Without Java or Python", "Without Java or Python", "Java", False),
+        ("Without Java or Python", "Without Java or Python", "Python", False),
+        ("Does not use Java or Python", "Does not use Java or Python", "Java", False),
+        ("Does not use Java or Python", "Does not use Java or Python", "Python", False),
         ("Python and not Java", "Python and not Java", "Python", True),
         ("Python and not Java", "Java", "Java", False),
+        ("Python, but not Java", "Python, but not Java", "Python", True),
+        ("Python, but not Java", "Python, but not Java", "Java", False),
+        ("Python experience; no Java experience", "Python", "Python", True),
+        ("Python experience; no Java experience", "Java", "Java", False),
+        (
+            "Python is not only used for backend work but also automation",
+            "Python is not only used for backend work but also automation",
+            "Python",
+            True,
+        ),
+        ("Python is not only required but preferred", "Python", "Python", True),
+        ("Not only Python but also Java", "Not only Python but also Java", "Python", True),
+        ("Not only Python but also Java", "Not only Python but also Java", "Java", True),
+        ("Python is not used", "Python", "Python", False),
         ("notable Python work", "Python", "Python", True),
         ("Python notification service", "Python", "Python", True),
         ("Python; no Java", "Python", "Python", True),
         ("Without Python", "Python", "Python", False),
         ("JS experience", "JS", "JavaScript", True),
         ("No Python. Python experience", "Python", "Python", False),
+        ("No Java.\nPython used extensively.", "Java", "Java", False),
+        ("No Java.\nPython used extensively.", "Python", "Python", True),
+        ("No Java\nPython used extensively.", "Python", "Python", True),
+        ("No Java; Python required.", "Java", "Java", False),
+        ("No Java; Python required.", "Python", "Python", True),
     ],
 )
 def test_canonical_context_and_local_scope(source, quote, skill, accepted):
@@ -68,6 +93,24 @@ def test_canonical_context_and_local_scope(source, quote, skill, accepted):
     else:
         with pytest.raises(EvidenceValidationError):
             verify_extraction_evidence(view(source), extraction)
+
+
+def test_repeated_short_quote_accepts_only_exact_attributable_positive_occurrence():
+    source = "No Python experience in 2018.\nWorked extensively with Python from 2021 to 2024."
+    exact = profile(
+        "skills",
+        "Worked extensively with Python from 2021 to 2024.",
+        name="Python",
+    )
+    verify_extraction_evidence(view(source), exact)
+
+    ambiguous = profile("skills", "Python", name="Python")
+    with pytest.raises(EvidenceValidationError):
+        verify_extraction_evidence(view(source), ambiguous)
+
+    cropped_negative = profile("skills", "Python", name="Python")
+    with pytest.raises(EvidenceValidationError):
+        verify_extraction_evidence(view("No Python experience"), cropped_negative)
 
 
 @pytest.mark.parametrize("category", ["employment_history", "domain_experience"])
@@ -158,6 +201,13 @@ def test_linked_employment_period(start, end, accepted):
         ("email", "jane@example.com", "notjane@example.com", False),
         ("email", "JANE@example.com", "Contact: jane@EXAMPLE.COM", True),
         ("phone", "123456789", "Reference 1234, other record 56789", False),
+        ("phone", "123456789", "Reference 1234. 56789", False),
+        ("phone", "123456789", "Reference 1234. Other record 56789", False),
+        ("phone", "123456789", "1234, code 56789", False),
+        ("phone", "123456789", "phone 1234567 ext 89", False),
+        ("phone", "123456789", "phone 1234567 00 89", False),
+        ("phone", "123456789", "phone 123456789", True),
+        ("phone", "0501234567", "050-123-45-67", True),
         ("phone", "+994501234567", "+994 (50) 123-45-67", True),
         ("full_name", "Jane Doe", "Janet Doe", False),
         ("full_name", "Jane Doe", "Jane Doe", True),
@@ -285,6 +335,10 @@ def _invalid_professional_cases():
     )
     return [
         ("No Python experience", cropped),
+        (
+            "No Java or Python experience",
+            profile("skills", "No Java or Python experience", name="Python"),
+        ),
         ("Developer Acme 2021; not current", current),
         ("Banking 2021 ended", domain),
         ("Banking experience\nNo banking experience 2021-2025", split),
