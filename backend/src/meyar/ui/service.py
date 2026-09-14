@@ -40,7 +40,6 @@ from meyar.models.folder_indexed_file import (
 )
 from meyar.models.job import JOB_STATUS_ACTIVE, Job
 from meyar.models.job_criteria_version import JobCriteriaVersion
-from meyar.schemas.candidate_identity import CandidateIdentityExtraction
 from meyar.schemas.candidate_profile import CandidateProfileExtraction, EvidenceRef
 from meyar.schemas.criteria import CriterionIn, CriterionKind, CriterionType
 from meyar.schemas.job import JobCreateRequest
@@ -56,11 +55,17 @@ from meyar.services.candidate_document_repo import (
     list_candidate_documents,
 )
 from meyar.services.candidate_identity_repo import get_current_identity_version
-from meyar.services.candidate_profile_repo import (
-    get_current_profile_version,
-    get_profile_version_by_id,
-)
+from meyar.services.candidate_profile_repo import get_current_profile_version
 from meyar.services.candidate_repo import get_candidate
+from meyar.services.identity_authority import (
+    get_current_identity_values,
+    identity_values_from_version,
+)
+from meyar.services.profile_authority import (
+    ProfileAuthorityError,
+    authorize_profile_version,
+    get_authorized_profile_version_by_id,
+)
 from meyar.ui.presentation import (
     AGENT_EVIDENCE_CATEGORY_LABELS,
     CRITERION_KIND_LABELS,
@@ -127,20 +132,6 @@ def _format_filter_match_label(category: str, value: str) -> str:
     if category == "min_total_experience_years":
         return f"{value} il təcrübə"
     return value
-
-
-def _identity_values(version: CandidateIdentityVersion | None) -> tuple[str | None, ...]:
-    if version is None or version.identity_content is None:
-        return None, None, None
-    try:
-        identity = CandidateIdentityExtraction.model_validate(version.identity_content)
-    except ValidationError:
-        return None, None, None
-    return (
-        identity.full_name.value if identity.full_name else None,
-        identity.email.value if identity.email else None,
-        identity.phone.value if identity.phone else None,
-    )
 
 
 def _evidence_views(
@@ -237,15 +228,11 @@ def _current_role_and_skills(
 
 
 def _library_profile_summary(
-    profile_version: CandidateProfileVersion | None,
+    profile: CandidateProfileExtraction | None,
 ) -> tuple[str | None, list[str], list[str]]:
     """HR-facing summary derived from already-fetched profile_content — no
     extra query. Returns (current_role, top_skills, languages)."""
-    if profile_version is None or profile_version.profile_content is None:
-        return None, [], []
-    try:
-        profile = CandidateProfileExtraction.model_validate(profile_version.profile_content)
-    except ValidationError:
+    if profile is None:
         return None, [], []
     current_role, top_skills = _current_role_and_skills(profile)
     languages = [item.language for item in profile.languages]
@@ -414,19 +401,38 @@ async def list_candidate_library(
 
     items: list[CandidateLibraryItemView] = []
     for candidate in candidates:
-        profile = profiles_by_candidate.get(candidate.id)
-        full_name, _email, _phone = _identity_values(identities_by_candidate.get(candidate.id))
+        profile_version = profiles_by_candidate.get(candidate.id)
+        profile = None
+        profile_authorized = False
+        if profile_version is not None:
+            try:
+                profile = await authorize_profile_version(db, version=profile_version)
+                profile_authorized = True
+            except ProfileAuthorityError:
+                profile = None
+        identity = await identity_values_from_version(
+            db, version=identities_by_candidate.get(candidate.id)
+        )
         current_role, top_skills, languages = _library_profile_summary(profile)
         items.append(
             CandidateLibraryItemView(
                 candidate_id=candidate.id,
                 created_at=candidate.created_at,
-                full_name=full_name,
+                full_name=identity.full_name,
                 current_role=current_role,
                 top_skills=top_skills,
                 languages=languages,
-                current_profile_version=profile.version_number if profile else None,
-                current_profile_status=profile.status if profile else None,
+                current_profile_version=profile_version.version_number if profile_version else None,
+                current_profile_status=(
+                    None
+                    if profile_version is None
+                    else (
+                        "UNAVAILABLE"
+                        if profile_version.status == PROFILE_STATUS_COMPLETED
+                        and not profile_authorized
+                        else profile_version.status
+                    )
+                ),
                 parser_statuses=sorted(parser_states[candidate.id]),
                 folder_index_statuses=sorted(folder_states[candidate.id]),
             )
@@ -450,7 +456,7 @@ async def get_candidate_detail_view(
     identity = await get_current_identity_version(
         db, tenant_id=tenant_id, candidate_id=candidate_id
     )
-    full_name, email, phone = _identity_values(identity)
+    identity_values = await identity_values_from_version(db, version=identity)
     profile_version = await get_current_profile_version(
         db, tenant_id=tenant_id, candidate_id=candidate_id
     )
@@ -467,13 +473,15 @@ async def get_candidate_detail_view(
     }
     current_role: str | None = None
     professional_summary: str | None = None
-    if profile_version and profile_version.profile_content is not None:
+    profile_authorized = False
+    if profile_version is not None:
         try:
-            profile = CandidateProfileExtraction.model_validate(profile_version.profile_content)
+            profile = await authorize_profile_version(db, version=profile_version)
+            profile_authorized = True
             facts = _facts(profile)
             current_role, top_skills = _current_role_and_skills(profile)
             professional_summary = join_nonempty([current_role, ", ".join(top_skills) or None])
-        except ValidationError:
+        except ProfileAuthorityError:
             pass
     documents = await list_candidate_documents(db, tenant_id=tenant_id, candidate_id=candidate_id)
     evaluations = list(
@@ -491,17 +499,48 @@ async def get_candidate_detail_view(
     job_titles = await _job_titles_by_id(
         db, tenant_id=tenant_id, job_ids=[evaluation.job_id for evaluation in evaluations]
     )
+    evaluation_views: list[EvaluationHistoryView] = []
+    for evaluation in evaluations:
+        authorized_profile = await get_authorized_profile_version_by_id(
+            db,
+            tenant_id=tenant_id,
+            profile_version_id=evaluation.candidate_profile_version_id,
+        )
+        evaluation_views.append(
+            EvaluationHistoryView(
+                evaluation_id=evaluation.id,
+                job_id=evaluation.job_id,
+                job_title=job_titles.get(evaluation.job_id),
+                job_criteria_version_id=evaluation.job_criteria_version_id,
+                evaluation_as_of_date=evaluation.evaluation_as_of_date,
+                numeric_score=(
+                    evaluation.numeric_score if authorized_profile is not None else None
+                ),
+                fit_band=evaluation.overall_result if authorized_profile is not None else None,
+                status=evaluation.status if authorized_profile is not None else "UNAVAILABLE",
+                created_at=evaluation.created_at,
+            )
+        )
     return CandidateDetailView(
         candidate_id=candidate.id,
         created_at=candidate.created_at,
-        full_name=full_name,
-        email=email,
-        phone=phone,
+        full_name=identity_values.full_name,
+        email=identity_values.email,
+        phone=identity_values.phone,
         current_role=current_role,
         professional_summary=professional_summary,
         identity_status=identity.status if identity else None,
         identity_version=identity.version_number if identity else None,
-        profile_status=profile_version.status if profile_version else None,
+        profile_status=(
+            None
+            if profile_version is None
+            else (
+                "UNAVAILABLE"
+                if profile_version.status == PROFILE_STATUS_COMPLETED
+                and not profile_authorized
+                else profile_version.status
+            )
+        ),
         profile_version=profile_version.version_number if profile_version else None,
         **facts,
         documents=[
@@ -517,20 +556,7 @@ async def get_candidate_detail_view(
             )
             for document in documents
         ],
-        evaluations=[
-            EvaluationHistoryView(
-                evaluation_id=evaluation.id,
-                job_id=evaluation.job_id,
-                job_title=job_titles.get(evaluation.job_id),
-                job_criteria_version_id=evaluation.job_criteria_version_id,
-                evaluation_as_of_date=evaluation.evaluation_as_of_date,
-                numeric_score=evaluation.numeric_score,
-                fit_band=evaluation.overall_result,
-                status=evaluation.status,
-                created_at=evaluation.created_at,
-            )
-            for evaluation in evaluations
-        ],
+        evaluations=evaluation_views,
     )
 
 
@@ -610,31 +636,27 @@ async def build_search_result_views(
     """Add presentation identity after Slice 8 has fixed result authority/order."""
     views: list[CandidateSearchResultView] = []
     for result in response.results:
-        identity = await get_current_identity_version(
+        identity = await get_current_identity_values(
             db, tenant_id=tenant_id, candidate_id=result.candidate_id
         )
-        full_name, _email, _phone = _identity_values(identity)
-        profile_row = await get_profile_version_by_id(
+        profile_row_and_content = await get_authorized_profile_version_by_id(
             db, tenant_id=tenant_id, profile_version_id=result.candidate_profile_version_id
         )
         summary = None
         evidence: list[EvidenceLocationView] = []
-        if profile_row and profile_row.profile_content is not None:
-            try:
-                profile = CandidateProfileExtraction.model_validate(profile_row.profile_content)
-                current_role, top_skills = _current_role_and_skills(profile)
-                summary = join_nonempty([current_role, ", ".join(top_skills) or None])
-                attributable_evidence = _requirement_attributable_evidence(
-                    profile,
-                    [*result.required_filters_matched, *result.preferred_filters_matched],
-                )
-                evidence = _evidence_views(attributable_evidence, snippets=True, maximum=4)
-            except ValidationError:
-                pass
+        if profile_row_and_content is not None:
+            _profile_row, profile = profile_row_and_content
+            current_role, top_skills = _current_role_and_skills(profile)
+            summary = join_nonempty([current_role, ", ".join(top_skills) or None])
+            attributable_evidence = _requirement_attributable_evidence(
+                profile,
+                [*result.required_filters_matched, *result.preferred_filters_matched],
+            )
+            evidence = _evidence_views(attributable_evidence, snippets=True, maximum=4)
         views.append(
             CandidateSearchResultView(
                 candidate_id=result.candidate_id,
-                full_name=full_name,
+                full_name=identity.full_name,
                 rank=result.rank,
                 relevance_score=result.relevance_score,
                 structured_score=result.structured_score,
@@ -675,12 +697,12 @@ async def _agent_candidate_profile_view(
     identity = await get_current_identity_version(
         db, tenant_id=tenant_id, candidate_id=candidate_id
     )
-    full_name, _email, _phone = _identity_values(identity)
+    identity_values = await identity_values_from_version(db, version=identity)
     current_role, _top_skills = _current_role_and_skills(profile)
     facts = _facts(profile)
     return AgentCandidateProfileView(
         candidate_id=candidate_id,
-        full_name=full_name,
+        full_name=identity_values.full_name,
         current_role=current_role,
         **facts,
     )
@@ -775,7 +797,7 @@ async def build_agent_turn_view(
             identity = await get_current_identity_version(
                 db, tenant_id=tenant_id, candidate_id=evidence_result.candidate_id
             )
-            full_name, _email, _phone = _identity_values(identity)
+            identity_values = await identity_values_from_version(db, version=identity)
             match_views = [
                 AgentEvidenceMatchView(
                     category_label=AGENT_EVIDENCE_CATEGORY_LABELS.get(
@@ -791,7 +813,7 @@ async def build_agent_turn_view(
                     tool_name=tool_result.tool_name.value,
                     evidence=AgentEvidenceView(
                         candidate_id=evidence_result.candidate_id,
-                        full_name=full_name,
+                        full_name=identity_values.full_name,
                         topic=evidence_result.topic,
                         matches=match_views,
                     ),
@@ -893,8 +915,8 @@ def _agent_turn_headline(
                 )
             note_text = f" ({'; '.join(notes)}.)" if notes else ""
             return (
-                f"\"{draft.title}\" üçün {len(draft.must_have_rows)} mütləq və "
-                f"{len(draft.preferred_rows)} üstünlük tələbi qaralandı. Nəzərdən keçirin, "
+                f"Vakansiya qaralaması üçün {len(draft.must_have_rows)} mütləq və "
+                f"{len(draft.preferred_rows)} üstünlük tələbi hazırlandı. Nəzərdən keçirin, "
                 f"lazım gəldikdə düzəliş edin və təsdiqləyin.{note_text}"
             )
     return agent_turn_outcome_message(result.outcome.value, None)
@@ -990,14 +1012,13 @@ async def build_ranked_candidate_views(
     )
     views: list[RankedCandidateView] = []
     for result in ranking.results:
-        identity = await get_current_identity_version(
+        identity = await get_current_identity_values(
             db, tenant_id=tenant_id, candidate_id=result.candidate_id
         )
-        full_name, _email, _phone = _identity_values(identity)
         views.append(
             RankedCandidateView(
                 candidate_id=result.candidate_id,
-                full_name=full_name,
+                full_name=identity.full_name,
                 rank=result.rank,
                 numeric_score=result.numeric_score,
                 fit_band=result.fit_band,

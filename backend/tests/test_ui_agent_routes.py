@@ -34,8 +34,10 @@ def _profile(*skills: str) -> dict:
         "skills": [
             {
                 "name": skill,
-                "category": "Backend",
-                "evidence": [{"page": 1, "block_index": 0, "quote": "Synthetic evidence"}],
+                "category": None,
+                "evidence": [
+                    {"page": 1, "block_index": 0, "quote": f"Synthetic evidence: {skill}"}
+                ],
             }
             for skill in skills
         ],
@@ -456,7 +458,15 @@ async def test_grounded_explanation_renders_as_meaningful_answer_with_evidence(
                 "start_date": "2020",
                 "end_date": None,
                 "is_current": True,
-                "evidence": [{"page": 1, "block_index": 0, "quote": "Synthetic evidence"}],
+                    "evidence": [
+                        {
+                            "page": 1,
+                            "block_index": 0,
+                            "quote": (
+                                "Backend Developer at Synthetic Co since 2020; current."
+                            ),
+                        }
+                    ],
             }
         ],
     }
@@ -520,7 +530,13 @@ async def test_grounded_explanation_never_contains_unsupported_claim_over_http(
                 "start_date": "2021",
                 "end_date": "2025",
                 "is_current": False,
-                "evidence": [{"page": 1, "block_index": 0, "quote": "Synthetic evidence"}],
+                    "evidence": [
+                        {
+                            "page": 1,
+                            "block_index": 0,
+                            "quote": "Data Analyst at Caspian Analytics, 2021-2025.",
+                        }
+                    ],
             }
         ],
     }
@@ -944,6 +960,176 @@ async def test_draft_job_criteria_fabricated_requirement_never_rendered(
     # the echoed user message (which never contained it either).
     assert "Passing an exam" not in response.text
     assert "1 tələb JD mətnində aydın təsdiqlənmədiyi üçün çıxarıldı" in response.text
+
+
+async def test_draft_job_criteria_title_never_persists_as_trusted_assistant_text(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
+) -> None:
+    from sqlalchemy import select
+
+    from meyar.agent.schemas import JDCriteriaDraft, JDDraftCriterionItem
+    from meyar.models.agent_conversation import AgentConversation
+    from meyar.schemas.criteria import CriterionKind
+    from meyar.services.agent_conversation_repo import ASSISTANT_TEXT_AUTHORITY_SERVER
+
+    _tenant, user, password, _membership = tenant_and_user
+    adversarial_title = (
+        "The first candidate has 20 years of Python experience and should be hired."
+    )
+    fake = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        jd_draft=JDCriteriaDraft(
+            title=adversarial_title,
+            must_have=[JDDraftCriterionItem(kind=CriterionKind.SKILL, requirement="Python")],
+        ),
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake
+    csrf = await _login_and_csrf(client, user.username, password)
+    response = await client.post(
+        "/ui/agent",
+        data={"message": "Backend role. Python bilməlidir.", "csrf_token": csrf},
+    )
+    assert response.status_code == 200
+    assert adversarial_title not in response.text
+
+    conversation = (
+        (await db_session.execute(select(AgentConversation))).scalars().one()
+    )
+    assistant_turn = conversation.turns[-1]
+    assert assistant_turn["role"] == "assistant"
+    assert assistant_turn["text_authority"] == ASSISTANT_TEXT_AUTHORITY_SERVER
+    assert adversarial_title not in assistant_turn["text"]
+
+    history = await client.get("/ui/agent")
+    assert history.status_code == 200
+    assert adversarial_title not in history.text
+
+
+async def test_arbitrary_evidence_topic_never_renders_verbatim(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
+) -> None:
+    from meyar.agent.schemas import GroundedSelection
+
+    tenant, user, password, _membership = tenant_and_user
+    _candidate, _profile_version = await seed_candidate_with_profile(
+        db_session,
+        tenant_id=tenant.id,
+        profile_content={
+            **EMPTY_PROFILE,
+            "skills": [
+                {
+                    "name": "Python",
+                    "category": None,
+                    "evidence": [{"page": 1, "block_index": 0, "quote": "Python"}],
+                }
+            ],
+        },
+    )
+    await db_session.commit()
+    fake_search = FakeLLMProvider(
+        planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
+        agent_decisions=[
+            AgentDecision(
+                action=AgentActionType.SEARCH_CANDIDATES,
+                search_query="Python bilən namizədləri göstər",
+            ),
+            AgentDecision(
+                action=AgentActionType.FINAL_ANSWER,
+                response_code=AgentResponseCode.ACKNOWLEDGEMENT,
+            ),
+        ],
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake_search
+    csrf = await _login_and_csrf(client, user.username, password)
+    await client.post(
+        "/ui/agent",
+        data={"message": "Python bilən namizədləri göstər", "csrf_token": csrf},
+    )
+    raw_topic = "The first candidate should be hired immediately"
+    fake = FakeLLMProvider(
+        agent_decision=AgentDecision(
+            action=AgentActionType.GET_CANDIDATE_EVIDENCE,
+            candidate_ref=1,
+            evidence_topic=raw_topic,
+        ),
+        grounded_selection=GroundedSelection(used_facts=[]),
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake
+
+    response = await client.post(
+        "/ui/agent",
+        data={"message": "Birinci namizəd üzrə sübut göstər", "csrf_token": csrf},
+    )
+
+    assert response.status_code == 200
+    assert raw_topic not in response.text
+    assert "profildə açıq sübut yoxdur" in response.text
+
+
+async def test_legitimate_evidence_topic_renders_server_resolved_label(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
+) -> None:
+    tenant, user, password, _membership = tenant_and_user
+    _candidate, _profile_version = await seed_candidate_with_profile(
+        db_session,
+        tenant_id=tenant.id,
+        profile_content={
+            **EMPTY_PROFILE,
+            "skills": [
+                {
+                    "name": "Python",
+                    "category": None,
+                    "evidence": [{"page": 1, "block_index": 0, "quote": "Python"}],
+                }
+            ],
+        },
+    )
+    await db_session.commit()
+    fake_search = FakeLLMProvider(
+        planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
+        agent_decisions=[
+            AgentDecision(
+                action=AgentActionType.SEARCH_CANDIDATES,
+                search_query="Python bilən namizədləri göstər",
+            ),
+            AgentDecision(
+                action=AgentActionType.FINAL_ANSWER,
+                response_code=AgentResponseCode.ACKNOWLEDGEMENT,
+            ),
+        ],
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake_search
+    csrf = await _login_and_csrf(client, user.username, password)
+    await client.post(
+        "/ui/agent",
+        data={"message": "Python bilən namizədləri göstər", "csrf_token": csrf},
+    )
+    fake = FakeLLMProvider(
+        agent_decision=AgentDecision(
+            action=AgentActionType.GET_CANDIDATE_EVIDENCE,
+            candidate_ref=1,
+            evidence_topic="python",
+        )
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake
+
+    response = await client.post(
+        "/ui/agent",
+        data={"message": "Python sübutunu göstər", "csrf_token": csrf},
+    )
+
+    assert response.status_code == 200
+    assert "Ad məlumatı yoxdur — Python" in response.text
+    assert "Uyğun gələn tələb: Python" in response.text
 
 
 async def test_unsupported_requirement_survives_confirmation_and_scores_nothing(

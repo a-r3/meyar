@@ -14,7 +14,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.embedding.provider import EmbeddingProvider
 from meyar.embedding.serializer import build_professional_embedding_text, compute_source_sha256
-from meyar.models.candidate_profile_version import PROFILE_STATUS_COMPLETED
 from meyar.schemas.candidate_profile import CandidateProfileExtraction
 from meyar.search.policy import (
     SEARCH_POLICY_VERSION,
@@ -33,6 +32,7 @@ from meyar.search.structured import evaluate_preferred_filters, evaluate_require
 from meyar.services.audit_repo import record_event
 from meyar.services.candidate_embedding_repo import search_compatible_embeddings
 from meyar.services.candidate_profile_repo import list_current_profile_versions_for_tenant
+from meyar.services.profile_authority import ProfileAuthorityError, authorize_profile_version
 
 
 class SearchRequestError(Exception):
@@ -68,12 +68,11 @@ async def search_candidates(
     # (candidate_id, profile_version_id, profile, profile_content, required_matches)
     eligible: list[tuple[uuid.UUID, uuid.UUID, CandidateProfileExtraction, dict, list]] = []
     for version in profile_versions:
-        if version.status != PROFILE_STATUS_COMPLETED or version.profile_content is None:
-            continue
         try:
-            profile = CandidateProfileExtraction.model_validate(version.profile_content)
-        except Exception:  # noqa: BLE001 - malformed stored content is simply not searchable
+            profile = await authorize_profile_version(db, version=version)
+        except ProfileAuthorityError:
             continue
+        assert version.profile_content is not None
         required_result = evaluate_required_filters(
             profile, request.required_filters, as_of_year=as_of_year
         )

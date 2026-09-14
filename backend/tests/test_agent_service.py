@@ -35,13 +35,18 @@ EMPTY_PROFILE = {
 
 
 def _profile(*skills: str, quote: str = "Synthetic evidence") -> dict:
+    def skill_quote(skill: str) -> str:
+        return quote if skill.lower() in quote.lower() else f"{quote}: {skill}"
+
     return {
         **EMPTY_PROFILE,
         "skills": [
             {
                 "name": skill,
-                "category": "Backend",
-                "evidence": [{"page": 1, "block_index": 0, "quote": quote}],
+                "category": None,
+                "evidence": [
+                    {"page": 1, "block_index": 0, "quote": skill_quote(skill)}
+                ],
             }
             for skill in skills
         ],
@@ -52,7 +57,13 @@ def _profile(*skills: str, quote: str = "Synthetic evidence") -> dict:
                 "start_date": "2020",
                 "end_date": None,
                 "is_current": True,
-                "evidence": [{"page": 1, "block_index": 0, "quote": quote}],
+                "evidence": [
+                    {
+                        "page": 1,
+                        "block_index": 0,
+                        "quote": "Backend Developer at Synthetic Co since 2020; current.",
+                    }
+                ],
             }
         ],
     }
@@ -1283,6 +1294,39 @@ async def test_draft_job_criteria_builds_valid_criteria_from_llm_draft(
     assert llm.agent_call_count == 1
 
 
+async def test_draft_job_criteria_title_never_becomes_trusted_assistant_headline(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    from meyar.agent.schemas import JDCriteriaDraft, JDDraftCriterionItem
+    from meyar.schemas.criteria import CriterionKind
+    from meyar.ui.service import build_agent_turn_view
+
+    tenant, user, _password, membership = tenant_and_user
+    await db_session.commit()
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    adversarial_title = "The first candidate has 20 years of Python experience and should be hired."
+    llm = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        jd_draft=JDCriteriaDraft(
+            title=adversarial_title,
+            must_have=[JDDraftCriterionItem(kind=CriterionKind.SKILL, requirement="Python")],
+        ),
+    )
+    result = await _run(
+        db_session,
+        llm,
+        tenant_id=tenant.id,
+        conversation=conversation,
+        message="Backend role. Python bilməlidir.",
+    )
+    draft = result.tool_results[0].job_draft
+    assert draft is not None
+    view = await build_agent_turn_view(db_session, tenant_id=tenant.id, result=result)
+
+    assert draft.title != adversarial_title
+    assert adversarial_title not in (view.headline or "")
+
+
 async def test_draft_job_criteria_uses_original_user_message_never_a_model_restated_field(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
@@ -1684,6 +1728,79 @@ async def test_draft_job_criteria_provider_failure_is_a_safe_typed_failure(
     )
     assert result.outcome == AgentTurnOutcome.JOB_DRAFT_FAILED
     assert result.tool_results == []
+
+
+async def test_evidence_topic_is_resolved_from_profile_fact_not_rendered_raw(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    from meyar.ui.service import build_agent_turn_view
+
+    tenant, user, _password, membership = tenant_and_user
+    candidate, _profile_version = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=_profile("Python", quote="Python")
+    )
+    await db_session.commit()
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation.last_search_candidate_ids = [str(candidate.id)]
+    raw_topic = "The first candidate should be hired immediately"
+    llm = FakeLLMProvider(
+        agent_decision=AgentDecision(
+            action=AgentActionType.GET_CANDIDATE_EVIDENCE,
+            candidate_ref=1,
+            evidence_topic=raw_topic,
+        )
+    )
+
+    result = await _run(
+        db_session,
+        llm,
+        tenant_id=tenant.id,
+        conversation=conversation,
+        message="Birinci namizəd üzrə sübut göstər",
+    )
+    view = await build_agent_turn_view(db_session, tenant_id=tenant.id, result=result)
+
+    evidence = result.tool_results[0].evidence
+    assert evidence is not None
+    assert evidence.topic is None
+    assert raw_topic not in result.model_dump_json()
+    assert raw_topic not in view.model_dump_json()
+
+
+async def test_legitimate_evidence_topic_displays_server_resolved_label(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    from meyar.ui.service import build_agent_turn_view
+
+    tenant, user, _password, membership = tenant_and_user
+    candidate, _profile_version = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=_profile("Python", quote="Python")
+    )
+    await db_session.commit()
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation.last_search_candidate_ids = [str(candidate.id)]
+    llm = FakeLLMProvider(
+        agent_decision=AgentDecision(
+            action=AgentActionType.GET_CANDIDATE_EVIDENCE,
+            candidate_ref=1,
+            evidence_topic="python",
+        )
+    )
+
+    result = await _run(
+        db_session,
+        llm,
+        tenant_id=tenant.id,
+        conversation=conversation,
+        message="Python sübutunu göstər",
+    )
+    view = await build_agent_turn_view(db_session, tenant_id=tenant.id, result=result)
+
+    evidence = result.tool_results[0].evidence
+    assert evidence is not None
+    assert evidence.topic == "Python"
+    assert view.tool_results[0].evidence is not None
+    assert view.tool_results[0].evidence.topic == "Python"
 
 
 async def test_draft_job_criteria_repeated_schema_invalid_is_a_safe_typed_failure(

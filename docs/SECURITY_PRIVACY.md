@@ -48,7 +48,7 @@
   the *exact* `CanonicalDocument` referenced — never trusted from model
   output. Claim-specific validation then requires one attributable quote
   to contain the material values of that fact: accepted skill alias (and
-  no supported explicit positive-skill negation), language plus claimed
+  no supported explicit contradiction), language plus claimed
   proficiency, certification identity and other populated fields,
   education's populated institution/degree/field/date, or employment's
   populated role/employer/date/current relationship. Project descriptions
@@ -62,12 +62,32 @@
   attribution, not general natural-language entailment. Matching is
   case/whitespace/Azerbaijani-diacritic normalized; skills additionally
   use the same curated aliases as deterministic evaluation. Positive
-  skills fail closed for the enumerated obvious English `no`, `without`,
-  and `not required/known/used/...` constructions. Paraphrases, implicit
-  claims, complex scope, and unenumerated multilingual negation are not
-  inferred; where literal support cannot be established, the extraction
-  remains unverified rather than becoming positive evidence or a
-  deterministic `NOT_MATCHED` fact.
+  every material professional term fails closed for enumerated obvious
+  English `no`, `without`, and nearby `not` constructions, including
+  `does/do/did/has/have/had not` with the bounded supported verb list.
+  This applies to skill, language/proficiency, certification, education,
+  employment, project, domain, skill-experience and domain-experience
+  claims. Skill/domain intervals still require subject plus interval in
+  one accepted quote; when an experience item references an employment
+  row, that same quote must also support the referenced role/employer.
+  Paraphrases, implicit claims, complex negation scope, distant terms,
+  and unenumerated multilingual negation are not inferred. This is not a
+  natural-language entailment guarantee. Where literal support cannot be
+  established, the whole extraction remains unverified rather than
+  becoming positive evidence or a deterministic `NOT_MATCHED` fact.
+- Identity extraction has the same location/verbatim check plus
+  value-specific attribution before HR presentation: normalized email
+  value, normalized phone digits, or all material normalized name tokens
+  must occur in one of that field's own accepted quotes. Identity remains
+  presentation-only and is not introduced into matching, scoring,
+  ranking, embeddings, or suitability logic.
+- Current consumers re-run these validators against the immutable
+  canonical document before treating a persisted `COMPLETED` professional
+  or identity version as authority. Unsupported legacy facts are
+  unavailable to search, evaluation, agent profile/evidence flows, and HR
+  profile presentation; cached positive evaluations tied to such a
+  profile are not reused and are presented without score/fit as
+  unavailable. Ordinary reads never rewrite historical rows.
 - The extraction schema uses `extra="forbid"` and has no field for name/
   email/phone/age/gender/religion/ethnicity/marital status/health/
   photo/nationality — the model cannot smuggle a sensitive attribute into
@@ -96,6 +116,14 @@
   authority. Legacy conversation rows without that marker are rendered
   from the fixed outcome mapping, preventing historical unrestricted model
   prose from re-entering the UI.
+- `JDCriteriaDraft.title` remains untrusted draft content. It is retained
+  only in the editable JD review payload when its material tokens are
+  attributable to the HR-supplied JD text; otherwise a generic draft
+  title is used. The assistant headline is always fixed server copy and
+  never includes that title. Likewise, `evidence_topic` is only a selector:
+  the visible topic is resolved from a validated profile fact title, or
+  omitted in favor of generic server copy; raw model topic text is never
+  rendered or persisted as assistant authority.
 
 ## Local-only Ollama operating contract
 

@@ -1,5 +1,6 @@
 import re
 import uuid
+from copy import deepcopy
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
@@ -14,6 +15,7 @@ from meyar.llm.dependency import get_llm_provider
 from meyar.llm.provider import ModelUnavailableError
 from meyar.main import app
 from meyar.models.candidate import Candidate
+from meyar.models.canonical_document import CanonicalDocument
 from meyar.schemas.criteria import CriterionIn, CriterionKind, CriterionType
 from meyar.search.planner_schemas import PlannerDraft, PlannerOutcome, PlannerReasonCode
 from meyar.search.schemas import RequiredFilters
@@ -86,6 +88,11 @@ async def _identity(
     name: str,
     email: str = "synthetic@example.invalid",
 ) -> None:
+    canonical = await db.get(CanonicalDocument, profile.canonical_document_id)
+    assert canonical is not None
+    content = deepcopy(canonical.content)
+    content["pages"][0]["blocks"][0]["text"] += f"\n{name}\n{email}"
+    canonical.content = content
     await create_identity_version(
         db,
         tenant_id=tenant_id,
@@ -99,8 +106,14 @@ async def _identity(
         model_name="fake",
         status="COMPLETED",
         identity_content={
-            "full_name": {"value": name, "evidence": EVIDENCE},
-            "email": {"value": email, "evidence": EVIDENCE},
+            "full_name": {
+                "value": name,
+                "evidence": [{"page": 1, "block_index": 0, "quote": name}],
+            },
+            "email": {
+                "value": email,
+                "evidence": [{"page": 1, "block_index": 0, "quote": email}],
+            },
             "phone": None,
         },
     )

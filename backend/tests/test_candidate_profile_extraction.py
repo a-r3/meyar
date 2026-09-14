@@ -13,6 +13,7 @@ from meyar.llm.provider import ModelTimeoutError, ModelUnavailableError
 from meyar.schemas.candidate_profile import (
     CandidateProfileExtraction,
     CertificationItem,
+    DomainExperienceItem,
     EducationItem,
     EmploymentItem,
     EvidenceRef,
@@ -253,6 +254,100 @@ def test_language_proficiency_cannot_borrow_language_only_evidence() -> None:
                 evidence=[EvidenceRef(page=1, block_index=0, quote=quote)],
             )
         ]
+    )
+
+    with pytest.raises(EvidenceValidationError) as exc_info:
+        verify_extraction_evidence(view, extraction)
+    assert exc_info.value.code == "CLAIM_EVIDENCE_UNSUPPORTED"
+
+
+@pytest.mark.parametrize(
+    ("quote", "extraction"),
+    [
+        (
+            "No AWS certification",
+            CandidateProfileExtraction(
+                certifications=[
+                    CertificationItem(
+                        name="AWS certification",
+                        evidence=[
+                            EvidenceRef(page=1, block_index=0, quote="No AWS certification")
+                        ],
+                    )
+                ]
+            ),
+        ),
+        (
+            "English proficiency is not C1",
+            CandidateProfileExtraction(
+                languages=[
+                    LanguageItem(
+                        language="English",
+                        proficiency="C1",
+                        evidence=[
+                            EvidenceRef(
+                                page=1,
+                                block_index=0,
+                                quote="English proficiency is not C1",
+                            )
+                        ],
+                    )
+                ]
+            ),
+        ),
+        (
+            "No BSc degree",
+            CandidateProfileExtraction(
+                education=[
+                    EducationItem(
+                        degree="BSc",
+                        evidence=[EvidenceRef(page=1, block_index=0, quote="No BSc degree")],
+                    )
+                ]
+            ),
+        ),
+        (
+            "Not a Backend Developer at Acme, 2021-2025",
+            CandidateProfileExtraction(
+                employment_history=[
+                    EmploymentItem(
+                        title="Backend Developer",
+                        organization="Acme",
+                        start_date="2021",
+                        end_date="2025",
+                        evidence=[
+                            EvidenceRef(
+                                page=1,
+                                block_index=0,
+                                quote="Not a Backend Developer at Acme, 2021-2025",
+                            )
+                        ],
+                    )
+                ]
+            ),
+        ),
+        (
+            "No banking experience",
+            CandidateProfileExtraction(
+                domain_experience=[
+                    DomainExperienceItem(
+                        domain="banking",
+                        employment_index=None,
+                        evidence=[
+                            EvidenceRef(page=1, block_index=0, quote="No banking experience")
+                        ],
+                    )
+                ]
+            ),
+        ),
+    ],
+)
+def test_positive_professional_claims_reject_explicit_contradictory_evidence(
+    quote: str, extraction: CandidateProfileExtraction
+) -> None:
+    view = ProfessionalDocumentView(
+        canonical_document_id=uuid.uuid4(),
+        blocks=[ModelInputBlock(page=1, block_index=0, text=quote)],
     )
 
     with pytest.raises(EvidenceValidationError) as exc_info:

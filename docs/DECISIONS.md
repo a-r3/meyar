@@ -4108,3 +4108,66 @@ localized deterministic validation. The agent schema replacement is
 closed and explicit; persisted JSON remains migration-free because legacy
 rows are handled conservatively at render time. No model, external
 service, database column, public route, scoring rule, or UI style changed.
+
+## D-049 — Current factual authority is evidence-valid now, not merely `COMPLETED`
+
+**Date:** 2026-09-14
+**Decision:** Close the remaining issue #44 candidate-factuality P0s on
+the existing PR #42 branch without changing APIs, duration arithmetic,
+JD criterion grounding, or immutable stored provenance.
+
+1. **Central contradiction policy.** The claim-support primitive now
+   applies its deterministic positive-term check to every populated
+   material term, not skills alone. It rejects bounded, explicit English
+   `no`, `without`, nearby `not`, and supported auxiliary-plus-negative
+   verb constructions for skill, language/proficiency, certification,
+   education, employment, project, domain, skill-experience, and
+   domain-experience facts. Existing normalization, skill aliases, domain
+   aliases, verbatim-location checks, and interval rules are reused. This
+   is deliberately lexical and fail-closed, not general entailment.
+2. **Linked employment attribution.** A skill/domain experience item's
+   accepted quote must support its subject and interval as before and,
+   when `employment_index` is present, the referenced employment's
+   material role/employer relationship too. A valid index alone cannot
+   attach a Globex Python period to an Acme role or contribute misleading
+   linked duration/context.
+3. **Current-read authority backstop.** `meyar.services.profile_authority`
+   rebuilds the exact canonical professional view and runs the current
+   evidence validator before a `COMPLETED` profile is consumed. Search,
+   deterministic evaluation (including cached-evaluation reuse), agent
+   profile/evidence tools, library/detail/search/ranking presentation, and
+   evaluation-history presentation use that shared boundary. Unsupported
+   legacy facts are unavailable; they are never translated to
+   `NOT_MATCHED`, and stored profile/evaluation rows are not rewritten.
+4. **Identity value attribution.** `meyar.services.identity_authority`
+   similarly revalidates current identity content for HR presentation.
+   Email must match normalized value, phone must match normalized digits,
+   and all material normalized name tokens must occur in one field-owned
+   accepted quote. Identity remains absent from all suitability inputs.
+5. **Agent display authority.** A model-authored JD title can remain only
+   as editable review data when source-bound to the HR's JD; otherwise it
+   becomes `Vakansiya qaralaması`. The assistant headline is fixed server
+   copy, so title text cannot be persisted as `SERVER_VALIDATED` prose or
+   replayed from history. Raw `evidence_topic` is never returned for
+   display; it selects a validated fact title, and unresolved topics use
+   generic server-owned copy. Inspection found no equivalent remaining
+   `AgentDecision` free-text route to live/persisted assistant prose.
+6. **Known product degradation unchanged.** One unsupported claim still
+   makes the entire extraction version `FAILED`, temporarily withholding
+   otherwise valid facts. This is **SAFE BUT PRODUCT-DEGRADING** and is
+   intentionally left for later issue #44 remediation; no partial-claim
+   persistence/recovery was introduced in this P0 closure.
+7. **Verification.** Focused adversarial/existing-flow suite: 186 passed.
+   Full gates: `ruff check .` clean; `mypy src` clean (138 source files);
+   `pytest -q` 910 passed with no failures/skips/xfails; one Alembic head
+   (`a1c5e9f2b6d3`); tracked-tree scan clean.
+
+**Why:** A stored status described historical processing, not current
+authority. Narrow skill-only contradiction handling, index-only employment
+links, location-only identity evidence, and two model-authored display
+fields each allowed unsupported content to cross that boundary.
+
+**Reversibility:** Two small read-time authority services centralize the
+existing validators; consumer changes are call-site substitutions and
+presentation redaction only. No migration, stored-row mutation, public
+schema change, scoring-policy change, or duration-policy change.

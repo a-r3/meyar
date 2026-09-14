@@ -1321,6 +1321,52 @@ def test_skill_experience_employment_index_out_of_bounds_rejected() -> None:
         )
 
 
+def test_skill_experience_cannot_link_to_unrelated_employment_context() -> None:
+    """Bounds-checking is insufficient: the skill-period evidence must
+    itself support the referenced employment context."""
+    quote = "Python used at Globex from 2021 to 2025."
+    profile = CandidateProfileExtraction.model_validate(
+        _profile(
+            employment_history=[
+                {
+                    "title": "Backend Developer",
+                    "organization": "Acme",
+                    "start_date": "2021",
+                    "end_date": "2025",
+                    "is_current": False,
+                    "evidence": _evidence("Backend Developer at Acme from 2021 to 2025."),
+                },
+                {
+                    "title": "Data Engineer",
+                    "organization": "Globex",
+                    "start_date": "2021",
+                    "end_date": "2025",
+                    "is_current": False,
+                    "evidence": _evidence(quote),
+                },
+            ],
+            skill_experience=[
+                _skill_exp("Python", 0, quote, start="2021", end="2025"),
+            ],
+        )
+    )
+    view = ProfessionalDocumentView(
+        canonical_document_id=uuid_mod.uuid4(),
+        blocks=[
+            ModelInputBlock(
+                page=1,
+                block_index=0,
+                text=f"{quote}\nBackend Developer at Acme from 2021 to 2025.",
+            ),
+        ],
+    )
+
+    with pytest.raises(EvidenceValidationError) as exc_info:
+        verify_extraction_evidence(view, profile)
+
+    assert exc_info.value.code == "CLAIM_EVIDENCE_UNSUPPORTED"
+
+
 def test_domain_experience_employment_index_out_of_bounds_rejected() -> None:
     with pytest.raises(ValidationError):
         CandidateProfileExtraction.model_validate(

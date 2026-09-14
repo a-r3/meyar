@@ -57,11 +57,26 @@ _CURRENT_EMPLOYMENT_TERMS = frozenset(
 )
 
 
-def _positive_skill_term_present(text: str, terms: frozenset[str]) -> bool:
-    """Recognize a positive skill mention while rejecting fixed, obvious
+def _negated_term_present(normalized_text: str, normalized_term: str) -> bool:
+    escaped = re.escape(normalized_term)
+    negation_patterns = (
+        rf"(?<!\w)no\s+(?:\w+\s+){{0,4}}{escaped}(?!\w)",
+        rf"(?<!\w)without\s+(?:\w+\s+){{0,4}}{escaped}(?!\w)",
+        rf"(?<!\w)not\s+(?:a\s+|an\s+|the\s+)?(?:\w+\s+){{0,2}}{escaped}(?!\w)",
+        rf"(?<!\w){escaped}(?!\w)\s+(?:\w+\s+){{0,4}}"
+        rf"(?:is\s+|was\s+|are\s+|were\s+)?not\s+",
+        rf"(?<!\w)(?:does|do|did|has|have|had)\s+not\s+"
+        rf"(?:know|use|have|possess|speak|hold|contain|include|list)\s+"
+        rf"(?:\w+\s+){{0,4}}{escaped}(?!\w)",
+    )
+    return any(re.search(pattern, normalized_text) for pattern in negation_patterns)
+
+
+def _positive_term_present(text: str, terms: frozenset[str]) -> bool:
+    """Recognize a positive material term while rejecting fixed, obvious
     contradiction forms. This is deliberately not general entailment: it
     guarantees only the enumerated ``no/without/not`` constructions and
-    otherwise requires a whole-word/phrase accepted skill alias.
+    otherwise requires a whole-word/phrase term.
     """
     normalized = _normalize_claim_text(text)
     mentioned = False
@@ -70,16 +85,7 @@ def _positive_skill_term_present(text: str, terms: frozenset[str]) -> bool:
         if not normalized_term or not _term_present(normalized, normalized_term):
             continue
         mentioned = True
-        escaped = re.escape(normalized_term)
-        negation_patterns = (
-            rf"(?<!\w)no\s+(?:\w+\s+){{0,3}}{escaped}(?!\w)",
-            rf"(?<!\w)without\s+(?:\w+\s+){{0,3}}{escaped}(?!\w)",
-            rf"(?<!\w){escaped}(?!\w)\s+(?:is\s+|was\s+|are\s+|were\s+)?not\s+"
-            rf"(?:required|known|used|possessed|held|spoken|experienced)",
-            rf"(?<!\w)(?:does|do|did|has|have|had)\s+not\s+"
-            rf"(?:know|use|have|possess|speak|hold)\s+(?:\w+\s+){{0,3}}{escaped}(?!\w)",
-        )
-        if any(re.search(pattern, normalized) for pattern in negation_patterns):
+        if _negated_term_present(normalized, normalized_term):
             return False
     return mentioned
 
@@ -96,9 +102,9 @@ def _one_quote_supports(
     relationship the source never states.
     """
     for ref in evidence:
-        if skill_terms is not None and not _positive_skill_term_present(ref.quote, skill_terms):
+        if skill_terms is not None and not _positive_term_present(ref.quote, skill_terms):
             continue
-        if not all(_any_term_present(ref.quote, terms) for terms in required_terms):
+        if not all(_positive_term_present(ref.quote, terms) for terms in required_terms):
             continue
         if require_current and not _any_term_present(ref.quote, _CURRENT_EMPLOYMENT_TERMS):
             continue
@@ -140,6 +146,37 @@ def _require_claim_support(
     raise EvidenceValidationError(
         "CLAIM_EVIDENCE_UNSUPPORTED",
         f"{category} claim '{label}' is not supported by one attributable evidence quote.",
+    )
+
+
+def _require_linked_employment_support(
+    *,
+    category: str,
+    label: str,
+    evidence: list[EvidenceRef],
+    subject_terms: frozenset[str],
+    employment,
+    start_date: str | None,
+    end_date: str | None,
+    is_current: bool,
+) -> None:
+    """Require one cited span to connect subject, interval, and employer.
+
+    ``employment_index`` is only safe presentation context when the item's
+    own evidence also names the referenced job/employer. A quote about
+    Python at Globex must not be rendered under Acme merely because both
+    employment rows exist in the same profile.
+    """
+    required_terms = (
+        *_material_terms(employment.title, employment.organization, start_date, end_date),
+    )
+    _require_claim_support(
+        category=category,
+        label=label,
+        evidence=evidence,
+        skill_terms=subject_terms,
+        required_terms=required_terms,
+        require_current=is_current,
     )
 
 
@@ -285,6 +322,7 @@ def verify_extraction_evidence(
         for ref in domain_exp.evidence:
             verify_evidence(view, ref)
         quotes = [ref.quote for ref in domain_exp.evidence]
+        domain_terms = accepted_terms_for_domain(domain_exp.domain)
         if not domain_term_present(domain_exp.domain, quotes):
             raise EvidenceValidationError(
                 "DOMAIN_EVIDENCE_NOT_EXPLICIT",
@@ -292,11 +330,18 @@ def verify_extraction_evidence(
                 "by its cited evidence quotes (no accepted sector/domain term found; an "
                 "employer name alone is never sufficient).",
             )
+        _require_claim_support(
+            category="Domain experience",
+            label=domain_exp.domain,
+            evidence=domain_exp.evidence,
+            skill_terms=domain_terms,
+            required_terms=(),
+        )
         if not interval_grounded_in_quotes(
             start_date=domain_exp.start_date,
             end_date=domain_exp.end_date,
             quotes=quotes,
-            subject_terms=accepted_terms_for_domain(domain_exp.domain),
+            subject_terms=domain_terms,
         ):
             raise EvidenceValidationError(
                 "DOMAIN_INTERVAL_NOT_EXPLICIT",
@@ -304,6 +349,17 @@ def verify_extraction_evidence(
                 f"(start='{domain_exp.start_date}', end='{domain_exp.end_date}') is not "
                 "explicitly supported, together with the domain term itself, by a "
                 "single cited evidence quote.",
+            )
+        if domain_exp.employment_index is not None:
+            _require_linked_employment_support(
+                category="Domain employment attribution",
+                label=domain_exp.domain,
+                evidence=domain_exp.evidence,
+                subject_terms=domain_terms,
+                employment=extraction.employment_history[domain_exp.employment_index],
+                start_date=domain_exp.start_date,
+                end_date=domain_exp.end_date,
+                is_current=domain_exp.is_current,
             )
 
     # Validate base employment facts after the more specific linked
@@ -323,6 +379,60 @@ def verify_extraction_evidence(
             require_current=employment.is_current,
         )
 
+    for skill_exp in extraction.skill_experience:
+        _require_linked_employment_support(
+            category="Skill employment attribution",
+            label=skill_exp.skill_name,
+            evidence=skill_exp.evidence,
+            subject_terms=accepted_skill_terms(skill_exp.skill_name),
+            employment=extraction.employment_history[skill_exp.employment_index],
+            start_date=skill_exp.start_date,
+            end_date=skill_exp.end_date,
+            is_current=skill_exp.is_current,
+        )
+
+
+def _email_supported(value: str, evidence: list[EvidenceRef]) -> bool:
+    expected = value.strip().lower()
+    return bool(expected) and any(expected in ref.quote.lower() for ref in evidence)
+
+
+def _digits(text: str) -> str:
+    return "".join(ch for ch in text if ch.isdigit())
+
+
+def _phone_supported(value: str, evidence: list[EvidenceRef]) -> bool:
+    expected = _digits(value)
+    return bool(expected) and any(expected in _digits(ref.quote) for ref in evidence)
+
+
+def _name_supported(value: str, evidence: list[EvidenceRef]) -> bool:
+    tokens = re.findall(r"[a-z0-9]+", _normalize_claim_text(value))
+    material_tokens = [token for token in tokens if len(token) > 1]
+    if not material_tokens:
+        return any(_term_present(ref.quote, value) for ref in evidence)
+    for ref in evidence:
+        quote = _normalize_claim_text(ref.quote)
+        if all(re.search(rf"(?<!\w){re.escape(token)}(?!\w)", quote) for token in material_tokens):
+            return True
+    return False
+
+
+def _require_identity_value_support(
+    field_name: str, value: str, evidence: list[EvidenceRef]
+) -> None:
+    supported = {
+        "email": _email_supported,
+        "phone": _phone_supported,
+        "full_name": _name_supported,
+    }[field_name](value, evidence)
+    if supported:
+        return
+    raise EvidenceValidationError(
+        "CLAIM_EVIDENCE_UNSUPPORTED",
+        f"Identity field '{field_name}' is not supported by its own evidence quote.",
+    )
+
 
 def verify_identity_evidence(
     view: ProfessionalDocumentView, extraction: CandidateIdentityExtraction
@@ -336,3 +446,11 @@ def verify_identity_evidence(
             continue
         for ref in field.evidence:
             verify_evidence(view, ref)
+    if extraction.full_name is not None:
+        _require_identity_value_support(
+            "full_name", extraction.full_name.value, extraction.full_name.evidence
+        )
+    if extraction.email is not None:
+        _require_identity_value_support("email", extraction.email.value, extraction.email.evidence)
+    if extraction.phone is not None:
+        _require_identity_value_support("phone", extraction.phone.value, extraction.phone.evidence)

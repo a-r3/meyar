@@ -62,7 +62,6 @@ from meyar.llm.provider import (
     ModelUnavailableError,
 )
 from meyar.models.agent_conversation import AgentConversation
-from meyar.models.candidate_profile_version import PROFILE_STATUS_COMPLETED
 from meyar.schemas.candidate_profile import CandidateProfileExtraction
 from meyar.schemas.criteria import (
     CriterionIn,
@@ -77,7 +76,7 @@ from meyar.services.agent_conversation_repo import (
     save_conversation_state,
 )
 from meyar.services.audit_repo import record_event
-from meyar.services.candidate_profile_repo import get_current_profile_version
+from meyar.services.profile_authority import get_current_authorized_profile
 
 MAX_DECISION_ATTEMPTS = 2
 # Bounds how much of one candidate's profile a single GET_CANDIDATE_EVIDENCE
@@ -289,12 +288,10 @@ async def _dispatch_profile(
             ),
             None,
         )
-    version = await get_current_profile_version(db, tenant_id=tenant_id, candidate_id=candidate_id)
-    if (
-        version is None
-        or version.status != PROFILE_STATUS_COMPLETED
-        or version.profile_content is None
-    ):
+    authorized = await get_current_authorized_profile(
+        db, tenant_id=tenant_id, candidate_id=candidate_id
+    )
+    if authorized is None:
         return (
             AgentToolResult(
                 tool_name=AgentActionType.GET_CANDIDATE_PROFILE,
@@ -302,26 +299,12 @@ async def _dispatch_profile(
                     candidate_ref=decision.candidate_ref,
                     candidate_id=candidate_id,
                     found=False,
-                    profile_status=version.status if version else None,
+                    profile_status=None,
                 ),
             ),
             None,
         )
-    try:
-        profile = CandidateProfileExtraction.model_validate(version.profile_content)
-    except ValidationError:
-        return (
-            AgentToolResult(
-                tool_name=AgentActionType.GET_CANDIDATE_PROFILE,
-                profile=AgentProfileToolResult(
-                    candidate_ref=decision.candidate_ref,
-                    candidate_id=candidate_id,
-                    found=False,
-                    profile_status=version.status,
-                ),
-            ),
-            None,
-        )
+    version, profile = authorized
     return (
         AgentToolResult(
             tool_name=AgentActionType.GET_CANDIDATE_PROFILE,
@@ -389,17 +372,14 @@ async def _dispatch_evidence(
                 evidence=AgentEvidenceToolResult(
                     candidate_ref=decision.candidate_ref,
                     found=False,
-                    topic=decision.evidence_topic,
                 ),
             ),
             None,
         )
-    version = await get_current_profile_version(db, tenant_id=tenant_id, candidate_id=candidate_id)
-    if (
-        version is None
-        or version.status != PROFILE_STATUS_COMPLETED
-        or version.profile_content is None
-    ):
+    authorized = await get_current_authorized_profile(
+        db, tenant_id=tenant_id, candidate_id=candidate_id
+    )
+    if authorized is None:
         return (
             AgentToolResult(
                 tool_name=AgentActionType.GET_CANDIDATE_EVIDENCE,
@@ -407,31 +387,16 @@ async def _dispatch_evidence(
                     candidate_ref=decision.candidate_ref,
                     candidate_id=candidate_id,
                     found=False,
-                    profile_status=version.status if version else None,
-                    topic=decision.evidence_topic,
+                    profile_status=None,
                 ),
             ),
             None,
         )
-    try:
-        profile = CandidateProfileExtraction.model_validate(version.profile_content)
-    except ValidationError:
-        return (
-            AgentToolResult(
-                tool_name=AgentActionType.GET_CANDIDATE_EVIDENCE,
-                evidence=AgentEvidenceToolResult(
-                    candidate_ref=decision.candidate_ref,
-                    candidate_id=candidate_id,
-                    found=False,
-                    profile_status=version.status,
-                    topic=decision.evidence_topic,
-                ),
-            ),
-            None,
-        )
+    version, profile = authorized
 
     topic_folded = _fold(decision.evidence_topic) if decision.evidence_topic else None
     matches: list[EvidenceMatchItem] = []
+    resolved_topic: str | None = None
     for category, title_fn in _EVIDENCE_CATEGORIES:
         for item in getattr(profile, category):
             title = title_fn(item)
@@ -439,6 +404,8 @@ async def _dispatch_evidence(
                 title_folded = _fold(title)
                 if topic_folded not in title_folded and title_folded not in topic_folded:
                     continue
+                if resolved_topic is None:
+                    resolved_topic = title
             matches.append(
                 EvidenceMatchItem(category=category, title=title, evidence=item.evidence)
             )
@@ -455,7 +422,7 @@ async def _dispatch_evidence(
                 candidate_id=candidate_id,
                 found=True,
                 profile_status=version.status,
-                topic=decision.evidence_topic,
+                topic=resolved_topic,
                 matches=matches,
             ),
         ),
@@ -744,6 +711,11 @@ async def _dispatch_draft_job_criteria(
             return None
     if draft is None:
         return None
+    safe_title = (
+        draft.title
+        if draft.title and _is_requirement_grounded_in_jd_text(draft.title, jd_text)
+        else "Vakansiya qaralaması"
+    )
 
     used_ids: set[str] = set()
     must_have: list[CriterionIn] = []
@@ -775,7 +747,7 @@ async def _dispatch_draft_job_criteria(
     return AgentToolResult(
         tool_name=AgentActionType.DRAFT_JOB_CRITERIA,
         job_draft=AgentJobDraftToolResult(
-            title=draft.title,
+            title=safe_title,
             must_have=must_have,
             preferred=preferred,
             unsupported=unsupported,

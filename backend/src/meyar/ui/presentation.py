@@ -163,9 +163,12 @@ AGENT_EVIDENCE_CATEGORY_LABELS = {
     "certifications": "Sertifikat",
     "languages": "Dil",
     "projects": "Layihə",
+    "skill_experience": "Bacarıq təcrübəsi",
+    "domain_experience": "Sahə təcrübəsi",
 }
 
 STATE_LABELS = {
+    "UNAVAILABLE": "Əlçatan deyil",
     "PENDING": "Gözləyir",
     "PARSED": "Emal olunub",
     "PARSE_FAILED": "Emal uğursuzdur",
