@@ -227,6 +227,10 @@ class CriterionIn(BaseModel):
                 raise ValueError(
                     f"Criterion '{self.id}': kind EXPERIENCE requires min_years."
                 )
+            if self.value is not None:
+                raise ValueError(
+                    f"Criterion '{self.id}': kind EXPERIENCE does not accept value."
+                )
         elif self.kind == CriterionKind.SKILL_EXPERIENCE:
             if not self.value:
                 raise ValueError(
@@ -246,6 +250,22 @@ class CriterionIn(BaseModel):
         elif not self.value:
             raise ValueError(
                 f"Criterion '{self.id}': kind {self.kind.value} requires a non-empty value."
+            )
+        if self.required_level is not None and self.kind != CriterionKind.LANGUAGE:
+            raise ValueError(
+                f"Criterion '{self.id}': required_level is only valid for LANGUAGE."
+            )
+        if self.min_years is not None and self.kind not in (
+            CriterionKind.EXPERIENCE,
+            CriterionKind.SKILL_EXPERIENCE,
+            CriterionKind.DOMAIN_EXPERIENCE,
+        ):
+            raise ValueError(
+                f"Criterion '{self.id}': min_years is not evaluated for {self.kind.value}."
+            )
+        if not self.evidence_required:
+            raise ValueError(
+                f"Criterion '{self.id}': evidence_required must remain true."
             )
         return self
 

@@ -21,7 +21,7 @@ PRE_SLICE1_HUMAN_IDENTITY_REVISION = "db7e4523f491"
 # (most recently: a1c5e9f2b6d3, add agent_conversations — see
 # docs/DECISIONS.md, Slice 2 / issue #31).
 PRE_DRAFT_CONFIRMATION_REVISION = "a1c5e9f2b6d3"
-CURRENT_HEAD_REVISION = "c7e91a4d2f60"
+CURRENT_HEAD_REVISION = "6f4c2a9d8e10"
 
 
 async def _create_database(name: str) -> None:

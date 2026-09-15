@@ -1051,7 +1051,7 @@ async def test_confirmation_survives_transcript_reset_and_new_database_session(
     )
     draft_id = uuid.UUID(confirm_path.split("/")[-2])
     confirmed = await client.post(confirm_path, data=_python_confirmation_data(html, csrf))
-    assert confirmed.status_code == 200
+    assert confirmed.status_code == 200, confirmed.text
 
     conversation = await db_session.scalar(select(AgentConversation))
     session = await db_session.scalar(select(BrowserSession))
@@ -1737,6 +1737,16 @@ async def test_unsupported_requirement_survives_confirmation_and_scores_nothing(
     labels = [c["label"] for c in version.criteria]
     assert labels == ["Python"]
     assert unsupported not in [c["label"] for c in version.criteria]
+    assert version.unsupported_requirements == [unsupported]
+    assert version.needs_review_requirements == []
+    assert version.eligible_only is True
+
+    rerank = await client.post(
+        f"/ui/jobs/{version.id}/rank", data={"csrf_token": csrf}
+    )
+    assert rerank.status_code == 200
+    assert unsupported in rerank.text
+    assert "Məlumat üçün — qiymətləndirməyə daxil edilmir" in rerank.text
 
     from sqlalchemy import select
 
@@ -2033,15 +2043,18 @@ async def test_confirmation_ranking_failure_is_truthful_and_retryable(
     assert await db_session.scalar(select(func.count()).select_from(AgentDraftConfirmation)) == 1
 
 
-async def test_zero_scorable_agent_draft_shows_review_without_rank_action(
-    client: AsyncClient, tenant_and_user, local_ui_settings: Settings
+async def test_skill_domain_and_language_draft_renders_complete_review_form(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
 ) -> None:
     from meyar.agent.schemas import JDCriteriaDraft, JDDraftCriterionItem
 
     _tenant, user, password, _membership = tenant_and_user
     source = (
-        "5 years Python experience required. English B2 required. "
-        "Banking experience preferred."
+        "Role. 5 years Python experience required. English B2 required. "
+        "Banking experience preferred. Show top 10 candidates."
     )
     fake = FakeLLMProvider(
         agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
@@ -2085,9 +2098,63 @@ async def test_zero_scorable_agent_draft_shows_review_without_rank_action(
         "Banking experience preferred",
     ):
         assert requirement in response.text
-    assert "Avtomatik sıralama üçün hazır meyar yoxdur" in response.text
-    assert "Tələbləri təsdiqlə və namizədləri sırala" not in response.text
-    assert "/confirm" not in response.text
+    assert "Avtomatik sıralama üçün hazır meyar yoxdur" not in response.text
+    assert "Tələbləri təsdiqlə və namizədləri sırala" in response.text
+    assert "Bacarıq üzrə təcrübə" in response.text
+    assert "Sahə təcrübəsi" in response.text
+    assert 'value="B2"' in response.text
+    assert "/confirm" in response.text
+    title_match = re.search(r'name="title"[^>]*value="([^"]+)"', response.text)
+    assert title_match is not None
+
+    confirm_path = _draft_confirm_path(response.text)
+    confirmed = await client.post(
+        confirm_path,
+        data={
+            "csrf_token": csrf,
+            "title": title_match.group(1),
+            "must_span_id_0": _hidden_value(response.text, "must_span_id_0"),
+            "must_kind_0": "SKILL_EXPERIENCE",
+            "must_requirement_0": "Python",
+            "must_min_years_0": "5",
+            "must_weight_0": "1",
+            "must_span_id_1": _hidden_value(response.text, "must_span_id_1"),
+            "must_kind_1": "LANGUAGE",
+            "must_requirement_1": "English",
+            "must_min_years_1": "",
+            "must_required_level_1": "B2",
+            "must_weight_1": "1",
+            "pref_span_id_0": _hidden_value(response.text, "pref_span_id_0"),
+            "pref_kind_0": "DOMAIN_EXPERIENCE",
+            "pref_requirement_0": "Banking",
+            "pref_min_years_0": "",
+            "pref_weight_0": "1",
+        },
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    assert "Reytinq nəticələri" in confirmed.text
+    assert "ən çox 10 uyğun namizəd" in confirmed.text
+    assert "Qiymətləndirmə tarixi:" in confirmed.text
+
+    from sqlalchemy import select
+
+    from meyar.models.job_criteria_version import JobCriteriaVersion
+
+    version = (
+        await db_session.execute(
+            select(JobCriteriaVersion).where(JobCriteriaVersion.tenant_id == _tenant.id)
+        )
+    ).scalar_one()
+    assert version.result_limit == 10
+    assert version.eligible_only is True
+    assert [
+        (row["kind"], row["value"], row["min_years"], row["required_level"], row["weight"])
+        for row in version.criteria
+    ] == [
+        ("SKILL_EXPERIENCE", "Python", 5.0, None, 1.0),
+        ("LANGUAGE", "English", None, "B2", 1.0),
+        ("DOMAIN_EXPERIENCE", "Banking", None, None, 1.0),
+    ]
 
 
 async def test_draft_job_criteria_provider_failure_renders_safe_message(

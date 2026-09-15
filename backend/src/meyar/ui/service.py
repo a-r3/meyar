@@ -685,6 +685,7 @@ def _criterion_row_view(
         kind_label=CRITERION_KIND_LABELS.get(criterion.kind.value, criterion.kind.value),
         requirement=criterion.label,
         min_years=f"{criterion.min_years:g}" if criterion.min_years is not None else "",
+        required_level=criterion.required_level or "",
         weight=f"{criterion.weight:g}",
         span_id=span_id,
     )
@@ -749,6 +750,9 @@ async def build_agent_turn_view(
                     job_draft=AgentJobDraftView(
                         title=draft.title,
                         draft_id=draft.draft_id,
+                        requested_result_limit=draft.requested_result_limit,
+                        result_limit=draft.result_limit,
+                        result_limit_was_bounded=draft.result_limit_was_bounded,
                         must_have_rows=[
                             _criterion_row_view(
                                 criterion,
@@ -1067,6 +1071,7 @@ async def build_ranked_candidate_views(
                         factor=item.factor,
                         weighted_points=item.weighted_points,
                         reason_code=item.reason_code,
+                        explanation=item.explanation,
                         manual_review_required=item.manual_review_required,
                         evidence=[
                             EvidenceLocationView(page=ref.page, block_index=ref.block_index)
@@ -1164,6 +1169,8 @@ CRITERION_KIND_OPTIONS: tuple[tuple[str, str], ...] = (
     (CriterionKind.EDUCATION.value, "Təhsil"),
     (CriterionKind.LANGUAGE.value, "Dil"),
     (CriterionKind.EXPERIENCE.value, "Təcrübə"),
+    (CriterionKind.SKILL_EXPERIENCE.value, "Bacarıq üzrə təcrübə"),
+    (CriterionKind.DOMAIN_EXPERIENCE.value, "Sahə təcrübəsi"),
 )
 DEFAULT_CRITERION_WEIGHT = "1"
 
@@ -1174,6 +1181,7 @@ class CriterionRowInput:
     requirement: str
     min_years: str
     weight: str
+    required_level: str = ""
 
 
 def _first_pydantic_message(exc: ValidationError) -> str:
@@ -1197,7 +1205,7 @@ def _parse_criterion_row(
 
     min_years: float | None = None
     value: str | None = requirement
-    if kind is CriterionKind.EXPERIENCE:
+    if kind in (CriterionKind.EXPERIENCE, CriterionKind.SKILL_EXPERIENCE):
         raw_years = row.min_years.strip()
         if not raw_years:
             raise UIServiceInputError(f"'{requirement}' meyarı üçün illik təcrübəni daxil edin.")
@@ -1207,7 +1215,15 @@ def _parse_criterion_row(
             raise UIServiceInputError(
                 f"'{requirement}' meyarı üçün illik təcrübə rəqəm olmalıdır."
             ) from exc
-        value = None
+        if kind is CriterionKind.EXPERIENCE:
+            value = None
+    elif kind is CriterionKind.DOMAIN_EXPERIENCE and row.min_years.strip():
+        try:
+            min_years = float(row.min_years.strip().replace(",", "."))
+        except ValueError as exc:
+            raise UIServiceInputError(
+                f"'{requirement}' meyarı üçün illik təcrübə rəqəm olmalıdır."
+            ) from exc
     elif row.min_years.strip():
         # Kind-aware validation: "Təcrübə (il)" is only meaningful for an
         # EXPERIENCE criterion — a value typed there for SKILL/
@@ -1215,8 +1231,14 @@ def _parse_criterion_row(
         # since that would mean the form accepted input it then ignored.
         raise UIServiceInputError(
             f"'{requirement}' meyarı üçün illik təcrübə sahəsi yalnız "
-            "'Təcrübə' növü üçündür — bu sahəni boş buraxın və ya növü "
-            "'Təcrübə' olaraq dəyişin."
+            "'Təcrübə' növü üçündür — bu sahəni boş buraxın və ya bacarıq/sahə "
+            "üzrə uyğun təcrübə növünü seçin."
+        )
+
+    required_level = row.required_level.strip() or None
+    if required_level is not None and kind is not CriterionKind.LANGUAGE:
+        raise UIServiceInputError(
+            f"'{requirement}' meyarı üçün səviyyə yalnız dil tələbinə aiddir."
         )
 
     raw_weight = row.weight.strip()
@@ -1235,6 +1257,7 @@ def _parse_criterion_row(
             label=requirement,
             value=value,
             min_years=min_years,
+            required_level=required_level,
             weight=weight,
         )
     except ValidationError as exc:
@@ -1338,7 +1361,8 @@ def compute_job_duplicate_signature(title: str, criteria: list[CriterionIn]) -> 
     order-independent (criteria are sorted before hashing) and
     display-text-independent (case/whitespace-normalized, and only the
     fields that actually affect matching — kind, MUST_HAVE/PREFERRED
-    type, value, min_years, weight — participate; the free-text label and
+    type, value, min_years, required_level, weight, and review/evidence
+    policy — participate; the free-text label and
     the server-generated id never do, so two vacancies with the same
     underlying requirements are recognized as duplicates regardless of
     how their criteria happen to be labeled)."""
@@ -1352,7 +1376,10 @@ def compute_job_duplicate_signature(title: str, criteria: list[CriterionIn]) -> 
             criterion.type.value,
             _normalized(criterion.value),
             round(criterion.min_years, 2) if criterion.min_years is not None else None,
+            _normalized(criterion.required_level),
             round(criterion.weight, 2),
+            criterion.evidence_required,
+            criterion.manual_review_required,
         )
         for criterion in criteria
     )

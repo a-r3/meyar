@@ -82,6 +82,7 @@
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <label for="jd-title">Vakansiya başlığı</label>
         <input id="jd-title" name="title" type="text" required readonly maxlength="255" value="{{ draft.title or "" }}">
+        <p><strong>Nəticələr:</strong> ən çox {{ draft.result_limit }} uyğun namizəd{% if draft.result_limit_was_bounded %} (təhlükəsiz maksimum; sorğuda {{ draft.requested_result_limit }} istənmişdi){% endif %}</p>
       {% else %}
       <div class="stack-form">
         <h3>{{ draft.title or "Vakansiya qaralaması" }}</h3>

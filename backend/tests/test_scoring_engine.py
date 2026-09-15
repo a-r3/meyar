@@ -96,7 +96,7 @@ async def test_scored_evaluation_persists_complete_provenance_and_safe_explanati
     assert result.reused is False
     assert evaluation.evaluation_as_of_date == date(2026, 6, 15)
     assert evaluation.numeric_score == Decimal("100.00")
-    assert evaluation.policy_engine_version == "meyar-policy-v1"
+    assert evaluation.policy_engine_version == "meyar-policy-v2"
     assert evaluation.scoring_policy_version == "meyar-score-v1"
     assert evaluation.score_explanation["evaluation_id"] == str(evaluation.id)
     assert evaluation.score_explanation["numeric_score"] == "100.00"

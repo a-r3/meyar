@@ -929,6 +929,7 @@ async def seed_demo(
     max_profile_input_chars: int,
     max_identity_input_chars: int,
     max_embedding_input_chars: int,
+    evaluation_as_of_date: date,
 ) -> DemoSeedSummary:
     """Idempotent: if the demo tenant already has seeded candidates, this
     is a safe no-op that rotates the demo login credential — every
@@ -1049,7 +1050,6 @@ async def seed_demo(
 
     jobs_created = 0
     evaluations_created = 0
-    evaluation_as_of_date = date.today()
     for job_spec in _demo_jobs():
         job = await create_job(db, tenant_id=tenant.id, title=job_spec["title"])
         criteria_version = await create_criteria_version(

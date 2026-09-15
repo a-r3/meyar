@@ -11,7 +11,6 @@ from meyar.schemas.evaluation import (
     CRITERION_STATUS_MANUAL_REVIEW_REQUIRED,
     CRITERION_STATUS_MATCH,
     CRITERION_STATUS_NOT_MATCHED,
-    CRITERION_STATUS_PARTIAL_MATCH,
     CRITERION_STATUS_UNKNOWN,
     CriterionResult,
 )
@@ -121,6 +120,7 @@ def evaluate_language(
 ) -> CriterionResult:
     target_lang = normalize_text(criterion.value or "")
     required_level = normalize_text(criterion.required_level) if criterion.required_level else None
+    cefr_order = {level: index for index, level in enumerate(("a1", "a2", "b1", "b2", "c1", "c2"))}
 
     for lang in profile.languages:
         if normalize_text(lang.language) != target_lang:
@@ -134,7 +134,37 @@ def evaluate_language(
                 evidence=lang.evidence,
                 confidence=1.0,
             )
-        if lang.proficiency and normalize_text(lang.proficiency) == required_level:
+        if not lang.proficiency:
+            return _finalize(
+                criterion,
+                CRITERION_STATUS_UNKNOWN,
+                "LANGUAGE_LEVEL_UNSTATED",
+                f"Profile lists '{lang.language}' but has no supported proficiency evidence "
+                f"to compare with required '{criterion.required_level}'.",
+                evidence=lang.evidence,
+            )
+        candidate_level = normalize_text(lang.proficiency)
+        if required_level in cefr_order and candidate_level in cefr_order:
+            if cefr_order[candidate_level] >= cefr_order[required_level]:
+                return _finalize(
+                    criterion,
+                    CRITERION_STATUS_MATCH,
+                    "LANGUAGE_LEVEL_THRESHOLD_MET",
+                    f"Profile states '{lang.language}' at CEFR {lang.proficiency}, meeting "
+                    f"the required CEFR {criterion.required_level} threshold.",
+                    evidence=lang.evidence,
+                    confidence=1.0,
+                )
+            return _finalize(
+                criterion,
+                CRITERION_STATUS_NOT_MATCHED,
+                "LANGUAGE_LEVEL_THRESHOLD_NOT_MET",
+                f"Profile states '{lang.language}' at CEFR {lang.proficiency}, below "
+                f"the required CEFR {criterion.required_level} threshold.",
+                evidence=lang.evidence,
+                confidence=1.0,
+            )
+        if candidate_level == required_level:
             return _finalize(
                 criterion,
                 CRITERION_STATUS_MATCH,
@@ -146,12 +176,11 @@ def evaluate_language(
             )
         return _finalize(
             criterion,
-            CRITERION_STATUS_PARTIAL_MATCH,
-            "LANGUAGE_LEVEL_UNSTATED",
-            f"Profile lists '{lang.language}' but does not state the required "
-            f"proficiency level '{criterion.required_level}'.",
+            CRITERION_STATUS_UNKNOWN,
+            "LANGUAGE_LEVEL_SCALE_INCOMPATIBLE",
+            f"Profile states '{lang.language}' proficiency as '{lang.proficiency}', which "
+            f"cannot be deterministically compared with '{criterion.required_level}'.",
             evidence=lang.evidence,
-            confidence=0.5,
         )
 
     return _finalize(
@@ -255,6 +284,19 @@ def _has_declared_interval(item) -> bool:  # noqa: ANN001 - duck-typed skill/dom
     return item.start_date is not None or item.end_date is not None or item.is_current
 
 
+def _period_is_compatible_with_employment(
+    period: tuple[int, int], employment, *, evaluation_as_of_date: date
+) -> bool:
+    employment_period = _resolve_period_years(
+        employment, evaluation_as_of_date=evaluation_as_of_date
+    )
+    return bool(
+        employment_period is not None
+        and employment_period[0] <= period[0]
+        and period[1] <= employment_period[1]
+    )
+
+
 def evaluate_skill_experience(
     criterion: CriterionIn,
     profile: CandidateProfileExtraction,
@@ -279,8 +321,8 @@ def evaluate_skill_experience(
             criterion,
             CRITERION_STATUS_UNKNOWN,
             "SKILL_DURATION_NO_ATTRIBUTABLE_PERIODS",
-            f"No attributable period links required skill '{criterion.value}' to a "
-            "specific date range; duration cannot be computed.",
+            f"The CV does not provide dated evidence showing how long "
+            f"'{criterion.value}' was used, so its duration is unknown.",
         )
 
     ranges: list[tuple[int, int]] = []
@@ -292,10 +334,9 @@ def evaluate_skill_experience(
                 criterion,
                 CRITERION_STATUS_UNKNOWN,
                 "SKILL_DURATION_NO_ATTRIBUTABLE_INTERVAL",
-                f"Skill '{criterion.value}' is linked to employment entry "
-                f"'{entry.title}' for context, but no explicit attributable "
-                "start/end was stated for the skill itself — the full employment "
-                "period is never used as a substitute; duration cannot be computed.",
+                f"The CV links '{criterion.value}' to '{entry.title}' but does not "
+                "state dates for using that skill, so the job's full duration is "
+                "not counted as skill experience.",
                 evidence=item.evidence + entry.evidence,
             )
         period = _resolve_period_years(item, evaluation_as_of_date=evaluation_as_of_date)
@@ -304,9 +345,20 @@ def evaluate_skill_experience(
                 criterion,
                 CRITERION_STATUS_UNKNOWN,
                 "SKILL_DURATION_DATES_UNPARSEABLE",
-                f"The attributable period stated for skill '{criterion.value}' "
+                f"The dated CV evidence for '{criterion.value}' "
                 f"(start='{item.start_date}', end='{item.end_date}') cannot be "
                 "reliably parsed; duration cannot be computed.",
+                evidence=item.evidence + entry.evidence,
+            )
+        if not _period_is_compatible_with_employment(
+            period, entry, evaluation_as_of_date=evaluation_as_of_date
+        ):
+            return _finalize(
+                criterion,
+                CRITERION_STATUS_UNKNOWN,
+                "SKILL_DURATION_EMPLOYMENT_INCOMPATIBLE",
+                f"The dated '{criterion.value}' evidence does not fit the linked "
+                "job period, so the skill duration is unknown.",
                 evidence=item.evidence + entry.evidence,
             )
         ranges.append(period)
@@ -320,8 +372,8 @@ def evaluate_skill_experience(
             criterion,
             CRITERION_STATUS_MATCH,
             "SKILL_DURATION_SUFFICIENT",
-            f"Computed {total_years} attributable year(s) of '{criterion.value}' "
-            f"experience, meeting the required {required}.",
+            f"CV evidence shows {total_years} year(s) of '{criterion.value}' "
+            f"experience, meeting the minimum {required}.",
             evidence=evidence,
             confidence=1.0,
         )
@@ -329,8 +381,8 @@ def evaluate_skill_experience(
         criterion,
         CRITERION_STATUS_NOT_MATCHED,
         "SKILL_DURATION_INSUFFICIENT",
-        f"Computed {total_years} attributable year(s) of '{criterion.value}' "
-        f"experience, below the required {required}.",
+        f"CV evidence shows {total_years} year(s) of '{criterion.value}' "
+        f"experience, below the minimum {required}.",
         evidence=evidence,
         confidence=1.0,
     )
@@ -359,8 +411,7 @@ def evaluate_domain_experience(
             criterion,
             CRITERION_STATUS_UNKNOWN,
             "DOMAIN_NOT_FOUND_IN_PROFILE",
-            f"No explicit profile evidence found for required domain/sector "
-            f"'{criterion.value}'.",
+            f"The CV has no explicit evidence of experience in '{criterion.value}'.",
         )
 
     presence_evidence: list[EvidenceRef] = [ref for item in matches for ref in item.evidence]
@@ -369,8 +420,7 @@ def evaluate_domain_experience(
             criterion,
             CRITERION_STATUS_MATCH,
             "DOMAIN_EXPLICIT_MATCH",
-            f"Profile has explicit evidence of '{criterion.value}' domain/sector "
-            "experience.",
+            f"The CV explicitly shows experience in '{criterion.value}'.",
             evidence=presence_evidence,
             confidence=1.0,
         )
@@ -396,11 +446,24 @@ def evaluate_domain_experience(
                 criterion,
                 CRITERION_STATUS_UNKNOWN,
                 "DOMAIN_DURATION_DATES_UNPARSEABLE",
-                f"The attributable period stated for domain/sector '{criterion.value}' "
+                f"The dated CV evidence for '{criterion.value}' "
                 f"(start='{item.start_date}', end='{item.end_date}') cannot be reliably "
                 "parsed; duration cannot be computed.",
                 evidence=item.evidence,
             )
+        if item.employment_index is not None:
+            employment = profile.employment_history[item.employment_index]
+            if not _period_is_compatible_with_employment(
+                period, employment, evaluation_as_of_date=evaluation_as_of_date
+            ):
+                return _finalize(
+                    criterion,
+                    CRITERION_STATUS_UNKNOWN,
+                    "DOMAIN_DURATION_EMPLOYMENT_INCOMPATIBLE",
+                    f"The dated '{criterion.value}' evidence does not fit the linked "
+                    "job period, so its duration is unknown.",
+                    evidence=item.evidence + employment.evidence,
+                )
         ranges.append(period)
         duration_evidence.extend(item.evidence)
 
@@ -409,9 +472,8 @@ def evaluate_domain_experience(
             criterion,
             CRITERION_STATUS_UNKNOWN,
             "DOMAIN_DURATION_NO_ATTRIBUTABLE_INTERVAL",
-            f"Profile has explicit '{criterion.value}' domain/sector evidence but no "
-            "attributable dated period to compute duration — a linked employment "
-            "entry's full period is never used as a substitute.",
+            f"The CV shows '{criterion.value}' experience but gives no dates for it, "
+            "so a linked job's full duration is not counted as domain experience.",
             evidence=presence_evidence,
         )
 
@@ -421,8 +483,8 @@ def evaluate_domain_experience(
             criterion,
             CRITERION_STATUS_MATCH,
             "DOMAIN_DURATION_SUFFICIENT",
-            f"Computed {total_years} attributable year(s) of '{criterion.value}' "
-            f"domain/sector experience, meeting the required {criterion.min_years}.",
+            f"CV evidence shows {total_years} year(s) of '{criterion.value}' "
+            f"experience, meeting the minimum {criterion.min_years}.",
             evidence=duration_evidence,
             confidence=1.0,
         )
@@ -430,8 +492,8 @@ def evaluate_domain_experience(
         criterion,
         CRITERION_STATUS_NOT_MATCHED,
         "DOMAIN_DURATION_INSUFFICIENT",
-        f"Computed {total_years} attributable year(s) of '{criterion.value}' "
-        f"domain/sector experience, below the required {criterion.min_years}.",
+        f"CV evidence shows {total_years} year(s) of '{criterion.value}' "
+        f"experience, below the minimum {criterion.min_years}.",
         evidence=duration_evidence,
         confidence=1.0,
     )

@@ -156,7 +156,14 @@ async def rank_candidates_for_job(
         )
 
     ranked.sort(key=lambda item: (item.fit_tier, -item.numeric_score, item.candidate_id.int))
-    ranked = [item.model_copy(update={"rank": index}) for index, item in enumerate(ranked, 1)]
+    evaluated_count = len(ranked)
+    eligible = [item for item in ranked if item.fit_band in ("STRONG_MATCH", "POTENTIAL_MATCH")]
+    eligible_count = len(eligible)
+    presented = eligible if criteria_version.eligible_only else ranked
+    ranked = [
+        item.model_copy(update={"rank": index})
+        for index, item in enumerate(presented[: criteria_version.result_limit], 1)
+    ]
 
     await record_event(
         db,
@@ -167,7 +174,9 @@ async def rank_candidates_for_job(
             "evaluation_as_of_date": evaluation_as_of_date.isoformat(),
             "evaluation_policy_version": POLICY_ENGINE_VERSION,
             "scoring_policy_version": SCORING_POLICY_VERSION,
-            "evaluated_count": len(ranked),
+            "evaluated_count": evaluated_count,
+            "eligible_count": eligible_count,
+            "result_limit": criteria_version.result_limit,
             "reused_count": reused_count,
             "skipped_count": sum(skipped.values()),
             "skip_reason_counts": dict(sorted(skipped.items())),
@@ -179,7 +188,10 @@ async def rank_candidates_for_job(
         evaluation_as_of_date=evaluation_as_of_date,
         evaluation_policy_version=POLICY_ENGINE_VERSION,
         scoring_policy_version=SCORING_POLICY_VERSION,
-        evaluated_count=len(ranked),
+        result_limit=criteria_version.result_limit,
+        eligible_count=eligible_count,
+        eligible_only=criteria_version.eligible_only,
+        evaluated_count=evaluated_count,
         reused_count=reused_count,
         skipped_count=sum(skipped.values()),
         skip_reason_counts=dict(sorted(skipped.items())),

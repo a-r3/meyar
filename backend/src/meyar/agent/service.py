@@ -52,6 +52,7 @@ from meyar.agent.schemas import (
     UnsupportedJDCriterionItem,
 )
 from meyar.core.domain_terms import DOMAIN_SYNONYMS, canonicalize_domain
+from meyar.core.result_count import extract_result_count_intent
 from meyar.core.text import (
     combine_degree_and_field,
     fold_az_ascii,
@@ -703,7 +704,7 @@ def _canonical_binding_result(
                 return DroppedJDCriterionReason.NEEDS_HUMAN_REVIEW
         elif item.min_years is not None:
             return DroppedJDCriterionReason.NEEDS_HUMAN_REVIEW
-        return DroppedJDCriterionReason.UNSUPPORTED
+        return None
 
     if is_language:
         if item.kind != JDDraftCriterionKind.LANGUAGE or not _subjects_match(
@@ -716,7 +717,7 @@ def _canonical_binding_result(
                 or _normalize_source_text(item.required_level) != source_level
             ):
                 return DroppedJDCriterionReason.NEEDS_HUMAN_REVIEW
-            return DroppedJDCriterionReason.UNSUPPORTED
+            return None
         if item.required_level is not None:
             return DroppedJDCriterionReason.NEEDS_HUMAN_REVIEW
     elif is_certification:
@@ -794,16 +795,6 @@ def _build_criterion_from_draft_item(
     )
     if binding_reason is not None:
         return None, binding_reason
-
-    # These evaluator fields cannot currently survive the agent review
-    # form unchanged: it has no required_level control and exposes only
-    # general EXPERIENCE among duration kinds. Keep them visible and
-    # unscored instead of silently erasing or weakening their semantics.
-    if item.required_level is not None or item.kind in (
-        JDDraftCriterionKind.SKILL_EXPERIENCE,
-        JDDraftCriterionKind.DOMAIN_EXPERIENCE,
-    ):
-        return None, DroppedJDCriterionReason.UNSUPPORTED
 
     criterion: CriterionIn | None
     reason: DroppedJDCriterionReason | None
@@ -968,11 +959,15 @@ async def _dispatch_draft_job_criteria(llm: LLMProvider, *, jd_text: str) -> Age
             )
         )
 
+    result_count = extract_result_count_intent(jd_text)
     return AgentToolResult(
         tool_name=AgentActionType.DRAFT_JOB_CRITERIA,
         job_draft=AgentJobDraftToolResult(
             title=safe_title,
             draft_id=uuid.uuid4(),
+            requested_result_limit=result_count.requested,
+            result_limit=result_count.effective,
+            result_limit_was_bounded=result_count.was_bounded,
             must_have=must_have,
             preferred=preferred,
             unsupported=unsupported,

@@ -22,6 +22,7 @@ repository/hashing functions — using meyar.services.demo_seed_service
 directly (the same safe hook the CLI itself calls), never parsing
 secrets out of captured terminal output."""
 
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -63,6 +64,7 @@ async def _seed(db_session: AsyncSession, tmp_path: Path):
         max_profile_input_chars=MAX_INPUT_CHARS,
         max_identity_input_chars=MAX_INPUT_CHARS,
         max_embedding_input_chars=MAX_INPUT_CHARS,
+        evaluation_as_of_date=date(2026, 1, 1),
     )
 
 

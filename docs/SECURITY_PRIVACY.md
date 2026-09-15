@@ -162,6 +162,14 @@ unlabeled number but never guesses that an arbitrary identifier is a phone.
   the server-held tenant/session draft; browser rows and hidden fields cannot
   choose manual mode, add, weaken, delete, or replay scoring authority. The
   consumed draft retains a durable Job/version link for idempotent ranking retry.
+- D-058 adds no new model authority: skill/domain duration comes only from
+  accepted attributable candidate-profile intervals, CEFR ordering is fixed
+  server policy, result count is deterministically parsed/bounded workflow
+  metadata, and all confirmed material fields are revalidated against the
+  locked canonical draft. Safe unsupported/review text is stored on the
+  criteria version for truthful reload; prohibited source text is never stored
+  there. The configured business date is resolved once at the UI boundary and
+  passed explicitly into deterministic services.
 
 ## Local-only Ollama operating contract
 

@@ -332,7 +332,7 @@ def test_regression_1_narrow_skill_evidence_inside_wide_employment_never_inherit
     )
     assert five_year_result.status == CRITERION_STATUS_NOT_MATCHED
     assert five_year_result.reason_code == "SKILL_DURATION_INSUFFICIENT"
-    assert "Computed 1" in five_year_result.explanation  # 1 attributable year, never 5
+    assert "CV evidence shows 1" in five_year_result.explanation  # 1 skill year, never 5
 
     one_year_result = evaluate_criterion(
         _skill_experience_criterion("java1", "Java", 1.0),
@@ -419,7 +419,7 @@ def test_regression_4_domain_duration_follows_the_same_attribution_rule() -> Non
     )
     assert five_year_result.status == CRITERION_STATUS_NOT_MATCHED
     assert five_year_result.reason_code == "DOMAIN_DURATION_INSUFFICIENT"
-    assert "Computed 1" in five_year_result.explanation  # 1 attributable year, never 5
+    assert "CV evidence shows 1" in five_year_result.explanation  # 1 domain year, never 5
 
     one_year_result = evaluate_criterion(
         _domain_criterion("aml1", "AML", 1.0), profile, evaluation_as_of_date=_AS_OF_DATE
@@ -1190,7 +1190,7 @@ def test_relational_4_multiple_relationally_grounded_periods_remain_aggregatable
         evaluation_as_of_date=_AS_OF_DATE,
     )
     assert result.status == CRITERION_STATUS_MATCH
-    assert "Computed 6" in result.explanation  # (2018-2015) + (2022-2019) = 3 + 3 = 6
+    assert "CV evidence shows 6" in result.explanation  # 3 + 3 years, no overlap
 
 
 def test_relational_5_open_current_period_still_uses_explicit_evaluation_date() -> None:
@@ -1431,3 +1431,80 @@ def test_canonicalize_domain_matches_curated_synonyms() -> None:
     assert canonicalize_domain("AML") == "aml"
     assert canonicalize_domain("banking sector") == "banking"
     assert canonicalize_domain("telecom") == "telecom"  # not curated, round-trips as-is
+
+
+@pytest.mark.parametrize(
+    ("candidate_level", "expected_status"),
+    [
+        ("C1", CRITERION_STATUS_MATCH),
+        ("B1", CRITERION_STATUS_NOT_MATCHED),
+        (None, CRITERION_STATUS_UNKNOWN),
+        ("Fluent", CRITERION_STATUS_UNKNOWN),
+    ],
+)
+def test_language_cefr_threshold_is_ordered_without_cross_scale_guessing(
+    candidate_level: str | None, expected_status: str
+) -> None:
+    profile = CandidateProfileExtraction.model_validate(
+        _profile(
+            languages=[
+                {
+                    "language": "English",
+                    "proficiency": candidate_level,
+                    "evidence": _evidence(
+                        f"English {candidate_level}" if candidate_level else "English"
+                    ),
+                }
+            ]
+        )
+    )
+    result = evaluate_criterion(
+        CriterionIn(
+            id="english_b2",
+            kind=CriterionKind.LANGUAGE,
+            type=CriterionType.MUST_HAVE,
+            label="English — B2",
+            value="English",
+            required_level="B2",
+        ),
+        profile,
+        evaluation_as_of_date=_AS_OF_DATE,
+    )
+    assert result.status == expected_status
+
+
+def test_skill_interval_outside_linked_employment_is_unknown() -> None:
+    profile = CandidateProfileExtraction.model_validate(
+        _profile(
+            employment_history=[_employment("Role", "2022", "2024")],
+            skill_experience=[
+                _skill_exp("Python", 0, "Python 2021-2024", start="2021", end="2024")
+            ],
+        )
+    )
+    result = evaluate_criterion(
+        _skill_experience_criterion("python", "Python", 2),
+        profile,
+        evaluation_as_of_date=_AS_OF_DATE,
+    )
+    assert result.status == CRITERION_STATUS_UNKNOWN
+    assert result.reason_code == "SKILL_DURATION_EMPLOYMENT_INCOMPATIBLE"
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"kind": CriterionKind.SKILL, "value": "Python", "min_years": 5},
+        {"kind": CriterionKind.SKILL, "value": "Python", "required_level": "B2"},
+        {"kind": CriterionKind.EXPERIENCE, "value": "Python", "min_years": 5},
+        {"kind": CriterionKind.SKILL, "value": "Python", "evidence_required": False},
+    ],
+)
+def test_criterion_schema_rejects_fields_the_evaluator_would_ignore(kwargs: dict) -> None:
+    with pytest.raises(ValidationError):
+        CriterionIn(
+            id="invalid_shape",
+            type=CriterionType.MUST_HAVE,
+            label="Invalid",
+            **kwargs,
+        )

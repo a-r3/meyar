@@ -19,6 +19,7 @@ from meyar.agent.schemas import (
     RequirementSpanState,
 )
 from meyar.agent.service import _dispatch_draft_job_criteria
+from meyar.core.result_count import DEFAULT_RESULT_LIMIT, extract_result_count_intent
 from meyar.schemas.criteria import CriterionKind
 
 
@@ -39,6 +40,55 @@ def _draft(source: str, *, must=(), preferred=()):
 
 def _span_id(source: str, occurrence: int = 0) -> str:
     return segment_requirement_spans(source)[occurrence].span_id
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("show top 10 candidates", 10),
+        ("top 10", 10),
+        ("10 nəfər göstər", 10),
+        ("10 nəfər namizəd göstər", 10),
+    ],
+)
+def test_result_count_intent_is_bounded_workflow_data(text: str, expected: int) -> None:
+    intent = extract_result_count_intent(text)
+    assert intent.requested == expected
+    assert intent.effective == expected
+    assert segment_requirement_spans(text) == []
+
+
+def test_result_count_defaults_and_caps_deterministically() -> None:
+    assert extract_result_count_intent("Python required").effective == DEFAULT_RESULT_LIMIT
+    minimum = extract_result_count_intent("show top 0 candidates")
+    assert minimum.requested == 0
+    assert minimum.effective == 1
+    assert minimum.was_bounded is True
+    bounded = extract_result_count_intent("show top 500 candidates")
+    assert bounded.requested == 500
+    assert bounded.effective == 100
+    assert bounded.was_bounded is True
+
+
+def test_duration_number_and_result_count_number_never_cross_bind() -> None:
+    source = "10 years Python experience required, show 5 candidates"
+    spans = segment_requirement_spans(source)
+    assert [span.text for span in spans] == ["10 years Python experience required"]
+    intent = extract_result_count_intent(source)
+    assert intent.requested == 5
+    draft = _draft(
+        source,
+        must=[
+            JDDraftCriterionItem(
+                span_id=spans[0].span_id,
+                kind="SKILL_EXPERIENCE",
+                requirement="Python",
+                min_years=10,
+            )
+        ],
+    )
+    assert draft.must_have[0].min_years == 10
+    assert draft.result_limit == 5
 
 
 def test_composite_skill_cannot_borrow_one_source_token() -> None:
@@ -356,10 +406,10 @@ def test_valid_supported_numeric_requirements_keep_their_scope() -> None:
             )
         ],
     )
-    assert scoped.must_have == []
-    assert [item.requirement for item in scoped.unsupported] == [
-        "5 years Python experience required"
+    assert [(item.kind, item.value, item.min_years) for item in scoped.must_have] == [
+        (CriterionKind.SKILL_EXPERIENCE, "Python", 5.0)
     ]
+    assert scoped.unsupported == []
 
 
 def test_valid_language_level_is_preserved() -> None:
@@ -376,8 +426,10 @@ def test_valid_language_level_is_preserved() -> None:
             )
         ],
     )
-    assert draft.must_have == []
-    assert [item.requirement for item in draft.unsupported] == [source]
+    assert [(item.kind, item.value, item.required_level) for item in draft.must_have] == [
+        (CriterionKind.LANGUAGE, "English", "B2")
+    ]
+    assert draft.unsupported == []
 
 
 def test_partial_model_source_cannot_weaken_complete_canonical_requirement() -> None:
@@ -483,7 +535,7 @@ def test_curated_complete_subject_aliases_are_authorized(
     assert [result.state for result in draft.requirements] == [RequirementSpanState.SCORABLE]
 
 
-def test_domain_experience_with_compatible_kind_stays_visible_unscored() -> None:
+def test_domain_experience_with_compatible_kind_is_scorable() -> None:
     source = "Banking experience preferred"
     draft = _draft(
         source,
@@ -496,9 +548,11 @@ def test_domain_experience_with_compatible_kind_stays_visible_unscored() -> None
             )
         ],
     )
-    assert draft.preferred == []
-    assert [item.requirement for item in draft.unsupported] == [source]
-    assert [result.state for result in draft.requirements] == [RequirementSpanState.UNSUPPORTED]
+    assert [(item.kind, item.value, item.min_years) for item in draft.preferred] == [
+        (CriterionKind.DOMAIN_EXPERIENCE, "Banking", None)
+    ]
+    assert draft.unsupported == []
+    assert [result.state for result in draft.requirements] == [RequirementSpanState.SCORABLE]
 
 
 def test_required_requirement_cannot_be_weakened_to_preferred() -> None:
@@ -811,10 +865,14 @@ def test_product_example_preserves_all_unsupported_semantics() -> None:
             )
         ],
     )
-    assert draft.must_have == [] and draft.preferred == []
-    assert [item.requirement for item in draft.unsupported] == [
-        "Minimum 5 il Python",
-        "bank təcrübəsi üstünlükdür",
+    assert [(item.kind, item.value, item.min_years) for item in draft.must_have] == [
+        (CriterionKind.SKILL_EXPERIENCE, "Python", 5.0)
     ]
+    assert [(item.kind, item.value) for item in draft.preferred] == [
+        (CriterionKind.DOMAIN_EXPERIENCE, "Banking")
+    ]
+    assert draft.unsupported == []
     assert [item.requirement for item in draft.needs_review] == ["B2 English"]
     assert len(draft.requirements) == 3
+    assert draft.requested_result_limit == 10
+    assert draft.result_limit == 10

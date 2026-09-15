@@ -9,6 +9,7 @@ against the complete resulting occurrence.
 import re
 
 from meyar.agent.schemas import MAX_JD_REQUIREMENT_SPANS, RequirementSpan
+from meyar.core.result_count import is_result_count_only
 from meyar.core.text import fold_az_ascii, normalize_azerbaijani_case
 from meyar.evaluation.normalization import SKILL_ALIASES
 from meyar.schemas.criteria import find_prohibited_term
@@ -157,8 +158,15 @@ def _split_safe_clauses(jd_text: str, start: int, end: int) -> list[tuple[int, i
     if piece_start < piece_end:
         pieces.append((piece_start, piece_end))
 
-    if len(pieces) > 1 and all(explicit_modality(jd_text[a:b]) for a, b in pieces):
-        return [(a, b, False) for a, b in pieces]
+    if len(pieces) > 1 and all(
+        explicit_modality(jd_text[a:b]) or is_result_count_only(jd_text[a:b])
+        for a, b in pieces
+    ):
+        return [
+            (a, b, False)
+            for a, b in pieces
+            if not is_result_count_only(jd_text[a:b])
+        ]
     # A conjunction with shared or unclear modality is kept whole.  The
     # complete clause remains visible, but cannot become scorable.
     return [(start, end, True)]
@@ -169,6 +177,8 @@ def segment_requirement_spans(jd_text: str) -> list[RequirementSpan]:
     candidates: list[tuple[int, int, bool]] = []
     for start, end, is_bullet in _base_occurrences(jd_text):
         text = jd_text[start:end]
+        if is_result_count_only(text):
+            continue
         normalized = normalize_requirement_text(text)
         if not (
             is_bullet

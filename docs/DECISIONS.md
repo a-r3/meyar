@@ -4583,3 +4583,57 @@ segmentation and all accepted candidate factual-authority logic are unchanged.
 Skill/domain-duration scoring, language-level scoring, natural-language top-K,
 full durable unsupported/review product history, API-first work, and deployment
 remain explicitly deferred.
+
+## D-058 — Final criterion/workflow parity and bounded top-K (issue #44)
+
+**Date:** 2026-09-16. **Status:** Local corrective implementation on
+`feat/agent-product-ux-jd-matching`; PR #42 remains open and unaccepted.
+
+**Root cause:** The deterministic evaluator already supported attributable
+skill/domain intervals, but the canonical JD dispatch deliberately routed
+`SKILL_EXPERIENCE`, `DOMAIN_EXPERIENCE`, and any `required_level` to
+UNSUPPORTED because the review form could not round-trip them. The same seam
+kept unsupported/review disclosures only in bounded transcript state, had no
+vacancy result-count contract, and resolved UI dates from unconfigured
+`date.today()`. Language evaluation compared only exact strings and treated a
+missing level as partial evidence.
+
+**Decision:**
+- Canonical span binding now admits the three already-defined semantic shapes
+  after exact subject/scope/modality/number/level validation. Confirmation
+  revalidates kind, value, modality, `min_years`, `required_level`, weight,
+  evidence policy, and review policy. Draft weights remain system-owned `1.0`.
+- Skill duration unions attributable item-owned intervals, never employment
+  duration, and additionally requires each interval to fit its linked
+  employment occurrence. Domain presence without a numeric threshold matches
+  only explicit accepted domain evidence; numeric domain duration follows the
+  same attributable/overlap-safe rules. Missing or incompatible evidence is
+  UNKNOWN.
+- CEFR has one fixed ordering (`A1 < A2 < B1 < B2 < C1 < C2`). A lower CEFR
+  level is NOT_MATCHED, an equal/higher level MATCH, missing level UNKNOWN,
+  and incompatible scales UNKNOWN. Non-CEFR labels compare only by exact
+  normalized equality.
+- `JobCriteriaVersion` now durably stores safe unsupported/review disclosures,
+  effective `result_limit`, and whether the agent workflow presents eligible
+  results only. Migration `6f4c2a9d8e10` backfills `[]`, `[]`, `20`, and false.
+  Prohibited text is not stored. Reload/re-rank reads the immutable version.
+- Result-count phrases are parsed separately from requirement spans. Default
+  is 20 and the server bounds explicit intent to 1–100. Count affects only
+  presentation truncation. Agent-confirmed vacancies present only
+  STRONG_MATCH/POTENTIAL_MATCH results; API/manual historical ranking retains
+  its prior all-fit-band behavior. Scores and MUST_HAVE/PREFERRED policy are
+  unchanged.
+- `MEYAR_BUSINESS_TIMEZONE` (default `Asia/Baku`) owns UI date resolution.
+  Search, agent turns, confirmation, and re-rank resolve one date at their
+  application boundary and pass it explicitly. Deterministic scoring services
+  still have no clock access.
+- Evaluator semantics materially changed, so provenance/cache identity moves
+  from `meyar-policy-v1` to `meyar-policy-v2`; scoring arithmetic remains
+  `meyar-score-v1`. Explanations now persist and display the evaluator's
+  criterion-level evidence conclusion, while internal reason codes remain
+  hidden from normal HR UI.
+
+**Unchanged:** candidate factual authority, canonical RequirementSpan and
+prohibited policy, confirmation idempotency/tamper/tenant/concurrency guards,
+ranking retry, identity exclusion, local-only candidate AI, and deterministic
+score arithmetic. No API-first or deployment work is included.

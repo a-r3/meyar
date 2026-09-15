@@ -110,6 +110,7 @@ def score_results(
                 factor=str(factor),
                 weighted_points=str(weighted_points),
                 reason_code=result.reason_code,
+                explanation=result.explanation,
                 evidence_state="REFERENCED" if result.evidence else "NONE",
                 evidence_references=[
                     ScoreEvidenceRef(page=evidence.page, block_index=evidence.block_index)

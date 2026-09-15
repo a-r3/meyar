@@ -7,6 +7,7 @@
     <p class="eyebrow">Reytinq nəticələri</p>
     <h1>{{ job_title or "Vakansiya" }}</h1>
     <p>Qiymətləndirmə tarixi: {{ ranking.evaluation_as_of_date }}</p>
+    {% if ranking.eligible_only %}<p>Nəticə sayı: ən çox {{ ranking.result_limit }} uyğun namizəd{% if ranking.eligible_count < ranking.result_limit %}; mövcud uyğun namizəd: {{ ranking.eligible_count }}{% endif %}</p>{% else %}<p>Nəticə sayı: ən çox {{ ranking.result_limit }} qiymətləndirilmiş namizəd</p>{% endif %}
   </div>
 </div>
 {% if unsupported_requirements %}
@@ -47,6 +48,7 @@
             <span class="criterion-label">{{ contribution.label }} <span class="meta">({{ criterion_kind_label(contribution.criterion_kind) }})</span></span>
             <span class="status-badge" data-state="{{ contribution.status }}">{{ criterion_label(contribution.status) }}</span>
           </div>
+          <p>{{ contribution.explanation }}</p>
           {% if contribution.evidence %}
           {{ evidence_partial.evidence_items(contribution.evidence) }}
           {% elif contribution.status == "UNKNOWN" %}

@@ -38,6 +38,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, Field, model_validator
 
+from meyar.core.result_count import DEFAULT_RESULT_LIMIT, MAX_RESULT_LIMIT, MIN_RESULT_LIMIT
 from meyar.schemas.candidate_profile import CandidateProfileExtraction, EvidenceRef
 from meyar.schemas.criteria import CriterionIn, CriterionType
 from meyar.search.planner_schemas import PlannedCandidateSearchResponse
@@ -464,6 +465,11 @@ class AgentJobDraftToolResult(BaseModel):
 
     title: str | None = None
     draft_id: uuid.UUID
+    requested_result_limit: int | None = Field(default=None, ge=0, le=9999)
+    result_limit: int = Field(
+        default=DEFAULT_RESULT_LIMIT, ge=MIN_RESULT_LIMIT, le=MAX_RESULT_LIMIT
+    )
+    result_limit_was_bounded: bool = False
     must_have: list[CriterionIn] = Field(default_factory=list)
     preferred: list[CriterionIn] = Field(default_factory=list)
     unsupported: list[UnsupportedJDCriterionItem] = Field(default_factory=list)
@@ -488,6 +494,9 @@ class ConfirmedAgentJobDraft(BaseModel):
     draft_id: uuid.UUID
     job_id: uuid.UUID
     criteria_version_id: uuid.UUID
+    result_limit: int = Field(
+        default=DEFAULT_RESULT_LIMIT, ge=MIN_RESULT_LIMIT, le=MAX_RESULT_LIMIT
+    )
     unsupported_requirements: list[str] = Field(default_factory=list)
     needs_review_requirements: list[str] = Field(default_factory=list)
 

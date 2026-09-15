@@ -17,6 +17,7 @@ from starlette.responses import Response
 from starlette.templating import Jinja2Templates
 
 from meyar.config import Settings, get_settings
+from meyar.core.business_date import resolve_business_date
 from meyar.core.password import hash_password, needs_rehash, verify_password
 from meyar.db import get_db
 from meyar.embedding.dependency import get_embedding_provider, get_embedding_search_config
@@ -38,7 +39,7 @@ from meyar.services.browser_session_repo import (
     revoke_browser_session_by_id,
 )
 from meyar.services.candidate_document_repo import get_candidate_document
-from meyar.services.job_criteria_repo import create_criteria_version
+from meyar.services.job_criteria_repo import create_criteria_version, get_criteria_version_by_id
 from meyar.services.job_repo import archive_job, create_job, find_active_duplicate_job
 from meyar.services.tenant_membership_repo import (
     get_membership_by_id,
@@ -379,13 +380,14 @@ async def search(
     llm: LLMProvider = Depends(get_llm_provider),
     embedding_provider: EmbeddingProvider = Depends(get_embedding_provider),
     embedding_config: EmbeddingSearchConfig = Depends(get_embedding_search_config),
+    settings: Settings = Depends(get_settings),
 ) -> HTMLResponse:
     verify_csrf(ctx.csrf_token, csrf_token)
     # HR users never choose an evaluation date — the current date is
     # injected here, once, at the UI boundary, and passed explicitly
     # through the same deterministic API/CLI contract below. See
     # docs/DECISIONS.md D-023.
-    as_of_date = date.today()
+    as_of_date = resolve_business_date(settings.business_timezone)
     try:
         planned = await plan_and_search_candidates(
             db,
@@ -560,7 +562,7 @@ async def agent_turn(
     )
     # Same "current date is a trusted-runtime value, never user/model
     # supplied" boundary as /ui/search (docs/DECISIONS.md D-023).
-    as_of_date = date.today()
+    as_of_date = resolve_business_date(settings.business_timezone)
     explicit_action = (
         AgentActionType.DRAFT_JOB_CRITERIA if intent == "draft_job_criteria" else None
     )
@@ -886,6 +888,7 @@ def _job_form_row(form: object, prefix: str, index: int) -> CriterionRowInput:
         requirement=field("requirement"),
         min_years=field("min_years"),
         weight=field("weight"),
+        required_level=field("required_level"),
     )
 
 
@@ -916,6 +919,7 @@ async def job_new_form(
         requirement="",
         min_years="",
         weight=DEFAULT_CRITERION_WEIGHT,
+        required_level="",
     )
     return _render(
         request,
@@ -1099,6 +1103,7 @@ async def confirm_agent_job_draft(
         require_ui_scopes("jobs:write", "jobs:read", "candidates:read", "evaluations:write")
     ),
     db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
 ) -> HTMLResponse:
     """Confirm one session-held canonical draft, then rank separately.
 
@@ -1120,6 +1125,7 @@ async def confirm_agent_job_draft(
     )
 
     verify_csrf(ctx.csrf_token, csrf_token)
+    evaluation_as_of_date = resolve_business_date(settings.business_timezone)
     form = await request.form()
     must_have_rows = [_job_form_row(form, "must", i) for i in range(CRITERION_ROW_COUNT)]
     preferred_rows = [_job_form_row(form, "pref", i) for i in range(CRITERION_ROW_COUNT)]
@@ -1135,9 +1141,10 @@ async def confirm_agent_job_draft(
             draft_id=draft_id,
         )
         if durable_confirmation is not None:
-            # Conversation JSON is optional UI state only. Reuse its safe
-            # disclosure lists when it agrees, but confirmation identity always
-            # comes from the independent server-owned row.
+            # Conversation JSON is optional UI state only. Confirmation identity
+            # comes from the independent server-owned row; the render below
+            # reloads result policy and disclosures from the immutable criteria
+            # version.
             transcript_confirmation = (
                 get_confirmed_job_draft(conversation, draft_id=draft_id)
                 if conversation is not None
@@ -1175,6 +1182,7 @@ async def confirm_agent_job_draft(
                 unsupported_requirements=confirmed.unsupported_requirements,
                 needs_review_requirements=confirmed.needs_review_requirements,
                 confirmation_succeeded=True,
+                evaluation_as_of_date=evaluation_as_of_date,
             )
 
         if conversation is None:
@@ -1240,6 +1248,10 @@ async def confirm_agent_job_draft(
             job_id=job.id,
             criteria=[criterion.model_dump(mode="json") for criterion in job_request.criteria],
             created_by_api_key_id=None,
+            unsupported_requirements=[item.requirement for item in pending.unsupported],
+            needs_review_requirements=[item.requirement for item in pending.needs_review],
+            result_limit=pending.result_limit,
+            eligible_only=True,
         )
         await record_event(
             db,
@@ -1253,6 +1265,7 @@ async def confirm_agent_job_draft(
             draft_id=draft_id,
             job_id=job.id,
             criteria_version_id=version.id,
+            result_limit=pending.result_limit,
             unsupported_requirements=[item.requirement for item in pending.unsupported],
             needs_review_requirements=[item.requirement for item in pending.needs_review],
         )
@@ -1304,6 +1317,7 @@ async def confirm_agent_job_draft(
         unsupported_requirements=confirmation.unsupported_requirements,
         needs_review_requirements=confirmation.needs_review_requirements,
         confirmation_succeeded=True,
+        evaluation_as_of_date=evaluation_as_of_date,
     )
 
 
@@ -1313,6 +1327,7 @@ async def _render_job_ranking(
     db: AsyncSession,
     *,
     job_criteria_version_id: uuid.UUID,
+    evaluation_as_of_date: date,
     unsupported_requirements: list[str] | None = None,
     needs_review_requirements: list[str] | None = None,
     confirmation_succeeded: bool = False,
@@ -1323,19 +1338,18 @@ async def _render_job_ranking(
     as /search: no manual date input; today's date is injected here and
     threaded explicitly into the deterministic ranking service (D-023).
 
-    ``unsupported_requirements`` (D-045, PR #42 owner correction, issue
-    #33, item 6): the agent JD-confirmation path's own already-disclosed,
-    already-confirmed-non-sensitive requirements that no CriterionKind
-    could represent — carried straight through from that one POST /jobs
-    submission into this render, never persisted to JobCriteriaVersion
-    and never touching ``ranking``/``results`` at all, so they contribute
-    nothing to score/ranking by construction while still "surviving
-    confirmation" (remaining visible to HR after they click confirm,
-    instead of vanishing once the one drafting turn scrolls past). The
-    manual re-rank path (rank_job) has none — an existing job's
-    already-persisted criteria carry no such list."""
-    evaluation_as_of_date = date.today()
+    Unsupported and review-required source requirements are loaded from
+    the immutable criteria version. They remain visible on every later
+    reload/re-rank but never become JobCriterion rows and never affect a
+    score. The optional arguments only preserve the already-built view if
+    the version lookup itself fails."""
     try:
+        criteria_version = await get_criteria_version_by_id(
+            db, tenant_id=ctx.tenant_id, criteria_version_id=job_criteria_version_id
+        )
+        if criteria_version is not None:
+            unsupported_requirements = list(criteria_version.unsupported_requirements)
+            needs_review_requirements = list(criteria_version.needs_review_requirements)
         ranking = await rank_candidates_for_job(
             db,
             tenant_id=ctx.tenant_id,
@@ -1433,10 +1447,15 @@ async def rank_job(
         require_ui_scopes("jobs:read", "candidates:read", "evaluations:write")
     ),
     db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
 ) -> HTMLResponse:
     verify_csrf(ctx.csrf_token, csrf_token)
     return await _render_job_ranking(
-        request, ctx, db, job_criteria_version_id=job_criteria_version_id
+        request,
+        ctx,
+        db,
+        job_criteria_version_id=job_criteria_version_id,
+        evaluation_as_of_date=resolve_business_date(settings.business_timezone),
     )
 
 

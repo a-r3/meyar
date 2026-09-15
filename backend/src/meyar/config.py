@@ -56,6 +56,10 @@ class Settings(BaseSettings):
     # agent's own prompt context each orchestration step. Bounds prompt
     # size and how much conversation state one BrowserSession accumulates.
     agent_max_context_turns: int = Field(default=8, ge=1, le=50)
+    # One bank/business timezone owns the UI's effective date. Deterministic
+    # services still receive the resolved date explicitly and never consult
+    # the wall clock themselves.
+    business_timezone: str = "Asia/Baku"
 
     @model_validator(mode="after")
     def _production_ui_cookie_must_be_secure(self) -> "Settings":

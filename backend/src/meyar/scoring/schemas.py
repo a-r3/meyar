@@ -27,6 +27,7 @@ class CriterionScoreContribution(BaseModel):
     factor: str
     weighted_points: str
     reason_code: str
+    explanation: str
     evidence_state: str
     evidence_references: list[ScoreEvidenceRef]
     manual_review_required: bool
@@ -80,6 +81,9 @@ class BatchRankingResult(BaseModel):
     evaluation_as_of_date: date
     evaluation_policy_version: str
     scoring_policy_version: str
+    result_limit: int = Field(ge=1, le=100)
+    eligible_count: int = Field(ge=0)
+    eligible_only: bool
     evaluated_count: int = Field(ge=0)
     reused_count: int = Field(ge=0)
     skipped_count: int = Field(ge=0)

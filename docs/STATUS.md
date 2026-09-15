@@ -1,16 +1,16 @@
 # MEYAR — Status
 
 ## Current phase
-**Issue #44 JD-authority/confirmation P1 remediation is implemented locally
-atop exact audit HEAD `155bc8f7d89a95b58b1e5862b68a184850510cd2` (D-057), not
-pushed or merged.** D-055's canonical `RequirementSpan` architecture is
-preserved. Model-authored `source_text` is now schema-optional and has no
-policy consumer; raw JD/canonical spans remain the only prohibition and
-semantic authority. Agent confirmation now writes an independent
-tenant/session-bound `agent_draft_confirmations` identity row in the same
-transaction as Job, criteria version, audit event, and optional conversation
-UI state. Replay remains safe after bounded transcript reset/truncation. PR
-#42 remains NOT accepted.
+**Issue #44 final product/correctness remediation is implemented locally on
+`feat/agent-product-ux-jd-matching` (D-058), not pushed or merged.** D-055's
+canonical `RequirementSpan` architecture and every previously accepted
+candidate/JD/confirmation boundary remain intact. Confirmed agent vacancies
+now round-trip and deterministically evaluate skill-specific duration,
+domain experience, and language proficiency; persist safe unsupported/review
+disclosures and bounded result count on the immutable criteria version; use a
+configured business timezone to resolve one explicit UI-boundary evaluation
+date; and return the requested top 1–100 eligible results without changing
+scores or requirements. PR #42 remains NOT accepted.
 
 **Slice 13 — Security + Official Definition-of-Done Acceptance: implementation
 pass 1 MERGED (PR #22, squash SHA `a709ce1`, `Refs #20`); Target-Mac hardware

@@ -184,7 +184,8 @@ as paths), path traversal blocked by construction.
 
 Each job has a versioned `JobCriteriaVersion` (immutable once referenced by
 an evaluation). Criterion fields: id, type (must-have/preferred), kind
-(skill/experience/certification/education/language), threshold/value,
+(skill/experience/skill-specific-experience/domain-experience/certification/
+education/language), threshold/value,
 `required_level` (language proficiency), weight, evidence_required,
 manual_review_required. Every evaluation stores the exact criteria
 version id used. The model cannot add criteria beyond what is stored.
@@ -206,8 +207,13 @@ those objects and the audit event, before ranking begins. Bounded conversation
 JSON is optional UI state and never the confirmation-identity authority, so
 ranking failure and transcript reset are retryable without duplicate
 persistence. Unsupported, omitted, or non-round-trippable
-semantics remain visible but unscored; prohibited detection is model-kind
-independent.
+semantics remain durably visible on the immutable criteria version but
+unscored; prohibited detection is model-kind independent and prohibited text
+is never copied into those disclosures. Presentation result count is separate
+workflow metadata (default 20, bounded 1–100), never a criterion. Agent-created
+vacancies present only STRONG_MATCH/POTENTIAL_MATCH candidates up to that
+limit; fewer eligible candidates produce fewer rows and zero produces an
+honest empty state.
 
 ## 14. Matching engine pipeline
 
@@ -219,7 +225,7 @@ independent.
    against each stored criterion (exact normalized-string match + curated
    alias table; deterministic date-overlap detection for experience) →
    raw per-criterion status — implemented, Slice 5.
-4. Deterministic policy engine (`meyar-policy-v1`, D-010): applies
+4. Deterministic policy engine (`meyar-policy-v2`, D-010/D-058): applies
    must-have/preferred rules to raw per-criterion statuses → overall fit
    band. Pure Python, unit tested independent of the LLM — implemented,
    Slice 5.

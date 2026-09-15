@@ -145,6 +145,7 @@ class ScoreContributionView(BaseModel):
     factor: str
     weighted_points: str
     reason_code: str
+    explanation: str
     manual_review_required: bool
     evidence: list[EvidenceLocationView]
 
@@ -188,6 +189,7 @@ class CriterionRowView(BaseModel):
     kind_label: str
     requirement: str
     min_years: str
+    required_level: str
     weight: str
     span_id: str | None = None
 
@@ -195,6 +197,9 @@ class CriterionRowView(BaseModel):
 class AgentJobDraftView(BaseModel):
     title: str | None
     draft_id: uuid.UUID
+    requested_result_limit: int | None = None
+    result_limit: int
+    result_limit_was_bounded: bool = False
     must_have_rows: list[CriterionRowView] = Field(default_factory=list)
     preferred_rows: list[CriterionRowView] = Field(default_factory=list)
     # Non-sensitive requirements the deterministic validator could not turn

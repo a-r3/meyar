@@ -99,6 +99,8 @@ CRITERION_KIND_LABELS = {
     "CERTIFICATION": "Sertifikat",
     "EDUCATION": "Təhsil",
     "LANGUAGE": "Dil",
+    "SKILL_EXPERIENCE": "Bacarıq üzrə təcrübə",
+    "DOMAIN_EXPERIENCE": "Sahə təcrübəsi",
 }
 
 JOB_STATUS_LABELS = {

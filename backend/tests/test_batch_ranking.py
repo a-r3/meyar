@@ -60,7 +60,14 @@ def _profile(*skills: str) -> dict:
     }
 
 
-async def _criteria(db: AsyncSession, tenant_id, criteria: list[CriterionIn]):
+async def _criteria(
+    db: AsyncSession,
+    tenant_id,
+    criteria: list[CriterionIn],
+    *,
+    result_limit: int = 20,
+    eligible_only: bool = False,
+):
     job = await create_job(db, tenant_id=tenant_id, title="Batch Job")
     version = await create_criteria_version(
         db,
@@ -68,8 +75,83 @@ async def _criteria(db: AsyncSession, tenant_id, criteria: list[CriterionIn]):
         job_id=job.id,
         criteria=[item.model_dump(mode="json") for item in criteria],
         created_by_api_key_id=None,
+        result_limit=result_limit,
+        eligible_only=eligible_only,
     )
     return version
+
+
+async def test_agent_workflow_top_k_returns_only_ranked_eligible_candidates(
+    db_session: AsyncSession, tenant_and_key
+) -> None:
+    tenant, _key, _plaintext = tenant_and_key
+    matching_ids = []
+    for _ in range(12):
+        candidate, _profile_version = await seed_candidate_with_profile(
+            db_session, tenant_id=tenant.id, profile_content=_profile("Python")
+        )
+        matching_ids.append(candidate.id)
+    await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=_profile("AWS")
+    )
+    criteria = await _criteria(
+        db_session,
+        tenant.id,
+        [_skill("python", "Python", weight=1, criterion_type=CriterionType.MUST_HAVE)],
+        result_limit=10,
+        eligible_only=True,
+    )
+    result = await rank_candidates_for_job(
+        db_session,
+        tenant_id=tenant.id,
+        job_criteria_version_id=criteria.id,
+        evaluation_as_of_date=AS_OF,
+    )
+    assert len(result.results) == 10
+    assert result.result_limit == 10
+    assert result.eligible_count == 12
+    assert all(item.candidate_id in matching_ids for item in result.results)
+    assert all(item.fit_band in ("STRONG_MATCH", "POTENTIAL_MATCH") for item in result.results)
+
+
+async def test_agent_workflow_top_k_returns_fewer_and_truthful_zero(
+    db_session: AsyncSession, tenant_and_key
+) -> None:
+    tenant, _key, _plaintext = tenant_and_key
+    for _ in range(4):
+        await seed_candidate_with_profile(
+            db_session, tenant_id=tenant.id, profile_content=_profile("Python")
+        )
+    criteria = await _criteria(
+        db_session,
+        tenant.id,
+        [_skill("python", "Python", weight=1, criterion_type=CriterionType.MUST_HAVE)],
+        result_limit=10,
+        eligible_only=True,
+    )
+    four = await rank_candidates_for_job(
+        db_session,
+        tenant_id=tenant.id,
+        job_criteria_version_id=criteria.id,
+        evaluation_as_of_date=AS_OF,
+    )
+    assert len(four.results) == 4
+
+    empty_criteria = await _criteria(
+        db_session,
+        tenant.id,
+        [_skill("go", "Go", weight=1, criterion_type=CriterionType.MUST_HAVE)],
+        result_limit=10,
+        eligible_only=True,
+    )
+    zero = await rank_candidates_for_job(
+        db_session,
+        tenant_id=tenant.id,
+        job_criteria_version_id=empty_criteria.id,
+        evaluation_as_of_date=AS_OF,
+    )
+    assert zero.eligible_count == 0
+    assert zero.results == []
 
 
 async def test_fit_tier_dominates_high_preferred_score(
