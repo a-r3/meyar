@@ -323,7 +323,7 @@ class JDDraftCriterionItem(BaseModel):
     # Verbatim/near-verbatim attributable fragment copied from the JD. It
     # is an untrusted usability/debugging hint only. It never selects,
     # narrows, or otherwise authorizes the canonical RequirementSpan.
-    source_text: str = Field(min_length=1, max_length=500)
+    source_text: str = Field(default="", max_length=500)
     min_years: float | None = Field(default=None, ge=0, le=60)
     required_level: str | None = Field(default=None, min_length=1, max_length=50)
 
@@ -476,12 +476,11 @@ class AgentJobDraftToolResult(BaseModel):
 
 
 class ConfirmedAgentJobDraft(BaseModel):
-    """Durable, session-bound result of one canonical draft confirmation.
+    """Session UI state for one canonical draft confirmation.
 
-    Stored in the conversation JSON beside the turn that originally held
-    ``pending_job_draft``.  It is the idempotency/retry link between the
-    consumed draft and the already-created Job/JobCriteriaVersion; ranking is
-    deliberately not part of this confirmation record or transaction.
+    A copy may remain in bounded conversation JSON to redisplay safe unscored
+    requirements. Confirmation identity and idempotency live independently in
+    ``AgentDraftConfirmation``; ids in this payload are never authoritative.
     """
 
     model_config = {"extra": "forbid"}

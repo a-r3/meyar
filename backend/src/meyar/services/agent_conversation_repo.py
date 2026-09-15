@@ -136,7 +136,11 @@ def get_pending_job_draft(
 def get_confirmed_job_draft(
     conversation: AgentConversation, *, draft_id: uuid.UUID
 ) -> ConfirmedAgentJobDraft | None:
-    """Resolve an idempotent confirmation result from this session only."""
+    """Read optional confirmation UI state from this session transcript.
+
+    Confirmation identity/idempotency is owned by AgentDraftConfirmation; a
+    caller must never treat ids found only here as authoritative.
+    """
     for turn in reversed(conversation.turns):
         payload = turn.get("confirmed_job_draft")
         if not isinstance(payload, dict):
@@ -156,7 +160,7 @@ async def mark_pending_job_draft_confirmed(
     *,
     confirmation: ConfirmedAgentJobDraft,
 ) -> None:
-    """Consume one pending authority while retaining its durable result link."""
+    """Consume pending authority while retaining optional confirmation UI state."""
     changed = False
     turns: list[dict] = []
     for turn in conversation.turns:

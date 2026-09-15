@@ -200,9 +200,12 @@ ends as SCORABLE, UNSUPPORTED/UNSCORED, PROHIBITED, or NEEDS_HUMAN_REVIEW.
 Confirmation resolves the session-held server draft through a dedicated
 draft-id operation and revalidates exactly its unchanged SCORABLE rows; browser
 fields cannot select manual mode, add authority, or delete confirmed semantics.
-Successful confirmation durably links the consumed draft to its Job/criteria
-version before ranking begins, so ranking failure is truthful and retryable
-without duplicate persistence. Unsupported, omitted, or non-round-trippable
+Successful confirmation writes a dedicated tenant/session-bound durable link
+from the consumed draft to its Job/criteria version in the same transaction as
+those objects and the audit event, before ranking begins. Bounded conversation
+JSON is optional UI state and never the confirmation-identity authority, so
+ranking failure and transcript reset are retryable without duplicate
+persistence. Unsupported, omitted, or non-round-trippable
 semantics remain visible but unscored; prohibited detection is model-kind
 independent.
 

@@ -4534,3 +4534,52 @@ unchanged. Skill/domain-duration scoring, language-level scoring, durable
 unsupported/review display across arbitrary later reload/re-rank, natural-
 language top-K, API-first/deployment work, and the concrete mixed unsupported
 HR example's missing evaluator capabilities remain explicitly deferred.
+
+## D-057 — Zero-authority model source hints and independent confirmation identity (issue #44)
+
+**Date:** 2026-09-15. **Status:** Local corrective implementation atop exact
+audit HEAD `155bc8f7d89a95b58b1e5862b68a184850510cd2`; PR #42 remains open
+and unaccepted. Supersedes D-056 only where it treated bounded conversation
+JSON as the durable confirmation identity.
+
+**Reproduced P1s:** `_build_criterion_from_draft_item` passed model-authored
+`requirement`, `source_text`, and `required_level` into prohibited-term policy
+before resolving the server's canonical span. Thus a `Female required`
+`source_text` hint on canonical `Python required` manufactured a prohibition,
+suppressed Python, and incremented `prohibited_count`. Separately, the only
+confirmed draft→Job/version lookup walked bounded `AgentConversation.turns`;
+reset/truncation removed the otherwise committed idempotency mapping.
+
+**Decision:**
+- `source_text` remains an optional/default-empty model usability hint, but no
+  policy branch reads it. Prohibition is derived from raw JD and server-owned
+  canonical spans only; complete-span binding continues to own subject, kind,
+  modality, number/duration, proficiency, terminal state, and scoring
+  eligibility. The valid/missing and fabricated-hint matrix therefore has the
+  same result as the canonical span, while a real canonical prohibition cannot
+  be hidden by a safe-looking hint.
+- A dedicated `agent_draft_confirmations` table stores only confirmation
+  identity: tenant, canonical draft id, owning browser-session id, Job id,
+  criteria-version id, fixed `CONFIRMED` status, and timestamp. Unique
+  constraints enforce one row per tenant/draft and one confirmation per Job
+  and criteria version; foreign keys bind the server-owned objects.
+- Confirmation locks the session conversation as before, checks the new table
+  before pending transcript state, validates the unchanged canonical draft,
+  then atomically writes Job, criteria version, audit event, independent
+  confirmation row, and optional transcript UI state. Ranking remains a
+  separate post-commit step. Replay resolves the independent row even after
+  transcript reset and uses transcript disclosures only when their ids agree;
+  the independent record always wins identity disagreements.
+- Lookup requires the authenticated tenant and exact browser session as well
+  as draft id. Another tenant/session sees safe not-found behavior. The
+  existing conversation row lock serializes ordinary same-session concurrency,
+  while database uniqueness fails closed if an abnormal competing write
+  bypasses that serialization.
+
+**Schema and scope:** Migration `c7e91a4d2f60` adds only the independent
+identity table, indexes, foreign keys, fixed-status check, and unique
+constraints; no JD or candidate content is duplicated. D-055 canonical span
+segmentation and all accepted candidate factual-authority logic are unchanged.
+Skill/domain-duration scoring, language-level scoring, natural-language top-K,
+full durable unsupported/review product history, API-first work, and deployment
+remain explicitly deferred.

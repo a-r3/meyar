@@ -207,6 +207,58 @@ def test_valid_source_grounded_skill_still_works() -> None:
     assert draft.needs_review == []
 
 
+@pytest.mark.parametrize(
+    "hint",
+    (
+        "Female required",
+        "20 years Python required",
+        "Kubernetes required",
+        "Python preferred",
+        "English B2 required",
+        "",
+        None,
+    ),
+)
+def test_model_source_text_has_zero_policy_authority(hint: str | None) -> None:
+    item = {
+        "span_id": "req-0001",
+        "kind": "SKILL",
+        "requirement": "Python",
+    }
+    if hint is not None:
+        item["source_text"] = hint
+    draft = _draft(
+        "Python required",
+        must=[JDDraftCriterionItem.model_validate(item)],
+    )
+    assert [(criterion.kind, criterion.type, criterion.value) for criterion in draft.must_have] == [
+        (CriterionKind.SKILL, "MUST_HAVE", "Python")
+    ]
+    assert draft.preferred == []
+    assert draft.unsupported == []
+    assert draft.needs_review == []
+    assert draft.prohibited_count == 0
+    assert [result.state for result in draft.requirements] == [RequirementSpanState.SCORABLE]
+
+
+def test_model_source_text_cannot_remove_canonical_prohibition() -> None:
+    draft = _draft(
+        "Female required",
+        must=[
+            JDDraftCriterionItem(
+                span_id="req-0001",
+                kind="SKILL",
+                requirement="Female",
+                source_text="Python required",
+            )
+        ],
+    )
+    assert draft.must_have == [] and draft.preferred == []
+    assert draft.unsupported == [] and draft.needs_review == []
+    assert draft.prohibited_count == 1
+    assert [result.state for result in draft.requirements] == [RequirementSpanState.PROHIBITED]
+
+
 def test_valid_required_preferred_distinction_still_works() -> None:
     draft = _draft(
         "Python required. SQL preferred.",

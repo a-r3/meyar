@@ -20,7 +20,8 @@ PRE_SLICE1_HUMAN_IDENTITY_REVISION = "db7e4523f491"
 # alongside alembic/versions whenever a new migration becomes the head
 # (most recently: a1c5e9f2b6d3, add agent_conversations — see
 # docs/DECISIONS.md, Slice 2 / issue #31).
-CURRENT_HEAD_REVISION = "a1c5e9f2b6d3"
+PRE_DRAFT_CONFIRMATION_REVISION = "a1c5e9f2b6d3"
+CURRENT_HEAD_REVISION = "c7e91a4d2f60"
 
 
 async def _create_database(name: str) -> None:
@@ -62,6 +63,16 @@ async def _assert_upgraded(database_url: str) -> None:
                 "('api_key','session_token','tenant_id','scopes')"
             )
         )
+        confirmation_columns = set(
+            (
+                await connection.execute(
+                    text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name='agent_draft_confirmations'"
+                    )
+                )
+            ).scalars()
+        )
     await engine.dispose()
     assert {
         "id",
@@ -74,6 +85,16 @@ async def _assert_upgraded(database_url: str) -> None:
         "revoked_at",
     } == columns
     assert raw_columns == 0
+    assert confirmation_columns == {
+        "id",
+        "tenant_id",
+        "draft_id",
+        "browser_session_id",
+        "job_id",
+        "criteria_version_id",
+        "status",
+        "confirmed_at",
+    }
     assert revision == CURRENT_HEAD_REVISION
 
 
@@ -262,6 +283,63 @@ def test_slice1_human_identity_migration_preserves_existing_data(monkeypatch) ->
         command.downgrade(alembic_config, PRE_SLICE1_HUMAN_IDENTITY_REVISION)
         command.upgrade(alembic_config, "head")
         asyncio.run(_assert_slice1_upgrade_preserved_data(database_url, tenant_id, api_key_id))
+    finally:
+        get_settings.cache_clear()
+        asyncio.run(_drop_database(database_name))
+
+
+async def _assert_draft_confirmation_schema(database_url: str, *, present: bool) -> None:
+    engine = create_async_engine(database_url)
+    async with engine.connect() as connection:
+        table = await connection.scalar(
+            text("SELECT to_regclass('agent_draft_confirmations')")
+        )
+        revision = await connection.scalar(text("SELECT version_num FROM alembic_version"))
+        if present:
+            constraints = set(
+                (
+                    await connection.execute(
+                        text(
+                            "SELECT conname FROM pg_constraint "
+                            "WHERE conrelid = 'agent_draft_confirmations'::regclass"
+                        )
+                    )
+                ).scalars()
+            )
+            assert {
+                "agent_draft_confirmations_pkey",
+                "agent_draft_confirmations_tenant_id_fkey",
+                "agent_draft_confirmations_browser_session_id_fkey",
+                "agent_draft_confirmations_job_id_fkey",
+                "agent_draft_confirmations_criteria_version_id_fkey",
+                "uq_agent_draft_confirmation",
+                "uq_agent_draft_confirmation_job",
+                "uq_agent_draft_confirmation_criteria_version",
+                "ck_agent_draft_confirmation_status",
+            }.issubset(constraints)
+    await engine.dispose()
+    assert (table is not None) is present
+    assert revision == (
+        CURRENT_HEAD_REVISION if present else PRE_DRAFT_CONFIRMATION_REVISION
+    )
+
+
+def test_draft_confirmation_migration_upgrade_downgrade_reupgrade(monkeypatch) -> None:
+    database_name = f"meyar_draft_confirmation_{uuid.uuid4().hex}"
+    database_url = f"{BASE_URL}/{database_name}"
+    alembic_config = Config(str(Path(__file__).resolve().parent.parent / "alembic.ini"))
+    asyncio.run(_create_database(database_name))
+    monkeypatch.setenv("MEYAR_DATABASE_URL", database_url)
+    get_settings.cache_clear()
+    try:
+        command.upgrade(alembic_config, PRE_DRAFT_CONFIRMATION_REVISION)
+        asyncio.run(_assert_draft_confirmation_schema(database_url, present=False))
+        command.upgrade(alembic_config, "head")
+        asyncio.run(_assert_draft_confirmation_schema(database_url, present=True))
+        command.downgrade(alembic_config, PRE_DRAFT_CONFIRMATION_REVISION)
+        asyncio.run(_assert_draft_confirmation_schema(database_url, present=False))
+        command.upgrade(alembic_config, "head")
+        asyncio.run(_assert_draft_confirmation_schema(database_url, present=True))
     finally:
         get_settings.cache_clear()
         asyncio.run(_drop_database(database_name))

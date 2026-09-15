@@ -1114,6 +1114,10 @@ async def confirm_agent_job_draft(
         get_pending_job_draft,
         mark_pending_job_draft_confirmed,
     )
+    from meyar.services.agent_draft_confirmation_repo import (
+        create_draft_confirmation,
+        get_draft_confirmation,
+    )
 
     verify_csrf(ctx.csrf_token, csrf_token)
     form = await request.form()
@@ -1124,15 +1128,44 @@ async def confirm_agent_job_draft(
         conversation = await get_conversation_for_update_by_session(
             db, tenant_id=ctx.tenant_id, browser_session_id=ctx.session_id
         )
-        if conversation is None:
-            raise UIServiceInputError(
-                "Qaralama təsdiqi tapılmadı; elanı yenidən analiz edin."
+        durable_confirmation = await get_draft_confirmation(
+            db,
+            tenant_id=ctx.tenant_id,
+            browser_session_id=ctx.session_id,
+            draft_id=draft_id,
+        )
+        if durable_confirmation is not None:
+            # Conversation JSON is optional UI state only. Reuse its safe
+            # disclosure lists when it agrees, but confirmation identity always
+            # comes from the independent server-owned row.
+            transcript_confirmation = (
+                get_confirmed_job_draft(conversation, draft_id=draft_id)
+                if conversation is not None
+                else None
             )
-
-        confirmed = get_confirmed_job_draft(conversation, draft_id=draft_id)
-        if confirmed is not None:
-            # Release the row lock before the potentially expensive ranking
-            # transaction. This replay resolves to the already-confirmed object.
+            transcript_agrees = (
+                transcript_confirmation is not None
+                and transcript_confirmation.job_id == durable_confirmation.job_id
+                and transcript_confirmation.criteria_version_id
+                == durable_confirmation.criteria_version_id
+            )
+            confirmed = ConfirmedAgentJobDraft(
+                draft_id=durable_confirmation.draft_id,
+                job_id=durable_confirmation.job_id,
+                criteria_version_id=durable_confirmation.criteria_version_id,
+                unsupported_requirements=(
+                    transcript_confirmation.unsupported_requirements
+                    if transcript_agrees and transcript_confirmation is not None
+                    else []
+                ),
+                needs_review_requirements=(
+                    transcript_confirmation.needs_review_requirements
+                    if transcript_agrees and transcript_confirmation is not None
+                    else []
+                ),
+            )
+            # Release any conversation row lock before potentially expensive
+            # ranking. Replay resolves to the database-owned identity.
             await db.commit()
             return await _render_job_ranking(
                 request,
@@ -1142,6 +1175,11 @@ async def confirm_agent_job_draft(
                 unsupported_requirements=confirmed.unsupported_requirements,
                 needs_review_requirements=confirmed.needs_review_requirements,
                 confirmation_succeeded=True,
+            )
+
+        if conversation is None:
+            raise UIServiceInputError(
+                "Qaralama təsdiqi tapılmadı; elanı yenidən analiz edin."
             )
 
         pending = get_pending_job_draft(conversation, draft_id=draft_id)
@@ -1217,6 +1255,14 @@ async def confirm_agent_job_draft(
             criteria_version_id=version.id,
             unsupported_requirements=[item.requirement for item in pending.unsupported],
             needs_review_requirements=[item.requirement for item in pending.needs_review],
+        )
+        await create_draft_confirmation(
+            db,
+            tenant_id=ctx.tenant_id,
+            browser_session_id=ctx.session_id,
+            draft_id=draft_id,
+            job_id=job.id,
+            criteria_version_id=version.id,
         )
         await mark_pending_job_draft_confirmed(
             db, conversation, confirmation=confirmation

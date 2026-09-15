@@ -1019,9 +1019,111 @@ async def test_confirming_agent_drafted_criteria_lands_on_ranking_not_jobs_list(
 
     from sqlalchemy import func, select
 
+    from meyar.models.agent_draft_confirmation import AgentDraftConfirmation
     from meyar.models.job import Job
+    from meyar.models.job_criteria_version import JobCriteriaVersion
 
     assert await db_session.scalar(select(func.count()).select_from(Job)) == 1
+    assert await db_session.scalar(select(func.count()).select_from(JobCriteriaVersion)) == 1
+    assert await db_session.scalar(select(func.count()).select_from(AgentDraftConfirmation)) == 1
+
+
+async def test_confirmation_survives_transcript_reset_and_new_database_session(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
+) -> None:
+    from sqlalchemy import func, select
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from meyar.models.agent_conversation import AgentConversation
+    from meyar.models.agent_draft_confirmation import AgentDraftConfirmation
+    from meyar.models.browser_session import BrowserSession
+    from meyar.models.job import Job
+    from meyar.models.job_criteria_version import JobCriteriaVersion
+    from meyar.services.agent_conversation_repo import reset_conversation
+    from meyar.services.agent_draft_confirmation_repo import get_draft_confirmation
+
+    tenant, user, password, _membership = tenant_and_user
+    csrf, confirm_path, html = await _render_python_draft(
+        client, username=user.username, password=password
+    )
+    draft_id = uuid.UUID(confirm_path.split("/")[-2])
+    confirmed = await client.post(confirm_path, data=_python_confirmation_data(html, csrf))
+    assert confirmed.status_code == 200
+
+    conversation = await db_session.scalar(select(AgentConversation))
+    session = await db_session.scalar(select(BrowserSession))
+    durable = await db_session.scalar(select(AgentDraftConfirmation))
+    assert conversation is not None and session is not None and durable is not None
+
+    # Even if bounded transcript JSON disagrees, it cannot replace the
+    # independent confirmation identity.
+    conversation.turns = [
+        {
+            **turn,
+            "confirmed_job_draft": {
+                **turn["confirmed_job_draft"],
+                "job_id": str(uuid.uuid4()),
+                "criteria_version_id": str(uuid.uuid4()),
+            },
+        }
+        if "confirmed_job_draft" in turn
+        else turn
+        for turn in conversation.turns
+    ]
+    await db_session.commit()
+    disagreement_replay = await client.post(confirm_path, data={"csrf_token": csrf})
+    assert disagreement_replay.status_code == 200
+    assert "Reytinq nəticələri" in disagreement_replay.text
+
+    await reset_conversation(db_session, conversation)
+    await db_session.commit()
+
+    assert db_session.bind is not None
+    engine = create_async_engine(str(db_session.bind.url))
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with factory() as reconstructed:
+            recovered = await get_draft_confirmation(
+                reconstructed,
+                tenant_id=tenant.id,
+                browser_session_id=session.id,
+                draft_id=draft_id,
+            )
+            assert recovered is not None
+            assert (recovered.job_id, recovered.criteria_version_id) == (
+                durable.job_id,
+                durable.criteria_version_id,
+            )
+            assert (
+                await get_draft_confirmation(
+                    reconstructed,
+                    tenant_id=uuid.uuid4(),
+                    browser_session_id=session.id,
+                    draft_id=draft_id,
+                )
+                is None
+            )
+            assert (
+                await get_draft_confirmation(
+                    reconstructed,
+                    tenant_id=tenant.id,
+                    browser_session_id=uuid.uuid4(),
+                    draft_id=draft_id,
+                )
+                is None
+            )
+    finally:
+        await engine.dispose()
+
+    replay = await client.post(confirm_path, data={"csrf_token": csrf})
+    assert replay.status_code == 200
+    assert "Reytinq nəticələri" in replay.text
+    assert await db_session.scalar(select(func.count()).select_from(Job)) == 1
+    assert await db_session.scalar(select(func.count()).select_from(JobCriteriaVersion)) == 1
+    assert await db_session.scalar(select(func.count()).select_from(AgentDraftConfirmation)) == 1
 
 
 async def test_agent_confirmation_rejects_browser_weakened_row_without_persistence(
@@ -1144,6 +1246,7 @@ async def test_agent_confirmation_browser_tampering_matrix_is_atomic(
 ) -> None:
     from sqlalchemy import func, select
 
+    from meyar.models.agent_draft_confirmation import AgentDraftConfirmation
     from meyar.models.audit_event import AuditEvent
     from meyar.models.job import Job
     from meyar.models.job_criteria_version import JobCriteriaVersion
@@ -1191,6 +1294,10 @@ async def test_agent_confirmation_browser_tampering_matrix_is_atomic(
     assert response.status_code == 422
     assert await db_session.scalar(select(func.count()).select_from(Job)) == 0
     assert await db_session.scalar(select(func.count()).select_from(JobCriteriaVersion)) == 0
+    assert (
+        await db_session.scalar(select(func.count()).select_from(AgentDraftConfirmation))
+        == 0
+    )
     assert (
         await db_session.scalar(
             select(func.count())
@@ -1798,6 +1905,7 @@ async def test_concurrent_confirmation_creates_exactly_one_canonical_object(
 
     from meyar.db import get_db
     from meyar.models.agent_conversation import AgentConversation
+    from meyar.models.agent_draft_confirmation import AgentDraftConfirmation
     from meyar.models.audit_event import AuditEvent
     from meyar.models.job import Job
     from meyar.models.job_criteria_version import JobCriteriaVersion
@@ -1853,6 +1961,12 @@ async def test_concurrent_confirmation_creates_exactly_one_canonical_object(
         assert await db_session.scalar(select(func.count()).select_from(JobCriteriaVersion)) == 1
         assert (
             await db_session.scalar(
+                select(func.count()).select_from(AgentDraftConfirmation)
+            )
+            == 1
+        )
+        assert (
+            await db_session.scalar(
                 select(func.count())
                 .select_from(AuditEvent)
                 .where(AuditEvent.event_type == "job.created")
@@ -1875,6 +1989,7 @@ async def test_confirmation_ranking_failure_is_truthful_and_retryable(
 ) -> None:
     from sqlalchemy import func, select
 
+    from meyar.models.agent_draft_confirmation import AgentDraftConfirmation
     from meyar.models.job import Job
     from meyar.models.job_criteria_version import JobCriteriaVersion
     from meyar.scoring.policy import ScoringPolicyError
@@ -1902,6 +2017,7 @@ async def test_confirmation_ranking_failure_is_truthful_and_retryable(
     assert "Tələblər təsdiqləndi, reytinq isə tamamlanmadı" in failed_rank.text
     assert "yeni vakansiya yaratmayacaq" in failed_rank.text
     assert await db_session.scalar(select(func.count()).select_from(Job)) == 1
+    assert await db_session.scalar(select(func.count()).select_from(AgentDraftConfirmation)) == 1
     version = (await db_session.execute(select(JobCriteriaVersion))).scalar_one()
 
     retry = await client.post(
@@ -1914,6 +2030,7 @@ async def test_confirmation_ranking_failure_is_truthful_and_retryable(
     assert replay.status_code == 200
     assert await db_session.scalar(select(func.count()).select_from(Job)) == 1
     assert await db_session.scalar(select(func.count()).select_from(JobCriteriaVersion)) == 1
+    assert await db_session.scalar(select(func.count()).select_from(AgentDraftConfirmation)) == 1
 
 
 async def test_zero_scorable_agent_draft_shows_review_without_rank_action(

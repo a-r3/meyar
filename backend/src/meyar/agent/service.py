@@ -783,13 +783,10 @@ def _build_criterion_from_draft_item(
 
     A missing/unknown server span id gates every disclosure/scoring outcome
     as UNGROUNDED. A resolved item is checked only against that complete
-    canonical occurrence. PROHIBITED remains an unconditional early return:
-    a doubly-bad item (fabricated and sensitive) is still count-only."""
-    # Prohibition is classification-independent and runs before OTHER or
-    # any other kind branch. A model cannot relabel sensitive text into a
-    # safe bucket. Check every model-authored field that can carry it.
-    if find_prohibited_term(item.requirement, item.source_text, item.required_level or ""):
-        return None, DroppedJDCriterionReason.PROHIBITED
+    canonical occurrence. Prohibition authority comes exclusively from the
+    raw JD/canonical server span in the dispatch boundary below; no
+    model-authored field, including source_text, can manufacture or remove it.
+    """
     if source_span is None:
         return None, DroppedJDCriterionReason.UNGROUNDED
     binding_reason = _canonical_binding_result(

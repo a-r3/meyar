@@ -1,16 +1,16 @@
 # MEYAR — Status
 
 ## Current phase
-**Issue #44 JD-authority/confirmation remediation is implemented locally atop
-exact audit HEAD `4b900567f289c57b027b83e8ae04476dad5d98dc` (D-056), not
+**Issue #44 JD-authority/confirmation P1 remediation is implemented locally
+atop exact audit HEAD `155bc8f7d89a95b58b1e5862b68a184850510cd2` (D-057), not
 pushed or merged.** D-055's canonical `RequirementSpan` architecture is
-preserved. Agent confirmation is now a dedicated tenant/session-bound,
-idempotent operation rather than a browser-selected branch of manual Job
-creation; confirmation commits a durable draft→Job/version link before the
-separate retryable ranking step. The `is a plus` idiom is subject-aware, and
-bounded standalone implicit professional items remain visible for human review
-instead of disappearing. Zero-scorable drafts no longer expose a misleading
-confirm/rank action. PR #42 remains NOT accepted.
+preserved. Model-authored `source_text` is now schema-optional and has no
+policy consumer; raw JD/canonical spans remain the only prohibition and
+semantic authority. Agent confirmation now writes an independent
+tenant/session-bound `agent_draft_confirmations` identity row in the same
+transaction as Job, criteria version, audit event, and optional conversation
+UI state. Replay remains safe after bounded transcript reset/truncation. PR
+#42 remains NOT accepted.
 
 **Slice 13 — Security + Official Definition-of-Done Acceptance: implementation
 pass 1 MERGED (PR #22, squash SHA `a709ce1`, `Refs #20`); Target-Mac hardware
