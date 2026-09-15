@@ -111,6 +111,14 @@ generation/reuse and folder/demo readiness also enforce shared current
 authority. Historical rows remain immutable. This is bounded lexical
 validation, not general entailment or multilingual NLI.
 
+D-052 completes the bounded English coordination rule: an explicit negative
+governor remains active across `and`/`or`/`nor` members until a sentence,
+semicolon, independent newline, `but`, or `however` boundary. Local `not` does
+not spread into a later positive member, and `not only ... but also ...` remains
+positive. Phone authority additionally rejects two-fragment numeric strings
+without a phone-like prefix/shape, even when the supplied quote is cropped from
+canonical reference/code context.
+
 ## Agent candidate-factual authority
 
 - `AgentDecision` has no free-text answer field. `FINAL_ANSWER` and

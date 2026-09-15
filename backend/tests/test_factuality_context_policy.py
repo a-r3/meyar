@@ -57,6 +57,23 @@ def profile(category, quote, **fields):
         ("Without Java or Python", "Without Java or Python", "Python", False),
         ("Does not use Java or Python", "Does not use Java or Python", "Java", False),
         ("Does not use Java or Python", "Does not use Java or Python", "Python", False),
+        ("No Java and Python experience", "No Java and Python experience", "Java", False),
+        ("No Java and Python experience", "No Java and Python experience", "Python", False),
+        ("Without Java and Python", "Without Java and Python", "Java", False),
+        ("Without Java and Python", "Without Java and Python", "Python", False),
+        ("Does not use Java and Python", "Does not use Java and Python", "Java", False),
+        ("Does not use Java and Python", "Does not use Java and Python", "Python", False),
+        ("Neither Java nor Python", "Neither Java nor Python", "Java", False),
+        ("Neither Java nor Python", "Neither Java nor Python", "Python", False),
+        ("Uses neither Java nor Python", "Uses neither Java nor Python", "Java", False),
+        ("Uses neither Java nor Python", "Uses neither Java nor Python", "Python", False),
+        ("Neither Java, Python, nor Go", "Neither Java, Python, nor Go", "Java", False),
+        ("Neither Java, Python, nor Go", "Neither Java, Python, nor Go", "Python", False),
+        ("Neither Java, Python, nor Go", "Neither Java, Python, nor Go", "Go", False),
+        ("Python and Java are used", "Python and Java are used", "Python", True),
+        ("Python and Java are used", "Python and Java are used", "Java", True),
+        ("Java is not used and Python is used", "Python is used", "Python", True),
+        ("Python is not used and Java is used", "Java is used", "Java", True),
         ("Python and not Java", "Python and not Java", "Python", True),
         ("Python and not Java", "Java", "Java", False),
         ("Python, but not Java", "Python, but not Java", "Python", True),
@@ -84,6 +101,15 @@ def profile(category, quote, **fields):
         ("No Java\nPython used extensively.", "Python", "Python", True),
         ("No Java; Python required.", "Java", "Java", False),
         ("No Java; Python required.", "Python", "Python", True),
+        ("No Java. Python required.", "Python", "Python", True),
+        ("No Java\nPython required.", "Python", "Python", True),
+        ("No Java.\nHowever, Python is used.", "Python", "Python", True),
+        ("No Java; however, Python is used.", "Python", "Python", True),
+        ("No Java. Python and Go are used.", "Python and Go are used", "Python", True),
+        ("No Java. Python and Go are used.", "Python and Go are used", "Go", True),
+        ("Python and Go, but not Java", "Python and Go, but not Java", "Python", True),
+        ("Python and Go, but not Java", "Python and Go, but not Java", "Go", True),
+        ("Python and Go, but not Java", "Python and Go, but not Java", "Java", False),
     ],
 )
 def test_canonical_context_and_local_scope(source, quote, skill, accepted):
@@ -203,11 +229,15 @@ def test_linked_employment_period(start, end, accepted):
         ("phone", "123456789", "Reference 1234, other record 56789", False),
         ("phone", "123456789", "Reference 1234. 56789", False),
         ("phone", "123456789", "Reference 1234. Other record 56789", False),
+        ("phone", "123456789", "Reference 1234 56789", False),
+        ("phone", "123456789", "Reference 1234-56789", False),
         ("phone", "123456789", "1234, code 56789", False),
         ("phone", "123456789", "phone 1234567 ext 89", False),
         ("phone", "123456789", "phone 1234567 00 89", False),
+        ("phone", "123456789", "123456789", True),
         ("phone", "123456789", "phone 123456789", True),
         ("phone", "0501234567", "050-123-45-67", True),
+        ("phone", "+994501234567", "+994 50 123 45 67", True),
         ("phone", "+994501234567", "+994 (50) 123-45-67", True),
         ("full_name", "Jane Doe", "Janet Doe", False),
         ("full_name", "Jane Doe", "Jane Doe", True),
@@ -222,6 +252,15 @@ def test_identity_occurrence_boundaries(field, value, quote, accepted):
     else:
         with pytest.raises(EvidenceValidationError):
             verify_identity_evidence(view(quote), identity)
+
+
+@pytest.mark.parametrize("quote", ["1234 56789", "1234-56789"])
+def test_cropped_numeric_quote_cannot_hide_reference_context(quote):
+    identity = CandidateIdentityExtraction.model_validate(
+        {"phone": {"value": "123456789", "evidence": [ref(quote)]}}
+    )
+    with pytest.raises(EvidenceValidationError):
+        verify_identity_evidence(view(f"Reference {quote}"), identity)
 
 
 @pytest.mark.parametrize("cached", [False, True])
@@ -339,6 +378,14 @@ def _invalid_professional_cases():
             "No Java or Python experience",
             profile("skills", "No Java or Python experience", name="Python"),
         ),
+        (
+            "No Java and Python experience",
+            profile("skills", "No Java and Python experience", name="Python"),
+        ),
+        (
+            "Neither Java nor Python",
+            profile("skills", "Neither Java nor Python", name="Python"),
+        ),
         ("Developer Acme 2021; not current", current),
         ("Banking 2021 ended", domain),
         ("Banking experience\nNo banking experience 2021-2025", split),
@@ -380,6 +427,16 @@ async def test_current_authority_all_consumers_and_immutable_history(
         canonical_text=source,
         profile_content=content,
     )
+    generated_provider = FakeEmbeddingProvider()
+    with pytest.raises(EmbeddingPreconditionError):
+        await embed_candidate_profile(
+            db_session,
+            generated_provider,
+            tenant_id=tenant.id,
+            candidate_id=seeded.candidate.id,
+            max_input_chars=10000,
+        )
+    assert generated_provider.call_count == 0
     job = await create_job(db_session, tenant_id=tenant.id, title="Synthetic role")
     criteria = await create_criteria_version(
         db_session,
@@ -430,6 +487,16 @@ async def test_current_authority_all_consumers_and_immutable_history(
         profile_content=content,
         vector=[0.1] * 8,
     )
+    reused_provider = FakeEmbeddingProvider()
+    with pytest.raises(EmbeddingPreconditionError):
+        await embed_candidate_profile(
+            db_session,
+            reused_provider,
+            tenant_id=tenant.id,
+            candidate_id=seeded.candidate.id,
+            max_input_chars=10000,
+        )
+    assert reused_provider.call_count == 0
     for mode in ("STRUCTURED_ONLY", "SEMANTIC_ONLY", "HYBRID"):
         request = CandidateSearchRequest(
             mode=mode,

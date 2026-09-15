@@ -1,5 +1,6 @@
 import calendar
 import re
+from collections.abc import Iterator
 from datetime import date
 
 from meyar.core.domain_terms import accepted_terms_for_domain, domain_term_present
@@ -72,7 +73,9 @@ _CURRENT_EMPLOYMENT_TERMS = frozenset(
 # in its cited block must agree; an ambiguous cropped quote cannot choose the
 # favorable occurrence. A longer unique quote can identify one occurrence.
 _CONTEXT_CHARS = 200
-_SCOPE_BOUNDARY = re.compile(r"\n|[;!?]|\.(?=\s|$)|\b(?:but|however|and)\b")
+_SCOPE_BOUNDARY = re.compile(r"\n|[;!?]|\.(?=\s|$)|\b(?:but|however)\b")
+_WORD_TOKEN = re.compile(r"\b\w+\b")
+_NEGATING_USE_VERBS = frozenset({"use", "uses", "using"})
 
 
 def _quote_pattern(quote: str) -> re.Pattern[str]:
@@ -95,17 +98,35 @@ def _source_spans(view: ProfessionalDocumentView, ref: EvidenceRef) -> list[tupl
 
 
 def _negated_occurrence(text: str, start: int, end: int) -> bool:
-    # Clause boundaries and positive ``and`` stop a neighboring subject's
-    # negation. ``or`` deliberately remains inside scope so bounded forms such
-    # as "no Java or Python" govern every coordinated subject. Contrastive
-    # ``but`` is a boundary. These are lexical constructions, never NLI.
+    # A negative governor remains active across a bounded coordinated list;
+    # ``and``/``or``/``nor`` do not create or end scope by themselves. The
+    # structural boundary above resets it before an independent statement.
+    # This deliberately models only the explicit constructs supported here,
+    # never general entailment.
     before = _SCOPE_BOUNDARY.split(text[:start])[-1]
     after = _SCOPE_BOUNDARY.split(text[end:])[0]
-    negative_prefix = re.search(r"(?<!\w)(?:no|without|not)\s+(?:\w+\s+){0,6}$", before)
+    words = [match.group() for match in _WORD_TOKEN.finditer(before)]
+    governed = False
+    for index, word in enumerate(words):
+        next_word = words[index + 1] if index + 1 < len(words) else None
+        previous_word = words[index - 1] if index else None
+        if word in {"no", "without", "neither"}:
+            governed = True
+        elif (
+            word == "not"
+            and next_word in _NEGATING_USE_VERBS
+            and previous_word in {"do", "does", "did"}
+        ):
+            governed = True
+    local_before = re.split(r"\b(?:and|or|nor)\b", before)[-1]
+    negative_prefix = re.search(
+        r"(?<!\w)(?:no|without|neither|not)\s+(?:\w+\s+){0,6}$", local_before
+    )
     if negative_prefix is not None and re.match(r"not\s+only\b", negative_prefix.group()):
         negative_prefix = None
     return bool(
-        negative_prefix
+        governed
+        or negative_prefix
         or re.match(
             r"\s+(?:experience\s+)?(?:(?:is|was|are|were)\s+)?not(?!\s+only\b)(?:\W|$)",
             after,
@@ -590,6 +611,24 @@ def _digits(text: str) -> str:
     return "".join(ch for ch in text if ch.isdigit())
 
 
+def _phone_like_occurrences(text: str) -> Iterator[re.Match[str]]:
+    """Yield complete, shape-coherent phone occurrences from canonical text.
+
+    An unseparated digit token is coherent by itself. A separated occurrence
+    must either carry an international/local prefix or contain at least three
+    groups; two arbitrary reference/code fragments are not a phone identity.
+    """
+    for match in _PHONE_TOKEN.finditer(text):
+        candidate = match.group()
+        groups = re.findall(_PHONE_GROUP, candidate)
+        first_digits = _digits(groups[0]) if groups else ""
+        separated = " " in candidate or "-" in candidate
+        if not separated or candidate.startswith("+") or first_digits.startswith("0"):
+            yield match
+        elif len(groups) >= 3:
+            yield match
+
+
 def _identity_token_supported(
     view: ProfessionalDocumentView, value: str, evidence: list[EvidenceRef], *, phone: bool
 ) -> bool:
@@ -607,12 +646,14 @@ def _identity_token_supported(
         source = block.text.lower()
         quote = ref.quote.lower()
         locations = list(re.finditer(re.escape(quote), source))
+        tokens = _phone_like_occurrences(source) if phone else pattern.finditer(source)
+        token_matches = list(tokens)
         if locations and all(
             any(
                 location.start() <= token.start()
                 and token.end() <= location.end()
                 and normalize(token.group()) == expected
-                for token in pattern.finditer(source)
+                for token in token_matches
             )
             for location in locations
         ):

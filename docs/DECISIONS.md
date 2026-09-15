@@ -4274,3 +4274,43 @@ agent tools, library/detail views, and assistant history presentation.
 **Verification:** Direct scope/idiom/boundary/repeated-occurrence/phone tests
 and a database-backed all-consumer quarantine regression were added. The final
 gate counts are recorded in the associated local commit report.
+
+## D-052 — Coordinated-negation and phone-occurrence authority completion (issue #44)
+
+**Date:** 2026-09-15. **Status:** Local corrective implementation; PR #42
+remains open and unaccepted.
+
+**Problem:** The independent audit of `12e218f` found that D-051 treated every
+`and` as a scope boundary, allowing the second member of `no`/`without`/
+`does not use` coordination to become positive authority. `neither ... nor ...`
+had no explicit negative-governor state. The phone occurrence grammar also
+treated two arbitrary numeric fragments separated by a space or hyphen as one
+phone token.
+
+**Decision:**
+- Preserve the token/span and canonical-context architecture. A small lexical
+  state now activates only for `no`, `without`, `neither`, and the supported
+  `do`/`does`/`did not use` construction. While active, `and`, `or`, and `nor`
+  coordinate members; they neither create negative scope in a positive list
+  nor end an existing negative list. Periods, semicolons, independent newlines,
+  `but`, and `however` reset the state.
+- Keep ordinary `not` local to its own coordinated member and retain the
+  existing post-subject `is/was/are/were not` check. `not only ... but also ...`
+  remains explicitly non-negative.
+- Phone attribution now filters complete canonical phone-token matches by
+  shape. A plain uninterrupted digit occurrence is coherent; formatted values
+  require an international/local prefix or at least three groups. Two arbitrary
+  fragments such as `1234 56789` or `1234-56789` cannot be joined, including
+  when a cropped evidence quote omits the canonical `Reference` context.
+
+**Scope:** No schema/migration, JD source binding, API-first work, duration
+redesign, deployment, scoring, ranking, search-planner, or embedding-identity
+feature was introduced. The shared current-authority boundary applies the
+correction to existing consumers only.
+
+**Verification:** The pre-fix focused reproduction failed 12 cases (the second
+`and` member, all `neither`/`nor` members, and both split-number forms). The
+corrected direct matrix passed 79 tests; the broader extraction/identity/
+embedding/search/evaluation/ranking/agent/UI suite passed 362 tests. Full gates:
+Ruff clean; mypy clean for 138 source files; 1032 pytest tests passed with no
+failures, skips, or xfails; Alembic retained the single `a1c5e9f2b6d3` head.
