@@ -25,7 +25,6 @@ from meyar.ingestion.validation import PDF_MIME
 from meyar.llm.dependency import get_llm_provider
 from meyar.llm.provider import LLMProvider
 from meyar.models.job import JOB_STATUS_ACTIVE, JOB_STATUS_ARCHIVED
-from meyar.schemas.criteria import find_prohibited_term
 from meyar.scoring.batch import BatchRankingError, rank_candidates_for_job
 from meyar.scoring.policy import ScoringPolicyError
 from meyar.search.planner_policy import find_skill_specific_duration_mention
@@ -77,6 +76,7 @@ from meyar.ui.service import (
     JOB_DUPLICATE_MESSAGE,
     CriterionRowInput,
     UIServiceInputError,
+    authorize_agent_draft_confirmation,
     build_job_create_request,
     build_ranked_candidate_views,
     build_search_result_views,
@@ -953,27 +953,8 @@ async def create_job_route(
     # form, whose own redirect-to-jobs-list behavior is unchanged. See
     # docs/DECISIONS.md D-043.
     from_agent_draft = str(form.get("from_agent_draft", "")) == "1"
-    # D-045 (PR #42 owner correction, issue #33, item 6): the agent
-    # criteria-review form's own hidden inputs (meyar.ui.templates.
-    # agent.html) — non-sensitive requirements already disclosed as
-    # unsupported in that turn (see AgentJobDraftView.unsupported_*).
-    # Never validated as criteria, never becomes a CriterionIn, never
-    # reaches build_job_create_request below — carried only into this
-    # one ranking render (_render_job_ranking) so confirming does not
-    # make them vanish. Absent entirely on the manual /ui/jobs/new form.
-    unsupported_requirements = [
-        str(value).strip()
-        for value in [
-            *form.getlist("unsupported_must_have"),
-            *form.getlist("unsupported_preferred"),
-        ]
-        if str(value).strip() and find_prohibited_term(str(value).strip()) is None
-    ]
-    needs_review_requirements = [
-        str(value).strip()
-        for value in form.getlist("needs_review_requirement")
-        if str(value).strip() and find_prohibited_term(str(value).strip()) is None
-    ]
+    unsupported_requirements: list[str] = []
+    needs_review_requirements: list[str] = []
     must_have_rows = [_job_form_row(form, "must", i) for i in range(CRITERION_ROW_COUNT)]
     preferred_rows = [_job_form_row(form, "pref", i) for i in range(CRITERION_ROW_COUNT)]
 
@@ -981,6 +962,50 @@ async def create_job_route(
         job_request = build_job_create_request(
             title=title, must_have_rows=must_have_rows, preferred_rows=preferred_rows
         )
+        pending_conversation = None
+        pending_draft_id = None
+        if from_agent_draft:
+            from meyar.services.agent_conversation_repo import (
+                get_conversation_for_update_by_session,
+                get_pending_job_draft,
+            )
+
+            try:
+                pending_draft_id = uuid.UUID(str(form.get("draft_id", "")))
+            except ValueError as exc:
+                raise UIServiceInputError(
+                    "Qaralama təsdiqi etibarsızdır; elanı yenidən analiz edin."
+                ) from exc
+            pending_conversation = await get_conversation_for_update_by_session(
+                db, tenant_id=ctx.tenant_id, browser_session_id=ctx.session_id
+            )
+            if pending_conversation is None:
+                raise UIServiceInputError(
+                    "Qaralama təsdiqi tapılmadı; elanı yenidən analiz edin."
+                )
+            pending_draft = get_pending_job_draft(
+                pending_conversation, draft_id=pending_draft_id
+            )
+            if pending_draft is None:
+                raise UIServiceInputError(
+                    "Qaralama təsdiqi tapılmadı və ya artıq istifadə edilib; "
+                    "elanı yenidən analiz edin."
+                )
+            submitted_span_ids = [
+                str(form.get(f"{prefix}_span_id_{index}", ""))
+                for prefix, rows in (("must", must_have_rows), ("pref", preferred_rows))
+                for index, row in enumerate(rows)
+                if row.requirement.strip()
+            ]
+            authorize_agent_draft_confirmation(
+                draft=pending_draft,
+                request=job_request,
+                submitted_span_ids=submitted_span_ids,
+            )
+            unsupported_requirements = [item.requirement for item in pending_draft.unsupported]
+            needs_review_requirements = [
+                item.requirement for item in pending_draft.needs_review
+            ]
     except UIServiceInputError as exc:
         return _render(
             request,
@@ -1048,6 +1073,13 @@ async def create_job_route(
             actor_type=ACTOR_HUMAN_USER,
             actor_id=ctx.user_id,
         )
+        if from_agent_draft:
+            assert pending_conversation is not None and pending_draft_id is not None
+            from meyar.services.agent_conversation_repo import consume_pending_job_draft
+
+            await consume_pending_job_draft(
+                db, pending_conversation, draft_id=pending_draft_id
+            )
         await db.commit()
     except IntegrityError:
         # A concurrent double-submit raced past the pre-check above and

@@ -62,6 +62,12 @@ async def _login_and_csrf(client: AsyncClient, username: str, password: str) -> 
     return match.group(1)
 
 
+def _hidden_value(html: str, name: str) -> str:
+    match = re.search(rf'name="{re.escape(name)}" value="([^"]+)"', html)
+    assert match is not None
+    return match.group(1)
+
+
 async def test_agent_workspace_requires_authentication(
     client: AsyncClient, local_ui_settings: Settings
 ) -> None:
@@ -670,11 +676,13 @@ async def test_draft_job_criteria_renders_editable_prefilled_review_form(
             title="Baş Backend Mühəndisi",
             must_have=[
                 JDDraftCriterionItem(
+                    span_id="req-0001",
                     kind=CriterionKind.SKILL, requirement="Python", source_text="Python bilməlidir"
                 )
             ],
             preferred=[
                 JDDraftCriterionItem(
+                    span_id="req-0002",
                     kind=CriterionKind.SKILL, requirement="AWS", source_text="AWS üstünlükdür"
                 )
             ],
@@ -731,9 +739,11 @@ async def test_draft_job_criteria_drops_prohibited_item_and_notes_it(
             title="Rol",
             must_have=[
                 JDDraftCriterionItem(
+                    span_id="req-0002",
                     kind=CriterionKind.SKILL, requirement="Python", source_text="Python bilməlidir"
                 ),
                 JDDraftCriterionItem(
+                    span_id="req-0001",
                     kind=CriterionKind.SKILL, requirement="kişi", source_text="kişi olmalıdır"
                 ),
             ],
@@ -754,7 +764,8 @@ async def test_draft_job_criteria_drops_prohibited_item_and_notes_it(
     # appear verbatim in the HR user's own echoed message above, which is
     # untrusted text shown as-is — that is not a policy leak).
     assert 'value="kişi"' not in response.text
-    assert "1 tələb qadağan olunmuş/əlaqəsiz atributa görə" in response.text
+    assert "Şəxsi və ya həssas xüsusiyyətə aid 1 tələb aşkarlandı" in response.text
+    assert "işlə bağlı peşəkar tələblə əvəz edin" in response.text
 
 
 async def test_draft_job_criteria_discloses_unsupported_requirement_visibly(
@@ -765,12 +776,9 @@ async def test_draft_job_criteria_discloses_unsupported_requirement_visibly(
     no derivable duration) must be visibly disclosed to HR, not silently
     dropped — and must never appear as an editable, persistable CRITERION
     row (a "must_requirement_N" field, which build_job_create_request
-    would validate and could turn into a real, scored criterion). D-045
-    does carry its own text into a dedicated, differently-named hidden
-    field (unsupported_must_have) so it survives confirmation onto the
-    ranking page — see test_unsupported_requirement_survives_confirmation_
-    and_scores_nothing below; that is a deliberate, separate contract,
-    not the thing this test guards against."""
+    would validate and could turn into a real, scored criterion). The
+    browser receives no hidden copy as authority; confirmation resolves the
+    server-held draft by draft_id."""
     from meyar.agent.schemas import JDCriteriaDraft, JDDraftCriterionItem
     from meyar.schemas.criteria import CriterionKind
 
@@ -781,11 +789,13 @@ async def test_draft_job_criteria_discloses_unsupported_requirement_visibly(
             title="Rol",
             must_have=[
                 JDDraftCriterionItem(
+                    span_id="req-0001",
                     kind=CriterionKind.SKILL, requirement="Python", source_text="Python bilməlidir"
                 ),
                 JDDraftCriterionItem(
-                    kind=CriterionKind.EXPERIENCE,
-                    requirement="ACAMS sertifikatı təcrübəsi",
+                    span_id="req-0002",
+                    kind="SKILL_EXPERIENCE",
+                    requirement="ACAMS sertifikatı üzrə",
                     source_text="ACAMS sertifikatı üzrə təcrübə tələb olunur",
                 ),
             ],
@@ -803,13 +813,9 @@ async def test_draft_job_criteria_discloses_unsupported_requirement_visibly(
     assert response.status_code == 200
     assert 'value="Python"' in response.text
     assert "ACAMS sertifikatı üzrə təcrübə tələb olunur" in response.text
-    # Never an editable "must_requirement_N" criterion-row value — only the
-    # dedicated, differently-named unsupported_must_have hidden field.
+    # Never an editable criterion row or browser-authority hidden field.
     assert 'name="must_requirement_1" value="ACAMS sertifikatı təcrübəsi"' not in response.text
-    assert (
-        'name="unsupported_must_have" value="ACAMS sertifikatı üzrə təcrübə tələb olunur"'
-        in response.text
-    )
+    assert 'name="unsupported_must_have"' not in response.text
     assert "Məlumat üçün — qiymətləndirməyə daxil edilmir" in response.text
 
 
@@ -830,6 +836,7 @@ async def test_draft_job_criteria_explicit_intent_routes_without_magic_wording(
             title="Rol",
             must_have=[
                 JDDraftCriterionItem(
+                    span_id="req-0001",
                     kind=CriterionKind.SKILL, requirement="Python", source_text="Python bilməlidir"
                 )
             ],
@@ -867,6 +874,7 @@ async def test_draft_job_criteria_explicit_intent_never_becomes_a_search(
             title="Backend Mühəndisi",
             must_have=[
                 JDDraftCriterionItem(
+                    span_id="req-0001",
                     kind=CriterionKind.SKILL, requirement="Python", source_text="Python bilməlidir"
                 )
             ],
@@ -911,6 +919,7 @@ async def test_confirming_agent_drafted_criteria_lands_on_ranking_not_jobs_list(
             title="Baş Backend Mühəndisi",
             must_have=[
                 JDDraftCriterionItem(
+                    span_id="req-0001",
                     kind=CriterionKind.SKILL, requirement="Python", source_text="Python bilməlidir"
                 )
             ],
@@ -923,13 +932,17 @@ async def test_confirming_agent_drafted_criteria_lands_on_ranking_not_jobs_list(
     assert draft_response.status_code == 200
     match = re.search(r'name="from_agent_draft" value="1"', draft_response.text)
     assert match is not None
+    draft_id = _hidden_value(draft_response.text, "draft_id")
+    span_id = _hidden_value(draft_response.text, "must_span_id_0")
 
     create = await client.post(
         "/ui/jobs",
         data={
             "csrf_token": csrf,
             "from_agent_draft": "1",
+            "draft_id": draft_id,
             "title": "Baş Backend Mühəndisi",
+            "must_span_id_0": span_id,
             "must_kind_0": "SKILL",
             "must_requirement_0": "Python",
             "must_min_years_0": "",
@@ -941,6 +954,79 @@ async def test_confirming_agent_drafted_criteria_lands_on_ranking_not_jobs_list(
     assert create.status_code == 200
     assert "Reytinq nəticələri" in create.text
     assert "Baş Backend Mühəndisi" in create.text
+
+    replay = await client.post(
+        "/ui/jobs",
+        data={
+            "csrf_token": csrf,
+            "from_agent_draft": "1",
+            "draft_id": draft_id,
+            "title": "Başqa başlıq",
+            "must_span_id_0": span_id,
+            "must_kind_0": "SKILL",
+            "must_requirement_0": "Python",
+            "must_min_years_0": "",
+            "must_weight_0": "1",
+        },
+    )
+    assert replay.status_code == 422
+
+    from sqlalchemy import func, select
+
+    from meyar.models.job import Job
+
+    assert await db_session.scalar(select(func.count()).select_from(Job)) == 1
+
+
+async def test_agent_confirmation_rejects_browser_weakened_row_without_persistence(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
+) -> None:
+    from sqlalchemy import func, select
+
+    from meyar.agent.schemas import JDCriteriaDraft, JDDraftCriterionItem
+    from meyar.models.job import Job
+
+    _tenant, user, password, _membership = tenant_and_user
+    fake = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        jd_draft=JDCriteriaDraft(
+            title="Backend",
+            must_have=[
+                JDDraftCriterionItem(
+                    span_id="req-0001",
+                    kind="SKILL", requirement="Python", source_text="Python required"
+                )
+            ],
+        ),
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake
+    csrf = await _login_and_csrf(client, user.username, password)
+    response = await client.post(
+        "/ui/agent", data={"message": "Backend. Python required.", "csrf_token": csrf}
+    )
+    draft_id = _hidden_value(response.text, "draft_id")
+    span_id = _hidden_value(response.text, "must_span_id_0")
+
+    tampered = await client.post(
+        "/ui/jobs",
+        data={
+            "csrf_token": csrf,
+            "from_agent_draft": "1",
+            "draft_id": draft_id,
+            "title": "Backend",
+            "must_span_id_0": span_id,
+            "must_kind_0": "SKILL",
+            "must_requirement_0": "JavaScript",
+            "must_min_years_0": "",
+            "must_weight_0": "1",
+        },
+    )
+    assert tampered.status_code == 422
+    assert "server təsdiqli forması ilə uyğun gəlmir" in tampered.text
+    assert await db_session.scalar(select(func.count()).select_from(Job)) == 0
 
 
 async def test_draft_job_criteria_fabricated_requirement_never_rendered(
@@ -962,11 +1048,13 @@ async def test_draft_job_criteria_fabricated_requirement_never_rendered(
             title="Kredit Analitiki",
             must_have=[
                 JDDraftCriterionItem(
+                    span_id="req-0001",
                     kind=JDDraftCriterionKind.OTHER,
                     requirement="Ezamiyyətə hazır olmaq",
                     source_text="Namizəd ezamiyyətə getməyə hazır olmalıdır",
                 ),
                 JDDraftCriterionItem(
+                    span_id="req-9999",
                     kind=JDDraftCriterionKind.OTHER,
                     requirement="Passing an exam",
                     source_text="Passing an exam",
@@ -1014,6 +1102,7 @@ async def test_draft_job_criteria_title_never_persists_as_trusted_assistant_text
             title=adversarial_title,
             must_have=[
                 JDDraftCriterionItem(
+                    span_id="req-0001",
                     kind=CriterionKind.SKILL, requirement="Python", source_text="Python bilməlidir"
                 )
             ],
@@ -1191,11 +1280,13 @@ async def test_unsupported_requirement_survives_confirmation_and_scores_nothing(
             title="Data Analitiki",
             must_have=[
                 JDDraftCriterionItem(
+                    span_id="req-0001",
                     kind=CriterionKind.SKILL, requirement="Python", source_text="Python bilməlidir"
                 )
             ],
             preferred=[
                 JDDraftCriterionItem(
+                    span_id="req-0002",
                     kind=JDDraftCriterionKind.OTHER,
                     requirement="Ezamiyyətə hazır olmaq",
                     source_text="Namizəd ezamiyyətə hazır olması üstünlükdür",
@@ -1217,15 +1308,19 @@ async def test_unsupported_requirement_survives_confirmation_and_scores_nothing(
     )
     assert draft_response.status_code == 200
     unsupported = "Namizəd ezamiyyətə hazır olması üstünlükdür"
-    assert f'name="unsupported_preferred" value="{unsupported}"' in draft_response.text
+    assert unsupported in draft_response.text
+    assert 'name="unsupported_preferred"' not in draft_response.text
+    draft_id = _hidden_value(draft_response.text, "draft_id")
+    span_id = _hidden_value(draft_response.text, "must_span_id_0")
 
     create = await client.post(
         "/ui/jobs",
         data={
             "csrf_token": csrf,
             "from_agent_draft": "1",
-            "unsupported_preferred": unsupported,
+            "draft_id": draft_id,
             "title": "Data Analitiki",
+            "must_span_id_0": span_id,
             "must_kind_0": "SKILL",
             "must_requirement_0": "Python",
             "must_min_years_0": "",
@@ -1288,6 +1383,7 @@ async def test_omitted_source_requirement_survives_confirmation_without_scoring(
             title="Data Analyst",
             must_have=[
                 JDDraftCriterionItem(
+                    span_id="req-0001",
                     kind="SKILL",
                     requirement="Python",
                     source_text="Python required",
@@ -1300,18 +1396,22 @@ async def test_omitted_source_requirement_survives_confirmation_without_scoring(
     draft_response = await client.post("/ui/agent", data={"message": source, "csrf_token": csrf})
     assert draft_response.status_code == 200
     omitted = "Candidate must be willing to travel"
-    assert f'name="needs_review_requirement" value="{omitted}"' in draft_response.text
+    assert omitted in draft_response.text
+    assert 'name="needs_review_requirement"' not in draft_response.text
     assert "İnsan baxışı tələb edir — qiymətləndirməyə daxil edilmir" in draft_response.text
     for internal_code in ("NEEDS_HUMAN_REVIEW", "UNGROUNDED", "PROHIBITED", "UNSUPPORTED"):
         assert internal_code not in draft_response.text
+    draft_id = _hidden_value(draft_response.text, "draft_id")
+    span_id = _hidden_value(draft_response.text, "must_span_id_0")
 
     create = await client.post(
         "/ui/jobs",
         data={
             "csrf_token": csrf,
             "from_agent_draft": "1",
-            "needs_review_requirement": omitted,
+            "draft_id": draft_id,
             "title": "Data Analyst",
+            "must_span_id_0": span_id,
             "must_kind_0": "SKILL",
             "must_requirement_0": "Python",
             "must_min_years_0": "",

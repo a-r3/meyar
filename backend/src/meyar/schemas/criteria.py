@@ -111,6 +111,26 @@ _AZ_PROTECTED_TERM_SUFFIXES: tuple[tuple[str, frozenset[str]], ...] = (
     ("əlillik", _AZ_FRONT_CONSONANT_NOUN_SUFFIXES),
     ("sağlamlıq", _AZ_BACK_CONSONANT_NOUN_SUFFIXES),
 )
+
+# Azerbaijani possessive/case suffixes can soften a final ``q``/``k``.
+# Enumerate those ordinary protected-lexeme forms explicitly; do not turn
+# the denylist into a substring/prefix matcher (``yaşıl`` must stay safe).
+_AZ_PROTECTED_MUTATED_FORMS = frozenset(
+    {
+        "sağlamlığı",
+        "sağlamlığın",
+        "sağlamlığa",
+        "sağlamlığında",
+        "sağlamlığından",
+        "əlilliyi",
+        "əlilliyin",
+        "əlilliyə",
+        "əlilliyində",
+        "əlilliyindən",
+    }
+)
+
+
 def _normalize_az_token(token: str) -> str:
     words = re.findall(r"[^\W_]+", normalize_azerbaijani_case(token))
     return words[0] if len(words) == 1 else ""
@@ -152,6 +172,8 @@ def find_prohibited_term(*texts: str) -> str | None:
             if match:
                 return match.group(0)
         for token in re.findall(r"[^\W_]+", text, flags=re.UNICODE):
+            if normalize_azerbaijani_case(token) in _AZ_PROTECTED_MUTATED_FORMS:
+                return token
             for root, suffixes in _AZ_PROTECTED_TERM_SUFFIXES:
                 if matches_term_or_allowed_az_forms(token, root, suffixes):
                     return token

@@ -50,6 +50,7 @@ AGENT_POLICY_VERSION = "agent-policy-v1"
 # meyar.search.policy.MAX_SEARCH_LIMIT so a candidate_ref is never
 # accepted for a rank the search policy itself could not have produced.
 MAX_CANDIDATE_REF = 50
+MAX_JD_REQUIREMENT_SPANS = 64
 
 # Deliberately NOT 4000 (the raw HR message's own cap, meyar.ui.router's
 # /ui/agent Form(max_length=4000)). Verified empirically against a real
@@ -268,6 +269,30 @@ class JDDraftCriterionKind(StrEnum):
     OTHER = "OTHER"
 
 
+class RequirementSpan(BaseModel):
+    """One server-segmented occurrence from the original JD.
+
+    Identity and offsets are produced before the model is called.  ``text``
+    is always the exact ``original_jd[start_offset:end_offset]`` slice;
+    ``normalized`` is server-produced comparison data, never model output.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    span_id: str = Field(pattern=r"^req-\d{4}$")
+    start_offset: int = Field(ge=0)
+    end_offset: int = Field(gt=0)
+    text: str = Field(min_length=1, max_length=4000)
+    normalized: str = Field(min_length=1, max_length=4000)
+    segmentation_needs_review: bool = False
+
+    @model_validator(mode="after")
+    def _validate_offsets(self) -> "RequirementSpan":
+        if self.end_offset <= self.start_offset:
+            raise ValueError("RequirementSpan end_offset must follow start_offset.")
+        return self
+
+
 class JDDraftCriterionItem(BaseModel):
     """One MODEL-PRODUCED candidate requirement drafted from a JD's own
     text — untrusted input, exactly like every other LLM-produced tool
@@ -292,9 +317,12 @@ class JDDraftCriterionItem(BaseModel):
     # drafted criterion can never disagree with its own displayed name.
     # Still the human-readable requirement text when kind is OTHER.
     requirement: str = Field(min_length=1, max_length=200)
+    # The only source-authority reference. The server creates and supplies
+    # these ids before inference; an unknown id is never resolved by text.
+    span_id: str = Field(pattern=r"^req-\d{4}$")
     # Verbatim/near-verbatim attributable fragment copied from the JD. It
-    # is untrusted until the deterministic boundary locates it in the
-    # original source and validates every material field against it.
+    # is an untrusted usability/debugging hint only. It never selects,
+    # narrows, or otherwise authorizes the canonical RequirementSpan.
     source_text: str = Field(min_length=1, max_length=500)
     min_years: float | None = Field(default=None, ge=0, le=60)
     required_level: str | None = Field(default=None, min_length=1, max_length=50)
@@ -345,9 +373,9 @@ class DroppedJDCriterionReason(StrEnum):
     # requirement's own text must never be re-displayed or persisted —
     # only a count and a safe, generic HR-facing explanation.
     PROHIBITED = "PROHIBITED"
-    # Failed meyar.agent.service._is_requirement_grounded_in_jd_text: the
-    # requirement's own text has no meaningful lexical trace in the actual
-    # JD text supplied by HR — a real-Ollama finding (qwen3:1.7b, D-046):
+    # Failed to resolve a server-owned canonical span id. The requirement's
+    # own text therefore has no authoritative occurrence in the actual JD —
+    # the structural replacement for D-046's lexical grounding check:
     # a short/underspecified JD reliably gets "filled in" with a
     # plausible-sounding but entirely unstated item (the reported
     # "Passing an exam" fabricated onto an unrelated travel-readiness
@@ -385,6 +413,30 @@ class NeedsReviewJDCriterionItem(BaseModel):
     criterion_type: CriterionType | None = None
 
 
+class RequirementSpanState(StrEnum):
+    SCORABLE = "SCORABLE"
+    UNSUPPORTED = "UNSUPPORTED"
+    PROHIBITED = "PROHIBITED"
+    NEEDS_HUMAN_REVIEW = "NEEDS_HUMAN_REVIEW"
+
+
+class RequirementSpanResult(BaseModel):
+    """Final explicit reconciliation state for one canonical occurrence."""
+
+    model_config = {"extra": "forbid"}
+
+    span_id: str = Field(pattern=r"^req-\d{4}$")
+    start_offset: int = Field(ge=0)
+    end_offset: int = Field(gt=0)
+    # Present for reviewable professional requirements. Prohibited source
+    # text is redacted from the tool result/session authority payload.
+    text: str | None = Field(default=None, max_length=4000)
+    normalized: str | None = Field(default=None, max_length=4000)
+    state: RequirementSpanState
+    criterion_type: CriterionType | None = None
+    criterion_id: str | None = Field(default=None, pattern=r"^[a-z0-9_]{1,64}$")
+
+
 class AgentJobDraftToolResult(BaseModel):
     """DRAFT_JOB_CRITERIA's tool result — NEVER LLM-authored directly:
     must_have/preferred are real, already-validated CriterionIn rows (same
@@ -396,9 +448,9 @@ class AgentJobDraftToolResult(BaseModel):
     sensitive/prohibited-attribute match is counted in
     ``prohibited_count`` only — its own text is never redisplayed,
     matching the same denylist discipline the manual form and REST API
-    already enforce. A requirement that failed the deterministic
-    JD-text grounding check (D-046 — see DroppedJDCriterionReason.
-    UNGROUNDED) is counted in ``ungrounded_count`` only, for the same
+    already enforce. A requirement with no resolved server-owned span id
+    (see DroppedJDCriterionReason.UNGROUNDED) is counted in
+    ``ungrounded_count`` only, for the same
     reason: its own text was never confirmed to actually be in HR's JD,
     so redisplaying it would itself misattribute invented content to the
     source document. Carries no candidate/tenant data. Only ever attached
@@ -411,12 +463,16 @@ class AgentJobDraftToolResult(BaseModel):
     model_config = {"extra": "forbid"}
 
     title: str | None = None
+    draft_id: uuid.UUID
     must_have: list[CriterionIn] = Field(default_factory=list)
     preferred: list[CriterionIn] = Field(default_factory=list)
     unsupported: list[UnsupportedJDCriterionItem] = Field(default_factory=list)
     needs_review: list[NeedsReviewJDCriterionItem] = Field(default_factory=list)
     prohibited_count: int = Field(default=0, ge=0)
     ungrounded_count: int = Field(default=0, ge=0)
+    requirements: list[RequirementSpanResult] = Field(
+        default_factory=list, max_length=MAX_JD_REQUIREMENT_SPANS
+    )
 
 
 class AgentToolResult(BaseModel):

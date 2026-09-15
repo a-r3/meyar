@@ -1,12 +1,14 @@
 # MEYAR — Status
 
 ## Current phase
-**Issue #44 JD source-binding/prohibition remediation is implemented locally
-atop accepted HEAD `8798c6a` (D-054), not pushed or merged.** The original JD
-now controls criterion subject/scope, kind, modality, numeric/duration and
-level fields through bounded source fragments; raw/post-parse prohibited
-checks are kind-independent; omissions and non-round-trippable semantics stay
-visible but unscored through confirmation. PR #42 remains NOT accepted.
+**Issue #44 canonical JD-requirement-span remediation is implemented locally
+atop audit HEAD `f4a728c` (D-055), not pushed or merged.** The server segments
+and identifies original-JD occurrences before inference; model `source_text`
+is now only an untrusted hint, while complete canonical spans control subject,
+kind/scope, modality, duration/level, explicit reconciliation state, and the
+confirmation allowlist. Raw/post-parse prohibited checks remain independent of
+model kind; unsupported/review requirements stay visible but unscored. PR #42
+remains NOT accepted.
 
 **Slice 13 — Security + Official Definition-of-Done Acceptance: implementation
 pass 1 MERGED (PR #22, squash SHA `a709ce1`, `Refs #20`); Target-Mac hardware

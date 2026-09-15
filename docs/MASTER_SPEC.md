@@ -189,12 +189,18 @@ an evaluation). Criterion fields: id, type (must-have/preferred), kind
 manual_review_required. Every evaluation stores the exact criteria
 version id used. The model cannot add criteria beyond what is stored.
 
-For agent JD drafting, the original JD is factual authority. Each model item
-must cite a bounded source fragment, and deterministic validation binds its
-subject/scope, kind, required/preferred modality, number/duration, and language
-level to that same fragment before it can become a scorable `CriterionIn`.
-Unsupported, omitted, or non-round-trippable semantics remain visible but
-unscored; prohibited attributes are detected independently of model kind.
+For agent JD drafting, the server segments the original JD before inference
+into occurrence-distinct `RequirementSpan`s (id, exact offsets/text, normalized
+representation). A model item may only reference a span id; model-authored
+`source_text` is an untrusted hint and never selects or narrows authority.
+Deterministic validation uses the complete canonical span to bind subject/type,
+kind/scope, required/preferred modality, number/duration, and language level
+before a criterion becomes scorable. Every material span ends as SCORABLE,
+UNSUPPORTED/UNSCORED, PROHIBITED, or NEEDS_HUMAN_REVIEW. Confirmation resolves
+the session-held server draft and revalidates unchanged SCORABLE rows; browser
+fields cannot add authority. Unsupported, omitted, or non-round-trippable
+semantics remain visible but unscored; prohibited detection is model-kind
+independent.
 
 ## 14. Matching engine pipeline
 

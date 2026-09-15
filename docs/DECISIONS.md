@@ -4422,3 +4422,64 @@ and unrecognized paraphrases may fail closed into human review. A partial
 source quote does not authorize an entire multi-requirement sentence; the
 uncovered source span remains visible for review. These are safe but potentially
 product-degrading P1s, not silent acceptance paths.
+
+## D-055 — Server-owned canonical JD requirement spans supersede model source authority (issue #44)
+
+**Date:** 2026-09-15. **Status:** Local corrective implementation atop exact
+audit HEAD `f4a728c`; PR #42 remains open and unaccepted.
+
+**Reproduced P0:** D-054 still let the model choose the effective authority
+boundary. `_source_span_index` accepted a model substring inside a larger
+source occurrence, while bidirectional prefix/token matching equated distinct
+subjects. Consequently `5 years Python experience required` plus model
+`source_text="Python experience required"` produced scorable bare Python;
+Java/JavaScript, C/C++, and SQL/NoSQL collided; `Banking experience preferred`
+could become plain SKILL; ordinary `sağlamlığı`/`əlilliyi` inflections bypassed
+the raw denylist; and omitted `Python is a plus` had no canonical span to
+reconcile.
+
+**Decision:**
+- The server deterministically segments the raw JD before inference into
+  occurrence-specific `RequirementSpan` objects with a stable per-operation id,
+  start/end offsets, exact original slice, and normalized representation.
+  Conservative sentence/newline/semicolon boundaries are used; a same-sentence
+  conjunction splits only when every side has its own explicit modality.
+  Otherwise the complete clause is retained for human review.
+- The model receives those ids and references `span_id`. Its retained
+  `source_text` is debugging/usability data only. Unknown/missing ids cannot
+  score, a repeated occurrence is reconciled by id rather than first text
+  match, and one occurrence authorizes at most one criterion.
+- Complete-span semantics, not prefix overlap, determine modality, numeric and
+  proficiency qualifiers, general versus skill/domain-qualified experience,
+  and kind compatibility. Complete subject identity is exact after only the
+  accepted deterministic normalization and curated aliases (`py`/Python,
+  `k8s`/Kubernetes, Postgres/PostgreSQL). Distinct subjects such as Java/
+  JavaScript, C/C++, SQL/NoSQL, and Go/Django never authorize one another.
+  Unordered multi-token equivalence is not used.
+- Skill/domain-specific experience and language proficiency remain visible as
+  UNSUPPORTED/UNSCORED when the current review form cannot round-trip them;
+  incompatible/weakened or ambiguous forms are NEEDS_HUMAN_REVIEW. General
+  explicitly total experience remains scorable. Scoring arithmetic and the
+  accepted candidate factual-authority contracts are unchanged.
+- Every canonical material occurrence receives one explicit terminal state:
+  SCORABLE, UNSUPPORTED, PROHIBITED, or NEEDS_HUMAN_REVIEW. Omission therefore
+  cannot delete a requirement. Raw-JD and post-parse prohibition remain
+  independent of model kind. Azerbaijani protected lexeme families add bounded
+  consonant-mutation forms without generic substring matching.
+- The server stores the pending canonical draft only in the authenticated,
+  tenant-scoped conversation. The confirmation form submits `draft_id` and
+  span ids; `POST /ui/jobs` resolves that server authority and accepts only an
+  unchanged subset of its SCORABLE rows. Browser edits/additions/duplicates and
+  replay are rejected. Unsupported/review text is reconstructed from server
+  state, never trusted from hidden fields. Only after this check are the
+  existing Job/CriteriaVersion/ranking services called.
+- HR guidance now says a personal/sensitive requirement was detected, cannot
+  be used for ranking, and should be removed or replaced by a job-related
+  professional requirement. Internal reason codes and prohibited source text
+  are not rendered as system guidance or persisted into scoring structures.
+
+**Explicit deferrals:** durable unsupported/review-state persistence across a
+later reload/re-rank and natural-language requested-result-count (`top 10`)
+handling remain NOT IMPLEMENTED. No deployment/API-first work, evaluator
+schema expansion, duration arithmetic, or candidate-authority redesign is in
+this correction.

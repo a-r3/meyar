@@ -32,6 +32,7 @@ from meyar.agent.schemas import (
     GroundedFact,
     GroundedSelection,
     JDCriteriaDraft,
+    RequirementSpan,
 )
 from meyar.core.roles import ROLE_HR_USER
 from meyar.embedding.provider import EmbeddingResult
@@ -153,7 +154,11 @@ class _DemoLLMProvider:
         raise NotImplementedError("The demo seed provider never runs the agent loop.")
 
     async def draft_job_criteria(
-        self, jd_text: str, *, repair: bool = False
+        self,
+        jd_text: str,
+        *,
+        requirement_spans: list[RequirementSpan],
+        repair: bool = False,
     ) -> tuple[JDCriteriaDraft, LLMResultProvenance]:
         raise NotImplementedError("The demo seed provider never drafts job criteria.")
 

@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meyar.agent.schemas import AgentActionType, AgentTurnResult
+from meyar.agent.schemas import AgentActionType, AgentJobDraftToolResult, AgentTurnResult
 from meyar.core.text import (
     combine_degree_and_field,
     fold_az_ascii,
@@ -677,13 +677,16 @@ async def build_search_result_views(
     return views
 
 
-def _criterion_row_view(criterion: CriterionIn) -> CriterionRowView:
+def _criterion_row_view(
+    criterion: CriterionIn, *, span_id: str | None = None
+) -> CriterionRowView:
     return CriterionRowView(
         kind=criterion.kind.value,
         kind_label=CRITERION_KIND_LABELS.get(criterion.kind.value, criterion.kind.value),
         requirement=criterion.label,
         min_years=f"{criterion.min_years:g}" if criterion.min_years is not None else "",
         weight=f"{criterion.weight:g}",
+        span_id=span_id,
     )
 
 
@@ -745,8 +748,29 @@ async def build_agent_turn_view(
                     tool_name=tool_result.tool_name.value,
                     job_draft=AgentJobDraftView(
                         title=draft.title,
-                        must_have_rows=[_criterion_row_view(c) for c in draft.must_have],
-                        preferred_rows=[_criterion_row_view(c) for c in draft.preferred],
+                        draft_id=draft.draft_id,
+                        must_have_rows=[
+                            _criterion_row_view(
+                                criterion,
+                                span_id=next(
+                                    item.span_id
+                                    for item in draft.requirements
+                                    if item.criterion_id == criterion.id
+                                ),
+                            )
+                            for criterion in draft.must_have
+                        ],
+                        preferred_rows=[
+                            _criterion_row_view(
+                                criterion,
+                                span_id=next(
+                                    item.span_id
+                                    for item in draft.requirements
+                                    if item.criterion_id == criterion.id
+                                ),
+                            )
+                            for criterion in draft.preferred
+                        ],
                         unsupported_must_have=[
                             u.requirement
                             for u in draft.unsupported
@@ -907,8 +931,8 @@ def _agent_turn_headline(
                 )
             if draft.prohibited_count:
                 notes.append(
-                    f"{draft.prohibited_count} tələb qadağan olunmuş/əlaqəsiz atributa görə "
-                    "daxil edilmədi"
+                    f"{draft.prohibited_count} şəxsi/həssas tələb sıralamada istifadə edilmir; "
+                    "elandan çıxarın və ya peşəkar tələblə əvəz edin"
                 )
             if draft.ungrounded_count:
                 notes.append(
@@ -1248,6 +1272,50 @@ def build_job_create_request(
         return JobCreateRequest(title=stripped_title, criteria=criteria)
     except ValidationError as exc:
         raise UIServiceInputError(_first_pydantic_message(exc)) from exc
+
+
+def authorize_agent_draft_confirmation(
+    *,
+    draft: AgentJobDraftToolResult,
+    request: JobCreateRequest,
+    submitted_span_ids: list[str],
+) -> None:
+    """Permit only unchanged server-authorized SCORABLE draft rows."""
+    if len(request.criteria) != len(submitted_span_ids):
+        raise UIServiceInputError("Qaralama meyarlarının mənbə təsdiqi etibarsızdır.")
+    expected_by_span = {
+        result.span_id: next(
+            (
+                criterion
+                for criterion in [*draft.must_have, *draft.preferred]
+                if criterion.id == result.criterion_id
+            ),
+            None,
+        )
+        for result in draft.requirements
+        if result.state.value == "SCORABLE" and result.criterion_id is not None
+    }
+    if len(set(submitted_span_ids)) != len(submitted_span_ids):
+        raise UIServiceInputError("Eyni mənbə tələbi birdən çox meyar yarada bilməz.")
+    comparable_fields = (
+        "kind",
+        "type",
+        "label",
+        "value",
+        "min_years",
+        "required_level",
+        "weight",
+        "evidence_required",
+        "manual_review_required",
+    )
+    for submitted, span_id in zip(request.criteria, submitted_span_ids, strict=True):
+        expected = expected_by_span.get(span_id)
+        if expected is None or any(
+            getattr(submitted, field) != getattr(expected, field) for field in comparable_fields
+        ):
+            raise UIServiceInputError(
+                "Qaralama meyarı mənbə tələbinin server təsdiqli forması ilə uyğun gəlmir."
+            )
 
 
 # Owner visual-inspection follow-up — Job lifecycle/duplicate-safety

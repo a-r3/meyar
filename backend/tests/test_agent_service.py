@@ -1263,11 +1263,13 @@ async def test_draft_job_criteria_builds_valid_criteria_from_llm_draft(
             title="Baş Backend Mühəndisi",
             must_have=[
                 JDDraftCriterionItem(
+                    span_id="req-0001",
                     kind=CriterionKind.SKILL, requirement="Python", source_text="Python bilməlidir"
                 )
             ],
             preferred=[
                 JDDraftCriterionItem(
+                    span_id="req-0002",
                     kind=CriterionKind.SKILL, requirement="AWS", source_text="AWS üstünlükdür"
                 )
             ],
@@ -1315,6 +1317,7 @@ async def test_draft_job_criteria_title_never_becomes_trusted_assistant_headline
             title=adversarial_title,
             must_have=[
                 JDDraftCriterionItem(
+                    span_id="req-0001",
                     kind=CriterionKind.SKILL, requirement="Python", source_text="Python bilməlidir"
                 )
             ],
@@ -1376,9 +1379,11 @@ async def test_draft_job_criteria_drops_prohibited_attribute_item(
             title="Rol",
             must_have=[
                 JDDraftCriterionItem(
+                    span_id="req-0002",
                     kind=CriterionKind.SKILL, requirement="Python", source_text="Python bilməlidir"
                 ),
                 JDDraftCriterionItem(
+                    span_id="req-0001",
                     kind=CriterionKind.SKILL, requirement="kişi", source_text="kişi olmalıdır"
                 ),
             ],
@@ -1421,16 +1426,17 @@ async def test_draft_job_criteria_discloses_unsupported_non_sensitive_item(
             title="Rol",
             must_have=[
                 JDDraftCriterionItem(
+                    span_id="req-0001",
                     kind=CriterionKind.SKILL, requirement="Python", source_text="Python bilməlidir"
                 ),
-                # No min_years — JDDraftCriterionItem itself allows this,
-                # but CriterionIn requires it for EXPERIENCE, so this is a
-                # genuine non-sensitive validation failure.
-                JDDraftCriterionItem(
-                    kind=CriterionKind.EXPERIENCE,
-                    requirement="Backend təcrübəsi",
-                    source_text="Backend təcrübəsi tələb olunur",
-                ),
+                    # Skill-scoped experience without a duration cannot be
+                    # round-tripped by the current agent review form.
+                    JDDraftCriterionItem(
+                        span_id="req-0002",
+                        kind="SKILL_EXPERIENCE",
+                        requirement="Backend",
+                        source_text="Backend təcrübəsi tələb olunur",
+                    ),
             ],
         ),
     )
@@ -1479,11 +1485,13 @@ async def test_draft_job_criteria_other_kind_is_unsupported_never_scored(
             title="Rol",
             must_have=[
                 JDDraftCriterionItem(
+                    span_id="req-0001",
                     kind=CriterionKind.SKILL, requirement="Python", source_text="Python bilməlidir"
                 )
             ],
             preferred=[
                 JDDraftCriterionItem(
+                    span_id="req-0002",
                     kind=JDDraftCriterionKind.OTHER,
                     requirement="Ezamiyyətə hazır olmaq",
                     source_text="Namizəd ezamiyyətə hazır olması üstünlükdür",
@@ -1519,29 +1527,20 @@ async def test_draft_job_criteria_other_kind_is_unsupported_never_scored(
 # genuine JD requirement the system merely cannot score. These tests use
 # FakeLLMProvider (deterministic, no real model call) to pin the fix's
 # behavior; the real-Ollama reproduction itself is recorded in
-# docs/DECISIONS.md D-046, not re-run here (see also test_is_requirement_
-# grounded_in_jd_text_unit below for the pure grounding-function contract).
+# docs/DECISIONS.md D-046, not re-run here. D-055 replaces that lexical
+# grounding unit with server-owned occurrence spans.
 
 
-def test_is_requirement_grounded_in_jd_text_unit() -> None:
-    """Direct, model-independent contract test for the deterministic
-    lexical grounding check itself (D-046) — the smallest unit of the
-    fix, independent of the full turn/dispatch pipeline exercised by the
-    other tests in this section."""
-    from meyar.agent.service import _is_requirement_grounded_in_jd_text
+def test_requirement_authority_is_an_exact_server_owned_occurrence() -> None:
+    from meyar.agent.jd_authority import segment_requirement_spans
 
     jd_text = "Vakansiya: Regional Satış Nümayəndəsi. Namizəd ezamiyyətə getməyə hazır olmalıdır."
-    # Grounded: the requirement's own content words are actually in the JD
-    # text (Azerbaijani suffix variance tolerated by diacritic/case fold).
-    assert _is_requirement_grounded_in_jd_text("Ezamiyyətə hazır olmaq", jd_text)
-    assert _is_requirement_grounded_in_jd_text("ezamiyyət", jd_text)
-    # Ungrounded: the exact reported real-Ollama hallucination pattern —
-    # a plausible-sounding but entirely unstated requirement.
-    assert not _is_requirement_grounded_in_jd_text("Passing an exam", jd_text)
-    assert not _is_requirement_grounded_in_jd_text("İngilis dili", jd_text)
-    assert not _is_requirement_grounded_in_jd_text("CFA sertifikatı", jd_text)
-    # No content word at all (only connector words) carries no signal.
-    assert not _is_requirement_grounded_in_jd_text("olmaq üçün", jd_text)
+    spans = segment_requirement_spans(jd_text)
+    assert len(spans) == 1
+    span = spans[0]
+    assert jd_text[span.start_offset : span.end_offset] == span.text
+    assert span.text == "Namizəd ezamiyyətə getməyə hazır olmalıdır"
+    assert "Passing an exam" not in span.text
 
 
 async def test_draft_job_criteria_drops_fabricated_unrelated_requirement(
@@ -1569,6 +1568,7 @@ async def test_draft_job_criteria_drops_fabricated_unrelated_requirement(
             title="Kredit Analitiki",
             must_have=[
                 JDDraftCriterionItem(
+                    span_id="req-0001",
                     kind=JDDraftCriterionKind.OTHER,
                     requirement="Ezamiyyətə hazır olmaq",
                     source_text="Namizəd ezamiyyətə getməyə hazır olmalıdır",
@@ -1578,6 +1578,7 @@ async def test_draft_job_criteria_drops_fabricated_unrelated_requirement(
                 # that previously reached HR-visible "unsupported" with no
                 # grounding check at all.
                 JDDraftCriterionItem(
+                    span_id="req-9998",
                     kind=JDDraftCriterionKind.OTHER,
                     requirement="Passing an exam",
                     source_text="Passing an exam",
@@ -1588,6 +1589,7 @@ async def test_draft_job_criteria_drops_fabricated_unrelated_requirement(
                 # built a real, scored CriterionIn — proving the grounding
                 # gate also guards the success path, not only OTHER.
                 JDDraftCriterionItem(
+                    span_id="req-9999",
                     kind=CriterionKind.LANGUAGE,
                     requirement="İngilis dili",
                     source_text="İngilis dili tələb olunur",
@@ -1643,6 +1645,7 @@ async def test_explicit_draft_job_criteria_action_never_calls_the_routing_model(
             title="Rol",
             must_have=[
                 JDDraftCriterionItem(
+                    span_id="req-0001",
                     kind=CriterionKind.SKILL, requirement="Python", source_text="Python bilməlidir"
                 )
             ],
@@ -1685,6 +1688,7 @@ async def test_explicit_draft_job_criteria_action_cannot_become_a_search(
             title="Backend Mühəndisi",
             must_have=[
                 JDDraftCriterionItem(
+                    span_id="req-0001",
                     kind=CriterionKind.SKILL, requirement="Python", source_text="Python bilməlidir"
                 )
             ],

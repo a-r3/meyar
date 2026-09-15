@@ -6,7 +6,7 @@
 {% for row in rows %}
 {% set is_experience = row.kind == "EXPERIENCE" %}
 <tr>
-  <td class="col-kind"><select class="js-kind-select" name="{{ prefix }}_kind_{{ loop.index0 }}">{% for value, label in kind_options %}<option value="{{ value }}"{% if row.kind == value %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></td>
+  <td class="col-kind">{% if row.span_id %}<input type="hidden" name="{{ prefix }}_span_id_{{ loop.index0 }}" value="{{ row.span_id }}">{% endif %}<select class="js-kind-select" name="{{ prefix }}_kind_{{ loop.index0 }}">{% for value, label in kind_options %}<option value="{{ value }}"{% if row.kind == value %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></td>
   <td class="col-requirement"><input type="text" name="{{ prefix }}_requirement_{{ loop.index0 }}" value="{{ row.requirement }}" maxlength="200" placeholder="Məs. Python, ACAMS, İngilis dili — 'Təcrübə' üçün qısa təsvir, məs. Minimum backend təcrübəsi"></td>
   <td class="col-years"><input type="number" step="0.5" min="0" max="60" class="js-min-years" name="{{ prefix }}_min_years_{{ loop.index0 }}" value="{{ row.min_years if is_experience else "" }}" placeholder="{{ "il" if is_experience else "—" }}"{% if not is_experience %} disabled aria-disabled="true"{% endif %}></td>
   <td class="col-weight"><input type="number" step="0.5" min="0" max="10" class="js-weight" name="{{ prefix }}_weight_{{ loop.index0 }}" value="{{ row.weight }}" aria-label="Əhəmiyyət (əlavə parametr)"></td>

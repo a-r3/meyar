@@ -12,7 +12,13 @@ from meyar.agent.prompts import (
     build_grounded_selection_user_prompt,
     build_jd_criteria_draft_user_prompt,
 )
-from meyar.agent.schemas import AgentDecision, GroundedFact, GroundedSelection, JDCriteriaDraft
+from meyar.agent.schemas import (
+    AgentDecision,
+    GroundedFact,
+    GroundedSelection,
+    JDCriteriaDraft,
+    RequirementSpan,
+)
 from meyar.extraction.identity_prompts import IDENTITY_SYSTEM_PROMPT
 from meyar.extraction.prompts import SYSTEM_PROMPT, build_user_prompt
 from meyar.extraction.view import ProfessionalDocumentView
@@ -175,11 +181,17 @@ class OllamaLLMProvider:
         return selection, provenance
 
     async def draft_job_criteria(
-        self, jd_text: str, *, repair: bool = False
+        self,
+        jd_text: str,
+        *,
+        requirement_spans: list[RequirementSpan],
+        repair: bool = False,
     ) -> tuple[JDCriteriaDraft, LLMResultProvenance]:
         content, provenance = await self._chat(
             system_prompt=JD_CRITERIA_DRAFT_SYSTEM_PROMPT,
-            user_prompt=build_jd_criteria_draft_user_prompt(jd_text=jd_text, repair=repair),
+            user_prompt=build_jd_criteria_draft_user_prompt(
+                jd_text=jd_text, requirement_spans=requirement_spans, repair=repair
+            ),
             schema=JDCriteriaDraft.model_json_schema(),
             think=False,
         )

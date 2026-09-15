@@ -3,7 +3,13 @@ real running LLM or embedding model — see Slice 4 spec §21."""
 
 from typing import Any
 
-from meyar.agent.schemas import AgentDecision, GroundedFact, GroundedSelection, JDCriteriaDraft
+from meyar.agent.schemas import (
+    AgentDecision,
+    GroundedFact,
+    GroundedSelection,
+    JDCriteriaDraft,
+    RequirementSpan,
+)
 from meyar.embedding.provider import EmbeddingProviderError, EmbeddingResult
 from meyar.extraction.view import ProfessionalDocumentView
 from meyar.llm.provider import LLMProviderError, LLMResultProvenance
@@ -64,6 +70,7 @@ class FakeLLMProvider:
         self._jd_draft_fail_first_n_calls = jd_draft_fail_first_n_calls
         self.jd_draft_call_count = 0
         self.last_jd_text: str | None = None
+        self.last_requirement_spans: list[RequirementSpan] | None = None
 
     async def extract_candidate_profile(
         self, view: ProfessionalDocumentView
@@ -181,10 +188,15 @@ class FakeLLMProvider:
         return self._grounded_selection, provenance
 
     async def draft_job_criteria(
-        self, jd_text: str, *, repair: bool = False
+        self,
+        jd_text: str,
+        *,
+        requirement_spans: list[RequirementSpan],
+        repair: bool = False,
     ) -> tuple[JDCriteriaDraft, LLMResultProvenance]:
         self.jd_draft_call_count += 1
         self.last_jd_text = jd_text
+        self.last_requirement_spans = requirement_spans
         if self.jd_draft_call_count <= self._jd_draft_fail_first_n_calls:
             from meyar.llm.provider import ModelSchemaInvalidError
 

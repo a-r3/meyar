@@ -189,10 +189,12 @@ class CriterionRowView(BaseModel):
     requirement: str
     min_years: str
     weight: str
+    span_id: str | None = None
 
 
 class AgentJobDraftView(BaseModel):
     title: str | None
+    draft_id: uuid.UUID
     must_have_rows: list[CriterionRowView] = Field(default_factory=list)
     preferred_rows: list[CriterionRowView] = Field(default_factory=list)
     # Non-sensitive requirements the deterministic validator could not turn

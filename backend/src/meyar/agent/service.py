@@ -23,6 +23,7 @@ from datetime import date
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meyar.agent.jd_authority import explicit_modality, segment_requirement_spans
 from meyar.agent.prompts import AGENT_PROMPT_VERSION
 from meyar.agent.schemas import (
     AGENT_POLICY_VERSION,
@@ -45,8 +46,12 @@ from meyar.agent.schemas import (
     JDDraftCriterionItem,
     JDDraftCriterionKind,
     NeedsReviewJDCriterionItem,
+    RequirementSpan,
+    RequirementSpanResult,
+    RequirementSpanState,
     UnsupportedJDCriterionItem,
 )
+from meyar.core.domain_terms import DOMAIN_SYNONYMS, canonicalize_domain
 from meyar.core.text import (
     combine_degree_and_field,
     fold_az_ascii,
@@ -54,6 +59,7 @@ from meyar.core.text import (
     slugify_criterion_label,
 )
 from meyar.embedding.provider import EmbeddingProvider
+from meyar.evaluation.normalization import normalize_skill_name
 from meyar.llm.provider import (
     LLMProvider,
     LLMProviderError,
@@ -95,108 +101,6 @@ def _fold(text: str) -> str:
     return fold_az_ascii(normalize_azerbaijani_case(text))
 
 
-# --- D-046 (PR #42 owner correction, issue #33): JD requirement grounding ---
-#
-# Real-Ollama acceptance testing surfaced a genuine content-fabrication
-# defect distinct from D-042/D-045's routing/classification findings: a
-# short or underspecified JD reliably gets a plausible-sounding but wholly
-# unstated requirement "filled in" from the model's own prior/training
-# knowledge about what a role "typically" requires (e.g. "İngilis dili"
-# fabricated onto a JD that never mentions language; the reported
-# "Passing an exam" fabricated onto a JD that only states travel
-# readiness). The JD_CRITERIA_DRAFT_SYSTEM_PROMPT already instructs "only
-# include a requirement that is actually stated in the text — never
-# invent one," and this is unreliable at this model size, matching the
-# project's established practice (D-042 point 6) of not expecting a
-# stronger prompt alone to fix a small-model behavior — so this is a
-# deterministic post-hoc check, not another prompt iteration.
-#
-# Generic connector/particle words carry no grounding signal either way
-# (they appear in nearly every requirement sentence regardless of actual
-# content) and are excluded before comparison.
-_GROUNDING_STOPWORDS = frozenset(
-    {
-        "ve",
-        "ya",
-        "ki",
-        "bir",
-        "bu",
-        "da",
-        "de",
-        "ile",
-        "ucun",
-        "uzre",
-        "olan",
-        "olmaq",
-        "olmalidir",
-        "olmalidi",
-        "etmek",
-        "edir",
-        "gore",
-        "haqqinda",
-        "arasinda",
-        "hem",
-        "yalniz",
-        "cox",
-        "daha",
-        "kimi",
-        "the",
-        "a",
-        "an",
-        "and",
-        "or",
-        "of",
-        "to",
-        "for",
-        "in",
-        "on",
-        "with",
-    }
-)
-
-
-def _grounding_tokens(text: str) -> list[str]:
-    """Folded, stopword-filtered word/number tokens used only for the
-    requirement-grounding check below — deliberately coarser than
-    slugify_criterion_label (which must produce a stable id, not a
-    comparison signal)."""
-    folded = _fold(text)
-    words = re.findall(r"[a-z0-9]+", folded)
-    return [word for word in words if word not in _GROUNDING_STOPWORDS]
-
-
-def _is_requirement_grounded_in_jd_text(requirement: str, jd_text: str) -> bool:
-    """Deterministic lexical check that a model-drafted requirement is
-    actually traceable to the JD's own text, rather than fabricated. Fold-
-    tolerant (Azerbaijani suffix variance survives fold_az_ascii/
-    normalize_azerbaijani_case, e.g. "ezamiyyətə" vs "ezamiyyət") and
-    requires at least half of the requirement's own non-connector words to
-    appear as a substring of the JD text. A requirement with no comparable
-    content word at all (only connector words, or an empty token set)
-    is treated as ungrounded — a real JD requirement always names at
-    least one concrete term (a skill, a duration, a credential, an
-    activity), so the absence of any such term is itself signal, not a
-    false negative to guard against."""
-    tokens = _grounding_tokens(requirement)
-    if not tokens:
-        return False
-    jd_folded = _fold(jd_text)
-    matched = sum(1 for token in tokens if token in jd_folded)
-    return matched * 2 >= len(tokens)
-
-
-# Issue #44: source fragments are the unit of JD factual authority.  The
-# splitter is deliberately bounded and conservative: explicit sentences,
-# semicolon/newline clauses, and bullet rows with requirement cues become
-# reviewable units.  It does not try to perform general entailment.
-_SOURCE_SPLIT_RE = re.compile(r"(?:\r?\n)+|(?<=[.!?;])\s+")
-_REQUIREMENT_CUE_RE = re.compile(
-    r"\b(required|requirement|must|mandatory|minimum|preferred|nice\s+to\s+have|"
-    r"experience|years?|proficiency|level|degree|certificat(?:e|ion)|language|"
-    r"license|licence|willing|available|teleb\w*|mutleq\w*|vacib\w*|ustunluk\w*|arzuolunan\w*|"
-    r"tecrube|il|dil|sertifikat|bakalavr|magistr|[a-z]+m[ae]lidir)\b",
-    re.IGNORECASE,
-)
 _REQUIRED_CUE_RE = re.compile(
     r"\b(required|must|mandatory|minimum|teleb\w*|mutleq\w*|vacib\w*|olmalidir|olmalidi|[a-z]+m[ae]lidir)\b",
     re.IGNORECASE,
@@ -223,212 +127,25 @@ _LANGUAGE_CUE_RE = re.compile(
     r"\b(language|proficiency|dil\w*|english|ingilis\w*|russian|rusca|azerbaijani|azerbaycan\w*)\b",
     re.IGNORECASE,
 )
-_FIELD_WORDS = _GROUNDING_STOPWORDS | frozenset(
-    {
-        "required",
-        "requirement",
-        "must",
-        "mandatory",
-        "minimum",
-        "preferred",
-        "nice",
-        "have",
-        "experience",
-        "years",
-        "year",
-        "yrs",
-        "proficiency",
-        "level",
-        "teleb",
-        "mutleq",
-        "vacib",
-        "olmalidir",
-        "olmalidi",
-        "ustunluk",
-        "arzuolunan",
-        "tecrube",
-        "il",
-        "knowledge",
-        "knowledgeable",
-        "bacariq",
-        "bilik",
-        "olunur",
-        "olaraq",
-        "lazimdir",
-        "namized",
-        "candidate",
-    }
-)
 
 
 def _normalize_source_text(text: str) -> str:
     return " ".join(_fold(text).split())
 
 
-def _extract_source_requirement_spans(jd_text: str) -> list[str]:
-    spans: list[str] = []
-    for raw in _SOURCE_SPLIT_RE.split(jd_text):
-        span = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", raw).strip(" \t.;")
-        if not span:
-            continue
-        folded = _normalize_source_text(span)
-        is_bullet = bool(re.match(r"^\s*(?:[-*•]|\d+[.)])\s*", raw))
-        if is_bullet or _REQUIREMENT_CUE_RE.search(folded) or _LANGUAGE_LEVEL_RE.search(folded):
-            spans.append(span)
-    return spans
+_TITLE_STOPWORDS = frozenset(
+    {"a", "an", "the", "ucun", "uzre", "axtaririq", "role", "rol", "vakansiya"}
+)
 
 
-def _source_span_index(source_text: str, spans: list[str]) -> int | None:
-    needle = _normalize_source_text(source_text)
-    if not needle:
-        return None
-    for index, span in enumerate(spans):
-        haystack = _normalize_source_text(span)
-        if needle == haystack or needle in haystack:
-            return index
-    return None
-
-
-def _criterion_type_from_source(source_text: str) -> CriterionType | None:
-    folded = _normalize_source_text(source_text)
-    required = bool(_REQUIRED_CUE_RE.search(folded))
-    preferred = bool(_PREFERRED_CUE_RE.search(folded))
-    if required == preferred:
-        return None
-    return CriterionType.MUST_HAVE if required else CriterionType.PREFERRED
-
-
-def _number_is_attributed(value: float, source_text: str) -> bool:
-    for raw in re.findall(r"(?<![\w.])\d+(?:[.,]\d+)?(?![\w.])", source_text):
-        try:
-            if abs(float(raw.replace(",", ".")) - value) < 1e-9:
-                return True
-        except ValueError:
-            continue
-    return False
-
-
-def _material_tokens_are_attributed(value: str, source_text: str) -> bool:
-    tokens = [token for token in _grounding_tokens(value) if token not in _FIELD_WORDS]
-    source_tokens = set(_grounding_tokens(source_text))
-
-    def attributed(token: str) -> bool:
-        return any(
-            token == source_token
-            or (
-                min(len(token), len(source_token)) >= 4
-                and (token.startswith(source_token) or source_token.startswith(token))
-            )
-            for source_token in source_tokens
-        )
-
-    return bool(tokens) and all(attributed(token) for token in tokens)
-
-
-def _source_scope_is_preserved(item: JDDraftCriterionItem, source_text: str) -> bool:
-    values = f"{item.requirement} {item.required_level or ''}"
-    value_tokens = _grounding_tokens(values)
-
-    def is_generic(token: str) -> bool:
-        return (
-            token in _FIELD_WORDS
-            or token.isdigit()
-            or token.startswith(("teleb", "mutleq", "vacib", "ustunluk", "arzuolunan"))
-            or token.endswith(("malidir", "melidir", "malidi", "melidi"))
-        )
-
-    source_subject = [token for token in _grounding_tokens(source_text) if not is_generic(token)]
-    return all(
-        any(
-            token == value_token
-            or (
-                min(len(token), len(value_token)) >= 4
-                and (token.startswith(value_token) or value_token.startswith(token))
-            )
-            for value_token in value_tokens
-        )
-        for token in source_subject
-    )
-
-
-def _field_binding_is_valid(
-    item: JDDraftCriterionItem, *, criterion_type: CriterionType, source_text: str
-) -> bool:
-    """Validate material semantics against one attributable source span.
-
-    This is intentionally lexical and structural, not NLI: every subject/
-    level token and number must occur in the same source fragment, modality
-    must be explicit, and a qualified duration cannot be converted to total
-    experience or bare presence.
-    """
-    if _criterion_type_from_source(source_text) != criterion_type:
-        return False
-    if not _material_tokens_are_attributed(item.requirement, source_text):
-        return False
-    if item.kind != JDDraftCriterionKind.OTHER and not _source_scope_is_preserved(
-        item, source_text
-    ):
-        return False
-
-    folded = _normalize_source_text(source_text)
-    has_duration = bool(_DURATION_CUE_RE.search(folded) and re.search(r"\d", folded))
-    if item.min_years is not None:
-        if not has_duration or not _number_is_attributed(item.min_years, source_text):
-            return False
-    if item.required_level is not None:
-        if not _material_tokens_are_attributed(item.required_level, source_text):
-            return False
-    elif item.kind == JDDraftCriterionKind.LANGUAGE and _LANGUAGE_LEVEL_RE.search(folded):
-        return False
-
-    if item.kind == JDDraftCriterionKind.EXPERIENCE:
-        if item.min_years is None:
-            # A source that states experience without a duration is real but
-            # not representable by CriterionIn.EXPERIENCE; let schema
-            # validation classify it UNSUPPORTED. If the source did state a
-            # number, omission of that number is a material-field mismatch.
-            return not has_duration
-        # An explicit general/total marker is always sufficient. Otherwise
-        # only a span with no named subject beyond duration/modality words is
-        # general experience. "5 years Python experience" is therefore not.
-        if not _GENERAL_EXPERIENCE_RE.search(folded):
-            remaining = [
-                t
-                for t in _grounding_tokens(source_text)
-                if t not in _FIELD_WORDS and not t.isdigit()
-            ]
-            if remaining:
-                return False
-    elif item.kind in (
-        JDDraftCriterionKind.SKILL_EXPERIENCE,
-        JDDraftCriterionKind.DOMAIN_EXPERIENCE,
-    ):
-        if item.min_years is None:
-            return not has_duration
-        if not has_duration:
-            return False
-    elif item.min_years is not None or has_duration:
-        # Never discard or transfer a duration by accepting only the bare
-        # subject under a non-duration kind.
-        return False
-
-    if item.kind != JDDraftCriterionKind.LANGUAGE and item.required_level is not None:
-        return False
-    if item.kind == JDDraftCriterionKind.SKILL and (
-        _CERTIFICATION_CUE_RE.search(folded)
-        or _EDUCATION_CUE_RE.search(folded)
-        or _LANGUAGE_CUE_RE.search(folded)
-    ):
-        return False
-    if item.kind == JDDraftCriterionKind.CERTIFICATION and not _CERTIFICATION_CUE_RE.search(folded):
-        return False
-    if item.kind == JDDraftCriterionKind.EDUCATION and not _EDUCATION_CUE_RE.search(folded):
-        return False
-    if item.kind == JDDraftCriterionKind.LANGUAGE and not (
-        _LANGUAGE_CUE_RE.search(folded) or _LANGUAGE_LEVEL_RE.search(folded)
-    ):
-        return False
-    return True
+def _title_is_attributed(title: str, jd_text: str) -> bool:
+    title_tokens = [
+        token
+        for token in re.findall(r"[a-z0-9]+", _normalize_source_text(title))
+        if token not in _TITLE_STOPWORDS
+    ]
+    source_tokens = set(re.findall(r"[a-z0-9]+", _normalize_source_text(jd_text)))
+    return bool(title_tokens) and all(token in source_tokens for token in title_tokens)
 
 
 _AGENT_RESPONSE_TEXT: dict[AgentResponseCode, str] = {
@@ -889,12 +606,156 @@ async def _synthesize_grounded_answer(
     return None
 
 
+def _canonical_subject(span: RequirementSpan) -> str:
+    """Extract the complete source subject without fuzzy token matching."""
+    subject = span.normalized
+    subject = re.sub(r"\bis\s+(?:a\s+)?plus\b", " ", subject)
+    subject = _REQUIRED_CUE_RE.sub(" ", subject)
+    subject = _PREFERRED_CUE_RE.sub(" ", subject)
+    subject = re.sub(r"\b\d+(?:[.,]\d+)?\s*(?:years?|yrs?|il)\b", " ", subject)
+    subject = _LANGUAGE_LEVEL_RE.sub(" ", subject)
+    subject = re.sub(
+        r"\b(?:experience|tecrube\w*|proficiency|level|knowledge|bilik\w*|bacariq\w*|"
+        r"olunur|olaraq|candidate|namized|total|overall|general|umumi)\b",
+        " ",
+        subject,
+    )
+    return " ".join(re.findall(r"[a-z0-9+#.]+", subject)).strip()
+
+
+def _source_number(span: RequirementSpan) -> float | None:
+    values = re.findall(r"(?<![\w.])\d+(?:[.,]\d+)?(?![\w.])", span.normalized)
+    if len(values) != 1:
+        return None
+    return float(values[0].replace(",", "."))
+
+
+def _source_language_level(span: RequirementSpan) -> str | None:
+    match = _LANGUAGE_LEVEL_RE.search(span.normalized)
+    return match.group(0).casefold() if match else None
+
+
+def _subjects_match(kind: JDDraftCriterionKind, drafted: str, canonical: str) -> bool:
+    if not canonical:
+        return False
+    if kind in (JDDraftCriterionKind.SKILL, JDDraftCriterionKind.SKILL_EXPERIENCE):
+        return normalize_skill_name(_normalize_source_text(drafted)) == normalize_skill_name(
+            canonical
+        )
+    if kind == JDDraftCriterionKind.DOMAIN_EXPERIENCE:
+        drafted_domain = "banking" if _normalize_source_text(drafted) == "bank" else drafted
+        canonical_domain = "banking" if canonical == "bank" else canonical
+        return canonicalize_domain(drafted_domain) == canonicalize_domain(canonical_domain)
+    return _normalize_source_text(drafted) == _normalize_source_text(canonical)
+
+
+def _expected_experience_kind(subject: str) -> JDDraftCriterionKind | None:
+    if not subject:
+        return None
+    if subject == "bank" or canonicalize_domain(subject) in DOMAIN_SYNONYMS:
+        return JDDraftCriterionKind.DOMAIN_EXPERIENCE
+    return JDDraftCriterionKind.SKILL_EXPERIENCE
+
+
+def _canonical_binding_result(
+    item: JDDraftCriterionItem,
+    *,
+    criterion_type: CriterionType,
+    span: RequirementSpan,
+) -> DroppedJDCriterionReason | None:
+    """Validate an item against the complete server-owned occurrence.
+
+    ``None`` means the item can proceed to CriterionIn construction.
+    Unsupported means the source semantics are valid but the current agent
+    review form cannot round-trip them. Every other mismatch fails closed to
+    human review; source_text is intentionally never consulted.
+    """
+    if span.segmentation_needs_review:
+        return DroppedJDCriterionReason.NEEDS_HUMAN_REVIEW
+    source_type = explicit_modality(span.text)
+    if source_type is None or source_type != criterion_type.value:
+        return DroppedJDCriterionReason.NEEDS_HUMAN_REVIEW
+
+    folded = span.normalized
+    subject = _canonical_subject(span)
+    has_experience = bool(re.search(r"\b(?:experience|tecrube\w*)\b", folded))
+    has_duration = bool(_DURATION_CUE_RE.search(folded) and re.search(r"\d", folded))
+    source_number = _source_number(span)
+    source_level = _source_language_level(span)
+    is_language = bool(_LANGUAGE_CUE_RE.search(folded) or source_level)
+    is_certification = bool(_CERTIFICATION_CUE_RE.search(folded))
+    is_education = bool(_EDUCATION_CUE_RE.search(folded))
+    is_general_experience = bool(_GENERAL_EXPERIENCE_RE.search(folded))
+
+    if item.kind == JDDraftCriterionKind.OTHER:
+        return DroppedJDCriterionReason.UNSUPPORTED
+
+    if (has_experience or has_duration) and not is_general_experience:
+        expected = _expected_experience_kind(subject)
+        if (
+            expected is None
+            or item.kind != expected
+            or not _subjects_match(item.kind, item.requirement, subject)
+        ):
+            return DroppedJDCriterionReason.NEEDS_HUMAN_REVIEW
+        if has_duration:
+            if source_number is None or item.min_years != source_number:
+                return DroppedJDCriterionReason.NEEDS_HUMAN_REVIEW
+        elif item.min_years is not None:
+            return DroppedJDCriterionReason.NEEDS_HUMAN_REVIEW
+        return DroppedJDCriterionReason.UNSUPPORTED
+
+    if is_language:
+        if item.kind != JDDraftCriterionKind.LANGUAGE or not _subjects_match(
+            item.kind, item.requirement, subject
+        ):
+            return DroppedJDCriterionReason.NEEDS_HUMAN_REVIEW
+        if source_level is not None:
+            if (
+                item.required_level is None
+                or _normalize_source_text(item.required_level) != source_level
+            ):
+                return DroppedJDCriterionReason.NEEDS_HUMAN_REVIEW
+            return DroppedJDCriterionReason.UNSUPPORTED
+        if item.required_level is not None:
+            return DroppedJDCriterionReason.NEEDS_HUMAN_REVIEW
+    elif is_certification:
+        if item.kind != JDDraftCriterionKind.CERTIFICATION or not _subjects_match(
+            item.kind, item.requirement, subject
+        ):
+            return DroppedJDCriterionReason.NEEDS_HUMAN_REVIEW
+    elif is_education:
+        if item.kind != JDDraftCriterionKind.EDUCATION or not _subjects_match(
+            item.kind, item.requirement, subject
+        ):
+            return DroppedJDCriterionReason.NEEDS_HUMAN_REVIEW
+    elif is_general_experience:
+        if (
+            item.kind != JDDraftCriterionKind.EXPERIENCE
+            or not has_duration
+            or source_number is None
+            or item.min_years != source_number
+        ):
+            return DroppedJDCriterionReason.NEEDS_HUMAN_REVIEW
+    else:
+        if item.kind != JDDraftCriterionKind.SKILL or not _subjects_match(
+            item.kind, item.requirement, subject
+        ):
+            return DroppedJDCriterionReason.NEEDS_HUMAN_REVIEW
+
+    if item.min_years is not None and item.kind != JDDraftCriterionKind.EXPERIENCE:
+        return DroppedJDCriterionReason.NEEDS_HUMAN_REVIEW
+    if item.required_level is not None and item.kind != JDDraftCriterionKind.LANGUAGE:
+        return DroppedJDCriterionReason.NEEDS_HUMAN_REVIEW
+    return None
+
+
 def _build_criterion_from_draft_item(
     item: JDDraftCriterionItem,
     *,
     criterion_type: CriterionType,
     used_ids: set[str],
-    source_text: str | None,
+    source_span: RequirementSpan | None,
 ) -> tuple[CriterionIn | None, DroppedJDCriterionReason | None]:
     """Re-validates one MODEL-PRODUCED draft item into a real CriterionIn —
     the exact same schema/prohibited-attribute denylist the manual
@@ -920,25 +781,22 @@ def _build_criterion_from_draft_item(
     unsupported requirement into a supported (and therefore scored)
     criterion, which the deterministic scorer must never do.
 
-    The grounding check (D-046) runs LAST and gates BOTH remaining
-    disclosure outcomes uniformly: a valid CriterionIn (which would be
-    shown as a real, scored criterion) and an UNSUPPORTED classification
-    (which discloses the requirement's own text to HR as a real JD
-    requirement the system merely cannot score) — a requirement reaching
-    either of those without a lexical trace in the JD text is reclassified
-    UNGROUNDED instead, count-only, never disclosed. PROHIBITED is an
-    unconditional early return above and is never reordered or gated by
-    this check — a doubly-bad item (both fabricated and sensitive) is
-    still counted PROHIBITED, exactly as before this check existed."""
+    A missing/unknown server span id gates every disclosure/scoring outcome
+    as UNGROUNDED. A resolved item is checked only against that complete
+    canonical occurrence. PROHIBITED remains an unconditional early return:
+    a doubly-bad item (fabricated and sensitive) is still count-only."""
     # Prohibition is classification-independent and runs before OTHER or
     # any other kind branch. A model cannot relabel sensitive text into a
     # safe bucket. Check every model-authored field that can carry it.
     if find_prohibited_term(item.requirement, item.source_text, item.required_level or ""):
         return None, DroppedJDCriterionReason.PROHIBITED
-    if source_text is None:
+    if source_span is None:
         return None, DroppedJDCriterionReason.UNGROUNDED
-    if not _field_binding_is_valid(item, criterion_type=criterion_type, source_text=source_text):
-        return None, DroppedJDCriterionReason.NEEDS_HUMAN_REVIEW
+    binding_reason = _canonical_binding_result(
+        item, criterion_type=criterion_type, span=source_span
+    )
+    if binding_reason is not None:
+        return None, binding_reason
 
     # These evaluator fields cannot currently survive the agent review
     # form unchanged: it has no required_level control and exposes only
@@ -998,10 +856,13 @@ async def _dispatch_draft_job_criteria(llm: LLMProvider, *, jd_text: str) -> Age
     AGENT_PROVIDER_FAILURE/MALFORMED_MODEL_OUTPUT precedent (D-036). A
     successful call always returns a real AgentToolResult, even with zero
     criteria."""
+    source_spans = segment_requirement_spans(jd_text)
     draft: JDCriteriaDraft | None = None
     for attempt in range(1, MAX_JD_DRAFT_ATTEMPTS + 1):
         try:
-            draft, _provenance = await llm.draft_job_criteria(jd_text, repair=attempt > 1)
+            draft, _provenance = await llm.draft_job_criteria(
+                jd_text, requirement_spans=source_spans, repair=attempt > 1
+            )
             break
         except ModelSchemaInvalidError:
             continue
@@ -1011,7 +872,7 @@ async def _dispatch_draft_job_criteria(llm: LLMProvider, *, jd_text: str) -> Age
         return None
     safe_title = (
         draft.title
-        if draft.title and _material_tokens_are_attributed(draft.title, jd_text)
+        if draft.title and _title_is_attributed(draft.title, jd_text)
         else "Vakansiya qaralaması"
     )
 
@@ -1020,91 +881,108 @@ async def _dispatch_draft_job_criteria(llm: LLMProvider, *, jd_text: str) -> Age
     preferred: list[CriterionIn] = []
     unsupported: list[UnsupportedJDCriterionItem] = []
     needs_review: list[NeedsReviewJDCriterionItem] = []
-    source_spans = _extract_source_requirement_spans(jd_text)
-    covered_source_spans: set[int] = set()
+    spans_by_id = {span.span_id: span for span in source_spans}
+    span_states: dict[str, RequirementSpanState] = {}
+    span_criterion_ids: dict[str, str] = {}
     raw_prohibited_spans = {
-        index for index, span in enumerate(source_spans) if find_prohibited_term(span)
+        span.span_id for span in source_spans if find_prohibited_term(span.text)
     }
     raw_jd_has_prohibited_text = find_prohibited_term(jd_text) is not None
     prohibited_count = max(len(raw_prohibited_spans), int(raw_jd_has_prohibited_text))
-    covered_source_spans.update(raw_prohibited_spans)
+    span_states.update(
+        {span_id: RequirementSpanState.PROHIBITED for span_id in raw_prohibited_spans}
+    )
     ungrounded_count = 0
     for items, criterion_type, bucket in (
         (draft.must_have, CriterionType.MUST_HAVE, must_have),
         (draft.preferred, CriterionType.PREFERRED, preferred),
     ):
         for item in items:
-            source_index = _source_span_index(item.source_text, source_spans)
-            source_text = item.source_text if source_index is not None else None
-            covers_whole_span = bool(
-                source_index is not None
-                and _normalize_source_text(item.source_text)
-                == _normalize_source_text(source_spans[source_index])
-            )
+            source_span = spans_by_id.get(item.span_id)
+            # Raw-JD prohibition is independently authoritative. A model
+            # reference to that same occurrence cannot create a second
+            # outcome or recast it as an ungrounded fabrication.
+            if source_span is not None and source_span.span_id in raw_prohibited_spans:
+                continue
+            if source_span is not None and item.span_id in span_states:
+                # One occurrence has one explicit terminal state and can
+                # authorize at most one row. A duplicate model item cannot
+                # manufacture a second criterion from the same source.
+                ungrounded_count += 1
+                continue
             criterion, reason = _build_criterion_from_draft_item(
                 item,
                 criterion_type=criterion_type,
                 used_ids=used_ids,
-                source_text=source_text,
+                source_span=source_span,
             )
             if criterion is not None:
                 bucket.append(criterion)
-                assert source_index is not None
-                if covers_whole_span and source_index is not None:
-                    covered_source_spans.add(source_index)
+                assert source_span is not None
+                span_states[source_span.span_id] = RequirementSpanState.SCORABLE
+                span_criterion_ids[source_span.span_id] = criterion.id
             elif reason == DroppedJDCriterionReason.PROHIBITED:
-                if (
-                    source_index is not None
-                    and source_index not in raw_prohibited_spans
-                ) or (source_index is None and not raw_jd_has_prohibited_text):
+                source_not_already_counted = (
+                    source_span is not None
+                    and source_span.span_id not in raw_prohibited_spans
+                ) or (source_span is None and not raw_jd_has_prohibited_text)
+                if source_not_already_counted:
                     prohibited_count += 1
-                if covers_whole_span and source_index is not None:
-                    covered_source_spans.add(source_index)
             elif reason == DroppedJDCriterionReason.UNGROUNDED:
                 ungrounded_count += 1
             elif reason == DroppedJDCriterionReason.NEEDS_HUMAN_REVIEW:
-                review_text = source_text or item.source_text
-                if not find_prohibited_term(review_text) and all(
-                    existing.requirement != review_text for existing in needs_review
-                ):
-                    needs_review.append(
-                        NeedsReviewJDCriterionItem(
-                            requirement=review_text, criterion_type=criterion_type
-                        )
-                    )
-                if covers_whole_span and source_index is not None:
-                    covered_source_spans.add(source_index)
+                if source_span is not None:
+                    span_states[source_span.span_id] = RequirementSpanState.NEEDS_HUMAN_REVIEW
             else:
+                assert source_span is not None
                 unsupported.append(
                     UnsupportedJDCriterionItem(
-                        requirement=source_text or item.requirement,
+                        requirement=source_span.text,
                         criterion_type=criterion_type,
                     )
                 )
-                if covers_whole_span and source_index is not None:
-                    covered_source_spans.add(source_index)
+                span_states[source_span.span_id] = RequirementSpanState.UNSUPPORTED
 
-    # Reconcile source requirements after processing the model draft. A
-    # material source span the model omitted is retained for HR review and
-    # never becomes a CriterionIn or score input.
-    for index, source_span in enumerate(source_spans):
-        if index in covered_source_spans:
-            continue
-        inferred_type = _criterion_type_from_source(source_span)
-        needs_review.append(
-            NeedsReviewJDCriterionItem(requirement=source_span, criterion_type=inferred_type)
+    requirement_results: list[RequirementSpanResult] = []
+    for source_span in source_spans:
+        inferred_value = explicit_modality(source_span.text)
+        inferred_type = CriterionType(inferred_value) if inferred_value is not None else None
+        state = span_states.get(
+            source_span.span_id, RequirementSpanState.NEEDS_HUMAN_REVIEW
+        )
+        if state == RequirementSpanState.NEEDS_HUMAN_REVIEW:
+            needs_review.append(
+                NeedsReviewJDCriterionItem(
+                    requirement=source_span.text, criterion_type=inferred_type
+                )
+            )
+        requirement_results.append(
+            RequirementSpanResult(
+                span_id=source_span.span_id,
+                start_offset=source_span.start_offset,
+                end_offset=source_span.end_offset,
+                text=(None if state == RequirementSpanState.PROHIBITED else source_span.text),
+                normalized=(
+                    None if state == RequirementSpanState.PROHIBITED else source_span.normalized
+                ),
+                state=state,
+                criterion_type=inferred_type,
+                criterion_id=span_criterion_ids.get(source_span.span_id),
+            )
         )
 
     return AgentToolResult(
         tool_name=AgentActionType.DRAFT_JOB_CRITERIA,
         job_draft=AgentJobDraftToolResult(
             title=safe_title,
+            draft_id=uuid.uuid4(),
             must_have=must_have,
             preferred=preferred,
             unsupported=unsupported,
             needs_review=needs_review,
             ungrounded_count=ungrounded_count,
             prohibited_count=prohibited_count,
+            requirements=requirement_results,
         ),
     )
 
@@ -1159,16 +1037,23 @@ async def _finish_turn(
     sentence — meyar.ui.service._agent_turn_headline); this call cannot
     compute that richer headline itself, since it runs before the
     router's post-tenant-lookup view-building step."""
-    turns = [
-        *turns,
-        {
-            "role": "assistant",
-            "text": result.message or "",
-            "outcome": result.outcome.value,
-            "text_authority": ASSISTANT_TEXT_AUTHORITY_SERVER,
-            "text_authority_version": ASSISTANT_TEXT_AUTHORITY_VERSION,
-        },
-    ][-max_context_turns:]
+    assistant_turn: dict[str, object] = {
+        "role": "assistant",
+        "text": result.message or "",
+        "outcome": result.outcome.value,
+        "text_authority": ASSISTANT_TEXT_AUTHORITY_SERVER,
+        "text_authority_version": ASSISTANT_TEXT_AUTHORITY_VERSION,
+    }
+    pending_drafts = [
+        tool_result.job_draft
+        for tool_result in result.tool_results
+        if tool_result.job_draft is not None
+    ]
+    if pending_drafts:
+        # Session/tenant-scoped server authority used by POST /ui/jobs to
+        # revalidate confirmation. Browser fields never recreate it.
+        assistant_turn["pending_job_draft"] = pending_drafts[-1].model_dump(mode="json")
+    turns = [*turns, assistant_turn][-max_context_turns:]
     await save_conversation_state(
         db,
         conversation,

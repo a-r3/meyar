@@ -79,6 +79,7 @@
       <form method="post" action="/ui/jobs" class="stack-form">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <input type="hidden" name="from_agent_draft" value="1">
+        <input type="hidden" name="draft_id" value="{{ draft.draft_id }}">
         <label for="jd-title">Vakansiya başlığı</label>
         <input id="jd-title" name="title" type="text" required maxlength="255" value="{{ draft.title or "" }}">
 
@@ -87,7 +88,7 @@
         {% if draft.unsupported_must_have %}
         <div class="alert alert-info">
           <p><strong>Məlumat üçün — qiymətləndirməyə daxil edilmir:</strong> bu tələblər real və qeydə alınıb, lakin sistem hələ bu növ tələbi ölçə bilmir, ona görə bal/reytinqə təsir etmir:</p>
-          <ul>{% for requirement in draft.unsupported_must_have %}<li>{{ requirement }}<input type="hidden" name="unsupported_must_have" value="{{ requirement }}"></li>{% endfor %}</ul>
+          <ul>{% for requirement in draft.unsupported_must_have %}<li>{{ requirement }}</li>{% endfor %}</ul>
         </div>
         {% endif %}
 
@@ -96,23 +97,23 @@
         {% if draft.unsupported_preferred %}
         <div class="alert alert-info">
           <p><strong>Məlumat üçün — qiymətləndirməyə daxil edilmir:</strong> bu tələblər real və qeydə alınıb, lakin sistem hələ bu növ tələbi ölçə bilmir, ona görə bal/reytinqə təsir etmir:</p>
-          <ul>{% for requirement in draft.unsupported_preferred %}<li>{{ requirement }}<input type="hidden" name="unsupported_preferred" value="{{ requirement }}"></li>{% endfor %}</ul>
+          <ul>{% for requirement in draft.unsupported_preferred %}<li>{{ requirement }}</li>{% endfor %}</ul>
         </div>
         {% endif %}
         {% if draft.prohibited_count %}
-        <p class="alert alert-warning">{{ draft.prohibited_count }} tələb qadağan olunmuş/əlaqəsiz atributa görə avtomatik qiymətləndirməyə daxil edilmədi.</p>
+        <p class="alert alert-warning">Şəxsi və ya həssas xüsusiyyətə aid {{ draft.prohibited_count }} tələb aşkarlandı. Bu məlumat namizədlərin sıralanmasında istifadə edilə bilməz; tələbi elandan çıxarın və ya işlə bağlı peşəkar tələblə əvəz edin.</p>
         {% endif %}
         {% if draft.needs_review %}
         <div class="alert alert-warning">
           <p><strong>İnsan baxışı tələb edir — qiymətləndirməyə daxil edilmir:</strong> bu mənbə tələblərinin mənası mövcud meyarlarla itkisiz təsdiqlənmədi:</p>
-          <ul>{% for requirement in draft.needs_review %}<li>{{ requirement }}<input type="hidden" name="needs_review_requirement" value="{{ requirement }}"></li>{% endfor %}</ul>
+          <ul>{% for requirement in draft.needs_review %}<li>{{ requirement }}</li>{% endfor %}</ul>
         </div>
         {% endif %}
         {% if draft.ungrounded_count %}
         <p class="alert alert-warning">{{ draft.ungrounded_count }} tələb JD mətnində aydın təsdiqlənmədiyi üçün çıxarıldı.</p>
         {% endif %}
 
-        <p class="field-help">Bu, AI tərəfindən hazırlanmış qaralamadır — yekun qərar deyil. Göndərmədən əvvəl istənilən sətri düzəldin, silin və ya əlavə edin.</p>
+        <p class="field-help">Bu, AI tərəfindən hazırlanmış qaralamadır — yekun qərar deyil. Server təsdiqli sətrləri yoxlayın; sətri silə bilərsiniz. Tələbi dəyişmək və ya əlavə etmək üçün elanı yenidən analiz edin və ya ayrıca əl ilə vakansiya yaradın.</p>
         <button class="button" type="submit">Tələbləri təsdiqlə və namizədləri sırala</button>
       </form>
     </section>

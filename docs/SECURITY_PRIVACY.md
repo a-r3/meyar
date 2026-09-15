@@ -150,15 +150,16 @@ unlabeled number but never guesses that an arbitrary identifier is a phone.
   the visible topic is resolved from a validated profile fact title, or
   omitted in favor of generic server copy; raw model topic text is never
   rendered or persisted as assistant authority.
-- JD criteria use source-fragment authority (D-054): raw JD spans are checked
-  for prohibited attributes before model interpretation; every produced
-  requirement/source fragment/level is checked again before any kind branch.
-  A model-provided source fragment must occur in the original JD, all material
-  subject/scope tokens and numeric values must bind to that same fragment, and
-  required/preferred modality must be explicit there. Omitted source spans,
-  unsupported evaluator/review combinations, and semantic mismatches remain
-  visible as unscored or human-review items. Prohibited text is count-only and
-  cannot enter scoring or be reintroduced through hidden review fields.
+- JD criteria use server-owned canonical requirement-span authority (D-055):
+  the original JD is segmented before inference into occurrence-distinct ids,
+  exact offsets/text, and a server normalization. A model references an id;
+  its `source_text` is never authority. Complete-span subject/type, kind/scope,
+  modality, duration/level, and curated exact alias identity must validate
+  before a row is scorable. Raw-JD and post-parse prohibited checks remain
+  independent of model kind, including bounded Azerbaijani inflection families.
+  Prohibited text is count-only outside the HR user's own original message and
+  cannot enter scoring. Confirmation resolves the server-held session draft;
+  browser rows and hidden fields cannot add, weaken, or replay scoring authority.
 
 ## Local-only Ollama operating contract
 

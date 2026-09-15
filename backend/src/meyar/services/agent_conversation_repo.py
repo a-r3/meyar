@@ -3,6 +3,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meyar.agent.schemas import AgentJobDraftToolResult
 from meyar.models.agent_conversation import AgentConversation
 
 ASSISTANT_TEXT_AUTHORITY_SERVER = "SERVER_VALIDATED"
@@ -17,6 +18,20 @@ async def get_conversation_by_session(
             AgentConversation.tenant_id == tenant_id,
             AgentConversation.browser_session_id == browser_session_id,
         )
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_conversation_for_update_by_session(
+    db: AsyncSession, *, tenant_id: uuid.UUID, browser_session_id: uuid.UUID
+) -> AgentConversation | None:
+    result = await db.execute(
+        select(AgentConversation)
+        .where(
+            AgentConversation.tenant_id == tenant_id,
+            AgentConversation.browser_session_id == browser_session_id,
+        )
+        .with_for_update()
     )
     return result.scalar_one_or_none()
 
@@ -99,3 +114,42 @@ async def reset_conversation(db: AsyncSession, conversation: AgentConversation) 
     get_or_create_conversation first, so it is always already this
     request's own row."""
     await save_conversation_state(db, conversation, turns=[], last_search_candidate_ids=[])
+
+
+def get_pending_job_draft(
+    conversation: AgentConversation, *, draft_id: uuid.UUID
+) -> AgentJobDraftToolResult | None:
+    """Resolve confirmation authority only from this server-held session."""
+    for turn in reversed(conversation.turns):
+        payload = turn.get("pending_job_draft")
+        if not isinstance(payload, dict):
+            continue
+        try:
+            draft = AgentJobDraftToolResult.model_validate(payload)
+        except ValueError:
+            continue
+        if draft.draft_id == draft_id:
+            return draft
+    return None
+
+
+async def consume_pending_job_draft(
+    db: AsyncSession, conversation: AgentConversation, *, draft_id: uuid.UUID
+) -> None:
+    """Make one confirmed authority non-replayable after job creation."""
+    changed = False
+    turns: list[dict] = []
+    for turn in conversation.turns:
+        current = dict(turn)
+        payload = current.get("pending_job_draft")
+        if isinstance(payload, dict) and payload.get("draft_id") == str(draft_id):
+            current.pop("pending_job_draft", None)
+            changed = True
+        turns.append(current)
+    if changed:
+        await save_conversation_state(
+            db,
+            conversation,
+            turns=turns,
+            last_search_candidate_ids=conversation.last_search_candidate_ids,
+        )
