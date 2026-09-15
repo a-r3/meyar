@@ -44,6 +44,7 @@ from meyar.agent.schemas import (
     JDCriteriaDraft,
     JDDraftCriterionItem,
     JDDraftCriterionKind,
+    NeedsReviewJDCriterionItem,
     UnsupportedJDCriterionItem,
 )
 from meyar.core.text import (
@@ -68,6 +69,7 @@ from meyar.schemas.criteria import (
     CriterionKind,
     CriterionType,
     ProhibitedCriterionError,
+    find_prohibited_term,
 )
 from meyar.search.planner_service import plan_and_search_candidates
 from meyar.search.schemas import EmbeddingSearchConfig
@@ -114,10 +116,41 @@ def _fold(text: str) -> str:
 # content) and are excluded before comparison.
 _GROUNDING_STOPWORDS = frozenset(
     {
-        "ve", "ya", "ki", "bir", "bu", "da", "de", "ile", "ucun", "uzre",
-        "olan", "olmaq", "olmalidir", "olmalidi", "etmek", "edir", "gore",
-        "haqqinda", "arasinda", "hem", "yalniz", "cox", "daha", "kimi",
-        "the", "a", "an", "and", "or", "of", "to", "for", "in", "on", "with",
+        "ve",
+        "ya",
+        "ki",
+        "bir",
+        "bu",
+        "da",
+        "de",
+        "ile",
+        "ucun",
+        "uzre",
+        "olan",
+        "olmaq",
+        "olmalidir",
+        "olmalidi",
+        "etmek",
+        "edir",
+        "gore",
+        "haqqinda",
+        "arasinda",
+        "hem",
+        "yalniz",
+        "cox",
+        "daha",
+        "kimi",
+        "the",
+        "a",
+        "an",
+        "and",
+        "or",
+        "of",
+        "to",
+        "for",
+        "in",
+        "on",
+        "with",
     }
 )
 
@@ -150,6 +183,252 @@ def _is_requirement_grounded_in_jd_text(requirement: str, jd_text: str) -> bool:
     jd_folded = _fold(jd_text)
     matched = sum(1 for token in tokens if token in jd_folded)
     return matched * 2 >= len(tokens)
+
+
+# Issue #44: source fragments are the unit of JD factual authority.  The
+# splitter is deliberately bounded and conservative: explicit sentences,
+# semicolon/newline clauses, and bullet rows with requirement cues become
+# reviewable units.  It does not try to perform general entailment.
+_SOURCE_SPLIT_RE = re.compile(r"(?:\r?\n)+|(?<=[.!?;])\s+")
+_REQUIREMENT_CUE_RE = re.compile(
+    r"\b(required|requirement|must|mandatory|minimum|preferred|nice\s+to\s+have|"
+    r"experience|years?|proficiency|level|degree|certificat(?:e|ion)|language|"
+    r"license|licence|willing|available|teleb\w*|mutleq\w*|vacib\w*|ustunluk\w*|arzuolunan\w*|"
+    r"tecrube|il|dil|sertifikat|bakalavr|magistr|[a-z]+m[ae]lidir)\b",
+    re.IGNORECASE,
+)
+_REQUIRED_CUE_RE = re.compile(
+    r"\b(required|must|mandatory|minimum|teleb\w*|mutleq\w*|vacib\w*|olmalidir|olmalidi|[a-z]+m[ae]lidir)\b",
+    re.IGNORECASE,
+)
+_PREFERRED_CUE_RE = re.compile(
+    r"\b(preferred|nice\s+to\s+have|plus|ustunluk\w*|arzuolunan\w*)\b", re.IGNORECASE
+)
+_DURATION_CUE_RE = re.compile(r"\b(years?|yrs?|il|tecrube|experience)\b", re.IGNORECASE)
+_GENERAL_EXPERIENCE_RE = re.compile(
+    r"\b(total|overall|general|umumi)\b.*\b(experience|tecrube)\b|"
+    r"\b(experience|tecrube)\b.*\b(total|overall|general|umumi)\b",
+    re.IGNORECASE,
+)
+_LANGUAGE_LEVEL_RE = re.compile(
+    r"\b(?:a1|a2|b1|b2|c1|c2|beginner|elementary|intermediate|advanced|fluent|native|serbest)\b",
+    re.IGNORECASE,
+)
+_CERTIFICATION_CUE_RE = re.compile(r"\b(certificat\w*|sertifikat\w*)\b", re.IGNORECASE)
+_EDUCATION_CUE_RE = re.compile(
+    r"\b(education|degree|bachelor|master|university|tehsil\w*|bakalavr\w*|magistr\w*)\b",
+    re.IGNORECASE,
+)
+_LANGUAGE_CUE_RE = re.compile(
+    r"\b(language|proficiency|dil\w*|english|ingilis\w*|russian|rusca|azerbaijani|azerbaycan\w*)\b",
+    re.IGNORECASE,
+)
+_FIELD_WORDS = _GROUNDING_STOPWORDS | frozenset(
+    {
+        "required",
+        "requirement",
+        "must",
+        "mandatory",
+        "minimum",
+        "preferred",
+        "nice",
+        "have",
+        "experience",
+        "years",
+        "year",
+        "yrs",
+        "proficiency",
+        "level",
+        "teleb",
+        "mutleq",
+        "vacib",
+        "olmalidir",
+        "olmalidi",
+        "ustunluk",
+        "arzuolunan",
+        "tecrube",
+        "il",
+        "knowledge",
+        "knowledgeable",
+        "bacariq",
+        "bilik",
+        "olunur",
+        "olaraq",
+        "lazimdir",
+        "namized",
+        "candidate",
+    }
+)
+
+
+def _normalize_source_text(text: str) -> str:
+    return " ".join(_fold(text).split())
+
+
+def _extract_source_requirement_spans(jd_text: str) -> list[str]:
+    spans: list[str] = []
+    for raw in _SOURCE_SPLIT_RE.split(jd_text):
+        span = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", raw).strip(" \t.;")
+        if not span:
+            continue
+        folded = _normalize_source_text(span)
+        is_bullet = bool(re.match(r"^\s*(?:[-*•]|\d+[.)])\s*", raw))
+        if is_bullet or _REQUIREMENT_CUE_RE.search(folded) or _LANGUAGE_LEVEL_RE.search(folded):
+            spans.append(span)
+    return spans
+
+
+def _source_span_index(source_text: str, spans: list[str]) -> int | None:
+    needle = _normalize_source_text(source_text)
+    if not needle:
+        return None
+    for index, span in enumerate(spans):
+        haystack = _normalize_source_text(span)
+        if needle == haystack or needle in haystack:
+            return index
+    return None
+
+
+def _criterion_type_from_source(source_text: str) -> CriterionType | None:
+    folded = _normalize_source_text(source_text)
+    required = bool(_REQUIRED_CUE_RE.search(folded))
+    preferred = bool(_PREFERRED_CUE_RE.search(folded))
+    if required == preferred:
+        return None
+    return CriterionType.MUST_HAVE if required else CriterionType.PREFERRED
+
+
+def _number_is_attributed(value: float, source_text: str) -> bool:
+    for raw in re.findall(r"(?<![\w.])\d+(?:[.,]\d+)?(?![\w.])", source_text):
+        try:
+            if abs(float(raw.replace(",", ".")) - value) < 1e-9:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def _material_tokens_are_attributed(value: str, source_text: str) -> bool:
+    tokens = [token for token in _grounding_tokens(value) if token not in _FIELD_WORDS]
+    source_tokens = set(_grounding_tokens(source_text))
+
+    def attributed(token: str) -> bool:
+        return any(
+            token == source_token
+            or (
+                min(len(token), len(source_token)) >= 4
+                and (token.startswith(source_token) or source_token.startswith(token))
+            )
+            for source_token in source_tokens
+        )
+
+    return bool(tokens) and all(attributed(token) for token in tokens)
+
+
+def _source_scope_is_preserved(item: JDDraftCriterionItem, source_text: str) -> bool:
+    values = f"{item.requirement} {item.required_level or ''}"
+    value_tokens = _grounding_tokens(values)
+
+    def is_generic(token: str) -> bool:
+        return (
+            token in _FIELD_WORDS
+            or token.isdigit()
+            or token.startswith(("teleb", "mutleq", "vacib", "ustunluk", "arzuolunan"))
+            or token.endswith(("malidir", "melidir", "malidi", "melidi"))
+        )
+
+    source_subject = [token for token in _grounding_tokens(source_text) if not is_generic(token)]
+    return all(
+        any(
+            token == value_token
+            or (
+                min(len(token), len(value_token)) >= 4
+                and (token.startswith(value_token) or value_token.startswith(token))
+            )
+            for value_token in value_tokens
+        )
+        for token in source_subject
+    )
+
+
+def _field_binding_is_valid(
+    item: JDDraftCriterionItem, *, criterion_type: CriterionType, source_text: str
+) -> bool:
+    """Validate material semantics against one attributable source span.
+
+    This is intentionally lexical and structural, not NLI: every subject/
+    level token and number must occur in the same source fragment, modality
+    must be explicit, and a qualified duration cannot be converted to total
+    experience or bare presence.
+    """
+    if _criterion_type_from_source(source_text) != criterion_type:
+        return False
+    if not _material_tokens_are_attributed(item.requirement, source_text):
+        return False
+    if item.kind != JDDraftCriterionKind.OTHER and not _source_scope_is_preserved(
+        item, source_text
+    ):
+        return False
+
+    folded = _normalize_source_text(source_text)
+    has_duration = bool(_DURATION_CUE_RE.search(folded) and re.search(r"\d", folded))
+    if item.min_years is not None:
+        if not has_duration or not _number_is_attributed(item.min_years, source_text):
+            return False
+    if item.required_level is not None:
+        if not _material_tokens_are_attributed(item.required_level, source_text):
+            return False
+    elif item.kind == JDDraftCriterionKind.LANGUAGE and _LANGUAGE_LEVEL_RE.search(folded):
+        return False
+
+    if item.kind == JDDraftCriterionKind.EXPERIENCE:
+        if item.min_years is None:
+            # A source that states experience without a duration is real but
+            # not representable by CriterionIn.EXPERIENCE; let schema
+            # validation classify it UNSUPPORTED. If the source did state a
+            # number, omission of that number is a material-field mismatch.
+            return not has_duration
+        # An explicit general/total marker is always sufficient. Otherwise
+        # only a span with no named subject beyond duration/modality words is
+        # general experience. "5 years Python experience" is therefore not.
+        if not _GENERAL_EXPERIENCE_RE.search(folded):
+            remaining = [
+                t
+                for t in _grounding_tokens(source_text)
+                if t not in _FIELD_WORDS and not t.isdigit()
+            ]
+            if remaining:
+                return False
+    elif item.kind in (
+        JDDraftCriterionKind.SKILL_EXPERIENCE,
+        JDDraftCriterionKind.DOMAIN_EXPERIENCE,
+    ):
+        if item.min_years is None:
+            return not has_duration
+        if not has_duration:
+            return False
+    elif item.min_years is not None or has_duration:
+        # Never discard or transfer a duration by accepting only the bare
+        # subject under a non-duration kind.
+        return False
+
+    if item.kind != JDDraftCriterionKind.LANGUAGE and item.required_level is not None:
+        return False
+    if item.kind == JDDraftCriterionKind.SKILL and (
+        _CERTIFICATION_CUE_RE.search(folded)
+        or _EDUCATION_CUE_RE.search(folded)
+        or _LANGUAGE_CUE_RE.search(folded)
+    ):
+        return False
+    if item.kind == JDDraftCriterionKind.CERTIFICATION and not _CERTIFICATION_CUE_RE.search(folded):
+        return False
+    if item.kind == JDDraftCriterionKind.EDUCATION and not _EDUCATION_CUE_RE.search(folded):
+        return False
+    if item.kind == JDDraftCriterionKind.LANGUAGE and not (
+        _LANGUAGE_CUE_RE.search(folded) or _LANGUAGE_LEVEL_RE.search(folded)
+    ):
+        return False
+    return True
 
 
 _AGENT_RESPONSE_TEXT: dict[AgentResponseCode, str] = {
@@ -615,7 +894,7 @@ def _build_criterion_from_draft_item(
     *,
     criterion_type: CriterionType,
     used_ids: set[str],
-    jd_text: str,
+    source_text: str | None,
 ) -> tuple[CriterionIn | None, DroppedJDCriterionReason | None]:
     """Re-validates one MODEL-PRODUCED draft item into a real CriterionIn —
     the exact same schema/prohibited-attribute denylist the manual
@@ -651,6 +930,26 @@ def _build_criterion_from_draft_item(
     unconditional early return above and is never reordered or gated by
     this check — a doubly-bad item (both fabricated and sensitive) is
     still counted PROHIBITED, exactly as before this check existed."""
+    # Prohibition is classification-independent and runs before OTHER or
+    # any other kind branch. A model cannot relabel sensitive text into a
+    # safe bucket. Check every model-authored field that can carry it.
+    if find_prohibited_term(item.requirement, item.source_text, item.required_level or ""):
+        return None, DroppedJDCriterionReason.PROHIBITED
+    if source_text is None:
+        return None, DroppedJDCriterionReason.UNGROUNDED
+    if not _field_binding_is_valid(item, criterion_type=criterion_type, source_text=source_text):
+        return None, DroppedJDCriterionReason.NEEDS_HUMAN_REVIEW
+
+    # These evaluator fields cannot currently survive the agent review
+    # form unchanged: it has no required_level control and exposes only
+    # general EXPERIENCE among duration kinds. Keep them visible and
+    # unscored instead of silently erasing or weakening their semantics.
+    if item.required_level is not None or item.kind in (
+        JDDraftCriterionKind.SKILL_EXPERIENCE,
+        JDDraftCriterionKind.DOMAIN_EXPERIENCE,
+    ):
+        return None, DroppedJDCriterionReason.UNSUPPORTED
+
     criterion: CriterionIn | None
     reason: DroppedJDCriterionReason | None
     if item.kind == JDDraftCriterionKind.OTHER:
@@ -658,7 +957,6 @@ def _build_criterion_from_draft_item(
     else:
         kind = CriterionKind(item.kind.value)
         value = None if kind == CriterionKind.EXPERIENCE else item.requirement
-        min_years = item.min_years if kind == CriterionKind.EXPERIENCE else None
         try:
             criterion = CriterionIn(
                 id=slugify_criterion_label(item.requirement, used_ids),
@@ -666,8 +964,11 @@ def _build_criterion_from_draft_item(
                 type=criterion_type,
                 label=item.requirement,
                 value=value,
-                min_years=min_years,
-                weight=item.weight,
+                min_years=item.min_years,
+                required_level=item.required_level,
+                # Weight is deterministic product policy, not a JD field the
+                # model is allowed to author.
+                weight=1.0,
             )
             reason = None
         except ValidationError as exc:
@@ -686,14 +987,10 @@ def _build_criterion_from_draft_item(
             ):
                 return None, DroppedJDCriterionReason.PROHIBITED
             criterion, reason = None, DroppedJDCriterionReason.UNSUPPORTED
-    if not _is_requirement_grounded_in_jd_text(item.requirement, jd_text):
-        return None, DroppedJDCriterionReason.UNGROUNDED
     return criterion, reason
 
 
-async def _dispatch_draft_job_criteria(
-    llm: LLMProvider, *, jd_text: str
-) -> AgentToolResult | None:
+async def _dispatch_draft_job_criteria(llm: LLMProvider, *, jd_text: str) -> AgentToolResult | None:
     """Returns None only when the drafting call itself never produced a
     usable JDCriteriaDraft (repeated schema-invalid output, or a
     provider failure) — the caller turns that into AgentTurnOutcome.
@@ -714,7 +1011,7 @@ async def _dispatch_draft_job_criteria(
         return None
     safe_title = (
         draft.title
-        if draft.title and _is_requirement_grounded_in_jd_text(draft.title, jd_text)
+        if draft.title and _material_tokens_are_attributed(draft.title, jd_text)
         else "Vakansiya qaralaması"
     )
 
@@ -722,28 +1019,81 @@ async def _dispatch_draft_job_criteria(
     must_have: list[CriterionIn] = []
     preferred: list[CriterionIn] = []
     unsupported: list[UnsupportedJDCriterionItem] = []
-    prohibited_count = 0
+    needs_review: list[NeedsReviewJDCriterionItem] = []
+    source_spans = _extract_source_requirement_spans(jd_text)
+    covered_source_spans: set[int] = set()
+    raw_prohibited_spans = {
+        index for index, span in enumerate(source_spans) if find_prohibited_term(span)
+    }
+    raw_jd_has_prohibited_text = find_prohibited_term(jd_text) is not None
+    prohibited_count = max(len(raw_prohibited_spans), int(raw_jd_has_prohibited_text))
+    covered_source_spans.update(raw_prohibited_spans)
     ungrounded_count = 0
     for items, criterion_type, bucket in (
         (draft.must_have, CriterionType.MUST_HAVE, must_have),
         (draft.preferred, CriterionType.PREFERRED, preferred),
     ):
         for item in items:
+            source_index = _source_span_index(item.source_text, source_spans)
+            source_text = item.source_text if source_index is not None else None
+            covers_whole_span = bool(
+                source_index is not None
+                and _normalize_source_text(item.source_text)
+                == _normalize_source_text(source_spans[source_index])
+            )
             criterion, reason = _build_criterion_from_draft_item(
-                item, criterion_type=criterion_type, used_ids=used_ids, jd_text=jd_text
+                item,
+                criterion_type=criterion_type,
+                used_ids=used_ids,
+                source_text=source_text,
             )
             if criterion is not None:
                 bucket.append(criterion)
+                assert source_index is not None
+                if covers_whole_span and source_index is not None:
+                    covered_source_spans.add(source_index)
             elif reason == DroppedJDCriterionReason.PROHIBITED:
-                prohibited_count += 1
+                if (
+                    source_index is not None
+                    and source_index not in raw_prohibited_spans
+                ) or (source_index is None and not raw_jd_has_prohibited_text):
+                    prohibited_count += 1
+                if covers_whole_span and source_index is not None:
+                    covered_source_spans.add(source_index)
             elif reason == DroppedJDCriterionReason.UNGROUNDED:
                 ungrounded_count += 1
+            elif reason == DroppedJDCriterionReason.NEEDS_HUMAN_REVIEW:
+                review_text = source_text or item.source_text
+                if not find_prohibited_term(review_text) and all(
+                    existing.requirement != review_text for existing in needs_review
+                ):
+                    needs_review.append(
+                        NeedsReviewJDCriterionItem(
+                            requirement=review_text, criterion_type=criterion_type
+                        )
+                    )
+                if covers_whole_span and source_index is not None:
+                    covered_source_spans.add(source_index)
             else:
                 unsupported.append(
                     UnsupportedJDCriterionItem(
-                        requirement=item.requirement, criterion_type=criterion_type
+                        requirement=source_text or item.requirement,
+                        criterion_type=criterion_type,
                     )
                 )
+                if covers_whole_span and source_index is not None:
+                    covered_source_spans.add(source_index)
+
+    # Reconcile source requirements after processing the model draft. A
+    # material source span the model omitted is retained for HR review and
+    # never becomes a CriterionIn or score input.
+    for index, source_span in enumerate(source_spans):
+        if index in covered_source_spans:
+            continue
+        inferred_type = _criterion_type_from_source(source_span)
+        needs_review.append(
+            NeedsReviewJDCriterionItem(requirement=source_span, criterion_type=inferred_type)
+        )
 
     return AgentToolResult(
         tool_name=AgentActionType.DRAFT_JOB_CRITERIA,
@@ -752,6 +1102,7 @@ async def _dispatch_draft_job_criteria(
             must_have=must_have,
             preferred=preferred,
             unsupported=unsupported,
+            needs_review=needs_review,
             ungrounded_count=ungrounded_count,
             prohibited_count=prohibited_count,
         ),
@@ -896,13 +1247,9 @@ async def run_agent_turn(
             for attempt in range(1, MAX_DECISION_ATTEMPTS + 1):
                 try:
                     decision, provenance = await llm.decide_agent_action(
-                        recent_turns=[
-                            (t["role"], t["text"]) for t in turns[-max_context_turns:]
-                        ],
+                        recent_turns=[(t["role"], t["text"]) for t in turns[-max_context_turns:]],
                         last_tool_result_summary=last_tool_summary,
-                        available_candidate_refs=list(
-                            range(1, len(last_search_candidate_ids) + 1)
-                        ),
+                        available_candidate_refs=list(range(1, len(last_search_candidate_ids) + 1)),
                         repair=attempt > 1,
                     )
                 except ModelSchemaInvalidError:

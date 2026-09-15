@@ -44,9 +44,7 @@ def _profile(*skills: str, quote: str = "Synthetic evidence") -> dict:
             {
                 "name": skill,
                 "category": None,
-                "evidence": [
-                    {"page": 1, "block_index": 0, "quote": skill_quote(skill)}
-                ],
+                "evidence": [{"page": 1, "block_index": 0, "quote": skill_quote(skill)}],
             }
             for skill in skills
         ],
@@ -1263,8 +1261,16 @@ async def test_draft_job_criteria_builds_valid_criteria_from_llm_draft(
         agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
         jd_draft=JDCriteriaDraft(
             title="Baş Backend Mühəndisi",
-            must_have=[JDDraftCriterionItem(kind=CriterionKind.SKILL, requirement="Python")],
-            preferred=[JDDraftCriterionItem(kind=CriterionKind.SKILL, requirement="AWS")],
+            must_have=[
+                JDDraftCriterionItem(
+                    kind=CriterionKind.SKILL, requirement="Python", source_text="Python bilməlidir"
+                )
+            ],
+            preferred=[
+                JDDraftCriterionItem(
+                    kind=CriterionKind.SKILL, requirement="AWS", source_text="AWS üstünlükdür"
+                )
+            ],
         ),
     )
     result = await _run(
@@ -1286,9 +1292,7 @@ async def test_draft_job_criteria_builds_valid_criteria_from_llm_draft(
 
     from meyar.models.job import Job
 
-    jobs = (
-        await db_session.execute(select(Job).where(Job.tenant_id == tenant.id))
-    ).scalars().all()
+    jobs = (await db_session.execute(select(Job).where(Job.tenant_id == tenant.id))).scalars().all()
     assert jobs == []
     # Turn-terminal like GET_CANDIDATE_PROFILE/EVIDENCE — no second decision call.
     assert llm.agent_call_count == 1
@@ -1309,7 +1313,11 @@ async def test_draft_job_criteria_title_never_becomes_trusted_assistant_headline
         agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
         jd_draft=JDCriteriaDraft(
             title=adversarial_title,
-            must_have=[JDDraftCriterionItem(kind=CriterionKind.SKILL, requirement="Python")],
+            must_have=[
+                JDDraftCriterionItem(
+                    kind=CriterionKind.SKILL, requirement="Python", source_text="Python bilməlidir"
+                )
+            ],
         ),
     )
     result = await _run(
@@ -1367,8 +1375,12 @@ async def test_draft_job_criteria_drops_prohibited_attribute_item(
         jd_draft=JDCriteriaDraft(
             title="Rol",
             must_have=[
-                JDDraftCriterionItem(kind=CriterionKind.SKILL, requirement="Python"),
-                JDDraftCriterionItem(kind=CriterionKind.SKILL, requirement="kişi"),
+                JDDraftCriterionItem(
+                    kind=CriterionKind.SKILL, requirement="Python", source_text="Python bilməlidir"
+                ),
+                JDDraftCriterionItem(
+                    kind=CriterionKind.SKILL, requirement="kişi", source_text="kişi olmalıdır"
+                ),
             ],
         ),
     )
@@ -1408,12 +1420,16 @@ async def test_draft_job_criteria_discloses_unsupported_non_sensitive_item(
         jd_draft=JDCriteriaDraft(
             title="Rol",
             must_have=[
-                JDDraftCriterionItem(kind=CriterionKind.SKILL, requirement="Python"),
+                JDDraftCriterionItem(
+                    kind=CriterionKind.SKILL, requirement="Python", source_text="Python bilməlidir"
+                ),
                 # No min_years — JDDraftCriterionItem itself allows this,
                 # but CriterionIn requires it for EXPERIENCE, so this is a
                 # genuine non-sensitive validation failure.
                 JDDraftCriterionItem(
-                    kind=CriterionKind.EXPERIENCE, requirement="Backend təcrübəsi"
+                    kind=CriterionKind.EXPERIENCE,
+                    requirement="Backend təcrübəsi",
+                    source_text="Backend təcrübəsi tələb olunur",
                 ),
             ],
         ),
@@ -1431,16 +1447,14 @@ async def test_draft_job_criteria_discloses_unsupported_non_sensitive_item(
     assert draft.prohibited_count == 0
     assert draft.ungrounded_count == 0
     assert len(draft.unsupported) == 1
-    assert draft.unsupported[0].requirement == "Backend təcrübəsi"
+    assert draft.unsupported[0].requirement == "Backend təcrübəsi tələb olunur"
     assert draft.unsupported[0].criterion_type == CriterionType.MUST_HAVE
     # Disclosed, never persisted.
     from sqlalchemy import select
 
     from meyar.models.job import Job
 
-    jobs = (
-        await db_session.execute(select(Job).where(Job.tenant_id == tenant.id))
-    ).scalars().all()
+    jobs = (await db_session.execute(select(Job).where(Job.tenant_id == tenant.id))).scalars().all()
     assert jobs == []
 
 
@@ -1463,10 +1477,16 @@ async def test_draft_job_criteria_other_kind_is_unsupported_never_scored(
         agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
         jd_draft=JDCriteriaDraft(
             title="Rol",
-            must_have=[JDDraftCriterionItem(kind=CriterionKind.SKILL, requirement="Python")],
+            must_have=[
+                JDDraftCriterionItem(
+                    kind=CriterionKind.SKILL, requirement="Python", source_text="Python bilməlidir"
+                )
+            ],
             preferred=[
                 JDDraftCriterionItem(
-                    kind=JDDraftCriterionKind.OTHER, requirement="Ezamiyyətə hazır olmaq"
+                    kind=JDDraftCriterionKind.OTHER,
+                    requirement="Ezamiyyətə hazır olmaq",
+                    source_text="Namizəd ezamiyyətə hazır olması üstünlükdür",
                 )
             ],
         ),
@@ -1476,7 +1496,7 @@ async def test_draft_job_criteria_other_kind_is_unsupported_never_scored(
         llm,
         tenant_id=tenant.id,
         conversation=conversation,
-        message="Python bilməlidir. Namizəd ezamiyyətə hazır olmalıdır.",
+        message="Python bilməlidir. Namizəd ezamiyyətə hazır olması üstünlükdür.",
     )
     draft = result.tool_results[0].job_draft
     assert draft is not None
@@ -1485,7 +1505,7 @@ async def test_draft_job_criteria_other_kind_is_unsupported_never_scored(
     assert draft.prohibited_count == 0
     assert draft.ungrounded_count == 0
     assert len(draft.unsupported) == 1
-    assert draft.unsupported[0].requirement == "Ezamiyyətə hazır olmaq"
+    assert draft.unsupported[0].requirement == "Namizəd ezamiyyətə hazır olması üstünlükdür"
     assert draft.unsupported[0].criterion_type == CriterionType.PREFERRED
 
 
@@ -1510,10 +1530,7 @@ def test_is_requirement_grounded_in_jd_text_unit() -> None:
     other tests in this section."""
     from meyar.agent.service import _is_requirement_grounded_in_jd_text
 
-    jd_text = (
-        "Vakansiya: Regional Satış Nümayəndəsi. "
-        "Namizəd ezamiyyətə getməyə hazır olmalıdır."
-    )
+    jd_text = "Vakansiya: Regional Satış Nümayəndəsi. Namizəd ezamiyyətə getməyə hazır olmalıdır."
     # Grounded: the requirement's own content words are actually in the JD
     # text (Azerbaijani suffix variance tolerated by diacritic/case fold).
     assert _is_requirement_grounded_in_jd_text("Ezamiyyətə hazır olmaq", jd_text)
@@ -1552,21 +1569,29 @@ async def test_draft_job_criteria_drops_fabricated_unrelated_requirement(
             title="Kredit Analitiki",
             must_have=[
                 JDDraftCriterionItem(
-                    kind=JDDraftCriterionKind.OTHER, requirement="Ezamiyyətə hazır olmaq"
+                    kind=JDDraftCriterionKind.OTHER,
+                    requirement="Ezamiyyətə hazır olmaq",
+                    source_text="Namizəd ezamiyyətə getməyə hazır olmalıdır",
                 ),
                 # The reported real-Ollama hallucination: unrelated to any
                 # word in jd_text, but classified OTHER — the exact path
                 # that previously reached HR-visible "unsupported" with no
                 # grounding check at all.
                 JDDraftCriterionItem(
-                    kind=JDDraftCriterionKind.OTHER, requirement="Passing an exam"
+                    kind=JDDraftCriterionKind.OTHER,
+                    requirement="Passing an exam",
+                    source_text="Passing an exam",
                 ),
             ],
             preferred=[
                 # Same fabrication class, but on a kind that WOULD have
                 # built a real, scored CriterionIn — proving the grounding
                 # gate also guards the success path, not only OTHER.
-                JDDraftCriterionItem(kind=CriterionKind.LANGUAGE, requirement="İngilis dili"),
+                JDDraftCriterionItem(
+                    kind=CriterionKind.LANGUAGE,
+                    requirement="İngilis dili",
+                    source_text="İngilis dili tələb olunur",
+                ),
             ],
         ),
     )
@@ -1578,7 +1603,7 @@ async def test_draft_job_criteria_drops_fabricated_unrelated_requirement(
     # The one genuine, grounded requirement survives as UNSUPPORTED
     # (real OTHER-kind disclosure, unchanged D-045 contract).
     assert len(draft.unsupported) == 1
-    assert draft.unsupported[0].requirement == "Ezamiyyətə hazır olmaq"
+    assert draft.unsupported[0].requirement == "Namizəd ezamiyyətə getməyə hazır olmalıdır"
     assert draft.unsupported[0].criterion_type == CriterionType.MUST_HAVE
     # The two fabricated items never became a scored criterion and never
     # entered the HR-visible "unsupported" disclosure — only a safe count.
@@ -1616,7 +1641,11 @@ async def test_explicit_draft_job_criteria_action_never_calls_the_routing_model(
     llm = FakeLLMProvider(
         jd_draft=JDCriteriaDraft(
             title="Rol",
-            must_have=[JDDraftCriterionItem(kind=CriterionKind.SKILL, requirement="Python")],
+            must_have=[
+                JDDraftCriterionItem(
+                    kind=CriterionKind.SKILL, requirement="Python", source_text="Python bilməlidir"
+                )
+            ],
         ),
     )
     result = await _run(
@@ -1654,7 +1683,11 @@ async def test_explicit_draft_job_criteria_action_cannot_become_a_search(
         ),
         jd_draft=JDCriteriaDraft(
             title="Backend Mühəndisi",
-            must_have=[JDDraftCriterionItem(kind=CriterionKind.SKILL, requirement="Python")],
+            must_have=[
+                JDDraftCriterionItem(
+                    kind=CriterionKind.SKILL, requirement="Python", source_text="Python bilməlidir"
+                )
+            ],
         ),
     )
     result = await _run(

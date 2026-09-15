@@ -1,6 +1,13 @@
 # MEYAR — Status
 
 ## Current phase
+**Issue #44 JD source-binding/prohibition remediation is implemented locally
+atop accepted HEAD `8798c6a` (D-054), not pushed or merged.** The original JD
+now controls criterion subject/scope, kind, modality, numeric/duration and
+level fields through bounded source fragments; raw/post-parse prohibited
+checks are kind-independent; omissions and non-round-trippable semantics stay
+visible but unscored through confirmation. PR #42 remains NOT accepted.
+
 **Slice 13 — Security + Official Definition-of-Done Acceptance: implementation
 pass 1 MERGED (PR #22, squash SHA `a709ce1`, `Refs #20`); Target-Mac hardware
 gate PENDING.** Original-CV access, no-exfiltration formal verification,

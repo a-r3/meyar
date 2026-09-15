@@ -201,6 +201,9 @@ class AgentJobDraftView(BaseModel):
     # owner correction (issue #33).
     unsupported_must_have: list[str] = Field(default_factory=list)
     unsupported_preferred: list[str] = Field(default_factory=list)
+    # Source requirements that were omitted or whose material fields could
+    # not be deterministically attributed. Visible, but never scorable.
+    needs_review: list[str] = Field(default_factory=list)
     # Count only — a prohibited/sensitive-attribute match's own text must
     # never be redisplayed (docs/SECURITY_PRIVACY.md).
     prohibited_count: int = 0

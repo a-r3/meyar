@@ -15,6 +15,12 @@
   <ul>{% for requirement in unsupported_requirements %}<li>{{ requirement }}</li>{% endfor %}</ul>
 </div>
 {% endif %}
+{% if needs_review_requirements %}
+<div class="alert alert-warning">
+  <p><strong>İnsan baxışı tələb edir — qiymətləndirməyə daxil edilmir:</strong> bu tələblər təsdiqlənmiş meyar kimi saxlanmayıb və heç bir namizədin balına/sırasına təsir etmir:</p>
+  <ul>{% for requirement in needs_review_requirements %}<li>{{ requirement }}</li>{% endfor %}</ul>
+</div>
+{% endif %}
 {% if not results %}
 <div class="empty-state"><h2>Qiymətləndirilən namizəd yoxdur</h2><p>Bu etibarlı boş nəticədir. {{ ranking.skipped_count }} namizəd təhlükəsiz səbəblərlə buraxılıb.</p></div>
 {% endif %}

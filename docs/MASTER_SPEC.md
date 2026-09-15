@@ -189,6 +189,13 @@ an evaluation). Criterion fields: id, type (must-have/preferred), kind
 manual_review_required. Every evaluation stores the exact criteria
 version id used. The model cannot add criteria beyond what is stored.
 
+For agent JD drafting, the original JD is factual authority. Each model item
+must cite a bounded source fragment, and deterministic validation binds its
+subject/scope, kind, required/preferred modality, number/duration, and language
+level to that same fragment before it can become a scorable `CriterionIn`.
+Unsupported, omitted, or non-round-trippable semantics remain visible but
+unscored; prohibited attributes are detected independently of model kind.
+
 ## 14. Matching engine pipeline
 
 1. Candidate fact extraction (LLM, schema-validated) → `CandidateProfile`

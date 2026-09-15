@@ -757,6 +757,7 @@ async def build_agent_turn_view(
                             for u in draft.unsupported
                             if u.criterion_type == CriterionType.PREFERRED
                         ],
+                        needs_review=[item.requirement for item in draft.needs_review],
                         prohibited_count=draft.prohibited_count,
                         ungrounded_count=draft.ungrounded_count,
                     ),
@@ -886,6 +887,7 @@ def _agent_turn_headline(
                 and unsupported_total == 0
                 and draft.prohibited_count == 0
                 and draft.ungrounded_count == 0
+                and not draft.needs_review
             ):
                 return (
                     "Bu mətndən konkret tələb müəyyən edilmədi. Aşağıdan əl ilə "
@@ -912,6 +914,10 @@ def _agent_turn_headline(
                 notes.append(
                     f"{draft.ungrounded_count} tələb JD mətnində aydın təsdiqlənmədiyi üçün "
                     "çıxarıldı"
+                )
+            if draft.needs_review:
+                notes.append(
+                    f"{len(draft.needs_review)} mənbə tələbi dəqiqləşdirmə/insan baxışı tələb edir"
                 )
             note_text = f" ({'; '.join(notes)}.)" if notes else ""
             return (

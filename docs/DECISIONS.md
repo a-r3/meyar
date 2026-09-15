@@ -4352,3 +4352,73 @@ suppressed on read when they fail the current contract.
 **Verification:** Direct positive/negative and cropped-canonical phone matrices,
 plus a database-backed legacy `COMPLETED` identity presentation regression, were
 added. Final gate counts are recorded in the associated local commit report.
+
+## D-054 — JD source-fragment and classification-independent prohibition boundary (issue #44)
+
+**Date:** 2026-09-15. **Status:** Local corrective implementation; PR #42
+remains open and unaccepted.
+
+**Pre-fix reproduction at exact accepted HEAD `8798c6a`:** the production
+`_dispatch_draft_job_criteria` boundary, driven with synthetic model drafts,
+accepted `Python Kubernetes` from `Python required`; accepted `Python` while
+silently discarding model-authored `min_years=20`; exposed `Female` classified
+as `OTHER` as ordinary unsupported (`prohibited_count=0`); converted `5 years
+of Python experience` into general `EXPERIENCE=5` plus bare `Python`; and
+returned no item at all when the model omitted `Candidate must be willing to
+travel`.
+
+**Root causes:** D-046 checked only whether half of a requirement's words
+occurred anywhere in the JD. It had no attributable source fragment, no
+field/kind/modality/number/scope binding, discarded `min_years` for non-general
+experience kinds, entered the `OTHER` branch before the `CriterionIn` denylist,
+and never reconciled source requirements against model output. The review form
+also cannot round-trip `required_level`, `SKILL_EXPERIENCE`, or
+`DOMAIN_EXPERIENCE`, so accepting those drafts would erase or weaken semantics
+at confirmation.
+
+**Decision:**
+- Each `JDDraftCriterionItem` now carries `source_text`. The service locates it
+  inside a bounded source requirement span and validates all material subject
+  and scope tokens in both directions, with only the project's established
+  case/diacritic and bounded Azerbaijani suffix tolerance. Kind cues,
+  MUST_HAVE/PREFERRED modality, numeric values, duration scope, and language
+  level must be attributable to that same fragment. One matching token is
+  never sufficient. Model-authored weights are removed; accepted drafts use
+  the existing deterministic default `1.0`.
+- General `EXPERIENCE` accepts an attributed number only for explicitly total/
+  general experience or a subject-free duration phrase. A named-skill/domain
+  duration cannot become total experience or bare presence. Numbers cannot be
+  borrowed from another source span. No duration arithmetic changed.
+- `find_prohibited_term` runs over the raw JD and every model-produced
+  requirement/source/level before `OTHER` or any other kind branch. Raw
+  prohibited text is represented count-only. The post-confirmation carry-
+  through fields are filtered through the same denylist and never score.
+- Source spans are reconciled after draft validation. Every detected span is
+  accepted/scorable, visible unsupported/unscored, prohibited count-only, or
+  visible needs-human-review. A model omission therefore cannot erase it.
+- The current review form cannot losslessly round-trip language proficiency or
+  skill/domain-duration kinds. Those validly source-bound requirements are
+  kept as source-verbatim unsupported/unscored items instead of being silently
+  persisted as weaker criteria. General numeric experience remains supported.
+  This is compatibility enforcement, not the deferred duration-policy/UI
+  redesign.
+- Drafting still performs no mutation. Only editable accepted/scorable rows
+  reach the existing `POST /ui/jobs` confirmation path and deterministic
+  ranking. Unsupported/review items remain visible before and immediately
+  after confirmation but never enter `JobCriteriaVersion`; prohibited items
+  never render verbatim. HR copy contains no internal reason enum.
+
+**Verification:** 17 focused production-boundary adversarial/positive tests
+plus database-backed agent/UI confirmation coverage pass; the combined agent
+service/UI/source-binding suite passes 105 tests. Full gates: Ruff clean; mypy
+clean for 138 source files; 1060 pytest tests pass with no failures, skips, or xfails; Alembic and
+tracked-tree results are recorded in the final local report. No migration,
+API-first work, deployment work, score arithmetic, candidate factual authority,
+or duration arithmetic changed.
+
+**Bounded limitations:** This is deterministic lexical/structural attribution,
+not NLI. Implicit modality, word-form numbers, complex multi-requirement prose,
+and unrecognized paraphrases may fail closed into human review. A partial
+source quote does not authorize an entire multi-requirement sentence; the
+uncovered source span remains visible for review. These are safe but potentially
+product-degrading P1s, not silent acceptance paths.

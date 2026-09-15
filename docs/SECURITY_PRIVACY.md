@@ -150,6 +150,15 @@ unlabeled number but never guesses that an arbitrary identifier is a phone.
   the visible topic is resolved from a validated profile fact title, or
   omitted in favor of generic server copy; raw model topic text is never
   rendered or persisted as assistant authority.
+- JD criteria use source-fragment authority (D-054): raw JD spans are checked
+  for prohibited attributes before model interpretation; every produced
+  requirement/source fragment/level is checked again before any kind branch.
+  A model-provided source fragment must occur in the original JD, all material
+  subject/scope tokens and numeric values must bind to that same fragment, and
+  required/preferred modality must be explicit there. Omitted source spans,
+  unsupported evaluator/review combinations, and semantic mismatches remain
+  visible as unscored or human-review items. Prohibited text is count-only and
+  cannot enter scoring or be reintroduced through hidden review fields.
 
 ## Local-only Ollama operating contract
 

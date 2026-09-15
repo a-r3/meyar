@@ -243,8 +243,8 @@ class AgentEvidenceToolResult(BaseModel):
 
 class JDDraftCriterionKind(StrEnum):
     """The kinds a JD-drafting model may propose for one requirement —
-    the same five ``CriterionKind`` values the deterministic evaluator
-    scores, plus ``OTHER``: a requirement that is genuinely stated in the
+    the evaluator's ``CriterionKind`` values, plus ``OTHER``: a requirement
+    that is genuinely stated in the
     JD text and already confirmed non-sensitive, but does not fit any of
     the five evaluator-supported dimensions (for example: relocation
     willingness, driving license, availability for shift work). ``OTHER``
@@ -263,6 +263,8 @@ class JDDraftCriterionKind(StrEnum):
     CERTIFICATION = "CERTIFICATION"
     EDUCATION = "EDUCATION"
     LANGUAGE = "LANGUAGE"
+    SKILL_EXPERIENCE = "SKILL_EXPERIENCE"
+    DOMAIN_EXPERIENCE = "DOMAIN_EXPERIENCE"
     OTHER = "OTHER"
 
 
@@ -270,11 +272,10 @@ class JDDraftCriterionItem(BaseModel):
     """One MODEL-PRODUCED candidate requirement drafted from a JD's own
     text — untrusted input, exactly like every other LLM-produced tool
     argument (D-031 point 4). ``kind`` is restricted to
-    ``JDDraftCriterionKind`` — the same five kinds the existing manual
-    vacancy-creation form offers (meyar.ui.service.CRITERION_KIND_OPTIONS)
-    plus the explicit ``OTHER`` escape hatch (D-045) — SKILL_EXPERIENCE/
-    DOMAIN_EXPERIENCE (D-041) remain out of scope for JD drafting in this
-    slice, not silently downgraded. Never persisted directly: every item
+    ``JDDraftCriterionKind`` — evaluator kinds plus the explicit ``OTHER``
+    escape hatch (D-045). The service still rejects any combination the
+    current review form cannot round-trip without loss. Never persisted
+    directly: every item
     is re-validated into a real ``CriterionIn`` (same prohibited-attribute
     denylist, same kind-specific shape rules) by
     meyar.agent.service._dispatch_draft_job_criteria before it is ever
@@ -291,8 +292,12 @@ class JDDraftCriterionItem(BaseModel):
     # drafted criterion can never disagree with its own displayed name.
     # Still the human-readable requirement text when kind is OTHER.
     requirement: str = Field(min_length=1, max_length=200)
+    # Verbatim/near-verbatim attributable fragment copied from the JD. It
+    # is untrusted until the deterministic boundary locates it in the
+    # original source and validates every material field against it.
+    source_text: str = Field(min_length=1, max_length=500)
     min_years: float | None = Field(default=None, ge=0, le=60)
-    weight: float = Field(default=1.0, ge=0, le=10)
+    required_level: str | None = Field(default=None, min_length=1, max_length=50)
 
 
 # Bounds how many must-have/preferred rows one JD draft may propose per
@@ -352,6 +357,7 @@ class DroppedJDCriterionReason(StrEnum):
     # to HR's own source document; only a safe count is exposed (see
     # AgentJobDraftToolResult.ungrounded_count).
     UNGROUNDED = "UNGROUNDED"
+    NEEDS_HUMAN_REVIEW = "NEEDS_HUMAN_REVIEW"
 
 
 class UnsupportedJDCriterionItem(BaseModel):
@@ -364,8 +370,19 @@ class UnsupportedJDCriterionItem(BaseModel):
 
     model_config = {"extra": "forbid"}
 
-    requirement: str = Field(min_length=1, max_length=200)
+    requirement: str = Field(min_length=1, max_length=500)
     criterion_type: CriterionType
+
+
+class NeedsReviewJDCriterionItem(BaseModel):
+    """A source requirement whose material semantics could not be safely
+    represented or whose model draft omitted/changed a source-bound field.
+    It remains visible to HR but is never submitted as a scoring row."""
+
+    model_config = {"extra": "forbid"}
+
+    requirement: str = Field(min_length=1, max_length=500)
+    criterion_type: CriterionType | None = None
 
 
 class AgentJobDraftToolResult(BaseModel):
@@ -397,6 +414,7 @@ class AgentJobDraftToolResult(BaseModel):
     must_have: list[CriterionIn] = Field(default_factory=list)
     preferred: list[CriterionIn] = Field(default_factory=list)
     unsupported: list[UnsupportedJDCriterionItem] = Field(default_factory=list)
+    needs_review: list[NeedsReviewJDCriterionItem] = Field(default_factory=list)
     prohibited_count: int = Field(default=0, ge=0)
     ungrounded_count: int = Field(default=0, ge=0)
 

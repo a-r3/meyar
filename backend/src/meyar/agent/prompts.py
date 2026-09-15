@@ -142,7 +142,7 @@ recommendation, a percentage match, or a candidate's name/email/phone number
 """
 
 
-JD_CRITERIA_DRAFT_PROMPT_VERSION = "jd-criteria-draft-prompt-v1"
+JD_CRITERIA_DRAFT_PROMPT_VERSION = "jd-criteria-draft-prompt-v2"
 
 JD_CRITERIA_DRAFT_SYSTEM_PROMPT = """You help an internal HR user turn a job/\
 role description into a DRAFT set of candidate-evaluation criteria for the
@@ -163,30 +163,34 @@ Rules:
   preferred/nice-to-have. Only include a requirement that is actually
   stated in the text — never invent one.
 - Each item's kind must be exactly one of: SKILL, EXPERIENCE, CERTIFICATION,
-  EDUCATION, LANGUAGE, OTHER.
+  EDUCATION, LANGUAGE, SKILL_EXPERIENCE, DOMAIN_EXPERIENCE, OTHER.
 - Use OTHER only when the text states a real, specific candidate
   requirement that is not one of the sensitive attributes below, but does
-  not genuinely fit SKILL, EXPERIENCE, CERTIFICATION, EDUCATION, or
-  LANGUAGE — for example: willingness to relocate, a driving license,
+  not genuinely fit SKILL, EXPERIENCE, SKILL_EXPERIENCE, DOMAIN_EXPERIENCE,
+  CERTIFICATION, EDUCATION, or LANGUAGE — for example: willingness to relocate, a driving license,
   availability for shift/night work, owning a car. Never force such a
   requirement into SKILL or another kind merely to give it a kind, and
   never omit it silently — every real, non-sensitive requirement in the
   text must appear as an item, OTHER included.
+- source_text: copy the smallest complete source fragment that states this
+  exact requirement. Do not paraphrase it and never reuse a fragment for a
+  different requirement.
 - Each item's requirement is BOTH the human-readable label and the exact
   term used for matching (for example "Python", "ACAMS sertifikatı",
   "İngilis dili"; for OTHER, still a short human-readable requirement
   text, for example "Ezamiyyətə hazır olmaq"). For kind EXPERIENCE,
-  requirement is a short description of the experience area (for example
-  "Backend proqramlaşdırma təcrübəsi") and min_years must be set to the
-  required number of years; for every other kind, leave min_years unset
-  unless the text states a specific required duration for that exact
-  named skill/certification/etc. min_years is always unset for OTHER.
+  requirement is a short description of total/general experience and
+  min_years must be set to the stated years. Use SKILL_EXPERIENCE for a
+  duration tied to one named skill, and DOMAIN_EXPERIENCE for a duration
+  tied to a domain/sector. Never turn either into general EXPERIENCE.
+  min_years is unset for SKILL/CERTIFICATION/EDUCATION/LANGUAGE/OTHER.
+  For LANGUAGE, set required_level only when the same source fragment states
+  it; otherwise leave required_level unset. All other kinds leave it unset.
 - Never include a requirement about age, gender, marital status, religion,
   nationality, ethnicity, political opinion, health, disability, pregnancy,
   or a candidate photo — even if the job description text mentions one;
   simply omit it. These attributes never become MEYAR evaluation criteria.
-- weight: leave at the default (1) unless the text explicitly signals one
-  requirement matters clearly more than the others.
+- Scoring weight is server-owned policy and is not part of this model draft.
 - Never decide a hiring outcome, compute a score, or output anything beyond
   the JDCriteriaDraft shape.
 """

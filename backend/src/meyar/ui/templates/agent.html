@@ -74,7 +74,7 @@
     {% endif %}
   {% elif tool_result.tool_name == "DRAFT_JOB_CRITERIA" %}
     {% set draft = tool_result.job_draft %}
-    {% if draft.must_have_rows or draft.preferred_rows or draft.unsupported_must_have or draft.unsupported_preferred or draft.prohibited_count or draft.ungrounded_count %}
+    {% if draft.must_have_rows or draft.preferred_rows or draft.unsupported_must_have or draft.unsupported_preferred or draft.needs_review or draft.prohibited_count or draft.ungrounded_count %}
     <section class="panel">
       <form method="post" action="/ui/jobs" class="stack-form">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -101,6 +101,12 @@
         {% endif %}
         {% if draft.prohibited_count %}
         <p class="alert alert-warning">{{ draft.prohibited_count }} tələb qadağan olunmuş/əlaqəsiz atributa görə avtomatik qiymətləndirməyə daxil edilmədi.</p>
+        {% endif %}
+        {% if draft.needs_review %}
+        <div class="alert alert-warning">
+          <p><strong>İnsan baxışı tələb edir — qiymətləndirməyə daxil edilmir:</strong> bu mənbə tələblərinin mənası mövcud meyarlarla itkisiz təsdiqlənmədi:</p>
+          <ul>{% for requirement in draft.needs_review %}<li>{{ requirement }}<input type="hidden" name="needs_review_requirement" value="{{ requirement }}"></li>{% endfor %}</ul>
+        </div>
         {% endif %}
         {% if draft.ungrounded_count %}
         <p class="alert alert-warning">{{ draft.ungrounded_count }} tələb JD mətnində aydın təsdiqlənmədiyi üçün çıxarıldı.</p>

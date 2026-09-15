@@ -25,6 +25,7 @@ from meyar.ingestion.validation import PDF_MIME
 from meyar.llm.dependency import get_llm_provider
 from meyar.llm.provider import LLMProvider
 from meyar.models.job import JOB_STATUS_ACTIVE, JOB_STATUS_ARCHIVED
+from meyar.schemas.criteria import find_prohibited_term
 from meyar.scoring.batch import BatchRankingError, rank_candidates_for_job
 from meyar.scoring.policy import ScoringPolicyError
 from meyar.search.planner_policy import find_skill_specific_duration_mention
@@ -966,7 +967,12 @@ async def create_job_route(
             *form.getlist("unsupported_must_have"),
             *form.getlist("unsupported_preferred"),
         ]
-        if str(value).strip()
+        if str(value).strip() and find_prohibited_term(str(value).strip()) is None
+    ]
+    needs_review_requirements = [
+        str(value).strip()
+        for value in form.getlist("needs_review_requirement")
+        if str(value).strip() and find_prohibited_term(str(value).strip()) is None
     ]
     must_have_rows = [_job_form_row(form, "must", i) for i in range(CRITERION_ROW_COUNT)]
     preferred_rows = [_job_form_row(form, "pref", i) for i in range(CRITERION_ROW_COUNT)]
@@ -1087,6 +1093,7 @@ async def create_job_route(
             db,
             job_criteria_version_id=version.id,
             unsupported_requirements=unsupported_requirements,
+            needs_review_requirements=needs_review_requirements,
         )
     return RedirectResponse("/ui/jobs", status_code=status.HTTP_303_SEE_OTHER)
 
@@ -1098,6 +1105,7 @@ async def _render_job_ranking(
     *,
     job_criteria_version_id: uuid.UUID,
     unsupported_requirements: list[str] | None = None,
+    needs_review_requirements: list[str] | None = None,
 ) -> HTMLResponse:
     """Shared by the manual "Namizədləri sırala" action (rank_job) and
     create_job_route's agent-JD-confirmation path (D-043) — one
@@ -1181,6 +1189,7 @@ async def _render_job_ranking(
             results=results,
             job_title=job_title,
             unsupported_requirements=unsupported_requirements or [],
+            needs_review_requirements=needs_review_requirements or [],
         ),
     )
 
