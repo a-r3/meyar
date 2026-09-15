@@ -1,14 +1,16 @@
 # MEYAR — Status
 
 ## Current phase
-**Issue #44 canonical JD-requirement-span remediation is implemented locally
-atop audit HEAD `f4a728c` (D-055), not pushed or merged.** The server segments
-and identifies original-JD occurrences before inference; model `source_text`
-is now only an untrusted hint, while complete canonical spans control subject,
-kind/scope, modality, duration/level, explicit reconciliation state, and the
-confirmation allowlist. Raw/post-parse prohibited checks remain independent of
-model kind; unsupported/review requirements stay visible but unscored. PR #42
-remains NOT accepted.
+**Issue #44 JD-authority/confirmation remediation is implemented locally atop
+exact audit HEAD `4b900567f289c57b027b83e8ae04476dad5d98dc` (D-056), not
+pushed or merged.** D-055's canonical `RequirementSpan` architecture is
+preserved. Agent confirmation is now a dedicated tenant/session-bound,
+idempotent operation rather than a browser-selected branch of manual Job
+creation; confirmation commits a durable draft→Job/version link before the
+separate retryable ranking step. The `is a plus` idiom is subject-aware, and
+bounded standalone implicit professional items remain visible for human review
+instead of disappearing. Zero-scorable drafts no longer expose a misleading
+confirm/rank action. PR #42 remains NOT accepted.
 
 **Slice 13 — Security + Official Definition-of-Done Acceptance: implementation
 pass 1 MERGED (PR #22, squash SHA `a709ce1`, `Refs #20`); Target-Mac hardware

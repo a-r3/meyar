@@ -4483,3 +4483,54 @@ later reload/re-rank and natural-language requested-result-count (`top 10`)
 handling remain NOT IMPLEMENTED. No deployment/API-first work, evaluator
 schema expansion, duration arithmetic, or candidate-authority redesign is in
 this correction.
+
+## D-056 — Dedicated idempotent agent confirmation and bounded residual review (issue #44)
+
+**Date:** 2026-09-15. **Status:** Local corrective implementation atop exact
+audit HEAD `4b900567f289c57b027b83e8ae04476dad5d98dc`; PR #42 remains open
+and unaccepted. Supersedes D-055 only where D-055 routed confirmation through
+`POST /ui/jobs`, accepted a scorable subset, and deleted consumption state.
+
+**Reproduced P0/P1:** The browser-owned `from_agent_draft` field selected
+whether `/ui/jobs` enforced canonical authority; deleting it converted agent
+confirmation into unrestricted manual creation. Consumption then removed the
+only draft link before inline ranking, so a ranking failure reported an error
+after Job/version/audit state had committed and could not be retried through
+the original operation. The bounded modality parser also treated arbitrary
+`is plus` material as preference, and standalone `Python` produced no span.
+
+**Decision:**
+- Manual creation and agent confirmation are distinct operations. The normal
+  review form posts to `POST /ui/agent/drafts/{draft_id}/confirm`; its path and
+  authenticated context, never a hidden mode flag, select the protected flow.
+  `/ui/jobs` rejects agent provenance instead of ignoring it.
+- Confirmation locks the tenant/session conversation row, resolves only its
+  stored canonical draft, and requires the exact unchanged SCORABLE set.
+  Value/subject, kind, modality, duration, weight, span identity, insertion,
+  duplication, deletion, and unsupported-to-scorable conversion all fail
+  before Job/version/audit persistence.
+- The same transaction replaces `pending_job_draft` with a durable
+  `confirmed_job_draft` link containing the resulting Job/version ids and the
+  safe unscored display lists. Replay resolves that object idempotently. The
+  row lock makes concurrent confirmations serialize; exactly one creates the
+  canonical Job/version. Ranking begins only after that transaction commits.
+  A later ranking failure explicitly says confirmation succeeded and offers
+  the existing rank action as a retry, without duplicating confirmed state.
+- English `<subject> is a plus` is recognized only as a full bounded idiom
+  whose subject belongs to a small reviewed professional taxonomy shared with
+  curated skill aliases. Trailing VAT/bonus/arithmetic material is not
+  preference authority. Exact standalone recognized professional subjects,
+  bullets, and existing short requirement cues receive a canonical span but
+  no invented modality; they remain NEEDS_HUMAN_REVIEW. Ordinary descriptive
+  prose remains outside reconciliation.
+- A zero-scorable draft retains its source disclosures but renders no
+  confirm/rank action and explains in HR language that clarification/review is
+  required.
+
+**Schema and scope:** No migration. The existing bounded conversation JSON
+holds the durable confirmation link. Candidate factuality, canonical span
+offset/subject/type authority, scoring arithmetic, and evaluator behavior are
+unchanged. Skill/domain-duration scoring, language-level scoring, durable
+unsupported/review display across arbitrary later reload/re-rank, natural-
+language top-K, API-first/deployment work, and the concrete mixed unsupported
+HR example's missing evaluator capabilities remain explicitly deferred.

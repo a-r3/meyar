@@ -475,6 +475,24 @@ class AgentJobDraftToolResult(BaseModel):
     )
 
 
+class ConfirmedAgentJobDraft(BaseModel):
+    """Durable, session-bound result of one canonical draft confirmation.
+
+    Stored in the conversation JSON beside the turn that originally held
+    ``pending_job_draft``.  It is the idempotency/retry link between the
+    consumed draft and the already-created Job/JobCriteriaVersion; ranking is
+    deliberately not part of this confirmation record or transaction.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    draft_id: uuid.UUID
+    job_id: uuid.UUID
+    criteria_version_id: uuid.UUID
+    unsupported_requirements: list[str] = Field(default_factory=list)
+    needs_review_requirements: list[str] = Field(default_factory=list)
+
+
 class AgentToolResult(BaseModel):
     """One executed tool call's typed result, tagged by which tool
     produced it. Exactly one of the payload fields is set, matching

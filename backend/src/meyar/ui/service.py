@@ -1280,7 +1280,7 @@ def authorize_agent_draft_confirmation(
     request: JobCreateRequest,
     submitted_span_ids: list[str],
 ) -> None:
-    """Permit only unchanged server-authorized SCORABLE draft rows."""
+    """Permit exactly the unchanged server-authorized SCORABLE draft rows."""
     if len(request.criteria) != len(submitted_span_ids):
         raise UIServiceInputError("Qaralama meyarlarının mənbə təsdiqi etibarsızdır.")
     expected_by_span = {
@@ -1295,6 +1295,12 @@ def authorize_agent_draft_confirmation(
         for result in draft.requirements
         if result.state.value == "SCORABLE" and result.criterion_id is not None
     }
+    if len(request.criteria) != len(expected_by_span):
+        raise UIServiceInputError(
+            "Qaralamanın təsdiqli meyarları silinə və ya yeni meyarla əvəz edilə bilməz."
+        )
+    if set(submitted_span_ids) != set(expected_by_span):
+        raise UIServiceInputError("Qaralama meyarlarının mənbə təsdiqi etibarsızdır.")
     if len(set(submitted_span_ids)) != len(submitted_span_ids):
         raise UIServiceInputError("Eyni mənbə tələbi birdən çox meyar yarada bilməz.")
     comparable_fields = (

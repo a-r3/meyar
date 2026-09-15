@@ -948,64 +948,35 @@ async def create_job_route(
     verify_csrf(ctx.csrf_token, csrf_token)
     form = await request.form()
     title = str(form.get("title", ""))
-    # Set only by the agent's JD-confirmation review form (meyar.ui.
-    # templates.agent.html) — never by the classic manual /ui/jobs/new
-    # form, whose own redirect-to-jobs-list behavior is unchanged. See
-    # docs/DECISIONS.md D-043.
-    from_agent_draft = str(form.get("from_agent_draft", "")) == "1"
-    unsupported_requirements: list[str] = []
-    needs_review_requirements: list[str] = []
     must_have_rows = [_job_form_row(form, "must", i) for i in range(CRITERION_ROW_COUNT)]
     preferred_rows = [_job_form_row(form, "pref", i) for i in range(CRITERION_ROW_COUNT)]
+
+    # Manual creation is a distinct operation. Agent provenance fields are
+    # never ignored here: an agent review payload posted to this endpoint
+    # cannot be reinterpreted as an unrestricted manual job creation.
+    if any(
+        key in {"from_agent_draft", "draft_id"} or "_span_id_" in key
+        for key in form.keys()
+    ):
+        return _render(
+            request,
+            "job_new.html",
+            _job_new_context(
+                ctx,
+                title=title,
+                must_have_rows=must_have_rows,
+                preferred_rows=preferred_rows,
+                error=(
+                    "Agent qaralaması yalnız öz təsdiq əməliyyatı ilə təsdiqlənə bilər."
+                ),
+            ),
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        )
 
     try:
         job_request = build_job_create_request(
             title=title, must_have_rows=must_have_rows, preferred_rows=preferred_rows
         )
-        pending_conversation = None
-        pending_draft_id = None
-        if from_agent_draft:
-            from meyar.services.agent_conversation_repo import (
-                get_conversation_for_update_by_session,
-                get_pending_job_draft,
-            )
-
-            try:
-                pending_draft_id = uuid.UUID(str(form.get("draft_id", "")))
-            except ValueError as exc:
-                raise UIServiceInputError(
-                    "Qaralama təsdiqi etibarsızdır; elanı yenidən analiz edin."
-                ) from exc
-            pending_conversation = await get_conversation_for_update_by_session(
-                db, tenant_id=ctx.tenant_id, browser_session_id=ctx.session_id
-            )
-            if pending_conversation is None:
-                raise UIServiceInputError(
-                    "Qaralama təsdiqi tapılmadı; elanı yenidən analiz edin."
-                )
-            pending_draft = get_pending_job_draft(
-                pending_conversation, draft_id=pending_draft_id
-            )
-            if pending_draft is None:
-                raise UIServiceInputError(
-                    "Qaralama təsdiqi tapılmadı və ya artıq istifadə edilib; "
-                    "elanı yenidən analiz edin."
-                )
-            submitted_span_ids = [
-                str(form.get(f"{prefix}_span_id_{index}", ""))
-                for prefix, rows in (("must", must_have_rows), ("pref", preferred_rows))
-                for index, row in enumerate(rows)
-                if row.requirement.strip()
-            ]
-            authorize_agent_draft_confirmation(
-                draft=pending_draft,
-                request=job_request,
-                submitted_span_ids=submitted_span_ids,
-            )
-            unsupported_requirements = [item.requirement for item in pending_draft.unsupported]
-            needs_review_requirements = [
-                item.requirement for item in pending_draft.needs_review
-            ]
     except UIServiceInputError as exc:
         return _render(
             request,
@@ -1073,13 +1044,6 @@ async def create_job_route(
             actor_type=ACTOR_HUMAN_USER,
             actor_id=ctx.user_id,
         )
-        if from_agent_draft:
-            assert pending_conversation is not None and pending_draft_id is not None
-            from meyar.services.agent_conversation_repo import consume_pending_job_draft
-
-            await consume_pending_job_draft(
-                db, pending_conversation, draft_id=pending_draft_id
-            )
         await db.commit()
     except IntegrityError:
         # A concurrent double-submit raced past the pre-check above and
@@ -1112,22 +1076,189 @@ async def create_job_route(
             ),
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
-    if from_agent_draft:
-        # D-043 (PR #42 owner correction, issue #33): the agent-first JD
-        # flow ends on the ranking/result context it exists to produce,
-        # never on the de-emphasized vacancy list — one confirmation, one
-        # landing page. Reuses the exact same deterministic ranking
-        # service/render as the manual "Namizədləri sırala" action below;
-        # no new scoring authority.
-        return await _render_job_ranking(
+    return RedirectResponse("/ui/jobs", status_code=status.HTTP_303_SEE_OTHER)
+
+
+def _render_agent_confirmation_error(
+    request: Request, ctx: UIContext, *, message: str, status_code: int
+) -> HTMLResponse:
+    return _render(
+        request,
+        "error.html",
+        _context(ctx, title="Qaralama təsdiqlənmədi", message=message),
+        status_code=status_code,
+    )
+
+
+@router.post("/agent/drafts/{draft_id}/confirm", response_class=HTMLResponse)
+async def confirm_agent_job_draft(
+    request: Request,
+    draft_id: uuid.UUID,
+    csrf_token: str = Form(...),
+    ctx: UIContext = Depends(
+        require_ui_scopes("jobs:write", "jobs:read", "candidates:read", "evaluations:write")
+    ),
+    db: AsyncSession = Depends(get_db),
+) -> HTMLResponse:
+    """Confirm one session-held canonical draft, then rank separately.
+
+    The route itself establishes agent-confirmation provenance. Browser rows
+    are checked as proposals against the locked server draft and never select
+    the authorization mode. Confirmation commits before ranking and retains a
+    durable result link so replay/retry cannot create another Job or version.
+    """
+    from meyar.agent.schemas import ConfirmedAgentJobDraft
+    from meyar.services.agent_conversation_repo import (
+        get_confirmed_job_draft,
+        get_conversation_for_update_by_session,
+        get_pending_job_draft,
+        mark_pending_job_draft_confirmed,
+    )
+
+    verify_csrf(ctx.csrf_token, csrf_token)
+    form = await request.form()
+    must_have_rows = [_job_form_row(form, "must", i) for i in range(CRITERION_ROW_COUNT)]
+    preferred_rows = [_job_form_row(form, "pref", i) for i in range(CRITERION_ROW_COUNT)]
+
+    try:
+        conversation = await get_conversation_for_update_by_session(
+            db, tenant_id=ctx.tenant_id, browser_session_id=ctx.session_id
+        )
+        if conversation is None:
+            raise UIServiceInputError(
+                "Qaralama təsdiqi tapılmadı; elanı yenidən analiz edin."
+            )
+
+        confirmed = get_confirmed_job_draft(conversation, draft_id=draft_id)
+        if confirmed is not None:
+            # Release the row lock before the potentially expensive ranking
+            # transaction. This replay resolves to the already-confirmed object.
+            await db.commit()
+            return await _render_job_ranking(
+                request,
+                ctx,
+                db,
+                job_criteria_version_id=confirmed.criteria_version_id,
+                unsupported_requirements=confirmed.unsupported_requirements,
+                needs_review_requirements=confirmed.needs_review_requirements,
+                confirmation_succeeded=True,
+            )
+
+        pending = get_pending_job_draft(conversation, draft_id=draft_id)
+        if pending is None:
+            raise UIServiceInputError(
+                "Qaralama təsdiqi tapılmadı və ya bu sessiyaya aid deyil; "
+                "elanı yenidən analiz edin."
+            )
+
+        canonical_title = pending.title or "Vakansiya qaralaması"
+        if str(form.get("title", "")).strip() != canonical_title.strip():
+            raise UIServiceInputError(
+                "Qaralama başlığı serverdə saxlanmış təsdiqli forma ilə uyğun gəlmir."
+            )
+        job_request = build_job_create_request(
+            title=canonical_title,
+            must_have_rows=must_have_rows,
+            preferred_rows=preferred_rows,
+        )
+        submitted_span_ids = [
+            str(form.get(f"{prefix}_span_id_{index}", ""))
+            for prefix, rows in (("must", must_have_rows), ("pref", preferred_rows))
+            for index, row in enumerate(rows)
+            if row.requirement.strip()
+        ]
+        authorize_agent_draft_confirmation(
+            draft=pending,
+            request=job_request,
+            submitted_span_ids=submitted_span_ids,
+        )
+
+        duplicate_signature = compute_job_duplicate_signature(
+            job_request.title, job_request.criteria
+        )
+        if (
+            await find_active_duplicate_job(
+                db, tenant_id=ctx.tenant_id, duplicate_signature=duplicate_signature
+            )
+            is not None
+        ):
+            await db.rollback()
+            return _render_agent_confirmation_error(
+                request,
+                ctx,
+                message=JOB_DUPLICATE_MESSAGE,
+                status_code=status.HTTP_409_CONFLICT,
+            )
+
+        job = await create_job(
+            db,
+            tenant_id=ctx.tenant_id,
+            title=job_request.title,
+            duplicate_signature=duplicate_signature,
+        )
+        version = await create_criteria_version(
+            db,
+            tenant_id=ctx.tenant_id,
+            job_id=job.id,
+            criteria=[criterion.model_dump(mode="json") for criterion in job_request.criteria],
+            created_by_api_key_id=None,
+        )
+        await record_event(
+            db,
+            tenant_id=ctx.tenant_id,
+            event_type="job.created",
+            metadata={"job_id": str(job.id), "criteria_version": version.version_number},
+            actor_type=ACTOR_HUMAN_USER,
+            actor_id=ctx.user_id,
+        )
+        confirmation = ConfirmedAgentJobDraft(
+            draft_id=draft_id,
+            job_id=job.id,
+            criteria_version_id=version.id,
+            unsupported_requirements=[item.requirement for item in pending.unsupported],
+            needs_review_requirements=[item.requirement for item in pending.needs_review],
+        )
+        await mark_pending_job_draft_confirmed(
+            db, conversation, confirmation=confirmation
+        )
+        await db.commit()
+    except UIServiceInputError as exc:
+        await db.rollback()
+        return _render_agent_confirmation_error(
             request,
             ctx,
-            db,
-            job_criteria_version_id=version.id,
-            unsupported_requirements=unsupported_requirements,
-            needs_review_requirements=needs_review_requirements,
+            message=str(exc),
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         )
-    return RedirectResponse("/ui/jobs", status_code=status.HTTP_303_SEE_OTHER)
+    except IntegrityError:
+        await db.rollback()
+        return _render_agent_confirmation_error(
+            request,
+            ctx,
+            message=JOB_DUPLICATE_MESSAGE,
+            status_code=status.HTTP_409_CONFLICT,
+        )
+    except (ValueError, SQLAlchemyError):
+        await db.rollback()
+        return _render_agent_confirmation_error(
+            request,
+            ctx,
+            message=(
+                "Qaralama təhlükəsiz şəkildə təsdiqlənə bilmədi. "
+                "Elanı yenidən analiz edin."
+            ),
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+
+    return await _render_job_ranking(
+        request,
+        ctx,
+        db,
+        job_criteria_version_id=confirmation.criteria_version_id,
+        unsupported_requirements=confirmation.unsupported_requirements,
+        needs_review_requirements=confirmation.needs_review_requirements,
+        confirmation_succeeded=True,
+    )
 
 
 async def _render_job_ranking(
@@ -1138,9 +1269,10 @@ async def _render_job_ranking(
     job_criteria_version_id: uuid.UUID,
     unsupported_requirements: list[str] | None = None,
     needs_review_requirements: list[str] | None = None,
+    confirmation_succeeded: bool = False,
 ) -> HTMLResponse:
     """Shared by the manual "Namizədləri sırala" action (rank_job) and
-    create_job_route's agent-JD-confirmation path (D-043) — one
+    the dedicated agent-draft confirmation path — one
     deterministic ranking render, never duplicated. Same UI-boundary rule
     as /search: no manual date input; today's date is injected here and
     threaded explicitly into the deterministic ranking service (D-023).
@@ -1168,6 +1300,16 @@ async def _render_job_ranking(
         await db.commit()
     except BatchRankingError as exc:
         await db.rollback()
+        if confirmation_succeeded:
+            return _render(
+                request,
+                "ranking_retry.html",
+                _context(
+                    ctx,
+                    job_criteria_version_id=job_criteria_version_id,
+                ),
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
         if exc.code == "JOB_ARCHIVED":
             return _render(
                 request,
@@ -1199,6 +1341,16 @@ async def _render_job_ranking(
         )
     except (ScoringPolicyError, SQLAlchemyError):
         await db.rollback()
+        if confirmation_succeeded:
+            return _render(
+                request,
+                "ranking_retry.html",
+                _context(
+                    ctx,
+                    job_criteria_version_id=job_criteria_version_id,
+                ),
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
         return _render(
             request,
             "error.html",

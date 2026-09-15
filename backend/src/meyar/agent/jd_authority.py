@@ -10,6 +10,7 @@ import re
 
 from meyar.agent.schemas import MAX_JD_REQUIREMENT_SPANS, RequirementSpan
 from meyar.core.text import fold_az_ascii, normalize_azerbaijani_case
+from meyar.evaluation.normalization import SKILL_ALIASES
 from meyar.schemas.criteria import find_prohibited_term
 
 _OUTER_BOUNDARY_RE = re.compile(r"(?:\r?\n)+|(?<=[.!?;])\s+")
@@ -22,10 +23,10 @@ _REQUIRED_RE = re.compile(
     re.IGNORECASE,
 )
 _PREFERRED_RE = re.compile(
-    r"\b(?:preferred|nice\s+to\s+have|ustunluk\w*|arzuolunan\w*)\b|"
-    r"\bis\s+(?:a\s+)?plus\b",
+    r"\b(?:preferred|nice\s+to\s+have|ustunluk\w*|arzuolunan\w*)\b",
     re.IGNORECASE,
 )
+_PLUS_PREFERENCE_RE = re.compile(r"^(?P<subject>[a-z0-9+#.]+(?:\s+[a-z0-9+#.]+)*)\s+is\s+a\s+plus$")
 _NEGATED_REQUIREMENT_RE = re.compile(
     r"\b(?:no|not|without)\b[^.!?;]{0,80}\b(?:requirement|required|must|preferred)\b",
     re.IGNORECASE,
@@ -41,9 +42,54 @@ _MATERIAL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# A deliberately bounded, reviewable taxonomy used only to recognize the
+# English "<professional subject> is a plus" idiom and standalone implicit
+# items. It does not add evaluator semantics: implicit items still become
+# NEEDS_HUMAN_REVIEW. Curated aliases share the scorer's existing authority.
+_KNOWN_PROFESSIONAL_SUBJECTS = frozenset(SKILL_ALIASES) | frozenset(
+    SKILL_ALIASES.values()
+) | frozenset(
+    {
+        ".net",
+        "acams",
+        "angular",
+        "aws",
+        "azure",
+        "c",
+        "c#",
+        "c++",
+        "django",
+        "docker",
+        "english",
+        "excel",
+        "fastapi",
+        "git",
+        "java",
+        "javascript",
+        "kubernetes",
+        "linux",
+        "node.js",
+        "nodejs",
+        "oracle",
+        "power bi",
+        "project management",
+        "python",
+        "react",
+        "russian",
+        "sap",
+        "sql",
+        "tableau",
+        "typescript",
+    }
+)
+
 
 def normalize_requirement_text(text: str) -> str:
     return " ".join(fold_az_ascii(normalize_azerbaijani_case(text)).split())
+
+
+def _recognized_professional_subject(text: str) -> bool:
+    return normalize_requirement_text(text).strip(" .;,:") in _KNOWN_PROFESSIONAL_SUBJECTS
 
 
 def explicit_modality(text: str) -> str | None:
@@ -52,7 +98,11 @@ def explicit_modality(text: str) -> str | None:
     if _NEGATED_REQUIREMENT_RE.search(normalized):
         return None
     required = bool(_REQUIRED_RE.search(normalized))
-    preferred = bool(_PREFERRED_RE.search(normalized))
+    plus_match = _PLUS_PREFERENCE_RE.fullmatch(normalized.strip(" .;,"))
+    supported_plus = bool(
+        plus_match and _recognized_professional_subject(plus_match.group("subject"))
+    )
+    preferred = bool(_PREFERRED_RE.search(normalized)) or supported_plus
     if required == preferred:
         return None
     return "MUST_HAVE" if required else "PREFERRED"
@@ -119,9 +169,11 @@ def segment_requirement_spans(jd_text: str) -> list[RequirementSpan]:
     candidates: list[tuple[int, int, bool]] = []
     for start, end, is_bullet in _base_occurrences(jd_text):
         text = jd_text[start:end]
+        normalized = normalize_requirement_text(text)
         if not (
             is_bullet
-            or _MATERIAL_RE.search(normalize_requirement_text(text))
+            or _MATERIAL_RE.search(normalized)
+            or _recognized_professional_subject(normalized)
             or find_prohibited_term(text)
         ):
             continue

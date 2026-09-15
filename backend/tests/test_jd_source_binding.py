@@ -483,6 +483,50 @@ def test_is_a_plus_is_bounded_preferred_modality() -> None:
     assert draft.needs_review == []
 
 
+@pytest.mark.parametrize("subject", ("Python", "Kubernetes"))
+def test_is_a_plus_requires_a_source_bound_professional_subject(subject: str) -> None:
+    source = f"{subject} is a plus"
+    draft = _draft(
+        source,
+        preferred=[
+            JDDraftCriterionItem(
+                kind="SKILL",
+                requirement=subject,
+                span_id=_span_id(source),
+                source_text="untrusted",
+            )
+        ],
+    )
+    assert [criterion.value for criterion in draft.preferred] == [subject]
+    assert [result.state for result in draft.requirements] == [RequirementSpanState.SCORABLE]
+
+
+@pytest.mark.parametrize(
+    ("source", "drafted"),
+    (
+        ("Price is plus VAT", "Price VAT"),
+        ("Salary is plus bonus", "Salary bonus"),
+        ("2 + 2 is plus 4", "2 2 4"),
+    ),
+)
+def test_is_plus_non_preference_controls_never_score(source: str, drafted: str) -> None:
+    draft = _draft(
+        source,
+        preferred=[
+            JDDraftCriterionItem(
+                kind="SKILL",
+                requirement=drafted,
+                span_id=_span_id(source),
+                source_text=source,
+            )
+        ],
+    )
+    assert draft.preferred == []
+    assert [result.state for result in draft.requirements] == [
+        RequirementSpanState.NEEDS_HUMAN_REVIEW
+    ]
+
+
 def test_implicit_modality_fails_closed_to_review() -> None:
     source = "- Python"
     spans = segment_requirement_spans(source)
@@ -500,6 +544,45 @@ def test_implicit_modality_fails_closed_to_review() -> None:
     )
     assert draft.must_have == []
     assert [item.requirement for item in draft.needs_review] == ["Python"]
+
+
+@pytest.mark.parametrize("source", ("Python", "English B2", "Banking experience"))
+def test_standalone_implicit_professional_item_is_visible_for_review(source: str) -> None:
+    draft = _draft(source)
+    assert draft.must_have == [] and draft.preferred == []
+    assert [item.requirement for item in draft.needs_review] == [source]
+    assert [result.state for result in draft.requirements] == [
+        RequirementSpanState.NEEDS_HUMAN_REVIEW
+    ]
+
+
+def test_descriptive_prose_is_not_falsely_reconciled_as_a_requirement() -> None:
+    source = "Our team uses Python to build reliable services and collaborates every day."
+    draft = _draft(source)
+    assert draft.requirements == []
+    assert draft.must_have == [] and draft.preferred == []
+    assert draft.needs_review == []
+
+
+def test_repeated_implicit_and_explicit_items_keep_distinct_occurrences() -> None:
+    source = "Python\nPython required"
+    spans = segment_requirement_spans(source)
+    assert len(spans) == 2 and spans[0].span_id != spans[1].span_id
+    draft = _draft(
+        source,
+        must=[
+            JDDraftCriterionItem(
+                kind="SKILL",
+                requirement="Python",
+                span_id=spans[1].span_id,
+                source_text="Python required",
+            )
+        ],
+    )
+    assert [result.state for result in draft.requirements] == [
+        RequirementSpanState.NEEDS_HUMAN_REVIEW,
+        RequirementSpanState.SCORABLE,
+    ]
 
 
 def test_negated_requirement_phrase_does_not_create_a_requirement() -> None:

@@ -3,7 +3,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meyar.agent.schemas import AgentJobDraftToolResult
+from meyar.agent.schemas import AgentJobDraftToolResult, ConfirmedAgentJobDraft
 from meyar.models.agent_conversation import AgentConversation
 
 ASSISTANT_TEXT_AUTHORITY_SERVER = "SERVER_VALIDATED"
@@ -133,23 +133,48 @@ def get_pending_job_draft(
     return None
 
 
-async def consume_pending_job_draft(
-    db: AsyncSession, conversation: AgentConversation, *, draft_id: uuid.UUID
+def get_confirmed_job_draft(
+    conversation: AgentConversation, *, draft_id: uuid.UUID
+) -> ConfirmedAgentJobDraft | None:
+    """Resolve an idempotent confirmation result from this session only."""
+    for turn in reversed(conversation.turns):
+        payload = turn.get("confirmed_job_draft")
+        if not isinstance(payload, dict):
+            continue
+        try:
+            confirmed = ConfirmedAgentJobDraft.model_validate(payload)
+        except ValueError:
+            continue
+        if confirmed.draft_id == draft_id:
+            return confirmed
+    return None
+
+
+async def mark_pending_job_draft_confirmed(
+    db: AsyncSession,
+    conversation: AgentConversation,
+    *,
+    confirmation: ConfirmedAgentJobDraft,
 ) -> None:
-    """Make one confirmed authority non-replayable after job creation."""
+    """Consume one pending authority while retaining its durable result link."""
     changed = False
     turns: list[dict] = []
     for turn in conversation.turns:
         current = dict(turn)
         payload = current.get("pending_job_draft")
-        if isinstance(payload, dict) and payload.get("draft_id") == str(draft_id):
+        if (
+            isinstance(payload, dict)
+            and payload.get("draft_id") == str(confirmation.draft_id)
+        ):
             current.pop("pending_job_draft", None)
+            current["confirmed_job_draft"] = confirmation.model_dump(mode="json")
             changed = True
         turns.append(current)
-    if changed:
-        await save_conversation_state(
-            db,
-            conversation,
-            turns=turns,
-            last_search_candidate_ids=conversation.last_search_candidate_ids,
-        )
+    if not changed:
+        raise ValueError("Pending draft was not available for confirmation.")
+    await save_conversation_state(
+        db,
+        conversation,
+        turns=turns,
+        last_search_candidate_ids=conversation.last_search_candidate_ids,
+    )

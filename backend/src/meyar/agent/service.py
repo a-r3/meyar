@@ -1050,8 +1050,8 @@ async def _finish_turn(
         if tool_result.job_draft is not None
     ]
     if pending_drafts:
-        # Session/tenant-scoped server authority used by POST /ui/jobs to
-        # revalidate confirmation. Browser fields never recreate it.
+        # Session/tenant-scoped server authority used by the dedicated
+        # draft-confirmation operation. Browser fields never recreate it.
         assistant_turn["pending_job_draft"] = pending_drafts[-1].model_dump(mode="json")
     turns = [*turns, assistant_turn][-max_context_turns:]
     await save_conversation_state(

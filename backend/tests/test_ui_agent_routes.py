@@ -2,7 +2,9 @@
 (/ui/agent). Complements tests/test_agent_service.py's direct
 service-level coverage with auth/CSRF/session/template behavior."""
 
+import asyncio
 import re
+import uuid
 
 import pytest
 from fakes import FakeLLMProvider
@@ -66,6 +68,52 @@ def _hidden_value(html: str, name: str) -> str:
     match = re.search(rf'name="{re.escape(name)}" value="([^"]+)"', html)
     assert match is not None
     return match.group(1)
+
+
+def _draft_confirm_path(html: str) -> str:
+    match = re.search(r'action="(/ui/agent/drafts/[0-9a-f-]+/confirm)"', html)
+    assert match is not None
+    return match.group(1)
+
+
+def _python_confirmation_data(html: str, csrf: str, *, title: str = "Backend") -> dict[str, str]:
+    return {
+        "csrf_token": csrf,
+        "title": title,
+        "must_span_id_0": _hidden_value(html, "must_span_id_0"),
+        "must_kind_0": "SKILL",
+        "must_requirement_0": "Python",
+        "must_min_years_0": "",
+        "must_weight_0": "1",
+    }
+
+
+async def _render_python_draft(
+    client: AsyncClient, *, username: str, password: str
+) -> tuple[str, str, str]:
+    from meyar.agent.schemas import JDCriteriaDraft, JDDraftCriterionItem
+
+    fake = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        jd_draft=JDCriteriaDraft(
+            title="Backend",
+            must_have=[
+                JDDraftCriterionItem(
+                    span_id="req-0001",
+                    kind="SKILL",
+                    requirement="Python",
+                    source_text="Python required",
+                )
+            ],
+        ),
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake
+    csrf = await _login_and_csrf(client, username, password)
+    response = await client.post(
+        "/ui/agent", data={"message": "Backend. Python required.", "csrf_token": csrf}
+    )
+    assert response.status_code == 200
+    return csrf, _draft_confirm_path(response.text), response.text
 
 
 async def test_agent_workspace_requires_authentication(
@@ -700,20 +748,24 @@ async def test_draft_job_criteria_renders_editable_prefilled_review_form(
     # name/internal marker anywhere in the visible page.
     assert "Bacarıq" in response.text
     assert "DRAFT_JOB_CRITERIA" not in response.text
-    assert '<form method="post" action="/ui/jobs"' in response.text
+    assert _draft_confirm_path(response.text).endswith("/confirm")
+    assert 'name="from_agent_draft"' not in response.text
+    assert 'name="draft_id"' not in response.text
 
-    # The review form is fully editable and posts through the EXISTING,
-    # unchanged /ui/jobs creation path — nothing was persisted by drafting
-    # alone (D-032): submitting it is what actually creates the vacancy.
+    # Drafting alone persists no Job; only the dedicated, server-authorized
+    # confirmation operation creates the vacancy and ranks it.
+    confirm_path = _draft_confirm_path(response.text)
     create = await client.post(
-        "/ui/jobs",
+        confirm_path,
         data={
             "csrf_token": csrf,
             "title": "Baş Backend Mühəndisi",
+            "must_span_id_0": _hidden_value(response.text, "must_span_id_0"),
             "must_kind_0": "SKILL",
             "must_requirement_0": "Python",
             "must_min_years_0": "",
             "must_weight_0": "1",
+            "pref_span_id_0": _hidden_value(response.text, "pref_span_id_0"),
             "pref_kind_0": "SKILL",
             "pref_requirement_0": "AWS",
             "pref_min_years_0": "",
@@ -721,9 +773,8 @@ async def test_draft_job_criteria_renders_editable_prefilled_review_form(
         },
         follow_redirects=False,
     )
-    assert create.status_code == 303
-    jobs_page = await client.get("/ui/jobs")
-    assert "Baş Backend Mühəndisi" in jobs_page.text
+    assert create.status_code == 200
+    assert "Reytinq nəticələri" in create.text
 
 
 async def test_draft_job_criteria_drops_prohibited_item_and_notes_it(
@@ -851,7 +902,7 @@ async def test_draft_job_criteria_explicit_intent_routes_without_magic_wording(
     )
     assert response.status_code == 200
     assert 'value="Python"' in response.text
-    assert '<form method="post" action="/ui/jobs"' in response.text
+    assert _draft_confirm_path(response.text).endswith("/confirm")
     assert fake.agent_call_count == 0
 
 
@@ -887,7 +938,7 @@ async def test_draft_job_criteria_explicit_intent_never_becomes_a_search(
         data={"message": jd_text, "intent": "draft_job_criteria", "csrf_token": csrf},
     )
     assert response.status_code == 200
-    assert '<form method="post" action="/ui/jobs"' in response.text
+    assert _draft_confirm_path(response.text).endswith("/confirm")
     assert "namizəd tapıldı" not in response.text
     assert fake.agent_call_count == 0
     assert fake.call_count == 0
@@ -930,17 +981,13 @@ async def test_confirming_agent_drafted_criteria_lands_on_ranking_not_jobs_list(
     jd_text = "Baş Backend Mühəndisi axtarırıq. Python bilməlidir."
     draft_response = await client.post("/ui/agent", data={"message": jd_text, "csrf_token": csrf})
     assert draft_response.status_code == 200
-    match = re.search(r'name="from_agent_draft" value="1"', draft_response.text)
-    assert match is not None
-    draft_id = _hidden_value(draft_response.text, "draft_id")
+    confirm_path = _draft_confirm_path(draft_response.text)
     span_id = _hidden_value(draft_response.text, "must_span_id_0")
 
     create = await client.post(
-        "/ui/jobs",
+        confirm_path,
         data={
             "csrf_token": csrf,
-            "from_agent_draft": "1",
-            "draft_id": draft_id,
             "title": "Baş Backend Mühəndisi",
             "must_span_id_0": span_id,
             "must_kind_0": "SKILL",
@@ -956,11 +1003,9 @@ async def test_confirming_agent_drafted_criteria_lands_on_ranking_not_jobs_list(
     assert "Baş Backend Mühəndisi" in create.text
 
     replay = await client.post(
-        "/ui/jobs",
+        confirm_path,
         data={
             "csrf_token": csrf,
-            "from_agent_draft": "1",
-            "draft_id": draft_id,
             "title": "Başqa başlıq",
             "must_span_id_0": span_id,
             "must_kind_0": "SKILL",
@@ -969,7 +1014,8 @@ async def test_confirming_agent_drafted_criteria_lands_on_ranking_not_jobs_list(
             "must_weight_0": "1",
         },
     )
-    assert replay.status_code == 422
+    assert replay.status_code == 200
+    assert "Reytinq nəticələri" in replay.text
 
     from sqlalchemy import func, select
 
@@ -1007,15 +1053,13 @@ async def test_agent_confirmation_rejects_browser_weakened_row_without_persisten
     response = await client.post(
         "/ui/agent", data={"message": "Backend. Python required.", "csrf_token": csrf}
     )
-    draft_id = _hidden_value(response.text, "draft_id")
+    confirm_path = _draft_confirm_path(response.text)
     span_id = _hidden_value(response.text, "must_span_id_0")
 
     tampered = await client.post(
-        "/ui/jobs",
+        confirm_path,
         data={
             "csrf_token": csrf,
-            "from_agent_draft": "1",
-            "draft_id": draft_id,
             "title": "Backend",
             "must_span_id_0": span_id,
             "must_kind_0": "SKILL",
@@ -1026,6 +1070,247 @@ async def test_agent_confirmation_rejects_browser_weakened_row_without_persisten
     )
     assert tampered.status_code == 422
     assert "server təsdiqli forması ilə uyğun gəlmir" in tampered.text
+    assert await db_session.scalar(select(func.count()).select_from(Job)) == 0
+
+
+async def test_agent_confirmation_route_does_not_depend_on_browser_mode_markers(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
+) -> None:
+    from sqlalchemy import func, select
+
+    from meyar.models.job import Job
+
+    _tenant, user, password, _membership = tenant_and_user
+    csrf, confirm_path, html = await _render_python_draft(
+        client, username=user.username, password=password
+    )
+    assert 'name="from_agent_draft"' not in html
+    assert 'name="draft_id"' not in html
+
+    # Removing every optional provenance marker, or adding/changing the old
+    # mode flag, cannot alter which server operation handles the request.
+    data = _python_confirmation_data(html, csrf)
+    data["from_agent_draft"] = "changed-by-browser"
+    response = await client.post(confirm_path, data=data)
+    assert response.status_code == 200
+    assert await db_session.scalar(select(func.count()).select_from(Job)) == 1
+
+
+async def test_manual_job_endpoint_rejects_agent_review_payload(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
+) -> None:
+    from sqlalchemy import func, select
+
+    from meyar.models.job import Job
+
+    _tenant, user, password, _membership = tenant_and_user
+    csrf, _confirm_path, html = await _render_python_draft(
+        client, username=user.username, password=password
+    )
+    response = await client.post("/ui/jobs", data=_python_confirmation_data(html, csrf))
+    assert response.status_code == 422
+    assert "yalnız öz təsdiq əməliyyatı" in response.text
+    assert await db_session.scalar(select(func.count()).select_from(Job)) == 0
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "value",
+        "kind",
+        "modality",
+        "years",
+        "weight",
+        "span_id",
+        "insert",
+        "duplicate",
+        "delete",
+        "remove_span_marker",
+        "title",
+    ),
+)
+async def test_agent_confirmation_browser_tampering_matrix_is_atomic(
+    mutation: str,
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
+) -> None:
+    from sqlalchemy import func, select
+
+    from meyar.models.audit_event import AuditEvent
+    from meyar.models.job import Job
+    from meyar.models.job_criteria_version import JobCriteriaVersion
+
+    _tenant, user, password, _membership = tenant_and_user
+    csrf, confirm_path, html = await _render_python_draft(
+        client, username=user.username, password=password
+    )
+    data = _python_confirmation_data(html, csrf)
+    if mutation == "value":
+        data["must_requirement_0"] = "JavaScript"
+    elif mutation == "kind":
+        data["must_kind_0"] = "CERTIFICATION"
+    elif mutation == "modality":
+        for field in ("span_id", "kind", "requirement", "min_years", "weight"):
+            data[f"pref_{field}_0"] = data.pop(f"must_{field}_0")
+    elif mutation == "years":
+        data["must_min_years_0"] = "5"
+    elif mutation == "weight":
+        data["must_weight_0"] = "2"
+    elif mutation == "span_id":
+        data["must_span_id_0"] = "req-9999"
+    elif mutation in {"insert", "duplicate"}:
+        data.update(
+            {
+                "must_span_id_1": (
+                    "req-9999" if mutation == "insert" else data["must_span_id_0"]
+                ),
+                "must_kind_1": "SKILL",
+                "must_requirement_1": "SQL",
+                "must_min_years_1": "",
+                "must_weight_1": "1",
+            }
+        )
+    elif mutation == "delete":
+        for key in list(data):
+            if key.startswith("must_"):
+                data.pop(key)
+    elif mutation == "remove_span_marker":
+        data.pop("must_span_id_0")
+    elif mutation == "title":
+        data["title"] = "Browser-authored title"
+
+    response = await client.post(confirm_path, data=data)
+    assert response.status_code == 422
+    assert await db_session.scalar(select(func.count()).select_from(Job)) == 0
+    assert await db_session.scalar(select(func.count()).select_from(JobCriteriaVersion)) == 0
+    assert (
+        await db_session.scalar(
+            select(func.count())
+            .select_from(AuditEvent)
+            .where(AuditEvent.event_type == "job.created")
+        )
+        == 0
+    )
+
+
+async def test_agent_confirmation_rejects_unsupported_to_scorable_insertion(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
+) -> None:
+    from sqlalchemy import func, select
+
+    from meyar.agent.schemas import JDCriteriaDraft, JDDraftCriterionItem
+    from meyar.models.job import Job
+
+    _tenant, user, password, _membership = tenant_and_user
+    fake = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        jd_draft=JDCriteriaDraft(
+            title="Backend",
+            must_have=[
+                JDDraftCriterionItem(
+                    span_id="req-0001",
+                    kind="SKILL",
+                    requirement="Python",
+                    source_text="Python required",
+                ),
+                JDDraftCriterionItem(
+                    span_id="req-0002",
+                    kind="SKILL_EXPERIENCE",
+                    requirement="Kubernetes",
+                    min_years=5,
+                    source_text="5 years Kubernetes experience required",
+                ),
+            ],
+        ),
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake
+    csrf = await _login_and_csrf(client, user.username, password)
+    draft = await client.post(
+        "/ui/agent",
+        data={
+            "message": "Backend. Python required. 5 years Kubernetes experience required.",
+            "csrf_token": csrf,
+        },
+    )
+    data = _python_confirmation_data(draft.text, csrf)
+    data.update(
+        {
+            "must_span_id_1": "req-0002",
+            "must_kind_1": "SKILL",
+            "must_requirement_1": "Kubernetes",
+            "must_min_years_1": "",
+            "must_weight_1": "1",
+        }
+    )
+    response = await client.post(_draft_confirm_path(draft.text), data=data)
+    assert response.status_code == 422
+    assert await db_session.scalar(select(func.count()).select_from(Job)) == 0
+
+
+async def test_agent_confirmation_rejects_prohibited_to_scorable_insertion(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
+) -> None:
+    from sqlalchemy import func, select
+
+    from meyar.agent.schemas import JDCriteriaDraft, JDDraftCriterionItem
+    from meyar.models.job import Job
+
+    _tenant, user, password, _membership = tenant_and_user
+    fake = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        jd_draft=JDCriteriaDraft(
+            title="Backend",
+            must_have=[
+                JDDraftCriterionItem(
+                    span_id="req-0001",
+                    kind="SKILL",
+                    requirement="Python",
+                    source_text="Python required",
+                ),
+                JDDraftCriterionItem(
+                    span_id="req-0002",
+                    kind="SKILL",
+                    requirement="Female",
+                    source_text="Female required",
+                ),
+            ],
+        ),
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake
+    csrf = await _login_and_csrf(client, user.username, password)
+    draft = await client.post(
+        "/ui/agent",
+        data={
+            "message": "Backend. Python required. Female required.",
+            "csrf_token": csrf,
+        },
+    )
+    data = _python_confirmation_data(draft.text, csrf)
+    data.update(
+        {
+            "must_span_id_1": "req-0002",
+            "must_kind_1": "SKILL",
+            "must_requirement_1": "Female",
+            "must_min_years_1": "",
+            "must_weight_1": "1",
+        }
+    )
+    response = await client.post(_draft_confirm_path(draft.text), data=data)
+    assert response.status_code == 422
     assert await db_session.scalar(select(func.count()).select_from(Job)) == 0
 
 
@@ -1310,15 +1595,13 @@ async def test_unsupported_requirement_survives_confirmation_and_scores_nothing(
     unsupported = "Namizəd ezamiyyətə hazır olması üstünlükdür"
     assert unsupported in draft_response.text
     assert 'name="unsupported_preferred"' not in draft_response.text
-    draft_id = _hidden_value(draft_response.text, "draft_id")
+    confirm_path = _draft_confirm_path(draft_response.text)
     span_id = _hidden_value(draft_response.text, "must_span_id_0")
 
     create = await client.post(
-        "/ui/jobs",
+        confirm_path,
         data={
             "csrf_token": csrf,
-            "from_agent_draft": "1",
-            "draft_id": draft_id,
             "title": "Data Analitiki",
             "must_span_id_0": span_id,
             "must_kind_0": "SKILL",
@@ -1401,15 +1684,13 @@ async def test_omitted_source_requirement_survives_confirmation_without_scoring(
     assert "İnsan baxışı tələb edir — qiymətləndirməyə daxil edilmir" in draft_response.text
     for internal_code in ("NEEDS_HUMAN_REVIEW", "UNGROUNDED", "PROHIBITED", "UNSUPPORTED"):
         assert internal_code not in draft_response.text
-    draft_id = _hidden_value(draft_response.text, "draft_id")
+    confirm_path = _draft_confirm_path(draft_response.text)
     span_id = _hidden_value(draft_response.text, "must_span_id_0")
 
     create = await client.post(
-        "/ui/jobs",
+        confirm_path,
         data={
             "csrf_token": csrf,
-            "from_agent_draft": "1",
-            "draft_id": draft_id,
             "title": "Data Analyst",
             "must_span_id_0": span_id,
             "must_kind_0": "SKILL",
@@ -1429,6 +1710,267 @@ async def test_omitted_source_requirement_survives_confirmation_without_scoring(
     ).scalar_one()
     assert [criterion["label"] for criterion in version.criteria] == ["Python"]
     assert omitted not in str(version.criteria)
+
+
+async def test_agent_draft_confirmation_is_tenant_and_session_bound(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
+) -> None:
+    from httpx import ASGITransport
+    from sqlalchemy import func, select
+
+    from meyar.core.roles import ROLE_HR_USER
+    from meyar.models.job import Job
+    from meyar.services.tenant_membership_repo import create_membership
+    from meyar.services.tenant_repo import create_tenant
+    from meyar.services.user_repo import create_user
+
+    _tenant_a, user_a, password_a, _membership_a = tenant_and_user
+    csrf_a, confirm_path, html = await _render_python_draft(
+        client, username=user_a.username, password=password_a
+    )
+    data_a = _python_confirmation_data(html, csrf_a)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as session_b:
+        csrf_b = await _login_and_csrf(session_b, user_a.username, password_a)
+        cross_session = await session_b.post(
+            confirm_path, data={**data_a, "csrf_token": csrf_b}
+        )
+        assert cross_session.status_code == 422
+
+    tenant_b = await create_tenant(db_session, name=f"Tenant-{uuid.uuid4().hex[:8]}")
+    user_b = await create_user(
+        db_session,
+        username=f"hr-{uuid.uuid4().hex[:8]}",
+        plaintext_password="correct-horse-battery-staple-2",
+    )
+    await create_membership(
+        db_session, user_id=user_b.id, tenant_id=tenant_b.id, role=ROLE_HR_USER
+    )
+    await db_session.commit()
+    async with AsyncClient(transport=transport, base_url="http://test") as tenant_b_client:
+        csrf_b = await _login_and_csrf(
+            tenant_b_client, user_b.username, "correct-horse-battery-staple-2"
+        )
+        cross_tenant = await tenant_b_client.post(
+            confirm_path, data={**data_a, "csrf_token": csrf_b}
+        )
+        assert cross_tenant.status_code == 422
+
+    assert await db_session.scalar(select(func.count()).select_from(Job)) == 0
+
+
+async def test_unknown_or_unreachable_agent_draft_fails_closed(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
+) -> None:
+    from sqlalchemy import func, select
+
+    from meyar.models.job import Job
+
+    _tenant, user, password, _membership = tenant_and_user
+    csrf = await _login_and_csrf(client, user.username, password)
+    response = await client.post(
+        f"/ui/agent/drafts/{uuid.uuid4()}/confirm",
+        data={"csrf_token": csrf, "title": "Backend"},
+    )
+    assert response.status_code == 422
+    assert await db_session.scalar(select(func.count()).select_from(Job)) == 0
+
+
+async def test_concurrent_confirmation_creates_exactly_one_canonical_object(
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from collections.abc import AsyncGenerator
+
+    from httpx import ASGITransport
+    from sqlalchemy import func, select
+    from sqlalchemy.ext.asyncio import AsyncSession as IndependentSession
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from meyar.db import get_db
+    from meyar.models.agent_conversation import AgentConversation
+    from meyar.models.audit_event import AuditEvent
+    from meyar.models.job import Job
+    from meyar.models.job_criteria_version import JobCriteriaVersion
+    from meyar.services import agent_conversation_repo
+
+    _tenant, user, password, _membership = tenant_and_user
+    assert db_session.bind is not None
+    engine = create_async_engine(str(db_session.bind.url))
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def independent_db() -> AsyncGenerator[IndependentSession, None]:
+        async with factory() as session:
+            yield session
+
+    app.dependency_overrides[get_db] = independent_db
+    transport = ASGITransport(app=app)
+    try:
+        async with AsyncClient(transport=transport, base_url="http://test") as login_client:
+            csrf, confirm_path, html = await _render_python_draft(
+                login_client, username=user.username, password=password
+            )
+            cookies = login_client.cookies
+
+        original_lock = agent_conversation_repo.get_conversation_for_update_by_session
+        both_entered = asyncio.Event()
+        arrival_count = 0
+
+        async def synchronized_lock(*args, **kwargs):
+            nonlocal arrival_count
+            arrival_count += 1
+            if arrival_count == 2:
+                both_entered.set()
+            await asyncio.wait_for(both_entered.wait(), timeout=5)
+            return await original_lock(*args, **kwargs)
+
+        monkeypatch.setattr(
+            agent_conversation_repo,
+            "get_conversation_for_update_by_session",
+            synchronized_lock,
+        )
+        data = _python_confirmation_data(html, csrf)
+        async with (
+            AsyncClient(transport=transport, base_url="http://test", cookies=cookies) as first,
+            AsyncClient(transport=transport, base_url="http://test", cookies=cookies) as second,
+        ):
+            responses = await asyncio.gather(
+                first.post(confirm_path, data=data),
+                second.post(confirm_path, data=data),
+            )
+        assert [response.status_code for response in responses] == [200, 200]
+        assert arrival_count == 2
+        assert await db_session.scalar(select(func.count()).select_from(Job)) == 1
+        assert await db_session.scalar(select(func.count()).select_from(JobCriteriaVersion)) == 1
+        assert (
+            await db_session.scalar(
+                select(func.count())
+                .select_from(AuditEvent)
+                .where(AuditEvent.event_type == "job.created")
+            )
+            == 1
+        )
+        conversation = (await db_session.execute(select(AgentConversation))).scalar_one()
+        assert sum("confirmed_job_draft" in turn for turn in conversation.turns) == 1
+        assert all("pending_job_draft" not in turn for turn in conversation.turns)
+    finally:
+        await engine.dispose()
+
+
+async def test_confirmation_ranking_failure_is_truthful_and_retryable(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sqlalchemy import func, select
+
+    from meyar.models.job import Job
+    from meyar.models.job_criteria_version import JobCriteriaVersion
+    from meyar.scoring.policy import ScoringPolicyError
+    from meyar.ui import router as ui_router
+
+    _tenant, user, password, _membership = tenant_and_user
+    csrf, confirm_path, html = await _render_python_draft(
+        client, username=user.username, password=password
+    )
+    original_rank = ui_router.rank_candidates_for_job
+    calls = 0
+
+    async def fail_once(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ScoringPolicyError("FORCED", "forced ranking failure")
+        return await original_rank(*args, **kwargs)
+
+    monkeypatch.setattr(ui_router, "rank_candidates_for_job", fail_once)
+    failed_rank = await client.post(
+        confirm_path, data=_python_confirmation_data(html, csrf)
+    )
+    assert failed_rank.status_code == 503
+    assert "Tələblər təsdiqləndi, reytinq isə tamamlanmadı" in failed_rank.text
+    assert "yeni vakansiya yaratmayacaq" in failed_rank.text
+    assert await db_session.scalar(select(func.count()).select_from(Job)) == 1
+    version = (await db_session.execute(select(JobCriteriaVersion))).scalar_one()
+
+    retry = await client.post(
+        f"/ui/jobs/{version.id}/rank", data={"csrf_token": csrf}
+    )
+    assert retry.status_code == 200
+    assert "Reytinq nəticələri" in retry.text
+
+    replay = await client.post(confirm_path, data={"csrf_token": csrf})
+    assert replay.status_code == 200
+    assert await db_session.scalar(select(func.count()).select_from(Job)) == 1
+    assert await db_session.scalar(select(func.count()).select_from(JobCriteriaVersion)) == 1
+
+
+async def test_zero_scorable_agent_draft_shows_review_without_rank_action(
+    client: AsyncClient, tenant_and_user, local_ui_settings: Settings
+) -> None:
+    from meyar.agent.schemas import JDCriteriaDraft, JDDraftCriterionItem
+
+    _tenant, user, password, _membership = tenant_and_user
+    source = (
+        "5 years Python experience required. English B2 required. "
+        "Banking experience preferred."
+    )
+    fake = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        jd_draft=JDCriteriaDraft(
+            title="Role",
+            must_have=[
+                JDDraftCriterionItem(
+                    span_id="req-0001",
+                    kind="SKILL_EXPERIENCE",
+                    requirement="Python",
+                    min_years=5,
+                    source_text="5 years Python experience required",
+                ),
+                JDDraftCriterionItem(
+                    span_id="req-0002",
+                    kind="LANGUAGE",
+                    requirement="English",
+                    required_level="B2",
+                    source_text="English B2 required",
+                ),
+            ],
+            preferred=[
+                JDDraftCriterionItem(
+                    span_id="req-0003",
+                    kind="DOMAIN_EXPERIENCE",
+                    requirement="Banking",
+                    source_text="Banking experience preferred",
+                )
+            ],
+        ),
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake
+    csrf = await _login_and_csrf(client, user.username, password)
+    response = await client.post(
+        "/ui/agent", data={"message": source, "csrf_token": csrf}
+    )
+    assert response.status_code == 200
+    for requirement in (
+        "5 years Python experience required",
+        "English B2 required",
+        "Banking experience preferred",
+    ):
+        assert requirement in response.text
+    assert "Avtomatik sıralama üçün hazır meyar yoxdur" in response.text
+    assert "Tələbləri təsdiqlə və namizədləri sırala" not in response.text
+    assert "/confirm" not in response.text
 
 
 async def test_draft_job_criteria_provider_failure_renders_safe_message(

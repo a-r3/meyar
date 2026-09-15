@@ -158,8 +158,10 @@ unlabeled number but never guesses that an arbitrary identifier is a phone.
   before a row is scorable. Raw-JD and post-parse prohibited checks remain
   independent of model kind, including bounded Azerbaijani inflection families.
   Prohibited text is count-only outside the HR user's own original message and
-  cannot enter scoring. Confirmation resolves the server-held session draft;
-  browser rows and hidden fields cannot add, weaken, or replay scoring authority.
+  cannot enter scoring. A dedicated confirmation operation resolves and locks
+  the server-held tenant/session draft; browser rows and hidden fields cannot
+  choose manual mode, add, weaken, delete, or replay scoring authority. The
+  consumed draft retains a durable Job/version link for idempotent ranking retry.
 
 ## Local-only Ollama operating contract
 

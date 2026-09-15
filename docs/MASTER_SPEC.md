@@ -195,10 +195,14 @@ representation). A model item may only reference a span id; model-authored
 `source_text` is an untrusted hint and never selects or narrows authority.
 Deterministic validation uses the complete canonical span to bind subject/type,
 kind/scope, required/preferred modality, number/duration, and language level
-before a criterion becomes scorable. Every material span ends as SCORABLE,
-UNSUPPORTED/UNSCORED, PROHIBITED, or NEEDS_HUMAN_REVIEW. Confirmation resolves
-the session-held server draft and revalidates unchanged SCORABLE rows; browser
-fields cannot add authority. Unsupported, omitted, or non-round-trippable
+before a criterion becomes scorable. Every safely identified material span
+ends as SCORABLE, UNSUPPORTED/UNSCORED, PROHIBITED, or NEEDS_HUMAN_REVIEW.
+Confirmation resolves the session-held server draft through a dedicated
+draft-id operation and revalidates exactly its unchanged SCORABLE rows; browser
+fields cannot select manual mode, add authority, or delete confirmed semantics.
+Successful confirmation durably links the consumed draft to its Job/criteria
+version before ranking begins, so ranking failure is truthful and retryable
+without duplicate persistence. Unsupported, omitted, or non-round-trippable
 semantics remain visible but unscored; prohibited detection is model-kind
 independent.
 

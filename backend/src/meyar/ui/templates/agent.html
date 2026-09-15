@@ -75,13 +75,20 @@
   {% elif tool_result.tool_name == "DRAFT_JOB_CRITERIA" %}
     {% set draft = tool_result.job_draft %}
     {% if draft.must_have_rows or draft.preferred_rows or draft.unsupported_must_have or draft.unsupported_preferred or draft.needs_review or draft.prohibited_count or draft.ungrounded_count %}
+    {% set has_scorable = draft.must_have_rows or draft.preferred_rows %}
     <section class="panel">
-      <form method="post" action="/ui/jobs" class="stack-form">
+      {% if has_scorable %}
+      <form method="post" action="/ui/agent/drafts/{{ draft.draft_id }}/confirm" class="stack-form">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <input type="hidden" name="from_agent_draft" value="1">
-        <input type="hidden" name="draft_id" value="{{ draft.draft_id }}">
         <label for="jd-title">Vakansiya başlığı</label>
-        <input id="jd-title" name="title" type="text" required maxlength="255" value="{{ draft.title or "" }}">
+        <input id="jd-title" name="title" type="text" required readonly maxlength="255" value="{{ draft.title or "" }}">
+      {% else %}
+      <div class="stack-form">
+        <h3>{{ draft.title or "Vakansiya qaralaması" }}</h3>
+        <div class="alert alert-warning">
+          <p><strong>Avtomatik sıralama üçün hazır meyar yoxdur.</strong> Mənbə tələbləri aşağıda görünür, lakin onlar insan baxışı tələb edir və ya sistem tərəfindən hələ ölçülmür. Tələbləri dəqiqləşdirib elanı yenidən analiz edin.</p>
+        </div>
+      {% endif %}
 
         <h3>Mütləq tələblər</h3>
         {{ criteria_form.criterion_rows("must", draft.must_have_rows, kind_options) }}
@@ -113,9 +120,15 @@
         <p class="alert alert-warning">{{ draft.ungrounded_count }} tələb JD mətnində aydın təsdiqlənmədiyi üçün çıxarıldı.</p>
         {% endif %}
 
-        <p class="field-help">Bu, AI tərəfindən hazırlanmış qaralamadır — yekun qərar deyil. Server təsdiqli sətrləri yoxlayın; sətri silə bilərsiniz. Tələbi dəyişmək və ya əlavə etmək üçün elanı yenidən analiz edin və ya ayrıca əl ilə vakansiya yaradın.</p>
+        <p class="field-help">Bu, AI tərəfindən hazırlanmış qaralamadır — yekun qərar deyil. Server təsdiqli sətrləri yoxlayın. Tələbi dəyişmək, silmək və ya əlavə etmək üçün elanı yenidən analiz edin və ya ayrıca əl ilə vakansiya yaradın.</p>
+        {% if has_scorable %}
         <button class="button" type="submit">Tələbləri təsdiqlə və namizədləri sırala</button>
+        {% endif %}
+      {% if has_scorable %}
       </form>
+      {% else %}
+      </div>
+      {% endif %}
     </section>
     {% endif %}
   {% endif %}
