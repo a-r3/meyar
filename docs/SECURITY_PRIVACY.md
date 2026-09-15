@@ -119,6 +119,13 @@ positive. Phone authority additionally rejects two-fragment numeric strings
 without a phone-like prefix/shape, even when the supplied quote is cropped from
 canonical reference/code context.
 
+D-053 removes bare digits as self-authenticating phone evidence. Canonical
+source context must provide conventional phone syntax or a directly adjacent
+bounded phone/contact label, while explicit reference, invoice, employee-ID,
+account, ID, and code labels reject. Cropped quotes cannot hide that canonical
+meaning. Unlabeled uninterrupted digits fail closed, which may suppress a valid
+unlabeled number but never guesses that an arbitrary identifier is a phone.
+
 ## Agent candidate-factual authority
 
 - `AgentDecision` has no free-text answer field. `FINAL_ANSWER` and

@@ -605,27 +605,46 @@ _EMAIL_TOKEN = re.compile(
 )
 _PHONE_GROUP = r"(?:\([0-9]+\)|[0-9]+)"
 _PHONE_TOKEN = re.compile(rf"(?<![\w+])\+?{_PHONE_GROUP}(?:[ -]{_PHONE_GROUP})*(?!\w)")
+_PHONE_LABEL = re.compile(
+    r"\b(?:phone|mobile|telephone|tel\.?|telefon|mobil|"
+    r"contact(?:\s+(?:number|no))?|əlaqə(?:\s+nömrəsi)?)"
+    r"(?:\s+(?:number|no))?\s*[:#-]?\s*$"
+)
+_NON_PHONE_IDENTIFIER_LABEL = re.compile(
+    r"\b(?:reference|ref|invoice|employee\s+(?:id|number|no)|account|acct|id|code)"
+    r"(?:\s+(?:id|number|no))?\s*[:#-]?\s*$"
+)
 
 
 def _digits(text: str) -> str:
     return "".join(ch for ch in text if ch.isdigit())
 
 
-def _phone_like_occurrences(text: str) -> Iterator[re.Match[str]]:
-    """Yield complete, shape-coherent phone occurrences from canonical text.
+def _phone_context_prefix(text: str, start: int) -> str:
+    boundary = max(text.rfind(separator, 0, start) for separator in ("\n", "|", ";", ","))
+    return text[boundary + 1 : start]
 
-    An unseparated digit token is coherent by itself. A separated occurrence
-    must either carry an international/local prefix or contain at least three
-    groups; two arbitrary reference/code fragments are not a phone identity.
+
+def _phone_like_occurrences(text: str) -> Iterator[re.Match[str]]:
+    """Yield authoritative phone occurrences from canonical text.
+
+    Explicit non-phone identifier labels fail closed. Otherwise an occurrence
+    needs conventional phone syntax or a directly adjacent phone/contact label;
+    an unlabeled uninterrupted digit token has no trustworthy phone provenance.
     """
     for match in _PHONE_TOKEN.finditer(text):
         candidate = match.group()
         groups = re.findall(_PHONE_GROUP, candidate)
-        first_digits = _digits(groups[0]) if groups else ""
         separated = " " in candidate or "-" in candidate
-        if not separated or candidate.startswith("+") or first_digits.startswith("0"):
-            yield match
-        elif len(groups) >= 3:
+        prefix = _phone_context_prefix(text, match.start())
+        if _NON_PHONE_IDENTIFIER_LABEL.search(prefix):
+            continue
+        if (
+            candidate.startswith("+")
+            or "(" in candidate
+            or (separated and len(groups) >= 3)
+            or _PHONE_LABEL.search(prefix)
+        ):
             yield match
 
 

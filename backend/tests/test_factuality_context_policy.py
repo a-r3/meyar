@@ -234,8 +234,15 @@ def test_linked_employment_period(start, end, accepted):
         ("phone", "123456789", "1234, code 56789", False),
         ("phone", "123456789", "phone 1234567 ext 89", False),
         ("phone", "123456789", "phone 1234567 00 89", False),
-        ("phone", "123456789", "123456789", True),
+        ("phone", "123456789", "Reference 123456789", False),
+        ("phone", "123456789", "Invoice 123456789", False),
+        ("phone", "123456789", "Employee ID 123456789", False),
+        ("phone", "123456789", "Account 123456789", False),
+        ("phone", "123456789", "123456789", False),
         ("phone", "123456789", "phone 123456789", True),
+        ("phone", "0501234567", "Phone: 0501234567", True),
+        ("phone", "+994501234567", "Mobile: +994501234567", True),
+        ("phone", "0501234567", "(050) 123-45-67", True),
         ("phone", "0501234567", "050-123-45-67", True),
         ("phone", "+994501234567", "+994 50 123 45 67", True),
         ("phone", "+994501234567", "+994 (50) 123-45-67", True),
@@ -254,13 +261,24 @@ def test_identity_occurrence_boundaries(field, value, quote, accepted):
             verify_identity_evidence(view(quote), identity)
 
 
-@pytest.mark.parametrize("quote", ["1234 56789", "1234-56789"])
-def test_cropped_numeric_quote_cannot_hide_reference_context(quote):
+@pytest.mark.parametrize(
+    ("source", "quote", "value", "accepted"),
+    [
+        ("Reference 1234 56789", "1234 56789", "123456789", False),
+        ("Reference 1234-56789", "1234-56789", "123456789", False),
+        ("Employee ID 123456789", "123456789", "123456789", False),
+        ("Phone: +994 50 123 45 67", "+994 50 123 45 67", "+994501234567", True),
+    ],
+)
+def test_cropped_numeric_quote_uses_canonical_context(source, quote, value, accepted):
     identity = CandidateIdentityExtraction.model_validate(
-        {"phone": {"value": "123456789", "evidence": [ref(quote)]}}
+        {"phone": {"value": value, "evidence": [ref(quote)]}}
     )
-    with pytest.raises(EvidenceValidationError):
-        verify_identity_evidence(view(f"Reference {quote}"), identity)
+    if accepted:
+        verify_identity_evidence(view(source), identity)
+    else:
+        with pytest.raises(EvidenceValidationError):
+            verify_identity_evidence(view(source), identity)
 
 
 @pytest.mark.parametrize("cached", [False, True])
@@ -580,6 +598,7 @@ async def test_current_authority_all_consumers_and_immutable_history(
         ("email", "jane@example.com", "notjane@example.com", False),
         ("email", "JANE@example.com", "jane@EXAMPLE.COM", True),
         ("phone", "123456789", "Reference 1234, other record 56789", False),
+        ("phone", "123456789", "Employee ID 123456789", False),
         ("phone", "+994501234567", "+994 (50) 123-45-67", True),
     ],
 )
@@ -590,6 +609,7 @@ async def test_legacy_identity_presentation_and_extraction(
 
     from meyar.extraction.identity_service import extract_candidate_identity
     from meyar.services.candidate_identity_repo import create_identity_version
+    from meyar.services.identity_authority import get_current_identity_values
     from meyar.ui.service import get_candidate_detail_view
 
     tenant, *_ = tenant_and_user
@@ -618,6 +638,10 @@ async def test_legacy_identity_presentation_and_extraction(
         db_session, tenant_id=tenant.id, candidate_id=seeded.candidate.id
     )
     assert getattr(detail, field) == (value if accepted else None)
+    current_values = await get_current_identity_values(
+        db_session, tenant_id=tenant.id, candidate_id=seeded.candidate.id
+    )
+    assert getattr(current_values, field) == (value if accepted else None)
     extracted = await extract_candidate_identity(
         db_session,
         FakeLLMProvider(identity_extraction=CandidateIdentityExtraction.model_validate(content)),

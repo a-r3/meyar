@@ -4314,3 +4314,41 @@ corrected direct matrix passed 79 tests; the broader extraction/identity/
 embedding/search/evaluation/ranking/agent/UI suite passed 362 tests. Full gates:
 Ruff clean; mypy clean for 138 source files; 1032 pytest tests passed with no
 failures, skips, or xfails; Alembic retained the single `a1c5e9f2b6d3` head.
+
+## D-053 — Phone identity requires canonical contact authority (issue #44)
+
+**Date:** 2026-09-15. **Status:** Local corrective implementation; PR #42
+remains open and unaccepted. Supersedes D-052's treatment of every uninterrupted
+digit token as inherently phone-coherent.
+
+**Problem:** The independent audit of `2df8ea9` showed that a model-extracted
+phone value `123456789` was accepted from canonical `Reference`, `Invoice`,
+`Employee ID`, and `Account` occurrences containing those digits. The untrusted
+field name `phone` supplied the only phone meaning; canonical source context did
+not.
+
+**Decision:** Classify each complete numeric occurrence using its canonical
+block, including context outside a cropped evidence quote. Explicit bounded
+non-phone identifier labels (`Reference`/`Ref`, `Invoice`, `Employee ID` or
+number, `ID`, `Account`/`Acct`, and `Code`) reject first. Otherwise phone
+authority requires either conventional syntax (leading `+`, a balanced numeric
+parenthesis group, or at least three space/hyphen-separated digit groups) or a
+directly adjacent bounded phone/contact label (`phone`, `mobile`, `telephone`,
+`tel`, `telefon`, `mobil`, `contact number`, or Azerbaijani `əlaqə nömrəsi`).
+The label is canonical evidence, not the model-produced schema field name.
+
+An uninterrupted bare digit token with no trustworthy contact context now
+fails closed. This can suppress a legitimate unlabeled phone number; that is an
+accepted bounded limitation because canonical provenance cannot distinguish it
+from an arbitrary identifier without guessing. Repeated cropped occurrences
+retain D-050's fail-closed all-occurrences rule.
+
+**Scope:** Shared identity evidence/authority and synthetic regressions only.
+No professional claim/negation semantics, schema/migration, JD source binding,
+API-first work, duration arithmetic, deployment, scoring, ranking, search, or
+stored-row mutation changed. Historical identity rows remain immutable and are
+suppressed on read when they fail the current contract.
+
+**Verification:** Direct positive/negative and cropped-canonical phone matrices,
+plus a database-backed legacy `COMPLETED` identity presentation regression, were
+added. Final gate counts are recorded in the associated local commit report.
