@@ -412,6 +412,25 @@ class NeedsReviewJDCriterionItem(BaseModel):
 
     requirement: str = Field(min_length=1, max_length=500)
     criterion_type: CriterionType | None = None
+    span_id: str | None = Field(default=None, pattern=r"^req-\d{4}$")
+    kind: JDDraftCriterionKind | None = None
+    subject: str | None = Field(default=None, min_length=1, max_length=200)
+    min_years: float | None = Field(default=None, ge=0, le=60)
+    required_level: str | None = Field(default=None, min_length=1, max_length=50)
+    allowed_types: list[CriterionType] = Field(default_factory=list, max_length=2)
+
+    @model_validator(mode="after")
+    def _validate_resolution_shape(self) -> "NeedsReviewJDCriterionItem":
+        fields = (self.span_id, self.kind, self.subject)
+        if any(value is not None for value in fields) and not all(
+            value is not None for value in fields
+        ):
+            raise ValueError("Review resolution metadata must be complete.")
+        if self.allowed_types and not all(value is not None for value in fields):
+            raise ValueError("Allowed review types require a complete canonical shape.")
+        if len(set(self.allowed_types)) != len(self.allowed_types):
+            raise ValueError("Allowed review types must be unique.")
+        return self
 
 
 class RequirementSpanState(StrEnum):

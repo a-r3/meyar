@@ -48,10 +48,12 @@ from meyar.schemas.candidate_identity import CandidateIdentityExtraction, Identi
 from meyar.schemas.candidate_profile import (
     CandidateProfileExtraction,
     CertificationItem,
+    DomainExperienceItem,
     EducationItem,
     EmploymentItem,
     EvidenceRef,
     LanguageItem,
+    SkillExperienceItem,
     SkillItem,
 )
 from meyar.schemas.criteria import CriterionIn, CriterionKind, CriterionType
@@ -206,6 +208,8 @@ class _DemoCandidate:
     education: list[dict]  # institution, degree, field_of_study, date, line_index
     certifications: list[dict] = field(default_factory=list)  # name, issuer, date, line_index
     languages: list[dict] = field(default_factory=list)  # language, proficiency, line_index
+    skill_experience: list[dict] = field(default_factory=list)
+    domain_experience: list[dict] = field(default_factory=list)
     embedding_vector: list[float] = field(default_factory=lambda: [0.1, 0.2, 0.3, 0.4])
 
 
@@ -556,13 +560,19 @@ def _demo_candidates() -> list[_DemoCandidate]:
                 disclaimer,
                 "Rashad Demo-Isayev",
                 "Email: rashad.demo@example.invalid | Phone: +994-00-000-0009",
-                "Skills: Site Reliability, Monitoring, Banking Systems Integration",
-                "Site Reliability Engineer — Zerafshan National Bank IT (2019 - 2025)",
+                "Skills: Python, Site Reliability, Monitoring, Banking Systems Integration",
+                (
+                    "Site Reliability Engineer — Zerafshan National Bank IT "
+                    "(2019 - 2025); Python used for banking systems integration "
+                    "throughout 2019 - 2025."
+                ),
                 "BSc Computer Science, Baku Engineering University (2015 - 2019)",
+                "Languages: English (B2)",
             ],
             name_line=1,
             contact_line=2,
             skills=[
+                ("Python", 3),
                 ("Site Reliability", 3),
                 ("Monitoring", 3),
                 ("Banking Systems Integration", 3),
@@ -584,6 +594,27 @@ def _demo_candidates() -> list[_DemoCandidate]:
                     "field_of_study": "Computer Science",
                     "date": "2015 - 2019",
                     "line": 5,
+                }
+            ],
+            languages=[{"language": "English", "proficiency": "B2", "line": 6}],
+            skill_experience=[
+                {
+                    "skill_name": "Python",
+                    "employment_index": 0,
+                    "start_date": "2019",
+                    "end_date": "2025",
+                    "is_current": False,
+                    "line": 4,
+                }
+            ],
+            domain_experience=[
+                {
+                    "domain": "Banking",
+                    "employment_index": 0,
+                    "start_date": "2019",
+                    "end_date": "2025",
+                    "is_current": False,
+                    "line": 4,
                 }
             ],
             embedding_vector=[0.15, 0.0, 0.2, 0.6],
@@ -664,6 +695,36 @@ def _profile_extraction(candidate: _DemoCandidate) -> CandidateProfileExtraction
                 ],
             )
             for entry in candidate.languages
+        ],
+        skill_experience=[
+            SkillExperienceItem(
+                skill_name=entry["skill_name"],
+                employment_index=entry["employment_index"],
+                start_date=entry["start_date"],
+                end_date=entry["end_date"],
+                is_current=entry["is_current"],
+                evidence=[
+                    EvidenceRef(
+                        page=1, block_index=entry["line"], quote=candidate.lines[entry["line"]]
+                    )
+                ],
+            )
+            for entry in candidate.skill_experience
+        ],
+        domain_experience=[
+            DomainExperienceItem(
+                domain=entry["domain"],
+                employment_index=entry["employment_index"],
+                start_date=entry["start_date"],
+                end_date=entry["end_date"],
+                is_current=entry["is_current"],
+                evidence=[
+                    EvidenceRef(
+                        page=1, block_index=entry["line"], quote=candidate.lines[entry["line"]]
+                    )
+                ],
+            )
+            for entry in candidate.domain_experience
         ],
     )
 

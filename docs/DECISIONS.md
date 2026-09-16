@@ -4637,3 +4637,48 @@ missing level as partial evidence.
 prohibited policy, confirmation idempotency/tamper/tenant/concurrency guards,
 ranking retry, identity exclusion, local-only candidate AI, and deterministic
 score arithmetic. No API-first or deployment work is included.
+
+## D-059 — Primary vacancy browser-flow typed boundary and protected review (issue #44)
+
+**Date:** 2026-09-16. **Status:** Local corrective implementation on exact
+audit base `dea50267c2936d2538dae305d20b6208c149b926`; PR #42 remains open
+and unaccepted.
+
+**Reproduced root cause:** The real browser path did call the configured local
+Ollama provider. Its JSON-Schema mode failed before inference because the
+configured model/runtime could not compile the schema vocabulary. In plain
+JSON mode the same provider exposed the second boundary mismatch: it could
+still emit legacy `EXPERIENCE`/`SKILL + min_years`, incomplete `LANGUAGE`, a
+wrong-bucket domain item, and a top-K `OTHER` item. The application accepted
+only the new typed contract, so valid source occurrences never reached the
+review UI and the entire turn collapsed to a generic draft failure.
+
+**Decision:**
+- Ollama JD drafting uses its supported JSON-output mode, followed by the
+  existing strict Pydantic validation and bounded repair attempt. Runtime
+  configuration accepts only `ollama`; no fake or deterministic provider can
+  be selected silently. Provider unavailability still fails visibly.
+- A bounded application adapter resolves every model item through its exact
+  server-owned `RequirementSpan`, derives only fields already present in that
+  occurrence, and then runs the unchanged canonical authority validator.
+  It maps skill duration, domain experience, and language level onto the D-058
+  typed contract; unsafe generic, mismatched, invented, or ungrounded shapes
+  continue to fail closed. A model echo of top-K remains workflow metadata,
+  never a criterion.
+- An implicit bounded CEFR-language occurrence has no invented modality. It
+  is rendered as a supported human-review item. HR may choose only the
+  server-declared required/preferred field; subject, level, span identity, and
+  professional semantics remain server-owned. Confirmation is unavailable
+  until that ambiguity is resolved and continues through the protected draft
+  endpoint.
+- The review visibly presents scorable rows, review-required rows, and result
+  count. Ranking exposes criterion evidence and replaces the post-confirm URL
+  with a stable authenticated GET route so reload preserves the confirmed
+  semantics and disclosures. The existing `Namizədlər` header correctly
+  targets `/ui/library`; no `/ui/candidates` alias is added.
+
+**Unchanged:** candidate/JD factual authority, prohibited filtering,
+tenant/session isolation, confirmation tamper protection and idempotency,
+deterministic evaluator/date/top-K semantics, score arithmetic, and local-only
+AI. No evaluation-date input, API-first work, deployment work, push, or merge
+is included.

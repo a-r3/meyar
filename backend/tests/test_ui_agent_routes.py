@@ -162,6 +162,9 @@ async def test_primary_nav_is_agent_first_classic_tools_are_secondary(
     assert 'class="nav-secondary"' not in page.text
     assert 'href="/ui/jobs"' not in page.text
     assert 'href="/ui">' not in page.text
+    library = await client.get("/ui/library")
+    assert library.status_code == 200
+    assert "Namizəd kitabxanası" in library.text
 
 
 async def test_search_candidates_turn_renders_grounded_results_not_model_text(
@@ -2155,6 +2158,211 @@ async def test_skill_domain_and_language_draft_renders_complete_review_form(
         ("LANGUAGE", "English", None, "B2", 1.0),
         ("DOMAIN_EXPERIENCE", "Banking", None, None, 1.0),
     ]
+
+
+async def test_primary_hr_request_requires_server_authorized_language_resolution(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
+) -> None:
+    from meyar.agent.schemas import JDCriteriaDraft, JDDraftCriterionItem
+
+    tenant, user, password, _membership = tenant_and_user
+    tenant_id = tenant.id
+    skill_evidence = {
+        "page": 1,
+        "block_index": 0,
+        "quote": (
+            "Backend Developer at Synthetic Bank used Python in banking systems "
+            "from 2019 to 2025."
+        ),
+    }
+    employment_evidence = skill_evidence
+    language_evidence = {"page": 1, "block_index": 0, "quote": "English B2."}
+    await seed_candidate_with_profile(
+        db_session,
+        tenant_id=tenant.id,
+        profile_content={
+            **EMPTY_PROFILE,
+            "skills": [
+                {"name": "Python", "category": None, "evidence": [skill_evidence]}
+            ],
+            "employment_history": [
+                {
+                    "title": "Backend Developer",
+                    "organization": "Synthetic Bank",
+                    "start_date": "2019",
+                    "end_date": "2025",
+                    "is_current": False,
+                    "evidence": [employment_evidence],
+                }
+            ],
+            "languages": [
+                {
+                    "language": "English",
+                    "proficiency": "B2",
+                    "evidence": [language_evidence],
+                }
+            ],
+            "skill_experience": [
+                {
+                    "skill_name": "Python",
+                    "employment_index": 0,
+                    "start_date": "2019",
+                    "end_date": "2025",
+                    "is_current": False,
+                    "evidence": [skill_evidence],
+                }
+            ],
+            "domain_experience": [
+                {
+                    "domain": "Banking",
+                    "employment_index": 0,
+                    "start_date": "2019",
+                    "end_date": "2025",
+                    "is_current": False,
+                    "evidence": [skill_evidence],
+                }
+            ],
+        },
+    )
+    await db_session.commit()
+    source = (
+        "Senior Backend Developer axtarırıq. Minimum 5 il Python, B2 English, "
+        "bank təcrübəsi üstünlükdür. 10 nəfər namizəd göstər."
+    )
+    fake = FakeLLMProvider(
+        jd_draft=JDCriteriaDraft(
+            title="Senior Backend Developer",
+            must_have=[
+                JDDraftCriterionItem(
+                    span_id="req-0001",
+                    kind="EXPERIENCE",
+                    requirement="Minimum 5 il Python",
+                    min_years=5,
+                ),
+                JDDraftCriterionItem(
+                    span_id="req-0002",
+                    kind="LANGUAGE",
+                    requirement="B2 English",
+                ),
+                JDDraftCriterionItem(
+                    span_id="req-0003",
+                    kind="EXPERIENCE",
+                    requirement="bank təcrübəsi üstünlükdür",
+                ),
+            ],
+            preferred=[
+                JDDraftCriterionItem(
+                    span_id="req-0004",
+                    kind="OTHER",
+                    requirement="10 nəfər namizəd göstər",
+                )
+            ],
+        )
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake
+    csrf = await _login_and_csrf(client, user.username, password)
+    review = await client.post(
+        "/ui/agent",
+        data={"message": source, "intent": "draft_job_criteria", "csrf_token": csrf},
+    )
+    assert review.status_code == 200
+    assert 'value="Python"' in review.text
+    assert 'value="5"' in review.text
+    assert 'value="Banking"' in review.text
+    assert "English" in review.text and "B2" in review.text
+    assert "ən çox 10 uyğun namizəd" in review.text
+    assert "Tələb səviyyəsini dəqiqləşdirin" in review.text
+    assert "Tələbləri təsdiqlə və namizədləri sırala" not in review.text
+    assert "JD mətnində aydın təsdiqlənmədiyi üçün" not in review.text
+    resolve_match = re.search(
+        r'action="(/ui/agent/drafts/[0-9a-f-]+/resolve)"', review.text
+    )
+    assert resolve_match is not None
+
+    rejected = await client.post(
+        resolve_match.group(1),
+        data={
+            "csrf_token": csrf,
+            "span_id": "req-0001",
+            "criterion_type": "MUST_HAVE",
+        },
+    )
+    assert rejected.status_code == 422
+
+    resolved = await client.post(
+        resolve_match.group(1),
+        data={
+            "csrf_token": csrf,
+            "span_id": "req-0002",
+            "criterion_type": "MUST_HAVE",
+        },
+    )
+    assert resolved.status_code == 200
+    assert "Tələbləri təsdiqlə və namizədləri sırala" in resolved.text
+    assert 'value="English"' in resolved.text
+    assert 'value="B2"' in resolved.text
+
+    confirmed = await client.post(
+        _draft_confirm_path(resolved.text),
+        data={
+            "csrf_token": csrf,
+            "title": "Senior Backend Developer",
+            "must_span_id_0": _hidden_value(resolved.text, "must_span_id_0"),
+            "must_kind_0": "SKILL_EXPERIENCE",
+            "must_requirement_0": "Python",
+            "must_min_years_0": "5",
+            "must_weight_0": "1",
+            "must_span_id_1": _hidden_value(resolved.text, "must_span_id_1"),
+            "must_kind_1": "LANGUAGE",
+            "must_requirement_1": "English",
+            "must_required_level_1": "B2",
+            "must_weight_1": "1",
+            "pref_span_id_0": _hidden_value(resolved.text, "pref_span_id_0"),
+            "pref_kind_0": "DOMAIN_EXPERIENCE",
+            "pref_requirement_0": "Banking",
+            "pref_min_years_0": "",
+            "pref_weight_0": "1",
+        },
+    )
+    assert confirmed.status_code == 200
+    assert "Reytinq nəticələri" in confirmed.text
+    assert "Qiymətləndirmə tarixi:" in confirmed.text
+    from sqlalchemy import select
+
+    from meyar.models.audit_event import AuditEvent
+    from meyar.models.evaluation import Evaluation
+
+    ranking_event = (
+        await db_session.execute(
+            select(AuditEvent)
+            .where(AuditEvent.event_type == "JOB_BATCH_RANKED")
+            .order_by(AuditEvent.created_at.desc())
+        )
+    ).scalars().first()
+    assert ranking_event is not None
+    evaluation = (await db_session.execute(select(Evaluation))).scalars().one()
+    assert ranking_event.event_metadata["skip_reason_counts"] == {}, (
+        ranking_event.event_metadata,
+        evaluation.error_code,
+        evaluation.error_message,
+    )
+    assert "Qiymətləndirilən namizəd yoxdur" not in confirmed.text
+    assert "<summary>Sübut</summary>" in confirmed.text
+
+    from meyar.models.job_criteria_version import JobCriteriaVersion
+
+    version = (
+        await db_session.execute(
+            select(JobCriteriaVersion).where(JobCriteriaVersion.tenant_id == tenant_id)
+        )
+    ).scalar_one()
+    reloaded = await client.get(f"/ui/jobs/{version.id}/ranking")
+    assert reloaded.status_code == 200
+    assert "Python" in reloaded.text and "English" in reloaded.text and "Banking" in reloaded.text
+    assert "ən çox 10 uyğun namizəd" in reloaded.text
 
 
 async def test_draft_job_criteria_provider_failure_renders_safe_message(

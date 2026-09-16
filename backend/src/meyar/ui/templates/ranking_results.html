@@ -2,7 +2,7 @@
 {% import "_evidence_list.html" as evidence_partial %}
 {% block title %}Reytinq nəticələri — MEYAR{% endblock %}
 {% block content %}
-<div class="page-heading">
+<div class="page-heading" data-canonical-ranking-url="{{ canonical_ranking_url }}">
   <div>
     <p class="eyebrow">Reytinq nəticələri</p>
     <h1>{{ job_title or "Vakansiya" }}</h1>
@@ -49,8 +49,8 @@
             <span class="status-badge" data-state="{{ contribution.status }}">{{ criterion_label(contribution.status) }}</span>
           </div>
           <p>{{ contribution.explanation }}</p>
-          {% if contribution.evidence %}
-          {{ evidence_partial.evidence_items(contribution.evidence) }}
+{% if contribution.evidence %}
+          <details><summary>Sübut</summary>{{ evidence_partial.evidence_items(contribution.evidence) }}</details>
           {% elif contribution.status == "UNKNOWN" %}
           <p class="muted">Bu meyar üzrə profildə açıq sübut tapılmadı — bu, mövcud olmadığı demək deyil, yalnız CV-də açıq şəkildə göstərilmədiyi deməkdir.</p>
           {% endif %}
@@ -77,4 +77,7 @@
   </article>
   {% endfor %}
 </div>
+{% endblock %}
+{% block scripts %}
+<script src="/ui/static/ranking-page.js" defer></script>
 {% endblock %}

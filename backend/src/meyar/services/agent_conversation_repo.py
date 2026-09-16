@@ -133,6 +133,32 @@ def get_pending_job_draft(
     return None
 
 
+async def replace_pending_job_draft(
+    db: AsyncSession,
+    conversation: AgentConversation,
+    *,
+    draft: AgentJobDraftToolResult,
+) -> None:
+    """Replace one pending draft after a server-authorized review resolution."""
+    changed = False
+    turns: list[dict] = []
+    for turn in conversation.turns:
+        current = dict(turn)
+        payload = current.get("pending_job_draft")
+        if isinstance(payload, dict) and payload.get("draft_id") == str(draft.draft_id):
+            current["pending_job_draft"] = draft.model_dump(mode="json")
+            changed = True
+        turns.append(current)
+    if not changed:
+        raise ValueError("Pending draft was not available for review.")
+    await save_conversation_state(
+        db,
+        conversation,
+        turns=turns,
+        last_search_candidate_ids=conversation.last_search_candidate_ids,
+    )
+
+
 def get_confirmed_job_draft(
     conversation: AgentConversation, *, draft_id: uuid.UUID
 ) -> ConfirmedAgentJobDraft | None:

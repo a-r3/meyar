@@ -192,7 +192,11 @@ class OllamaLLMProvider:
             user_prompt=build_jd_criteria_draft_user_prompt(
                 jd_text=jd_text, requirement_spans=requirement_spans, repair=repair
             ),
-            schema=JDCriteriaDraft.model_json_schema(),
+            # Some supported Ollama/model combinations cannot compile this
+            # schema and return HTTP 500 before inference. JSON mode still
+            # requires real local inference; strict Pydantic validation and
+            # the bounded repair attempt remain the application boundary.
+            schema="json",
             think=False,
         )
         try:
@@ -208,7 +212,7 @@ class OllamaLLMProvider:
         *,
         system_prompt: str,
         user_prompt: str,
-        schema: dict,
+        schema: dict | str,
         think: bool | None = None,
     ) -> tuple[str, LLMResultProvenance]:
         payload: dict[str, Any] = {

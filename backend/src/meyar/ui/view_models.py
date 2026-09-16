@@ -194,6 +194,16 @@ class CriterionRowView(BaseModel):
     span_id: str | None = None
 
 
+class AgentJobDraftReviewView(BaseModel):
+    span_id: str | None = None
+    requirement: str
+    subject: str | None = None
+    kind_label: str | None = None
+    min_years: str = ""
+    required_level: str = ""
+    allowed_types: list[str] = Field(default_factory=list)
+
+
 class AgentJobDraftView(BaseModel):
     title: str | None
     draft_id: uuid.UUID
@@ -210,7 +220,8 @@ class AgentJobDraftView(BaseModel):
     unsupported_preferred: list[str] = Field(default_factory=list)
     # Source requirements that were omitted or whose material fields could
     # not be deterministically attributed. Visible, but never scorable.
-    needs_review: list[str] = Field(default_factory=list)
+    needs_review: list[AgentJobDraftReviewView] = Field(default_factory=list)
+    requires_resolution: bool = False
     # Count only — a prohibited/sensitive-attribute match's own text must
     # never be redisplayed (docs/SECURITY_PRIVACY.md).
     prohibited_count: int = 0

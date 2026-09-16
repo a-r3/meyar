@@ -77,6 +77,7 @@ from meyar.ui.view_models import (
     AgentCandidateProfileView,
     AgentEvidenceMatchView,
     AgentEvidenceView,
+    AgentJobDraftReviewView,
     AgentJobDraftView,
     AgentToolResultView,
     AgentTurnView,
@@ -747,48 +748,7 @@ async def build_agent_turn_view(
             tool_result_views.append(
                 AgentToolResultView(
                     tool_name=tool_result.tool_name.value,
-                    job_draft=AgentJobDraftView(
-                        title=draft.title,
-                        draft_id=draft.draft_id,
-                        requested_result_limit=draft.requested_result_limit,
-                        result_limit=draft.result_limit,
-                        result_limit_was_bounded=draft.result_limit_was_bounded,
-                        must_have_rows=[
-                            _criterion_row_view(
-                                criterion,
-                                span_id=next(
-                                    item.span_id
-                                    for item in draft.requirements
-                                    if item.criterion_id == criterion.id
-                                ),
-                            )
-                            for criterion in draft.must_have
-                        ],
-                        preferred_rows=[
-                            _criterion_row_view(
-                                criterion,
-                                span_id=next(
-                                    item.span_id
-                                    for item in draft.requirements
-                                    if item.criterion_id == criterion.id
-                                ),
-                            )
-                            for criterion in draft.preferred
-                        ],
-                        unsupported_must_have=[
-                            u.requirement
-                            for u in draft.unsupported
-                            if u.criterion_type == CriterionType.MUST_HAVE
-                        ],
-                        unsupported_preferred=[
-                            u.requirement
-                            for u in draft.unsupported
-                            if u.criterion_type == CriterionType.PREFERRED
-                        ],
-                        needs_review=[item.requirement for item in draft.needs_review],
-                        prohibited_count=draft.prohibited_count,
-                        ungrounded_count=draft.ungrounded_count,
-                    ),
+                    job_draft=build_agent_job_draft_view(draft),
                 )
             )
         elif tool_result.tool_name == AgentActionType.GET_CANDIDATE_PROFILE:
@@ -853,6 +813,67 @@ async def build_agent_turn_view(
         message=result.message,
         headline=_agent_turn_headline(result, tool_result_views),
         tool_results=tool_result_views,
+    )
+
+
+def build_agent_job_draft_view(draft: AgentJobDraftToolResult) -> AgentJobDraftView:
+    return AgentJobDraftView(
+        title=draft.title,
+        draft_id=draft.draft_id,
+        requested_result_limit=draft.requested_result_limit,
+        result_limit=draft.result_limit,
+        result_limit_was_bounded=draft.result_limit_was_bounded,
+        must_have_rows=[
+            _criterion_row_view(
+                criterion,
+                span_id=next(
+                    item.span_id
+                    for item in draft.requirements
+                    if item.criterion_id == criterion.id
+                ),
+            )
+            for criterion in draft.must_have
+        ],
+        preferred_rows=[
+            _criterion_row_view(
+                criterion,
+                span_id=next(
+                    item.span_id
+                    for item in draft.requirements
+                    if item.criterion_id == criterion.id
+                ),
+            )
+            for criterion in draft.preferred
+        ],
+        unsupported_must_have=[
+            item.requirement
+            for item in draft.unsupported
+            if item.criterion_type == CriterionType.MUST_HAVE
+        ],
+        unsupported_preferred=[
+            item.requirement
+            for item in draft.unsupported
+            if item.criterion_type == CriterionType.PREFERRED
+        ],
+        needs_review=[
+            AgentJobDraftReviewView(
+                span_id=item.span_id,
+                requirement=item.requirement,
+                subject=item.subject,
+                kind_label=(
+                    CRITERION_KIND_LABELS.get(item.kind.value, item.kind.value)
+                    if item.kind is not None
+                    else None
+                ),
+                min_years=(str(item.min_years) if item.min_years is not None else ""),
+                required_level=item.required_level or "",
+                allowed_types=[value.value for value in item.allowed_types],
+            )
+            for item in draft.needs_review
+        ],
+        requires_resolution=any(item.allowed_types for item in draft.needs_review),
+        prohibited_count=draft.prohibited_count,
+        ungrounded_count=draft.ungrounded_count,
     )
 
 
@@ -1304,6 +1325,10 @@ def authorize_agent_draft_confirmation(
     submitted_span_ids: list[str],
 ) -> None:
     """Permit exactly the unchanged server-authorized SCORABLE draft rows."""
+    if any(item.allowed_types for item in draft.needs_review):
+        raise UIServiceInputError(
+            "İnsan baxışı tələb edən sahələri dəqiqləşdirmədən sıralamanı təsdiqləmək olmaz."
+        )
     if len(request.criteria) != len(submitted_span_ids):
         raise UIServiceInputError("Qaralama meyarlarının mənbə təsdiqi etibarsızdır.")
     expected_by_span = {

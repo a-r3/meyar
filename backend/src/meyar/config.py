@@ -1,4 +1,5 @@
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -15,8 +16,13 @@ class Settings(BaseSettings):
     rate_limit_per_minute: int = 60
     inference_concurrency: int = 1
     storage_root: str = "./var/storage"
-    llm_provider: str = "ollama"
-    llm_timeout_seconds: float = 60.0
+    # Request-serving runtime has no fake/deterministic provider mode.
+    # Test doubles are dependency overrides and the synthetic demo provider
+    # is scoped to the explicit seed command only.
+    llm_provider: Literal["ollama"] = "ollama"
+    # Small local models can need more than a minute for the bounded JD
+    # schema-repair turn on development hardware; still finite and explicit.
+    llm_timeout_seconds: float = 120.0
     llm_max_input_chars: int = 20000
     embedding_provider: str = "ollama"
     # DEV_INTEGRATION_MODEL default — not an approved final production

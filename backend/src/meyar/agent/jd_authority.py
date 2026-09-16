@@ -17,6 +17,10 @@ from meyar.schemas.criteria import find_prohibited_term
 _OUTER_BOUNDARY_RE = re.compile(r"(?:\r?\n)+|(?<=[.!?;])\s+")
 _BULLET_RE = re.compile(r"\s*(?:[-*•]|\d+[.)])\s*")
 _SAFE_CLAUSE_SEPARATOR_RE = re.compile(r"\s*(?:,|\band\b|\bvə\b)\s*", re.IGNORECASE)
+_REVIEWABLE_LANGUAGE_RE = re.compile(
+    r"^(?:a1|a2|b1|b2|c1|c2)\s+(?:english|ingilis(?:\s+dili)?|russian|rus(?:\s+dili)?)$",
+    re.IGNORECASE,
+)
 
 _REQUIRED_RE = re.compile(
     r"\b(?:required|must|mandatory|minimum|teleb\w*|mutleq\w*|vacib\w*|"
@@ -93,6 +97,15 @@ def _recognized_professional_subject(text: str) -> bool:
     return normalize_requirement_text(text).strip(" .;,:") in _KNOWN_PROFESSIONAL_SUBJECTS
 
 
+def _is_reviewable_implicit_clause(text: str) -> bool:
+    """A bounded subject+level shape may be split without inventing modality.
+
+    The clause remains NEEDS_HUMAN_REVIEW until HR chooses required/preferred;
+    this only gives the canonical subject and CEFR level their own occurrence.
+    """
+    return bool(_REVIEWABLE_LANGUAGE_RE.fullmatch(normalize_requirement_text(text)))
+
+
 def explicit_modality(text: str) -> str | None:
     """Return one unambiguous source modality, otherwise fail closed."""
     normalized = normalize_requirement_text(text)
@@ -159,7 +172,9 @@ def _split_safe_clauses(jd_text: str, start: int, end: int) -> list[tuple[int, i
         pieces.append((piece_start, piece_end))
 
     if len(pieces) > 1 and all(
-        explicit_modality(jd_text[a:b]) or is_result_count_only(jd_text[a:b])
+        explicit_modality(jd_text[a:b])
+        or _is_reviewable_implicit_clause(jd_text[a:b])
+        or is_result_count_only(jd_text[a:b])
         for a, b in pieces
     ):
         return [

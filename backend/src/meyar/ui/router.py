@@ -1094,6 +1094,86 @@ def _render_agent_confirmation_error(
     )
 
 
+@router.post("/agent/drafts/{draft_id}/resolve", response_class=HTMLResponse)
+async def resolve_agent_job_draft_review(
+    request: Request,
+    draft_id: uuid.UUID,
+    csrf_token: str = Form(...),
+    span_id: str = Form(..., pattern=r"^req-\d{4}$"),
+    criterion_type: str = Form(..., max_length=16),
+    ctx: UIContext = Depends(require_ui_scopes("jobs:write", "candidates:read")),
+    db: AsyncSession = Depends(get_db),
+) -> HTMLResponse:
+    """Persist one canonical, server-declared human-review resolution."""
+    from meyar.agent.service import resolve_job_draft_review_modality
+    from meyar.schemas.criteria import CriterionType
+    from meyar.services.agent_conversation_repo import (
+        get_conversation_for_update_by_session,
+        get_pending_job_draft,
+        replace_pending_job_draft,
+    )
+    from meyar.ui.service import build_agent_job_draft_view
+    from meyar.ui.view_models import AgentToolResultView, AgentTurnView
+
+    verify_csrf(ctx.csrf_token, csrf_token)
+    try:
+        resolved_type = CriterionType(criterion_type)
+        conversation = await get_conversation_for_update_by_session(
+            db, tenant_id=ctx.tenant_id, browser_session_id=ctx.session_id
+        )
+        if conversation is None:
+            raise UIServiceInputError("Qaralama bu sessiyada tapılmadı.")
+        pending = get_pending_job_draft(conversation, draft_id=draft_id)
+        if pending is None:
+            raise UIServiceInputError("Qaralama bu sessiyada tapılmadı.")
+        resolved = resolve_job_draft_review_modality(
+            pending, span_id=span_id, criterion_type=resolved_type
+        )
+        await replace_pending_job_draft(db, conversation, draft=resolved)
+        await record_event(
+            db,
+            tenant_id=ctx.tenant_id,
+            event_type="agent.draft.review_resolved",
+            metadata={"span_id": span_id, "criterion_type": resolved_type.value},
+            actor_type=ACTOR_HUMAN_USER,
+            actor_id=ctx.user_id,
+        )
+        await db.commit()
+    except (ValueError, UIServiceInputError) as exc:
+        await db.rollback()
+        return _render_agent_confirmation_error(
+            request, ctx, message=str(exc), status_code=status.HTTP_422_UNPROCESSABLE_CONTENT
+        )
+
+    all_turns = _agent_turn_log_views(conversation)
+    latest_user_message = all_turns[-2].text if len(all_turns) >= 2 else ""
+    latest = AgentTurnView(
+        outcome="ANSWERED_FROM_TOOL_RESULT",
+        message=None,
+        headline=(
+            "Dəqiqləşdirmə serverdə yoxlanıldı və yadda saxlanıldı. "
+            "Tələbləri təsdiqləyib namizədləri sıralaya bilərsiniz."
+        ),
+        tool_results=[
+            AgentToolResultView(
+                tool_name="DRAFT_JOB_CRITERIA",
+                job_draft=build_agent_job_draft_view(resolved),
+            )
+        ],
+    )
+    return _render(
+        request,
+        "agent.html",
+        _context(
+            ctx,
+            history_turns=all_turns[:-2] if len(all_turns) >= 2 else [],
+            latest=latest,
+            latest_user_message=latest_user_message,
+            kind_options=CRITERION_KIND_OPTIONS,
+        ),
+    )
+
+
 @router.post("/agent/drafts/{draft_id}/confirm", response_class=HTMLResponse)
 async def confirm_agent_job_draft(
     request: Request,
@@ -1434,7 +1514,28 @@ async def _render_job_ranking(
             job_title=job_title,
             unsupported_requirements=unsupported_requirements or [],
             needs_review_requirements=needs_review_requirements or [],
+            canonical_ranking_url=f"/ui/jobs/{job_criteria_version_id}/ranking",
         ),
+    )
+
+
+@router.get("/jobs/{job_criteria_version_id}/ranking", response_class=HTMLResponse)
+async def get_job_ranking(
+    request: Request,
+    job_criteria_version_id: uuid.UUID,
+    ctx: UIContext = Depends(
+        require_ui_scopes("jobs:read", "candidates:read", "evaluations:write")
+    ),
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> HTMLResponse:
+    """Stable, reload-safe ranking URL for a confirmed criteria version."""
+    return await _render_job_ranking(
+        request,
+        ctx,
+        db,
+        job_criteria_version_id=job_criteria_version_id,
+        evaluation_as_of_date=resolve_business_date(settings.business_timezone),
     )
 
 

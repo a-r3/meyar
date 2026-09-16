@@ -76,15 +76,19 @@
     {% set draft = tool_result.job_draft %}
     {% if draft.must_have_rows or draft.preferred_rows or draft.unsupported_must_have or draft.unsupported_preferred or draft.needs_review or draft.prohibited_count or draft.ungrounded_count %}
     {% set has_scorable = draft.must_have_rows or draft.preferred_rows %}
+    {% set confirmation_ready = has_scorable and not draft.requires_resolution %}
     <section class="panel">
-      {% if has_scorable %}
+      {% if confirmation_ready %}
       <form method="post" action="/ui/agent/drafts/{{ draft.draft_id }}/confirm" class="stack-form">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <label for="jd-title">Vakansiya başlığı</label>
-        <input id="jd-title" name="title" type="text" required readonly maxlength="255" value="{{ draft.title or "" }}">
-        <p><strong>Nəticələr:</strong> ən çox {{ draft.result_limit }} uyğun namizəd{% if draft.result_limit_was_bounded %} (təhlükəsiz maksimum; sorğuda {{ draft.requested_result_limit }} istənmişdi){% endif %}</p>
       {% else %}
       <div class="stack-form">
+      {% endif %}
+      {% if has_scorable %}
+        <label for="jd-title">Vakansiya başlığı</label>
+        {% if confirmation_ready %}<input id="jd-title" name="title" type="text" required readonly maxlength="255" value="{{ draft.title or "" }}">{% else %}<p id="jd-title"><strong>{{ draft.title or "Vakansiya qaralaması" }}</strong></p>{% endif %}
+        <p><strong>Nəticələr:</strong> ən çox {{ draft.result_limit }} uyğun namizəd{% if draft.result_limit_was_bounded %} (təhlükəsiz maksimum; sorğuda {{ draft.requested_result_limit }} istənmişdi){% endif %}</p>
+      {% else %}
         <h3>{{ draft.title or "Vakansiya qaralaması" }}</h3>
         <div class="alert alert-warning">
           <p><strong>Avtomatik sıralama üçün hazır meyar yoxdur.</strong> Mənbə tələbləri aşağıda görünür, lakin onlar insan baxışı tələb edir və ya sistem tərəfindən hələ ölçülmür. Tələbləri dəqiqləşdirib elanı yenidən analiz edin.</p>
@@ -113,8 +117,29 @@
         {% endif %}
         {% if draft.needs_review %}
         <div class="alert alert-warning">
+          {% if draft.requires_resolution %}
+          <p><strong>İnsan baxışı tələb edir:</strong> aşağıdakı sahəni dəqiqləşdirmədən namizədləri sıralamaq olmaz.</p>
+          {% else %}
           <p><strong>İnsan baxışı tələb edir — qiymətləndirməyə daxil edilmir:</strong> bu mənbə tələblərinin mənası mövcud meyarlarla itkisiz təsdiqlənmədi:</p>
-          <ul>{% for requirement in draft.needs_review %}<li>{{ requirement }}</li>{% endfor %}</ul>
+          {% endif %}
+          {% for review in draft.needs_review %}
+            {% if review.allowed_types and review.span_id %}
+            <form method="post" action="/ui/agent/drafts/{{ draft.draft_id }}/resolve" class="stack-form review-resolution-form">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="span_id" value="{{ review.span_id }}">
+              <p><strong>{{ review.subject }}</strong>{% if review.required_level %} — {{ review.required_level }}{% endif %}{% if review.min_years %} — minimum {{ review.min_years }} il{% endif %}</p>
+              <label for="review-type-{{ loop.index0 }}">Tələb səviyyəsini dəqiqləşdirin</label>
+              <select id="review-type-{{ loop.index0 }}" name="criterion_type" required>
+                <option value="">Seçin</option>
+                {% if "MUST_HAVE" in review.allowed_types %}<option value="MUST_HAVE">Əsas tələb</option>{% endif %}
+                {% if "PREFERRED" in review.allowed_types %}<option value="PREFERRED">Üstünlük</option>{% endif %}
+              </select>
+              <button class="button button-secondary" type="submit">Dəqiqləşdirməni yadda saxla</button>
+            </form>
+            {% else %}
+            <p>{{ review.requirement }} — bu tələb hazırkı formada avtomatik sıralamaya daxil edilmir.</p>
+            {% endif %}
+          {% endfor %}
         </div>
         {% endif %}
         {% if draft.ungrounded_count %}
@@ -122,10 +147,12 @@
         {% endif %}
 
         <p class="field-help">Bu, AI tərəfindən hazırlanmış qaralamadır — yekun qərar deyil. Server təsdiqli sətrləri yoxlayın. Tələbi dəyişmək, silmək və ya əlavə etmək üçün elanı yenidən analiz edin və ya ayrıca əl ilə vakansiya yaradın.</p>
-        {% if has_scorable %}
+        {% if confirmation_ready %}
         <button class="button" type="submit">Tələbləri təsdiqlə və namizədləri sırala</button>
+        {% elif has_scorable and draft.requires_resolution %}
+        <p class="field-help">Əvvəlcə yuxarıdakı dəqiqləşdirməni serverdə təsdiqləyin. Bundan sonra sıralama təsdiqi görünəcək.</p>
         {% endif %}
-      {% if has_scorable %}
+      {% if confirmation_ready %}
       </form>
       {% else %}
       </div>

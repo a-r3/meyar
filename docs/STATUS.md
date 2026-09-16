@@ -1,8 +1,8 @@
 # MEYAR — Status
 
 ## Current phase
-**Issue #44 final product/correctness remediation is implemented locally on
-`feat/agent-product-ux-jd-matching` (D-058), not pushed or merged.** D-055's
+**Issue #44 primary vacancy browser-flow remediation is implemented locally on
+`feat/agent-product-ux-jd-matching` (D-059), not pushed or merged.** D-055's
 canonical `RequirementSpan` architecture and every previously accepted
 candidate/JD/confirmation boundary remain intact. Confirmed agent vacancies
 now round-trip and deterministically evaluate skill-specific duration,
@@ -10,7 +10,10 @@ domain experience, and language proficiency; persist safe unsupported/review
 disclosures and bounded result count on the immutable criteria version; use a
 configured business timezone to resolve one explicit UI-boundary evaluation
 date; and return the requested top 1–100 eligible results without changing
-scores or requirements. PR #42 remains NOT accepted.
+scores or requirements. The real local browser path now adapts bounded legacy
+Ollama draft shapes to those typed semantics, exposes supported modality
+ambiguity for protected HR resolution, and provides a stable reloadable
+ranking URL with criterion evidence. PR #42 remains NOT accepted.
 
 **Slice 13 — Security + Official Definition-of-Done Acceptance: implementation
 pass 1 MERGED (PR #22, squash SHA `a709ce1`, `Refs #20`); Target-Mac hardware

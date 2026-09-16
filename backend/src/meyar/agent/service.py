@@ -52,7 +52,7 @@ from meyar.agent.schemas import (
     UnsupportedJDCriterionItem,
 )
 from meyar.core.domain_terms import DOMAIN_SYNONYMS, canonicalize_domain
-from meyar.core.result_count import extract_result_count_intent
+from meyar.core.result_count import extract_result_count_intent, is_result_count_only
 from meyar.core.text import (
     combine_degree_and_field,
     fold_az_ascii,
@@ -636,6 +636,109 @@ def _source_language_level(span: RequirementSpan) -> str | None:
     return match.group(0).casefold() if match else None
 
 
+def _canonical_display_subject(kind: JDDraftCriterionKind, subject: str) -> str:
+    if kind == JDDraftCriterionKind.DOMAIN_EXPERIENCE:
+        canonical = "banking" if subject == "bank" else canonicalize_domain(subject)
+        return canonical.title()
+    normalized = normalize_skill_name(subject) if kind in (
+        JDDraftCriterionKind.SKILL,
+        JDDraftCriterionKind.SKILL_EXPERIENCE,
+    ) else subject
+    return normalized[:1].upper() + normalized[1:]
+
+
+def _canonicalize_supported_draft_shape(
+    item: JDDraftCriterionItem, *, span: RequirementSpan
+) -> JDDraftCriterionItem:
+    """Map legacy model shapes onto fields owned by the canonical span.
+
+    This adapter cannot add source authority: it only runs after span_id
+    resolution, and every resulting field is revalidated against that exact
+    occurrence by _canonical_binding_result.
+    """
+    subject = _canonical_subject(span)
+    folded = span.normalized
+    has_experience = bool(re.search(r"\b(?:experience|tecrube\w*)\b", folded))
+    has_duration = bool(_DURATION_CUE_RE.search(folded) and re.search(r"\d", folded))
+    source_level = _source_language_level(span)
+    is_language = bool(_LANGUAGE_CUE_RE.search(folded) or source_level)
+    is_general_experience = bool(_GENERAL_EXPERIENCE_RE.search(folded))
+
+    if is_language and item.kind == JDDraftCriterionKind.LANGUAGE and subject:
+        if source_level is not None and (
+            item.required_level is None
+            and source_level not in _normalize_source_text(item.requirement)
+        ):
+            return item
+        return item.model_copy(
+            update={
+                "requirement": _canonical_display_subject(item.kind, subject),
+                "required_level": source_level.upper() if source_level else None,
+                "min_years": None,
+            }
+        )
+    if (has_experience or has_duration) and not is_general_experience and subject:
+        expected = _expected_experience_kind(subject)
+        if expected is not None and item.kind in {
+            JDDraftCriterionKind.SKILL,
+            JDDraftCriterionKind.EXPERIENCE,
+            JDDraftCriterionKind.SKILL_EXPERIENCE,
+            JDDraftCriterionKind.DOMAIN_EXPERIENCE,
+        }:
+            source_number = _source_number(span) if has_duration else None
+            if has_duration and item.min_years != source_number:
+                return item
+            if not has_duration and item.min_years is not None:
+                return item
+            if item.kind == JDDraftCriterionKind.SKILL and item.min_years is None:
+                return item
+            if (
+                item.kind == JDDraftCriterionKind.SKILL
+                and expected == JDDraftCriterionKind.DOMAIN_EXPERIENCE
+            ):
+                return item
+            # A legacy generic EXPERIENCE row is adaptable only when its own
+            # label still names the canonical subject. This prevents the old
+            # unsafe "total experience + separate skill" decomposition from
+            # being recombined by coincidence.
+            if item.kind == JDDraftCriterionKind.EXPERIENCE and not re.search(
+                rf"(?<!\w){re.escape(subject)}(?!\w)",
+                _normalize_source_text(item.requirement),
+            ):
+                return item
+            return item.model_copy(
+                update={
+                    "kind": expected,
+                    "requirement": _canonical_display_subject(expected, subject),
+                    "min_years": source_number,
+                    "required_level": None,
+                }
+            )
+    return item
+
+
+def _review_item_for_supported_ambiguity(
+    item: JDDraftCriterionItem, *, span: RequirementSpan
+) -> NeedsReviewJDCriterionItem | None:
+    """Expose only a bounded ambiguity HR is authorized to resolve."""
+    if explicit_modality(span.text) is not None:
+        return None
+    if item.kind != JDDraftCriterionKind.LANGUAGE:
+        return None
+    subject = _canonical_subject(span)
+    level = _source_language_level(span)
+    if not subject or level is None:
+        return None
+    return NeedsReviewJDCriterionItem(
+        requirement=span.text,
+        span_id=span.span_id,
+        kind=JDDraftCriterionKind.LANGUAGE,
+        subject=_canonical_display_subject(JDDraftCriterionKind.LANGUAGE, subject),
+        required_level=level.upper(),
+        allowed_types=[CriterionType.MUST_HAVE, CriterionType.PREFERRED],
+    )
+
+
 def _subjects_match(kind: JDDraftCriterionKind, drafted: str, canonical: str) -> bool:
     if not canonical:
         return False
@@ -881,12 +984,17 @@ async def _dispatch_draft_job_criteria(llm: LLMProvider, *, jd_text: str) -> Age
         {span_id: RequirementSpanState.PROHIBITED for span_id in raw_prohibited_spans}
     )
     ungrounded_count = 0
-    for items, criterion_type, bucket in (
-        (draft.must_have, CriterionType.MUST_HAVE, must_have),
-        (draft.preferred, CriterionType.PREFERRED, preferred),
+    for items, drafted_type in (
+        (draft.must_have, CriterionType.MUST_HAVE),
+        (draft.preferred, CriterionType.PREFERRED),
     ):
         for item in items:
             source_span = spans_by_id.get(item.span_id)
+            # The model may echo a requested top-K as a legacy OTHER row.
+            # Result count is already parsed from the original JD as workflow
+            # metadata and is never a criterion or an ungrounded disclosure.
+            if source_span is None and is_result_count_only(item.requirement):
+                continue
             # Raw-JD prohibition is independently authoritative. A model
             # reference to that same occurrence cannot create a second
             # outcome or recast it as an ungrounded fabrication.
@@ -898,13 +1006,30 @@ async def _dispatch_draft_job_criteria(llm: LLMProvider, *, jd_text: str) -> Age
                 # manufacture a second criterion from the same source.
                 ungrounded_count += 1
                 continue
+            canonical_item = (
+                _canonicalize_supported_draft_shape(item, span=source_span)
+                if source_span is not None
+                else item
+            )
+            source_modality = explicit_modality(source_span.text) if source_span else None
+            criterion_type = (
+                CriterionType(source_modality)
+                if source_modality is not None
+                and canonical_item.kind
+                in {
+                    JDDraftCriterionKind.SKILL_EXPERIENCE,
+                    JDDraftCriterionKind.DOMAIN_EXPERIENCE,
+                }
+                else drafted_type
+            )
             criterion, reason = _build_criterion_from_draft_item(
-                item,
+                canonical_item,
                 criterion_type=criterion_type,
                 used_ids=used_ids,
                 source_span=source_span,
             )
             if criterion is not None:
+                bucket = must_have if criterion_type == CriterionType.MUST_HAVE else preferred
                 bucket.append(criterion)
                 assert source_span is not None
                 span_states[source_span.span_id] = RequirementSpanState.SCORABLE
@@ -921,6 +1046,11 @@ async def _dispatch_draft_job_criteria(llm: LLMProvider, *, jd_text: str) -> Age
             elif reason == DroppedJDCriterionReason.NEEDS_HUMAN_REVIEW:
                 if source_span is not None:
                     span_states[source_span.span_id] = RequirementSpanState.NEEDS_HUMAN_REVIEW
+                    supported_review = _review_item_for_supported_ambiguity(
+                        canonical_item, span=source_span
+                    )
+                    if supported_review is not None:
+                        needs_review.append(supported_review)
             else:
                 assert source_span is not None
                 unsupported.append(
@@ -939,11 +1069,12 @@ async def _dispatch_draft_job_criteria(llm: LLMProvider, *, jd_text: str) -> Age
             source_span.span_id, RequirementSpanState.NEEDS_HUMAN_REVIEW
         )
         if state == RequirementSpanState.NEEDS_HUMAN_REVIEW:
-            needs_review.append(
-                NeedsReviewJDCriterionItem(
-                    requirement=source_span.text, criterion_type=inferred_type
+            if not any(item.span_id == source_span.span_id for item in needs_review):
+                needs_review.append(
+                    NeedsReviewJDCriterionItem(
+                        requirement=source_span.text, criterion_type=inferred_type
+                    )
                 )
-            )
         requirement_results.append(
             RequirementSpanResult(
                 span_id=source_span.span_id,
@@ -977,6 +1108,62 @@ async def _dispatch_draft_job_criteria(llm: LLMProvider, *, jd_text: str) -> Age
             requirements=requirement_results,
         ),
     )
+
+
+def resolve_job_draft_review_modality(
+    draft: AgentJobDraftToolResult,
+    *,
+    span_id: str,
+    criterion_type: CriterionType,
+) -> AgentJobDraftToolResult:
+    """Resolve only a server-declared modality ambiguity for one span."""
+    matches = [item for item in draft.needs_review if item.span_id == span_id]
+    if len(matches) != 1:
+        raise ValueError("Reviewable source requirement was not found.")
+    review = matches[0]
+    if criterion_type not in review.allowed_types:
+        raise ValueError("That review resolution is not allowed for this requirement.")
+    if review.kind is None or review.subject is None:
+        raise ValueError("Reviewable source requirement has no canonical criterion shape.")
+    result_matches = [item for item in draft.requirements if item.span_id == span_id]
+    if (
+        len(result_matches) != 1
+        or result_matches[0].state != RequirementSpanState.NEEDS_HUMAN_REVIEW
+    ):
+        raise ValueError("Source requirement is not awaiting review.")
+
+    used_ids = {criterion.id for criterion in [*draft.must_have, *draft.preferred]}
+    criterion = CriterionIn(
+        id=slugify_criterion_label(review.subject, used_ids),
+        kind=CriterionKind(review.kind.value),
+        type=criterion_type,
+        label=review.subject,
+        value=None if review.kind == JDDraftCriterionKind.EXPERIENCE else review.subject,
+        min_years=review.min_years,
+        required_level=review.required_level,
+        weight=1.0,
+    )
+    requirements = [
+        item.model_copy(
+            update={
+                "state": RequirementSpanState.SCORABLE,
+                "criterion_type": criterion_type,
+                "criterion_id": criterion.id,
+            }
+        )
+        if item.span_id == span_id
+        else item
+        for item in draft.requirements
+    ]
+    updates: dict[str, object] = {
+        "needs_review": [item for item in draft.needs_review if item.span_id != span_id],
+        "requirements": requirements,
+    }
+    if criterion_type == CriterionType.MUST_HAVE:
+        updates["must_have"] = [*draft.must_have, criterion]
+    else:
+        updates["preferred"] = [*draft.preferred, criterion]
+    return draft.model_copy(update=updates)
 
 
 def _configured_provenance(llm: LLMProvider) -> LLMResultProvenance:

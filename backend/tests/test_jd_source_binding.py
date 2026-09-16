@@ -18,9 +18,9 @@ from meyar.agent.schemas import (
     JDDraftCriterionKind,
     RequirementSpanState,
 )
-from meyar.agent.service import _dispatch_draft_job_criteria
+from meyar.agent.service import _dispatch_draft_job_criteria, resolve_job_draft_review_modality
 from meyar.core.result_count import DEFAULT_RESULT_LIMIT, extract_result_count_intent
-from meyar.schemas.criteria import CriterionKind
+from meyar.schemas.criteria import CriterionKind, CriterionType
 
 
 def _draft(source: str, *, must=(), preferred=()):
@@ -68,6 +68,82 @@ def test_result_count_defaults_and_caps_deterministically() -> None:
     assert bounded.requested == 500
     assert bounded.effective == 100
     assert bounded.was_bounded is True
+
+
+def test_primary_hr_request_reaches_typed_contract_and_bounded_review() -> None:
+    source = (
+        "Senior Backend Developer axtarırıq. Minimum 5 il Python, B2 English, "
+        "bank təcrübəsi üstünlükdür. 10 nəfər namizəd göstər."
+    )
+    spans = segment_requirement_spans(source)
+    assert [span.text for span in spans] == [
+        "Minimum 5 il Python",
+        "B2 English",
+        "bank təcrübəsi üstünlükdür",
+    ]
+    draft = _draft(
+        source,
+        must=[
+            # Concrete qwen3:1.7b legacy shapes reproduced at dea50267.
+            JDDraftCriterionItem(
+                span_id="req-0001",
+                kind="EXPERIENCE",
+                requirement="Minimum 5 il Python",
+                min_years=5,
+            ),
+            JDDraftCriterionItem(
+                span_id="req-0002",
+                kind="LANGUAGE",
+                requirement="B2 English",
+                required_level="B2",
+            ),
+            JDDraftCriterionItem(
+                span_id="req-0003",
+                kind="DOMAIN_EXPERIENCE",
+                requirement="bank təcrübəsi üstünlükdür",
+            ),
+        ],
+        preferred=[
+            JDDraftCriterionItem(
+                span_id="req-0004",
+                kind="OTHER",
+                requirement="10 nəfər namizəd göstər",
+            )
+        ],
+    )
+    assert [
+        (item.kind, item.type, item.value, item.min_years) for item in draft.must_have
+    ] == [(CriterionKind.SKILL_EXPERIENCE, CriterionType.MUST_HAVE, "Python", 5.0)]
+    assert [(item.kind, item.type, item.value, item.min_years) for item in draft.preferred] == [
+        (CriterionKind.DOMAIN_EXPERIENCE, CriterionType.PREFERRED, "Banking", None)
+    ]
+    assert draft.result_limit == 10
+    assert draft.ungrounded_count == 0
+    assert len(draft.needs_review) == 1
+    english = draft.needs_review[0]
+    assert (english.span_id, english.kind, english.subject, english.required_level) == (
+        "req-0002",
+        JDDraftCriterionKind.LANGUAGE,
+        "English",
+        "B2",
+    )
+    assert english.allowed_types == [CriterionType.MUST_HAVE, CriterionType.PREFERRED]
+
+    resolved = resolve_job_draft_review_modality(
+        draft, span_id="req-0002", criterion_type=CriterionType.MUST_HAVE
+    )
+    language = resolved.must_have[1]
+    assert (language.kind, language.value, language.required_level, language.type) == (
+        CriterionKind.LANGUAGE,
+        "English",
+        "B2",
+        CriterionType.MUST_HAVE,
+    )
+    assert resolved.needs_review == []
+    with pytest.raises(ValueError):
+        resolve_job_draft_review_modality(
+            draft, span_id="req-9999", criterion_type=CriterionType.MUST_HAVE
+        )
 
 
 def test_duration_number_and_result_count_number_never_cross_bind() -> None:
