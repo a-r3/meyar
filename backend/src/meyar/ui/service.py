@@ -16,6 +16,7 @@ from meyar.core.text import (
     normalize_azerbaijani_case,
     slugify_criterion_label,
 )
+from meyar.evaluation.evaluators import evaluate_criterion
 from meyar.ingestion.parser import CanonicalDocumentContent
 from meyar.models.candidate import Candidate
 from meyar.models.candidate_document import (
@@ -70,6 +71,7 @@ from meyar.ui.presentation import (
     AGENT_EVIDENCE_CATEGORY_LABELS,
     CRITERION_KIND_LABELS,
     agent_turn_outcome_message,
+    criterion_explanation_az,
     join_nonempty,
     planner_outcome_view,
 )
@@ -138,19 +140,18 @@ def _format_filter_match_label(category: str, value: str) -> str:
 def _evidence_views(
     evidence: list[EvidenceRef], *, snippets: bool, maximum: int = 4
 ) -> list[EvidenceLocationView]:
-    """Deduplicates by (page, quote) before truncating to ``maximum`` — an
-    HR user must never see the identical citation repeated (distinct
-    ``EvidenceRef`` entries can legitimately point at the same quoted
-    sentence for different extracted facts). ``block_index`` is still
-    carried on each view for internal provenance (never dropped from the
-    data), it is simply never the thing HR reads — see
-    meyar.ui.templates for the display text (D-044, PR #42 owner UX
-    correction)."""
-    seen: set[tuple[int, str]] = set()
+    """Deduplicate one immutable profile source by exact evidence occurrence.
+
+    Page alone is never an identity: different quotes on one page remain
+    visible.  Within the caller's already-authorized profile version, page,
+    block and normalized verbatim quote identify the effective occurrence.
+    """
+    seen: set[tuple[int, int, str]] = set()
     views: list[EvidenceLocationView] = []
     for item in evidence:
         quote = item.quote[:240] if snippets else None
-        key = (item.page, quote or "")
+        normalized_quote = " ".join((quote or "").split()).casefold()
+        key = (item.page, item.block_index, normalized_quote)
         if key in seen:
             continue
         seen.add(key)
@@ -966,13 +967,13 @@ def _agent_turn_headline(
                 )
             if draft.needs_review:
                 notes.append(
-                    f"{len(draft.needs_review)} mənbə tələbi dəqiqləşdirmə/insan baxışı tələb edir"
+                    f"{len(draft.needs_review)} tələb dəqiqləşdirmə tələb edir"
                 )
             note_text = f" ({'; '.join(notes)}.)" if notes else ""
             return (
                 f"Vakansiya qaralaması üçün {len(draft.must_have_rows)} mütləq və "
                 f"{len(draft.preferred_rows)} üstünlük tələbi hazırlandı. Nəzərdən keçirin, "
-                f"lazım gəldikdə düzəliş edin və təsdiqləyin.{note_text}"
+                f"və təsdiqləyin.{note_text}"
             )
     return agent_turn_outcome_message(result.outcome.value, None)
 
@@ -1058,6 +1059,29 @@ async def _criterion_labels_by_id(
     }
 
 
+async def _criteria_by_id(
+    db: AsyncSession, *, tenant_id: uuid.UUID, job_criteria_version_id: uuid.UUID
+) -> dict[str, CriterionIn]:
+    version = (
+        await db.execute(
+            select(JobCriteriaVersion).where(
+                JobCriteriaVersion.id == job_criteria_version_id,
+                JobCriteriaVersion.tenant_id == tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if version is None:
+        return {}
+    criteria: dict[str, CriterionIn] = {}
+    for item in version.criteria:
+        try:
+            criterion = CriterionIn.model_validate(item)
+        except ValidationError:
+            continue
+        criteria[criterion.id] = criterion
+    return criteria
+
+
 async def build_ranked_candidate_views(
     db: AsyncSession, *, tenant_id: uuid.UUID, ranking: BatchRankingResult
 ) -> list[RankedCandidateView]:
@@ -1065,11 +1089,75 @@ async def build_ranked_candidate_views(
     criterion_labels = await _criterion_labels_by_id(
         db, tenant_id=tenant_id, job_criteria_version_id=ranking.job_criteria_version_id
     )
+    criteria = await _criteria_by_id(
+        db, tenant_id=tenant_id, job_criteria_version_id=ranking.job_criteria_version_id
+    )
     views: list[RankedCandidateView] = []
     for result in ranking.results:
         identity = await get_current_identity_values(
             db, tenant_id=tenant_id, candidate_id=result.candidate_id
         )
+        authorized = await get_authorized_profile_version_by_id(
+            db,
+            tenant_id=tenant_id,
+            profile_version_id=result.candidate_profile_version_id,
+        )
+        profile = authorized[1] if authorized is not None else None
+        contributions: list[ScoreContributionView] = []
+        for item in result.score_explanation.criteria:
+            criterion = criteria.get(item.criterion_id)
+            label = criterion_labels.get(item.criterion_id, item.criterion_id)
+            evidence = [
+                EvidenceLocationView(page=ref.page, block_index=ref.block_index)
+                for ref in item.evidence_references
+            ]
+            if criterion is not None and profile is not None:
+                displayed_result = evaluate_criterion(
+                    criterion,
+                    profile,
+                    evaluation_as_of_date=result.evaluation_as_of_date,
+                )
+                scored_locations = {
+                    (ref.page, ref.block_index) for ref in item.evidence_references
+                }
+                displayed_locations = {
+                    (ref.page, ref.block_index) for ref in displayed_result.evidence
+                }
+                if (
+                    displayed_result.status == item.status
+                    and displayed_result.reason_code == item.reason_code
+                    and displayed_locations == scored_locations
+                ):
+                    evidence = _evidence_views(displayed_result.evidence, snippets=True)
+            # Even the truthful page-only fallback must not repeat an identical
+            # location when an old score contains duplicate references.
+            unique_evidence: list[EvidenceLocationView] = []
+            seen_locations: set[tuple[int, int, str | None]] = set()
+            for ref in evidence:
+                key = (ref.page, ref.block_index, ref.snippet)
+                if key not in seen_locations:
+                    seen_locations.add(key)
+                    unique_evidence.append(ref)
+            contributions.append(
+                ScoreContributionView(
+                    criterion_id=item.criterion_id,
+                    label=label,
+                    criterion_kind=item.criterion_kind,
+                    criterion_type=item.criterion_type,
+                    weight=item.weight,
+                    status=item.status,
+                    factor=item.factor,
+                    weighted_points=item.weighted_points,
+                    reason_code=item.reason_code,
+                    explanation=criterion_explanation_az(
+                        reason_code=item.reason_code,
+                        explanation=item.explanation,
+                        label=label,
+                    ),
+                    manual_review_required=item.manual_review_required,
+                    evidence=unique_evidence,
+                )
+            )
         views.append(
             RankedCandidateView(
                 candidate_id=result.candidate_id,
@@ -1081,26 +1169,7 @@ async def build_ranked_candidate_views(
                 evaluation_as_of_date=result.evaluation_as_of_date,
                 evaluation_policy_version=result.evaluation_policy_version,
                 scoring_policy_version=result.scoring_policy_version,
-                contributions=[
-                    ScoreContributionView(
-                        criterion_id=item.criterion_id,
-                        label=criterion_labels.get(item.criterion_id, item.criterion_id),
-                        criterion_kind=item.criterion_kind,
-                        criterion_type=item.criterion_type,
-                        weight=item.weight,
-                        status=item.status,
-                        factor=item.factor,
-                        weighted_points=item.weighted_points,
-                        reason_code=item.reason_code,
-                        explanation=item.explanation,
-                        manual_review_required=item.manual_review_required,
-                        evidence=[
-                            EvidenceLocationView(page=ref.page, block_index=ref.block_index)
-                            for ref in item.evidence_references
-                        ],
-                    )
-                    for item in result.score_explanation.criteria
-                ],
+                contributions=contributions,
             )
         )
     return views

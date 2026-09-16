@@ -26,6 +26,7 @@ from meyar.ingestion.validation import PDF_MIME
 from meyar.llm.dependency import get_llm_provider
 from meyar.llm.provider import LLMProvider
 from meyar.models.job import JOB_STATUS_ACTIVE, JOB_STATUS_ARCHIVED
+from meyar.schemas.job import JobCreateRequest
 from meyar.scoring.batch import BatchRankingError, rank_candidates_for_job
 from meyar.scoring.policy import ScoringPolicyError
 from meyar.search.planner_policy import find_skill_specific_duration_mention
@@ -1151,7 +1152,7 @@ async def resolve_agent_job_draft_review(
         outcome="ANSWERED_FROM_TOOL_RESULT",
         message=None,
         headline=(
-            "Dəqiqləşdirmə serverdə yoxlanıldı və yadda saxlanıldı. "
+            "Dəqiqləşdirmə yadda saxlanıldı. "
             "Tələbləri təsdiqləyib namizədləri sıralaya bilərsiniz."
         ),
         tool_results=[
@@ -1207,8 +1208,6 @@ async def confirm_agent_job_draft(
     verify_csrf(ctx.csrf_token, csrf_token)
     evaluation_as_of_date = resolve_business_date(settings.business_timezone)
     form = await request.form()
-    must_have_rows = [_job_form_row(form, "must", i) for i in range(CRITERION_ROW_COUNT)]
-    preferred_rows = [_job_form_row(form, "pref", i) for i in range(CRITERION_ROW_COUNT)]
 
     try:
         conversation = await get_conversation_for_update_by_session(
@@ -1278,21 +1277,52 @@ async def confirm_agent_job_draft(
             )
 
         canonical_title = pending.title or "Vakansiya qaralaması"
-        if str(form.get("title", "")).strip() != canonical_title.strip():
-            raise UIServiceInputError(
-                "Qaralama başlığı serverdə saxlanmış təsdiqli forma ilə uyğun gəlmir."
-            )
-        job_request = build_job_create_request(
-            title=canonical_title,
-            must_have_rows=must_have_rows,
-            preferred_rows=preferred_rows,
+        submitted_authority = "title" in form or any(
+            key.startswith(("must_", "pref_")) for key in form
         )
-        submitted_span_ids = [
-            str(form.get(f"{prefix}_span_id_{index}", ""))
-            for prefix, rows in (("must", must_have_rows), ("pref", preferred_rows))
-            for index, row in enumerate(rows)
-            if row.requirement.strip()
-        ]
+        if submitted_authority:
+            # Backward-compatible handling for already-open review pages and
+            # explicit tamper regressions. New protected review pages submit no
+            # criterion authority at all.
+            must_have_rows = [
+                _job_form_row(form, "must", i) for i in range(CRITERION_ROW_COUNT)
+            ]
+            preferred_rows = [
+                _job_form_row(form, "pref", i) for i in range(CRITERION_ROW_COUNT)
+            ]
+            if str(form.get("title", "")).strip() != canonical_title.strip():
+                raise UIServiceInputError(
+                    "Qaralama başlığı yadda saxlanmış təsdiqli forma ilə uyğun gəlmir."
+                )
+            job_request = build_job_create_request(
+                title=canonical_title,
+                must_have_rows=must_have_rows,
+                preferred_rows=preferred_rows,
+            )
+            submitted_span_ids = [
+                str(form.get(f"{prefix}_span_id_{index}", ""))
+                for prefix, rows in (("must", must_have_rows), ("pref", preferred_rows))
+                for index, row in enumerate(rows)
+                if row.requirement.strip()
+            ]
+        else:
+            job_request = JobCreateRequest(
+                title=canonical_title,
+                criteria=[*pending.must_have, *pending.preferred],
+            )
+            span_by_criterion = {
+                item.criterion_id: item.span_id
+                for item in pending.requirements
+                if item.criterion_id is not None and item.state.value == "SCORABLE"
+            }
+            submitted_span_ids = []
+            for criterion in job_request.criteria:
+                span_id = span_by_criterion.get(criterion.id)
+                if span_id is None:
+                    raise UIServiceInputError(
+                        "Qaralama meyarlarının təsdiqi etibarsızdır; elanı yenidən analiz edin."
+                    )
+                submitted_span_ids.append(span_id)
         authorize_agent_draft_confirmation(
             draft=pending,
             request=job_request,

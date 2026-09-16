@@ -1,3 +1,4 @@
+import re
 from collections.abc import Iterable
 
 from meyar.search.planner_schemas import PlannerOutcome, PlannerReasonCode, SearchPlanResult
@@ -102,6 +103,153 @@ CRITERION_KIND_LABELS = {
     "SKILL_EXPERIENCE": "Bacarıq üzrə təcrübə",
     "DOMAIN_EXPERIENCE": "Sahə təcrübəsi",
 }
+
+
+def _compact_number(value: str) -> str:
+    try:
+        return f"{float(value):g}"
+    except ValueError:
+        return value
+
+
+def criterion_explanation_az(*, reason_code: str, explanation: str, label: str) -> str:
+    """Translate deterministic evaluator conclusions at the HR UI boundary.
+
+    The evaluator payload remains unchanged for API/history compatibility.  This
+    function only replaces its developer-facing English prose with concise
+    Azerbaijani copy; status and reason-code semantics still come from the
+    deterministic result.
+    """
+    duration = re.search(
+        r"(?:shows|Computed) (?P<actual>\d+(?:\.\d+)?) year\(s\).*?"
+        r"(?:minimum|required) (?P<required>\d+(?:\.\d+)?)",
+        explanation,
+    )
+    language = re.search(
+        r"Profile states '([^']+)' at CEFR ([A-C][12]).*?required CEFR ([A-C][12])",
+        explanation,
+    )
+    if reason_code == "SKILL_DURATION_SUFFICIENT" and duration:
+        return (
+            f"CV-də {label} üzrə {_compact_number(duration['actual'])} il təsdiqlənən "
+            f"təcrübə var; minimum {_compact_number(duration['required'])} il tələbi ödənir."
+        )
+    if reason_code == "SKILL_DURATION_INSUFFICIENT" and duration:
+        return (
+            f"CV-də {label} üzrə {_compact_number(duration['actual'])} il təsdiqlənən "
+            f"təcrübə var; minimum {_compact_number(duration['required'])} il tələbi ödənmir."
+        )
+    if reason_code == "DOMAIN_DURATION_SUFFICIENT" and duration:
+        return (
+            f"CV-də {label} sahəsində {_compact_number(duration['actual'])} il təsdiqlənən "
+            f"təcrübə var; minimum {_compact_number(duration['required'])} il tələbi ödənir."
+        )
+    if reason_code == "DOMAIN_DURATION_INSUFFICIENT" and duration:
+        return (
+            f"CV-də {label} sahəsində {_compact_number(duration['actual'])} il təsdiqlənən "
+            f"təcrübə var; minimum {_compact_number(duration['required'])} il tələbi ödənmir."
+        )
+    if reason_code == "EXPERIENCE_DURATION_SUFFICIENT" and duration:
+        return (
+            f"CV-də {_compact_number(duration['actual'])} il təsdiqlənən ümumi təcrübə var; "
+            f"minimum {_compact_number(duration['required'])} il tələbi ödənir."
+        )
+    if reason_code == "EXPERIENCE_DURATION_INSUFFICIENT" and duration:
+        return (
+            f"CV-də {_compact_number(duration['actual'])} il təsdiqlənən ümumi təcrübə var; "
+            f"minimum {_compact_number(duration['required'])} il tələbi ödənmir."
+        )
+    language_name = None
+    if language:
+        localized_languages = {
+            "english": "ingilis dili",
+            "russian": "rus dili",
+            "azerbaijani": "Azərbaycan dili",
+            "turkish": "türk dili",
+            "german": "alman dili",
+            "french": "fransız dili",
+        }
+        language_name = localized_languages.get(
+            language[1].casefold(), f"{language[1]} dili"
+        )
+    if reason_code == "LANGUAGE_LEVEL_THRESHOLD_MET" and language:
+        return (
+            f"CV-də {language_name} səviyyəsi {language[2]} olaraq göstərilib; "
+            f"{language[3]} tələbi ödənir."
+        )
+    if reason_code == "LANGUAGE_LEVEL_THRESHOLD_NOT_MET" and language:
+        return (
+            f"CV-də {language_name} səviyyəsi {language[2]} olaraq göstərilib; "
+            f"{language[3]} tələbi ödənmir."
+        )
+
+    domain_label = "bank" if label.casefold() == "banking" else label.casefold()
+    templates = {
+        "SKILL_EXPLICIT_MATCH": f"CV-də {label} bacarığı təsdiqlənir.",
+        "SKILL_NOT_FOUND_IN_PROFILE": (f"CV-də {label} bacarığı üzrə açıq sübut tapılmadı."),
+        "CERTIFICATION_EXPLICIT_MATCH": f"CV-də {label} sertifikatı təsdiqlənir.",
+        "CERTIFICATION_NOT_FOUND_IN_PROFILE": (
+            f"CV-də {label} sertifikatı üzrə açıq sübut tapılmadı."
+        ),
+        "EDUCATION_EXPLICIT_MATCH": f"CV-də {label} təhsil tələbi təsdiqlənir.",
+        "EDUCATION_NOT_FOUND_IN_PROFILE": (
+            f"CV-də {label} təhsil tələbi üzrə açıq sübut tapılmadı."
+        ),
+        "LANGUAGE_PRESENT": f"CV-də {label} dili üzrə bilik təsdiqlənir.",
+        "LANGUAGE_LEVEL_UNSTATED": (
+            f"CV-də {label} dili göstərilib, lakin tələb olunan səviyyəni "
+            "təsdiqləyən məlumat yoxdur."
+        ),
+        "LANGUAGE_LEVEL_EXPLICIT_MATCH": (
+            f"CV-də {label} dili üzrə tələb olunan səviyyə təsdiqlənir."
+        ),
+        "LANGUAGE_LEVEL_SCALE_INCOMPATIBLE": (
+            f"CV-də göstərilən {label} dili səviyyəsi tələblə etibarlı müqayisə edilə bilmir."
+        ),
+        "LANGUAGE_NOT_FOUND_IN_PROFILE": (f"CV-də {label} dili üzrə açıq sübut tapılmadı."),
+        "EXPERIENCE_NO_EMPLOYMENT_HISTORY": (
+            "CV-də iş təcrübəsi barədə kifayət qədər məlumat yoxdur."
+        ),
+        "EXPERIENCE_DATES_UNPARSEABLE": (
+            "CV-dəki iş tarixləri etibarlı hesablanmadığı üçün insan baxışı tələb olunur."
+        ),
+        "EXPERIENCE_OVERLAPPING_DATES": (
+            "CV-də üst-üstə düşən iş tarixləri var; ümumi təcrübə etibarlı hesablanmır."
+        ),
+        "SKILL_DURATION_NO_ATTRIBUTABLE_PERIODS": (
+            f"CV-də {label} üzrə təcrübə müddətini təsdiqləyən tarixli sübut yoxdur."
+        ),
+        "SKILL_DURATION_NO_ATTRIBUTABLE_INTERVAL": (
+            f"CV-də {label} bacarığı göstərilib, lakin istifadə müddəti ayrıca təsdiqlənmir."
+        ),
+        "SKILL_DURATION_DATES_UNPARSEABLE": (
+            f"CV-də {label} üzrə göstərilən tarixlər etibarlı hesablanmır."
+        ),
+        "SKILL_DURATION_EMPLOYMENT_INCOMPATIBLE": (
+            f"CV-də {label} üzrə tarixlər əlaqəli iş dövrü ilə uyğun gəlmir."
+        ),
+        "DOMAIN_NOT_FOUND_IN_PROFILE": (
+            f"CV-də {label} sahəsi üzrə açıq təcrübə sübutu tapılmadı."
+        ),
+        "DOMAIN_EXPLICIT_MATCH": (f"CV-də {domain_label} sahəsində təcrübə təsdiqlənir."),
+        "DOMAIN_DURATION_DATES_UNPARSEABLE": (
+            f"CV-də {label} sahəsi üzrə göstərilən tarixlər etibarlı hesablanmır."
+        ),
+        "DOMAIN_DURATION_EMPLOYMENT_INCOMPATIBLE": (
+            f"CV-də {label} sahəsi üzrə tarixlər əlaqəli iş dövrü ilə uyğun gəlmir."
+        ),
+        "DOMAIN_DURATION_NO_ATTRIBUTABLE_INTERVAL": (
+            f"CV-də {label} sahəsi üzrə təcrübə göstərilib, lakin müddət təsdiqlənmir."
+        ),
+        "UNSUPPORTED_CRITERION": (
+            "Bu meyar avtomatik qiymətləndirilmir və insan baxışı tələb edir."
+        ),
+    }
+    return templates.get(
+        reason_code,
+        "Nəticə CV-dəki təsdiqlənən məlumatlara əsasən müəyyən edilib.",
+    )
+
 
 JOB_STATUS_LABELS = {
     "ACTIVE": "Aktiv",

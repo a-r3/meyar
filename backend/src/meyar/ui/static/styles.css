@@ -600,6 +600,9 @@ tbody tr:hover { background: var(--surface-subtle); }
 .criteria-table .col-kind { width: 18%; }
 .criteria-table .col-years { width: 14%; }
 .criteria-table .col-weight { width: 10%; }
+.criteria-table-protected .col-requirement { width: 48%; }
+.criteria-table-protected td { vertical-align: middle; }
+.criteria-table-protected td span { display: inline-block; padding: 9px 0; }
 .criteria-table .col-weight, .criteria-table th.col-weight {
   color: var(--text-muted);
   font-size: .85rem;

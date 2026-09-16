@@ -1,18 +1,25 @@
-{% macro criterion_rows(prefix, rows, kind_options) %}
+{% macro criterion_rows(prefix, rows, kind_options, protected=false) %}
 <div class="table-wrap">
-<table class="criteria-table">
-<thead><tr><th class="col-kind">Tələb növü</th><th class="col-requirement">Tələb</th><th class="col-years">Minimum müddət</th><th>Səviyyə</th><th class="col-weight">Əhəmiyyət</th></tr></thead>
+<table class="criteria-table{% if protected %} criteria-table-protected{% endif %}">
+<thead><tr><th class="col-kind">Tələb növü</th><th class="col-requirement">Tələb</th><th class="col-years">Minimum müddət</th><th>Səviyyə</th>{% if not protected %}<th class="col-weight">Əhəmiyyət</th>{% endif %}</tr></thead>
 <tbody>
 {% for row in rows %}
 {% set is_experience = row.kind in ("EXPERIENCE", "SKILL_EXPERIENCE", "DOMAIN_EXPERIENCE") %}
 {% set is_language = row.kind == "LANGUAGE" %}
 {% set locked = row.span_id %}
-<tr>
-  <td class="col-kind">{% if locked %}<input type="hidden" name="{{ prefix }}_span_id_{{ loop.index0 }}" value="{{ row.span_id }}"><input type="hidden" name="{{ prefix }}_kind_{{ loop.index0 }}" value="{{ row.kind }}"><span>{{ row.kind_label }}</span>{% else %}<select class="js-kind-select" name="{{ prefix }}_kind_{{ loop.index0 }}">{% for value, label in kind_options %}<option value="{{ value }}"{% if row.kind == value %} selected{% endif %}>{{ label }}</option>{% endfor %}</select>{% endif %}</td>
-  <td class="col-requirement"><input type="text" name="{{ prefix }}_requirement_{{ loop.index0 }}" value="{{ row.requirement }}" maxlength="200" placeholder="Məs. Python, ACAMS, İngilis dili"{% if locked %} readonly{% endif %}></td>
-  <td class="col-years"><input type="number" step="0.5" min="0" max="60" class="js-min-years" name="{{ prefix }}_min_years_{{ loop.index0 }}" value="{{ row.min_years if is_experience else "" }}" placeholder="{{ "il" if is_experience else "—" }}"{% if not is_experience %} disabled aria-disabled="true"{% elif locked %} readonly{% endif %}></td>
-  <td><input type="text" class="js-required-level" name="{{ prefix }}_required_level_{{ loop.index0 }}" value="{{ row.required_level if is_language else "" }}" maxlength="50" placeholder="{{ "Məs. B2" if is_language else "—" }}"{% if not is_language %} disabled aria-disabled="true"{% elif locked %} readonly{% endif %}></td>
-  <td class="col-weight">{% if locked %}<input type="hidden" name="{{ prefix }}_weight_{{ loop.index0 }}" value="{{ row.weight or "1" }}"><span>Standart</span>{% else %}<input type="number" step="0.5" min="0" max="10" class="js-weight" name="{{ prefix }}_weight_{{ loop.index0 }}" value="{{ row.weight }}" aria-label="Əhəmiyyət (əlavə parametr)">{% endif %}</td>
+<tr{% if protected and locked %} data-span-id="{{ row.span_id }}" data-row-prefix="{{ prefix }}" data-row-index="{{ loop.index0 }}"{% endif %}>
+  {% if protected %}
+  <td class="col-kind"><span>{{ row.kind_label }}</span></td>
+  <td class="col-requirement"><span data-value="{{ row.requirement }}">{{ row.requirement }}</span></td>
+  <td class="col-years"><span{% if is_experience and row.min_years %} data-value="{{ row.min_years }}"{% endif %}>{{ row.min_years if is_experience and row.min_years else "—" }}</span></td>
+  <td><span{% if is_language and row.required_level %} data-value="{{ row.required_level }}"{% endif %}>{{ row.required_level if is_language and row.required_level else "—" }}</span></td>
+  {% else %}
+  <td class="col-kind"><select class="js-kind-select" name="{{ prefix }}_kind_{{ loop.index0 }}">{% for value, label in kind_options %}<option value="{{ value }}"{% if row.kind == value %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></td>
+  <td class="col-requirement"><input type="text" name="{{ prefix }}_requirement_{{ loop.index0 }}" value="{{ row.requirement }}" maxlength="200" placeholder="Məs. Python, ACAMS, İngilis dili"></td>
+  <td class="col-years"><input type="number" step="0.5" min="0" max="60" class="js-min-years" name="{{ prefix }}_min_years_{{ loop.index0 }}" value="{{ row.min_years if is_experience else "" }}" placeholder="{{ "il" if is_experience else "—" }}"{% if not is_experience %} disabled aria-disabled="true"{% endif %}></td>
+  <td><input type="text" class="js-required-level" name="{{ prefix }}_required_level_{{ loop.index0 }}" value="{{ row.required_level if is_language else "" }}" maxlength="50" placeholder="{{ "Məs. B2" if is_language else "—" }}"{% if not is_language %} disabled aria-disabled="true"{% endif %}></td>
+  <td class="col-weight"><input type="number" step="0.5" min="0" max="10" class="js-weight" name="{{ prefix }}_weight_{{ loop.index0 }}" value="{{ row.weight }}" aria-label="Əhəmiyyət (əlavə parametr)"></td>
+  {% endif %}
 </tr>
 {% endfor %}
 </tbody>

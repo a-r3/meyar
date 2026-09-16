@@ -86,7 +86,7 @@
       {% endif %}
       {% if has_scorable %}
         <label for="jd-title">Vakansiya başlığı</label>
-        {% if confirmation_ready %}<input id="jd-title" name="title" type="text" required readonly maxlength="255" value="{{ draft.title or "" }}">{% else %}<p id="jd-title"><strong>{{ draft.title or "Vakansiya qaralaması" }}</strong></p>{% endif %}
+        <p id="jd-title"><strong>{{ draft.title or "Vakansiya qaralaması" }}</strong></p>
         <p><strong>Nəticələr:</strong> ən çox {{ draft.result_limit }} uyğun namizəd{% if draft.result_limit_was_bounded %} (təhlükəsiz maksimum; sorğuda {{ draft.requested_result_limit }} istənmişdi){% endif %}</p>
       {% else %}
         <h3>{{ draft.title or "Vakansiya qaralaması" }}</h3>
@@ -96,7 +96,7 @@
       {% endif %}
 
         <h3>Mütləq tələblər</h3>
-        {{ criteria_form.criterion_rows("must", draft.must_have_rows, kind_options) }}
+        {{ criteria_form.criterion_rows("must", draft.must_have_rows, kind_options, true) }}
         {% if draft.unsupported_must_have %}
         <div class="alert alert-info">
           <p><strong>Məlumat üçün — qiymətləndirməyə daxil edilmir:</strong> bu tələblər real və qeydə alınıb, lakin sistem hələ bu növ tələbi ölçə bilmir, ona görə bal/reytinqə təsir etmir:</p>
@@ -105,7 +105,7 @@
         {% endif %}
 
         <h3>Üstünlük tələbləri</h3>
-        {{ criteria_form.criterion_rows("pref", draft.preferred_rows, kind_options) }}
+        {{ criteria_form.criterion_rows("pref", draft.preferred_rows, kind_options, true) }}
         {% if draft.unsupported_preferred %}
         <div class="alert alert-info">
           <p><strong>Məlumat üçün — qiymətləndirməyə daxil edilmir:</strong> bu tələblər real və qeydə alınıb, lakin sistem hələ bu növ tələbi ölçə bilmir, ona görə bal/reytinqə təsir etmir:</p>
@@ -146,11 +146,11 @@
         <p class="alert alert-warning">{{ draft.ungrounded_count }} tələb JD mətnində aydın təsdiqlənmədiyi üçün çıxarıldı.</p>
         {% endif %}
 
-        <p class="field-help">Bu, AI tərəfindən hazırlanmış qaralamadır — yekun qərar deyil. Server təsdiqli sətrləri yoxlayın. Tələbi dəyişmək, silmək və ya əlavə etmək üçün elanı yenidən analiz edin və ya ayrıca əl ilə vakansiya yaradın.</p>
+        <p class="field-help">Bu, AI tərəfindən hazırlanmış qaralamadır — yekun qərar deyil. MEYAR-ın anladığı tələbləri yoxlayın. Tələbi dəyişmək, silmək və ya əlavə etmək üçün elanı yenidən analiz edin və ya ayrıca əl ilə vakansiya yaradın.</p>
         {% if confirmation_ready %}
         <button class="button" type="submit">Tələbləri təsdiqlə və namizədləri sırala</button>
         {% elif has_scorable and draft.requires_resolution %}
-        <p class="field-help">Əvvəlcə yuxarıdakı dəqiqləşdirməni serverdə təsdiqləyin. Bundan sonra sıralama təsdiqi görünəcək.</p>
+        <p class="field-help">Əvvəlcə yuxarıdakı dəqiqləşdirməni yadda saxlayın. Bundan sonra sıralama təsdiqi görünəcək.</p>
         {% endif %}
       {% if confirmation_ready %}
       </form>

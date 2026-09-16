@@ -46,6 +46,28 @@ def _profile(*skills: str) -> dict:
     }
 
 
+def test_ranking_evidence_dedup_preserves_distinct_same_page_occurrences() -> None:
+    from meyar.schemas.candidate_profile import EvidenceRef
+    from meyar.ui.service import _evidence_views
+
+    duplicate = EvidenceRef(page=1, block_index=4, quote="Python 2019-2025")
+    views = _evidence_views(
+        [
+            duplicate,
+            EvidenceRef(page=1, block_index=4, quote="  Python 2019-2025  "),
+            EvidenceRef(page=1, block_index=4, quote="Banking systems 2019-2025"),
+            EvidenceRef(page=1, block_index=5, quote="Python 2019-2025"),
+        ],
+        snippets=True,
+    )
+
+    assert [(view.block_index, view.snippet) for view in views] == [
+        (4, "Python 2019-2025"),
+        (4, "Banking systems 2019-2025"),
+        (5, "Python 2019-2025"),
+    ]
+
+
 @pytest.fixture
 def local_ui_settings() -> Settings:
     settings = Settings(ui_cookie_secure=False)
@@ -66,6 +88,14 @@ async def _login_and_csrf(client: AsyncClient, username: str, password: str) -> 
 
 def _hidden_value(html: str, name: str) -> str:
     match = re.search(rf'name="{re.escape(name)}" value="([^"]+)"', html)
+    if match is None:
+        row = re.fullmatch(r"(must|pref)_span_id_(\d+)", name)
+        if row is not None:
+            match = re.search(
+                rf'data-span-id="([^"]+)" data-row-prefix="{row.group(1)}" '
+                rf'data-row-index="{row.group(2)}"',
+                html,
+            )
     assert match is not None
     return match.group(1)
 
@@ -714,7 +744,7 @@ async def test_grounded_explanation_never_leaks_identity_to_model(
 # --- Slice 4 (issue #33, D-030/D-032): DRAFT_JOB_CRITERIA + "Yeni söhbət" ---
 
 
-async def test_draft_job_criteria_renders_editable_prefilled_review_form(
+async def test_draft_job_criteria_renders_static_protected_review_rows(
     client: AsyncClient, tenant_and_user, local_ui_settings: Settings
 ) -> None:
     from meyar.agent.schemas import JDCriteriaDraft, JDDraftCriterionItem
@@ -744,7 +774,7 @@ async def test_draft_job_criteria_renders_editable_prefilled_review_form(
     jd_text = "Baş Backend Mühəndisi axtarırıq. Python bilməlidir. AWS üstünlükdür."
     response = await client.post("/ui/agent", data={"message": jd_text, "csrf_token": csrf})
     assert response.status_code == 200
-    assert 'value="Baş Backend Mühəndisi"' in response.text
+    assert "Baş Backend Mühəndisi" in response.text
     assert 'value="Python"' in response.text
     assert 'value="AWS"' in response.text
     # HR-facing kind label, never the raw enum value, and no raw tool
@@ -754,26 +784,16 @@ async def test_draft_job_criteria_renders_editable_prefilled_review_form(
     assert _draft_confirm_path(response.text).endswith("/confirm")
     assert 'name="from_agent_draft"' not in response.text
     assert 'name="draft_id"' not in response.text
+    assert 'name="title"' not in response.text
+    assert 'name="must_requirement_0"' not in response.text
+    assert 'name="pref_requirement_0"' not in response.text
 
     # Drafting alone persists no Job; only the dedicated, server-authorized
     # confirmation operation creates the vacancy and ranks it.
     confirm_path = _draft_confirm_path(response.text)
     create = await client.post(
         confirm_path,
-        data={
-            "csrf_token": csrf,
-            "title": "Baş Backend Mühəndisi",
-            "must_span_id_0": _hidden_value(response.text, "must_span_id_0"),
-            "must_kind_0": "SKILL",
-            "must_requirement_0": "Python",
-            "must_min_years_0": "",
-            "must_weight_0": "1",
-            "pref_span_id_0": _hidden_value(response.text, "pref_span_id_0"),
-            "pref_kind_0": "SKILL",
-            "pref_requirement_0": "AWS",
-            "pref_min_years_0": "",
-            "pref_weight_0": "1",
-        },
+        data={"csrf_token": csrf},
         follow_redirects=False,
     )
     assert create.status_code == 200
@@ -2107,32 +2127,10 @@ async def test_skill_domain_and_language_draft_renders_complete_review_form(
     assert "Sahə təcrübəsi" in response.text
     assert 'value="B2"' in response.text
     assert "/confirm" in response.text
-    title_match = re.search(r'name="title"[^>]*value="([^"]+)"', response.text)
-    assert title_match is not None
-
     confirm_path = _draft_confirm_path(response.text)
     confirmed = await client.post(
         confirm_path,
-        data={
-            "csrf_token": csrf,
-            "title": title_match.group(1),
-            "must_span_id_0": _hidden_value(response.text, "must_span_id_0"),
-            "must_kind_0": "SKILL_EXPERIENCE",
-            "must_requirement_0": "Python",
-            "must_min_years_0": "5",
-            "must_weight_0": "1",
-            "must_span_id_1": _hidden_value(response.text, "must_span_id_1"),
-            "must_kind_1": "LANGUAGE",
-            "must_requirement_1": "English",
-            "must_min_years_1": "",
-            "must_required_level_1": "B2",
-            "must_weight_1": "1",
-            "pref_span_id_0": _hidden_value(response.text, "pref_span_id_0"),
-            "pref_kind_0": "DOMAIN_EXPERIENCE",
-            "pref_requirement_0": "Banking",
-            "pref_min_years_0": "",
-            "pref_weight_0": "1",
-        },
+        data={"csrf_token": csrf},
     )
     assert confirmed.status_code == 200, confirmed.text
     assert "Reytinq nəticələri" in confirmed.text
@@ -2305,31 +2303,28 @@ async def test_primary_hr_request_requires_server_authorized_language_resolution
     assert 'value="English"' in resolved.text
     assert 'value="B2"' in resolved.text
 
+    assert 'name="must_requirement_0"' not in resolved.text
+    assert 'name="pref_requirement_0"' not in resolved.text
+    assert 'name="title"' not in resolved.text
+    assert "Əhəmiyyət" not in resolved.text
+    assert "Standart" not in resolved.text
+    assert "Server" not in resolved.text and "server" not in resolved.text
     confirmed = await client.post(
-        _draft_confirm_path(resolved.text),
-        data={
-            "csrf_token": csrf,
-            "title": "Senior Backend Developer",
-            "must_span_id_0": _hidden_value(resolved.text, "must_span_id_0"),
-            "must_kind_0": "SKILL_EXPERIENCE",
-            "must_requirement_0": "Python",
-            "must_min_years_0": "5",
-            "must_weight_0": "1",
-            "must_span_id_1": _hidden_value(resolved.text, "must_span_id_1"),
-            "must_kind_1": "LANGUAGE",
-            "must_requirement_1": "English",
-            "must_required_level_1": "B2",
-            "must_weight_1": "1",
-            "pref_span_id_0": _hidden_value(resolved.text, "pref_span_id_0"),
-            "pref_kind_0": "DOMAIN_EXPERIENCE",
-            "pref_requirement_0": "Banking",
-            "pref_min_years_0": "",
-            "pref_weight_0": "1",
-        },
+        _draft_confirm_path(resolved.text), data={"csrf_token": csrf}
     )
     assert confirmed.status_code == 200
     assert "Reytinq nəticələri" in confirmed.text
     assert "Qiymətləndirmə tarixi:" in confirmed.text
+    assert (
+        "CV-də Python üzrə 6 il təsdiqlənən təcrübə var; minimum 5 il tələbi ödənir."
+        in confirmed.text
+    )
+    assert "CV-də ingilis dili səviyyəsi B2 olaraq göstərilib; B2 tələbi ödənir." in confirmed.text
+    assert "CV-də bank sahəsində təcrübə təsdiqlənir." in confirmed.text
+    assert confirmed.text.count("CV, səhifə 1 — “Backend Developer") == 2
+    assert 'CV, səhifə 1 — “English B2.”' in confirmed.text
+    assert "CV evidence shows" not in confirmed.text
+    assert "Profile states" not in confirmed.text
     from sqlalchemy import select
 
     from meyar.models.audit_event import AuditEvent
