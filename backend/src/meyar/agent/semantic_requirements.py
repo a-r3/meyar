@@ -66,14 +66,16 @@ _NUMBER_WORDS = {
 _NUMBER_TOKEN = r"(?:\d+(?:[.,]\d+)?|" + "|".join(_NUMBER_WORDS) + r")"
 
 _NEGATIVE_RE = re.compile(
-    r"\b(?:not\s+(?:required|mandatory)|no\s+.+?required|isn['’]?t\s+required|"
-    r"lazim\s+deyil|teleb\s+olunmur|vacib\s+deyil|mecburi\s+deyil)\b",
+    r"\b(?:not\s+(?:required|mandatory|needed)|no\s+.+?required|isn['’]?t\s+required|"
+    r"need\s+not|without\s+requiring|lazim\s+deyil|teleb\s+olunmur|"
+    r"vacib\s+deyil|mecburi\s+deyil)\b",
     re.I,
 )
 _PREFERRED_RE = re.compile(
-    r"\b(?:preferred|nice\s+to\s+have|is\s+(?:a\s+)?plus|plus(?:dir|\s+sayilir)?|"
-    r"ustunluk(?:dur|du|\s+verilir|\s+sayilsin)?|arzuolunan(?:dir)?|"
-    r"olsa\s+yaxsi(?:dir|di)?|yaxsi\s+olar)\b",
+    r"\b(?:preferred|optional|desirable|advantageous|nice\s+to\s+have|"
+    r"considered\s+(?:an?\s+)?asset|is\s+(?:a\s+)?plus|plus(?:dir|\s+sayilir)?|"
+    r"ustunluk(?:dur|du|\s+verilir|\s+sayilsin)?|elave\s+ustunluk|"
+    r"arzuolunan(?:dir)?|arzu\s+edilir|olsa\s+yaxsi(?:dir|di)?|yaxsi\s+olar)\b",
     re.I,
 )
 _REQUIRED_RE = re.compile(
@@ -105,7 +107,10 @@ _LANGUAGE_RE = re.compile(
     r"german|deutsch|alman(?:ca|\s+dili)?)\b",
     re.I,
 )
-_CERT_RE = re.compile(r"\b(?:certificat(?:e|ion|ed)?|sertifikat\w*)\b", re.I)
+_LANGUAGE_WRAPPER_RE = re.compile(
+    r"(?i)\b(?P<subject>[^,.;:\d]{2,60}?)\s+(?:language|dili)\b"
+)
+_CERT_RE = re.compile(r"\b(?:certificat(?:e|ion|ed)?s?|sertifikat\w*)\b", re.I)
 _CERTIFICATION_NAMES = frozenset({"acca", "acams", "cfa", "cia", "cisa", "pmp"})
 _EDUCATION_RE = re.compile(
     r"\b(?:education|degree|bachelor(?:['’]s)?|master(?:['’]s)?|university|"
@@ -114,11 +119,15 @@ _EDUCATION_RE = re.compile(
 )
 _EDUCATION_SUBJECT_RE = re.compile(
     r"\b(?:bachelor(?:['’]s)?(?:\s+degree)?|master(?:['’]s)?(?:\s+degree)?|"
-    r"university\s+degree|bakalavr\w*|magistr\w*)\b",
+    r"university\s+degree|bakalavr\w*|magistr\w*)"
+    r"(?:\s+(?:in|uzre)\s+[a-z0-9əçşöüğ\s&+./-]+?)?"
+    r"(?=\s+(?:is\s+)?(?:required|preferred|optional|mandatory|teleb\w*|"
+    r"ustunluk\w*|mecburi\w*)\b|[.,;:]|$)",
     re.I,
 )
 _EXPERIENCE_RE = re.compile(
-    r"\b(?:experience|background|tecrube\w*|islemis|isley\w*|worked)\b", re.I
+    r"\b(?:experience|experienced|background|exposure|tecrube\w*|islemis|isley\w*|worked)\b",
+    re.I,
 )
 _TOTAL_RE = re.compile(r"\b(?:total|overall|general|professional|umumi|pesekar)\b", re.I)
 _SOFT_UNSUPPORTED_RE = re.compile(
@@ -128,7 +137,10 @@ _SOFT_UNSUPPORTED_RE = re.compile(
 )
 _UNSCORABLE_SCOPE_RE = re.compile(r"\b(?:project|layihe)\w*\b", re.I)
 _SEARCH_PREAMBLE_RE = re.compile(
-    r"^(?:please\s+)?(?:find|show|display|list|return)\b.*?\b(?:candidates?|namized\w*)\s+(?:with|who\s+have)\s+",
+    r"^(?:(?:please\s+)?(?:find|show|display|list|return)\b.*?\b"
+    r"(?:candidates?|applicants?|namized\w*)\s+(?:with|who\s+have)\s+|"
+    r"(?:\d+|bir|iki|uc|dord|bes|alti|yeddi|sekkiz|doqquz|on)\s+"
+    r"(?:nefer\s+)?namized\w*\s+(?:goster|tap|cixart)\w*\s*:?\s*)",
     re.I,
 )
 _ROLE_ONLY_RE = re.compile(
@@ -143,8 +155,60 @@ _GENERIC_SEARCH_SUBJECT_RE = re.compile(
     r"(?i)^(?:(?:en\s+)?(?:uygun|yaxsi)|suitable|best)\s*"
     r"(?:namized\w*|candidate\w*)?$|^(?:namized\w*|candidate\w*)$"
 )
+_PROFESSIONAL_CUE_RE = re.compile(
+    r"(?i)\b(?:knowledge(?:\s+of)?|command\s+of|proficien(?:t|cy)\s+in|familiar(?:ity)?\s+with|"
+    r"skilled\s+in|competence\s+in|bilik\w*|biliy\w*|bilm\w*|bils\w*|bacariq\w*|"
+    r"istifade\w*)\b"
+)
+_COUNT_ENTITY_RE = re.compile(
+    rf"(?i)\b(?:top\s*)?{_NUMBER_TOKEN}\s+"
+    r"(?:candidates?|applicants?|results?|profiles?|namized\w*|nefer)\b|"
+    rf"\b(?:show|find|display|list|return|goster\w*|tap\w*|cixart\w*)\s+"
+    rf"(?:up\s+to\s+|at\s+most\s+|en\s+cox\s+)?{_NUMBER_TOKEN}\b"
+)
+_KNOWLEDGE_QUALIFIER_RE = re.compile(
+    r"(?i)\b(?:good|strong|solid|working|advanced|yaxsi|ela|guclu)\b"
+)
+_SUBJECT_SYNTAX_PATTERNS = (
+    re.compile(
+        r"(?i)^\s*(?:(?:applicants?|candidates?)\s+(?:(?:are|must|should)\s+)?"
+        r"(?:be\s+|have\s+)?)?(?:proficient|skilled|experienced)\s+in\s+"
+        r"(?P<subject>.+?)(?=\s+(?:and\s+)?it\s+is\s+"
+        r"(?:preferred|required|optional)\s*$|\s*$)"
+    ),
+    re.compile(
+        r"(?i)^\s*(?:(?:applicants?|candidates?)\s+(?:(?:are|must|should)\s+)?"
+        r"have\s+)?(?:knowledge|command|familiarity)\s+(?:of|with)\s+"
+        r"(?P<subject>.+?)(?=\s+(?:is\s+)?(?:required|preferred|optional|mandatory)"
+        r"\b|\s*$)"
+    ),
+    re.compile(r"(?i)^\s*(?P<subject>.+?)\s+knowledge\b"),
+    re.compile(
+        r"(?i)^\s*(?P<subject>.+?)(?:-(?:dan|den))?\s+istifade\w*\b"
+    ),
+    re.compile(
+        r"(?i)^\s*(?:(?:amma|lakin|hemcinin|ve|but|however|and)\s+)?"
+        r"(?P<subject>.+?)(?:-(?:ni|nu|n[uü]|i|ı|u|ü))?\s+"
+        r"(?:(?:yaxsi|ela|guclu)\s+)?(?:biliy\w*|bilm\w*|bils\w*|bacariq\w*)\b"
+    ),
+    re.compile(
+        r"(?i)^\s*(?:(?:amma|lakin|hemcinin|ve|but|however|and)\s+)?"
+        r"(?P<subject>.+?)\s+(?:uzre|sahesinde|sektorunda)\s+"
+        r"(?:tecrube\w*|islemis|isley\w*)\b"
+    ),
+    re.compile(
+        r"(?i)^\s*(?:experience|background|exposure)\s+in\s+"
+        r"(?P<subject>.+?)(?:\s+(?:domain|sector))?(?:\s+is)?\s+"
+        r"(?:required|preferred|optional|mandatory)\b"
+    ),
+    re.compile(
+        r"(?i)^\s*(?P<subject>.+?)\s+(?:language|dili)\b"
+    ),
+)
 _PREFERRED_CONTRAST_RE = re.compile(
-    r"\bnot\s+mandatory\s*,?\s*but\s+(?:it\s+)?is\s+preferred\b", re.I
+    r"\b(?:not\s+(?:mandatory|required)\s*,?\s*but\s+(?:it\s+)?(?:is\s+)?preferred|"
+    r"mecburi\s+deyil\s*,?\s*(?:amma|lakin)\s+ustunluk\w*)\b",
+    re.I,
 )
 _BOUNDARY_RE = re.compile(r"(?:\r?\n)+|(?<=[.!?;])\s+")
 _BULLET_RE = re.compile(r"\s*(?:[-*•]|\d+[.)])\s*")
@@ -280,6 +344,8 @@ def _material(text: str) -> bool:
         or _EDUCATION_RE.search(folded)
         or _LEVEL_RE.search(folded)
         or _SOFT_UNSUPPORTED_RE.search(folded)
+        or _PROFESSIONAL_CUE_RE.search(folded)
+        or _COUNT_ENTITY_RE.search(folded)
     )
 
 
@@ -373,6 +439,11 @@ def _split_units(text: str) -> list[tuple[int, int, tuple[int, int] | None]]:
             ]
             if re.search(r"(?i)\bve\s+plus\s+sayilir\b", _fold(clause)):
                 coordinated = []
+            if re.search(
+                r"(?i)\b(?:and|ve)\s+it\s+is\s+(?:preferred|required|optional)\b",
+                _fold(clause),
+            ):
+                coordinated = []
             should_split = bool(coordinated) and (
                 len(coordinated) == 1
                 and (
@@ -411,7 +482,7 @@ def _modality(
     folded = _fold(source)
     contrast = _PREFERRED_CONTRAST_RE.search(folded)
     if contrast:
-        preferred = re.search(r"(?i)preferred", folded[contrast.start() : contrast.end()])
+        preferred = _PREFERRED_RE.search(folded[contrast.start() : contrast.end()])
         assert preferred is not None
         occurrence_start = start + contrast.start() + preferred.start()
         return (
@@ -498,6 +569,19 @@ def _subject_bounds(text: str, start: int, end: int) -> tuple[int, int]:
     """Remove only anchored HR grammar wrappers; never delete arbitrary tokens."""
     raw = text[start:end]
     folded = _fold(raw)
+    for pattern in _SUBJECT_SYNTAX_PATTERNS:
+        match = pattern.search(folded)
+        if match:
+            subject_start = start + match.start("subject")
+            subject_end = start + match.end("subject")
+            while subject_end > subject_start and text[subject_end - 1] in " .;,:":
+                subject_end -= 1
+            hyphen_case = re.search(
+                r"(?i)-(?:ni|nu|n[uü]|i|ı|u|ü)$", text[subject_start:subject_end]
+            )
+            if hyphen_case:
+                subject_end = subject_start + hyphen_case.start()
+            return subject_start, subject_end
     masks: list[tuple[int, int]] = []
     for pattern in (
         _NEGATIVE_RE,
@@ -512,6 +596,9 @@ def _subject_bounds(text: str, start: int, end: int) -> tuple[int, int]:
         _EXPERIENCE_RE,
         _PREFERRED_CONTRAST_RE,
         _RESULT_TAIL_RE,
+        _COUNT_ENTITY_RE,
+        _PROFESSIONAL_CUE_RE,
+        _KNOWLEDGE_QUALIFIER_RE,
     ):
         masks.extend((match.start(), match.end()) for match in pattern.finditer(folded))
     chars = list(raw)
@@ -522,8 +609,15 @@ def _subject_bounds(text: str, start: int, end: int) -> tuple[int, int]:
     # substituting) so the surviving subject offsets remain exact.
     wrapper_patterns = (
         re.compile(
-            r"(?i)^\s*(?:minimum|at\s+least|en\s+azi|find|show|mene|namizəd\w*|"
-            r"namized\w*|candidate\w*)\s+"
+            r"(?i)^\s*(?:(?:but|however|and|amma|lakin|hemcinin)\s+)?"
+            r"(?:minimum|at\s+least|en\s+azi|find|show|mene|applicants?|namizəd\w*|"
+            r"namized\w*|candidates?)\s+(?:are\s+|must\s+(?:be\s+|have\s+)?|"
+            r"should\s+(?:be\s+|have\s+)?)?"
+        ),
+        re.compile(
+            r"(?i)^\s*(?:(?:but|however|and|amma|lakin|hemcinin)\s+|"
+            r"(?:are|be|have)\s+|(?:proficient|skilled|experienced)\s+in\s+|"
+            r"(?:knowledge|command)\s+of\s+|(?:familiarity|familiar)\s+with\s+)+"
         ),
         re.compile(
             r"(?i)\s+(?:uzre|ile|sahesi|sahesinde|sektorunda(?:\s+is)?|"
@@ -541,13 +635,18 @@ def _subject_bounds(text: str, start: int, end: int) -> tuple[int, int]:
         ),
         re.compile(r"(?i)^\s*(?:of|in|with)\s+"),
         re.compile(r"(?i)\s+(?:but\s+it|is|it\s+is)\s*$"),
+        re.compile(r"(?i)^\s*(?:de|da)\s+"),
     )
-    for pattern in wrapper_patterns:
-        residual_folded = _fold("".join(chars))
-        match = pattern.search(residual_folded)
-        if match:
-            for index in range(match.start(), min(match.end(), len(chars))):
-                chars[index] = " "
+    changed = True
+    while changed:
+        changed = False
+        for pattern in wrapper_patterns:
+            residual_folded = _fold("".join(chars))
+            match = pattern.search(residual_folded)
+            if match:
+                for index in range(match.start(), min(match.end(), len(chars))):
+                    chars[index] = " "
+                changed = True
     residual = "".join(chars)
     match = re.search(r"\S(?:.*\S)?", residual)
     if not match:
@@ -570,44 +669,66 @@ def _subject_bounds(text: str, start: int, end: int) -> tuple[int, int]:
     # Azerbaijani locative/ablative on one leading professional token
     # (Pythonda, SQL-dan, Bankda) is a grammatical wrapper, not subject text.
     token = text[subject_start:subject_end]
-    locative = re.fullmatch(r"(?i)([A-Za-zƏəÇçŞşÖöÜüĞğİı0-9+#./-]+?)-?(?:da|de|dan|den)", token)
+    locative = re.fullmatch(
+        r"(?i)([A-Za-zƏəÇçŞşÖöÜüĞğİı0-9+#./-]+?)(?P<hyphen>-?)(?:da|de|dan|den)",
+        token,
+    )
     if locative:
-        subject_end = subject_start + len(locative.group(1))
+        base = _fold(locative.group(1))
+        # Without a hyphen, a word ending in -da/-dan may be the entity
+        # itself (Camunda), not Azerbaijani case grammar. Strip only when the
+        # boundary is explicit or the base is already a reviewed canonical
+        # alias/domain; unknown professional identities remain intact.
+        if (
+            locative.group("hyphen")
+            or base in SKILL_ALIASES
+            or base in SKILL_ALIASES.values()
+            or base in _DOMAIN_HEADS
+            or canonicalize_domain(base) in DOMAIN_SYNONYMS
+        ):
+            subject_end = subject_start + len(locative.group(1))
     return subject_start, subject_end
 
 
 def _language_subject(source: str) -> str | None:
     match = _LANGUAGE_RE.search(_fold(source))
-    return _LANGUAGE_ALIASES.get(match.group(0).casefold()) if match else None
+    if match:
+        return _LANGUAGE_ALIASES.get(match.group(0).casefold())
+    generic = _LANGUAGE_WRAPPER_RE.search(_fold(source))
+    if generic:
+        return " ".join(source[generic.start("subject") : generic.end("subject")].split())
+    return None
 
 
 def _family(subject: str, source: str) -> JDDraftCriterionKind:
     folded = _fold(source)
-    if _CERT_RE.search(folded) or _fold(subject).strip(" .,:;-") in _CERTIFICATION_NAMES:
-        return JDDraftCriterionKind.CERTIFICATION
-    if _EDUCATION_RE.search(folded):
-        return JDDraftCriterionKind.EDUCATION
-    if _LANGUAGE_RE.search(folded) or (_LEVEL_RE.search(folded) and "dil" in folded):
-        return JDDraftCriterionKind.LANGUAGE
     if _SOFT_UNSUPPORTED_RE.search(folded):
         return JDDraftCriterionKind.OTHER
     if _UNSCORABLE_SCOPE_RE.search(folded) and "project management" not in folded:
         return JDDraftCriterionKind.OTHER
-    if re.search(r"\b(?:sahe\w*|sector\w*|domain)\b", folded):
-        return JDDraftCriterionKind.DOMAIN_EXPERIENCE
     if _EXPERIENCE_RE.search(folded) or _DURATION_RE.search(folded):
+        if _TOTAL_RE.search(folded):
+            return JDDraftCriterionKind.EXPERIENCE
         normalized = _fold(subject).strip(" .,:;-")
         if not normalized:
             return JDDraftCriterionKind.EXPERIENCE
         domain = canonicalize_domain(normalized)
         if (
-            normalized in _DOMAIN_HEADS
+            re.search(r"\b(?:sahe\w*|sector\w*|domain)\b", folded)
+            or normalized in _DOMAIN_HEADS
             or domain in DOMAIN_SYNONYMS
             or any(normalized.endswith(f" {suffix}") for suffix in _DOMAIN_HEADS)
-            or re.search(r"\b(?:sahe|sector|domain)\w*\b", folded)
         ):
             return JDDraftCriterionKind.DOMAIN_EXPERIENCE
         return JDDraftCriterionKind.SKILL_EXPERIENCE
+    if _CERT_RE.search(folded) or _fold(subject).strip(" .,:;-") in _CERTIFICATION_NAMES:
+        return JDDraftCriterionKind.CERTIFICATION
+    if _EDUCATION_RE.search(folded):
+        return JDDraftCriterionKind.EDUCATION
+    if _LANGUAGE_RE.search(folded) or _LANGUAGE_WRAPPER_RE.search(folded):
+        return JDDraftCriterionKind.LANGUAGE
+    if re.search(r"\b(?:sahe\w*|sector\w*|domain)\b", folded):
+        return JDDraftCriterionKind.DOMAIN_EXPERIENCE
     return JDDraftCriterionKind.SKILL
 
 
@@ -633,6 +754,7 @@ def _normalized_subject(family: JDDraftCriterionKind, source_subject: str, sourc
         return normalized
     if family == JDDraftCriterionKind.DOMAIN_EXPERIENCE:
         canonical = canonicalize_domain(_fold(normalized))
+        normalized = re.sub(r"(?i)\s+(?:domain|sector)$", "", normalized).strip()
         return "Banking" if canonical == "banking" or _fold(normalized) == "bank" else normalized
     return normalized
 
@@ -705,6 +827,18 @@ def analyze_hr_text(jd_text: str) -> SemanticAnalysis:
             state = SemanticRequirementState.PROHIBITED
         elif negated:
             state = SemanticRequirementState.UNSUPPORTED
+        elif _COUNT_ENTITY_RE.search(_fold(source)):
+            # Candidate/result quantities are workflow control, never a
+            # professional criterion. Ambiguous count wording stays visible
+            # for review; an unambiguous count-only unit was already consumed
+            # above by is_result_count_only().
+            state = SemanticRequirementState.NEEDS_HUMAN_REVIEW
+        elif re.search(r"(?i)\s+d[ea]\s+", _fold(source)):
+            # Azerbaijani additive particles can coordinate multiple subjects
+            # under one trailing modality. Without a distinct source-bound
+            # subject occurrence for each side, the clause must not become one
+            # synthetic combined skill identity.
+            state = SemanticRequirementState.NEEDS_HUMAN_REVIEW
         elif comparison == ">":
             state = SemanticRequirementState.UNSUPPORTED
         elif family == JDDraftCriterionKind.OTHER:
@@ -721,10 +855,22 @@ def analyze_hr_text(jd_text: str) -> SemanticAnalysis:
             )
             and min_years is None
         ):
-            # A named skill without duration is still deterministically
-            # supported as SKILL; a duration family cannot invent a threshold.
-            family = JDDraftCriterionKind.SKILL
-            state = SemanticRequirementState.SCORABLE
+            # Preserve the source family. A named experience claim without a
+            # duration cannot be weakened to bare skill presence merely to fit
+            # an evaluator shape.
+            state = SemanticRequirementState.NEEDS_HUMAN_REVIEW
+        elif family == JDDraftCriterionKind.CERTIFICATION and (
+            not normalized_subject
+            or re.fullmatch(r"\d+(?:[.,]\d+)?", normalized_subject)
+            or re.fullmatch(
+                r"(?i)(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)?\s*"
+                r"(?:certificat(?:e|ion)s?|sertifikat\w*)",
+                _fold(normalized_subject),
+            )
+        ):
+            # Quantity/generic certification wording is not a certification
+            # identity. Keep it visible without inventing a named credential.
+            state = SemanticRequirementState.NEEDS_HUMAN_REVIEW
         else:
             state = SemanticRequirementState.SCORABLE
 
@@ -757,6 +903,14 @@ def analyze_hr_text(jd_text: str) -> SemanticAnalysis:
                 comparison=comparison,
             )
         )
+    # Construction invariant: every server-owned material span terminates in
+    # exactly one explicit semantic state. Any future parser branch that adds,
+    # drops, or duplicates one side fails here instead of silently weakening a
+    # vacancy draft.
+    span_ids = [span.span_id for span in spans]
+    requirement_ids = [item.requirement_span_id for item in requirements]
+    if len(span_ids) != len(set(span_ids)) or requirement_ids != span_ids:
+        raise RuntimeError("Material requirement reconciliation invariant failed.")
     return SemanticAnalysis(
         language,
         spans,

@@ -148,6 +148,67 @@ _AZ_PROTECTED_MUTATED_FORMS = frozenset(
     }
 )
 
+# Concept-level policy patterns complement the bounded lexical forms above.
+# They describe protected *semantics* (comparison, idiom, and multi-word
+# constructions), rather than individual audit sentences.  Both the raw JD
+# scan and the final CriterionIn boundary use this same server-owned policy.
+_PROTECTED_CONCEPT_PATTERNS = (
+    # Nationality / citizenship.
+    re.compile(
+        r"(?i)\b(?:national(?:ity|ities)|citizen(?:ship)?|passport\s+holder|"
+        r"right\s+to\s+citizenship)\b"
+    ),
+    re.compile(r"(?i)\b(?:vetendas|milliyyet)\w*\b"),
+    # Age expressed directly, comparatively, or as an age band.
+    re.compile(
+        r"(?i)\b(?:younger|older)\s+than\s+(?:\d+|one|two|three|four|five|six|"
+        r"seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|"
+        r"seventeen|eighteen|nineteen|twenty(?:[- ](?:one|two|three|four|five|six|"
+        r"seven|eight|nine))?|thirty(?:[- ](?:one|two|three|four|five|six|seven|eight|"
+        r"nine))?|forty(?:[- ](?:one|two|three|four|five|six|seven|eight|nine))?|"
+        r"fifty(?:[- ](?:one|two|three|four|five|six|seven|eight|nine))?|sixty)\b|"
+        r"\b(?:under|below|above|over|aged?)\s+(?:the\s+age\s+of\s+)?"
+        r"(?:\d+|ten|twenty|thirty|forty|fifty|sixty)\b|"
+        r"\b(?:in\s+(?:his|her|their)\s+)?"
+        r"(?:twenties|thirties|forties|fifties|sixties)\b"
+    ),
+    re.compile(
+        r"(?i)\b(?:\d+|[a-z]+)\s*yas(?:inda|dan|a|i)?\b|"
+        r"\byas(?:i|ina|inda)?\s+(?:\d+|[a-z]+)\b|"
+        r"\b(?:cavan|genc|yuxari|asagi)\s+yas\w*\b"
+    ),
+    # Health and medical fitness, including common idioms.
+    re.compile(
+        r"(?i)\b(?:(?:clean|clear|good|sound)\s+(?:bill\s+of\s+)?health|"
+        r"medically\s+fit|fit\s+and\s+healthy|"
+        r"physical(?:ly)?\s+fit(?:ness)?|medical\s+(?:fitness|condition))\b"
+    ),
+    re.compile(
+        r"(?i)\b(?:sehhet\w*|tibbi\s+(?:cehetden\s+)?yararli|"
+        r"fiziki\s+(?:cehetden\s+)?saglam)\b"
+    ),
+    # Disability and euphemistic equivalents.
+    re.compile(
+        r"(?i)\b(?:disabled|able[- ]bodied|differently\s+abled|"
+        r"special\s+needs?|physical\s+impairment)\b"
+    ),
+    re.compile(r"(?i)\b(?:mehdud\s+imkan\w*|xususi\s+ehtiyac\w*)\b"),
+    # Gender/sex expressed without the literal field label.
+    re.compile(
+        r"(?i)\b(?:men|women|males?|females?)\s+only\b|"
+        r"\b(?:male|female)\s+(?:applicants?|candidates?)\b"
+    ),
+)
+
+
+def _matches_protected_concept(text: str) -> str | None:
+    folded = fold_az_ascii(normalize_azerbaijani_case(text))
+    for pattern in _PROTECTED_CONCEPT_PATTERNS:
+        match = pattern.search(folded)
+        if match:
+            return text[match.start() : match.end()]
+    return None
+
 
 def _normalize_az_token(token: str) -> str:
     words = re.findall(r"[^\W_]+", normalize_azerbaijani_case(token))
@@ -185,6 +246,9 @@ def find_prohibited_term(*texts: str) -> str | None:
     for text in texts:
         if not text:
             continue
+        concept = _matches_protected_concept(text)
+        if concept:
+            return concept
         # Run the same bounded policy over both ordinary Unicode text and
         # Azerbaijani ASCII-keyboard folding.  This is a safety boundary, not
         # semantic interpretation: a model cannot evade it by relabelling
@@ -221,6 +285,47 @@ def _check_not_sensitive(criterion_id: str, *texts: str) -> None:
     term = find_prohibited_term(*texts)
     if term:
         raise ProhibitedCriterionError(criterion_id, term)
+
+
+_NON_SUBJECT_GRAMMAR_RE = re.compile(
+    r"(?i)\b(?:applicants?|candidates?|namized\w*)\s+(?:are|must|should|have|"
+    r"olmal\w*|teleb\w*)\b|\b(?:required|mandatory|preferred|optional|"
+    r"nice\s+to\s+have|teleb\w*|mecburi\w*|ustunluk\w*)\b"
+)
+_COUNT_LIKE_SUBJECT_RE = re.compile(
+    r"(?i)^\s*(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+"
+    r"(?:certificat(?:e|ion)s?|degrees?|skills?|languages?|candidates?|results?)\s*$"
+)
+_LANGUAGE_SUBJECT_RE = re.compile(
+    r"(?i)^[^\W\d_]+(?:[- ][^\W\d_]+){0,2}(?:\s+(?:language|dili))?$"
+)
+
+
+def _check_kind_subject_authority(criterion: "CriterionIn") -> None:
+    """Reject values that cannot be the named entity for their family.
+
+    This is deliberately a shape/grammar boundary, not a technology list.
+    Unknown professional entities remain valid, while complete HR clauses,
+    result/count expressions, and structurally impossible language subjects
+    cannot be persisted merely because an upstream model chose a safe kind.
+    """
+    value = (criterion.value or "").strip()
+    if not value:
+        return
+    folded = fold_az_ascii(normalize_azerbaijani_case(value))
+    if _NON_SUBJECT_GRAMMAR_RE.search(folded):
+        raise ValueError(
+            f"Criterion '{criterion.id}': value must be a bounded professional subject, "
+            "not an HR requirement clause."
+        )
+    if _COUNT_LIKE_SUBJECT_RE.fullmatch(folded):
+        raise ValueError(
+            f"Criterion '{criterion.id}': a count expression cannot be a criterion subject."
+        )
+    if criterion.kind == CriterionKind.LANGUAGE and not _LANGUAGE_SUBJECT_RE.fullmatch(value):
+        raise ValueError(
+            f"Criterion '{criterion.id}': LANGUAGE requires one bounded language name."
+        )
 
 
 class CriterionKind(StrEnum):
@@ -296,6 +401,7 @@ class CriterionIn(BaseModel):
             )
         if not self.evidence_required:
             raise ValueError(f"Criterion '{self.id}': evidence_required must remain true.")
+        _check_kind_subject_authority(self)
         return self
 
     @model_validator(mode="after")

@@ -1,8 +1,9 @@
 # MEYAR — Status
 
 ## Current phase
-**Issue #44 AZ/EN generalization hardening is implemented locally on
-`feat/agent-product-ux-jd-matching` (D-060), not pushed or merged.** D-055's
+**Issue #44 AZ/EN generalization hardening has an independent-audit corrective
+implementation locally on `feat/agent-product-ux-jd-matching` (D-061), not
+pushed or merged.** D-055's
 canonical `RequirementSpan` architecture and every previously accepted
 candidate/JD/confirmation boundary remain intact. Confirmed agent vacancies
 now round-trip and deterministically evaluate skill-specific duration,
@@ -18,8 +19,14 @@ supports Azerbaijani and English (plus safe mixed professional terminology),
 blocks protected attributes before and after parsing, preserves unfamiliar
 professional subjects without grammar suffixes, shares skill-duration/domain/
 language-level semantics with ordinary search, binds top-K separately, and
-handles bounded pending-draft edits before search routing. Russian fails closed
-before inference. PR #42 remains NOT accepted.
+handles bounded pending-draft edits before search routing. D-061 replaces the
+remaining phrase-bounded protected checks with concept/grammar policy, makes
+subject identity an exact bounded occurrence rather than a clause remainder,
+preserves professional families, rejects count expressions at the typed
+criterion boundary, reconciles every material span to one terminal state,
+supports truthful bidirectional modality follow-ups, and gives equivalent
+simple-search-in-vacancy-mode guidance in AZ/EN. Russian fails closed before
+inference. PR #42 remains NOT accepted.
 
 **Slice 13 — Security + Official Definition-of-Done Acceptance: implementation
 pass 1 MERGED (PR #22, squash SHA `a709ce1`, `Refs #20`); Target-Mac hardware

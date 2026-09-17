@@ -842,7 +842,7 @@ async def test_draft_job_criteria_drops_prohibited_item_and_notes_it(
     assert "işlə bağlı peşəkar tələblə əvəz edin" in response.text
 
 
-async def test_draft_job_criteria_preserves_certification_semantics(
+async def test_draft_job_criteria_preserves_named_experience_family_for_review(
     client: AsyncClient, tenant_and_user, local_ui_settings: Settings
 ) -> None:
     """D-043/D-045 (PR #42 owner correction, issue #33): a non-sensitive
@@ -886,8 +886,9 @@ async def test_draft_job_criteria_preserves_certification_semantics(
     )
     assert response.status_code == 200
     assert 'value="Python"' in response.text
-    assert 'value="ACAMS"' in response.text
+    assert 'value="ACAMS"' not in response.text
     assert "ACAMS sertifikatı üzrə təcrübə tələb olunur" in response.text
+    assert "İnsan baxışı tələb edir" in response.text
     # The browser still receives no free-form hidden field as authority.
     assert 'name="unsupported_must_have"' not in response.text
     assert "Məlumat üçün — qiymətləndirməyə daxil edilmir" not in response.text

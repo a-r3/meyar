@@ -529,6 +529,8 @@ def test_prefix_collisions_never_authorize_a_different_skill() -> None:
         ("NoSQL", "SQL"),
         ("Django", "Go"),
         ("Go", "Django"),
+        ("Risk", "Credit Risk"),
+        ("Credit Risk", "Risk"),
     ):
         source = f"{source_subject} required"
         draft = _draft(

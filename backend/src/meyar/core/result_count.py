@@ -75,5 +75,10 @@ def is_result_count_only(text: str) -> bool:
         " ",
         remainder,
     )
+    remainder = re.sub(
+        r"(?i)\b(?:candidates?|applicants?|results?|profiles?|namized\w*|nefer)\b",
+        " ",
+        remainder,
+    )
     remainder = re.sub(r"[^a-z0-9]+", " ", remainder).strip()
     return not remainder

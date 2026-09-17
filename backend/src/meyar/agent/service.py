@@ -1265,11 +1265,32 @@ async def _dispatch_draft_job_criteria(llm: LLMProvider, *, jd_text: str) -> Age
     folded_jd = _fold(jd_text)
     raw_has_prohibited_text = find_prohibited_term(jd_text) is not None
     simple_search_in_vacancy_mode = bool(
-        len(analysis.requirements) == 1
-        and re.search(r"\b(?:goster|tap|cixart|show|find)\w*\b", folded_jd)
-        and analysis.requirements[0].min_years is None
-        and analysis.requirements[0].required_level is None
-        and not re.search(r"\b(?:required|preferred|teleb|mutleq|ustunluk|vacib)\w*\b", folded_jd)
+        not raw_has_prohibited_text
+        and (
+            not analysis.requirements
+            or (
+                len(analysis.requirements) == 1
+                and analysis.requirements[0].criterion_family == JDDraftCriterionKind.SKILL
+                and analysis.requirements[0].min_years is None
+                and analysis.requirements[0].required_level is None
+            )
+        )
+        and re.search(
+            r"\b(?:show|find|display|list|return|search\s+for|goster\w*|tap\w*|"
+            r"cixart\w*|axtar\w*)\b",
+            folded_jd,
+        )
+        and re.search(r"\b(?:candidates?|applicants?|namized\w*)\b", folded_jd)
+        and not re.search(
+            r"\b(?:vacancy|job\s+description|role\s+requirements?|vakansiya|"
+            r"vezife\s+telebleri)\b",
+            folded_jd,
+        )
+        and not re.search(
+            r"\b(?:required|mandatory|preferred|optional|must|teleb\w*|mutleq\w*|"
+            r"ustunluk\w*|mecburi\w*|vacib\w*)\b",
+            folded_jd,
+        )
     )
     draft: JDCriteriaDraft | None = None
     if not raw_has_prohibited_text and not simple_search_in_vacancy_mode:
@@ -1369,8 +1390,45 @@ def resolve_job_draft_review_modality(
 
 _FOLLOWUP_RE = re.compile(
     r"(?i)\b(?:yox|et|dəyiş|deyis|saxla|make|change|instead|not\s+mandatory|"
-    r"məcburi\s+etmə|mecburi\s+etme)\b"
+    r"məcburi\s+etmə|mecburi\s+etme|required|preferred|ustunluk|mecburi)\b"
 )
+
+
+def _requested_followup_modality(text: str) -> CriterionType | None:
+    """Resolve an explicit modality mutation without guessing from keywords."""
+    folded = _fold(text)
+    preferred = r"(?:preferred|ustunluk\w*)"
+    required = r"(?:required|mandatory|must(?:\s+have)?|mecburi\w*|mutleq\w*)"
+    # In "X instead of Y", X is the requested state. In "from X to Y"
+    # and Azerbaijani "X yox, Y", Y is the requested state.
+    instead = re.search(r"(?i)\binstead\s+of\b", folded)
+    if instead:
+        prefix = folded[: instead.start()]
+        if re.search(rf"\b{preferred}\b", prefix):
+            return CriterionType.PREFERRED
+        if re.search(rf"\b{required}\b", prefix):
+            return CriterionType.MUST_HAVE
+    destination = re.search(r"(?i)\b(?:to|yox\s*,?)\s+(?P<value>.+)$", folded)
+    if destination:
+        value = destination.group("value")
+        if re.search(rf"\b{required}\b", value):
+            return CriterionType.MUST_HAVE
+        if re.search(rf"\b{preferred}\b", value):
+            return CriterionType.PREFERRED
+    matches = [
+        (match.start(), CriterionType.MUST_HAVE)
+        for match in re.finditer(rf"(?i)\b{required}\b", folded)
+    ] + [
+        (match.start(), CriterionType.PREFERRED)
+        for match in re.finditer(rf"(?i)\b{preferred}\b", folded)
+    ]
+    if re.search(r"(?i)\b(?:make|change|et\w*|cevir\w*|olsun|saxla\w*)\b", folded) and matches:
+        return max(matches, key=lambda item: item[0])[1]
+    if re.search(rf"(?i)\bnot\s+{required}\b", folded) and re.search(
+        rf"(?i)\b{preferred}\b", folded
+    ):
+        return CriterionType.PREFERRED
+    return None
 
 
 def _latest_pending_job_draft(conversation: AgentConversation) -> AgentJobDraftToolResult | None:
@@ -1492,30 +1550,28 @@ def _apply_pending_draft_followup(
                 }
             )
 
-    demote = bool(
-        re.search(r"\b(?:ustunluk|preferred)\b", folded)
-        and re.search(r"\b(?:mecburi|mandatory|must)\b", folded)
-    )
-    if demote and target.type == CriterionType.MUST_HAVE:
-        replacement = target.model_copy(update={"type": CriterionType.PREFERRED})
+    requested_type = _requested_followup_modality(user_message)
+    if requested_type is not None and requested_type != target.type:
+        replacement = target.model_copy(update={"type": requested_type})
+        updated_must_have = [item for item in draft.must_have if item.id != target.id]
+        updated_preferred = [item for item in draft.preferred if item.id != target.id]
+        if requested_type == CriterionType.MUST_HAVE:
+            updated_must_have.append(replacement)
+        else:
+            updated_preferred.append(replacement)
         return draft.model_copy(
             update={
                 "draft_id": uuid.uuid4(),
-                "must_have": [item for item in draft.must_have if item.id != target.id],
-                "preferred": [*draft.preferred, replacement],
+                "must_have": updated_must_have,
+                "preferred": updated_preferred,
                 "requirements": _modified_requirement_results(
-                    draft, criterion_id=target.id, criterion_type=CriterionType.PREFERRED
+                    draft, criterion_id=target.id, criterion_type=requested_type
                 ),
                 "modification_source_text": user_message,
             }
         )
-    if demote and target.type == CriterionType.PREFERRED:
-        return draft.model_copy(
-            update={
-                "draft_id": uuid.uuid4(),
-                "modification_source_text": user_message,
-            }
-        )
+    # An explicit no-op or ambiguous direction fails truthfully. It must not
+    # mint a fresh draft id that implies a mutation was applied.
     return None
 
 

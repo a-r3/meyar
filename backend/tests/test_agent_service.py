@@ -1344,6 +1344,90 @@ async def test_pending_draft_followup_is_modified_before_search_routing(
     assert draft is not None and draft.result_limit == 5
 
 
+async def test_pending_draft_modality_followups_apply_and_persist_both_directions(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    from meyar.agent.schemas import AgentJobDraftToolResult, JDCriteriaDraft
+
+    tenant, user, _password, membership = tenant_and_user
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    initial_result = await _run(
+        db_session,
+        FakeLLMProvider(jd_draft=JDCriteriaDraft(title="Platform")),
+        tenant_id=tenant.id,
+        conversation=conversation,
+        message="ClickHouse tələb olunur. COBIT üstünlükdür.",
+        explicit_action=AgentActionType.DRAFT_JOB_CRITERIA,
+    )
+    initial = initial_result.tool_results[0].job_draft
+    assert initial is not None
+    await db_session.refresh(conversation)
+
+    promoted_result = await _run(
+        db_session,
+        FakeLLMProvider(),
+        tenant_id=tenant.id,
+        conversation=conversation,
+        message="Make COBIT required instead of preferred",
+    )
+    promoted = promoted_result.tool_results[0].job_draft
+    assert promoted is not None and promoted.draft_id != initial.draft_id
+    assert [item.value for item in promoted.must_have] == ["ClickHouse", "COBIT"]
+    await db_session.refresh(conversation)
+    persisted_promoted = AgentJobDraftToolResult.model_validate(
+        conversation.turns[-1]["pending_job_draft"]
+    )
+    assert persisted_promoted == promoted
+
+    demoted_result = await _run(
+        db_session,
+        FakeLLMProvider(),
+        tenant_id=tenant.id,
+        conversation=conversation,
+        message="Make ClickHouse preferred instead of required",
+    )
+    demoted = demoted_result.tool_results[0].job_draft
+    assert demoted is not None and demoted.draft_id != promoted.draft_id
+    assert [item.value for item in demoted.must_have] == ["COBIT"]
+    assert [item.value for item in demoted.preferred] == ["ClickHouse"]
+    await db_session.refresh(conversation)
+    persisted_demoted = AgentJobDraftToolResult.model_validate(
+        conversation.turns[-1]["pending_job_draft"]
+    )
+    assert persisted_demoted == demoted
+
+
+@pytest.mark.parametrize(
+    "message",
+    ["ClickHouse bilən namizədləri göstər", "Show candidates who know ClickHouse"],
+)
+async def test_vacancy_mode_simple_search_has_bilingual_guidance_and_no_persistence(
+    db_session: AsyncSession, tenant_and_user, message: str
+) -> None:
+    from sqlalchemy import select
+
+    from meyar.agent.schemas import JDCriteriaDraft
+    from meyar.models.job import Job
+
+    tenant, user, _password, membership = tenant_and_user
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    provider = FakeLLMProvider(jd_draft=JDCriteriaDraft(title="unused"))
+    result = await _run(
+        db_session,
+        provider,
+        tenant_id=tenant.id,
+        conversation=conversation,
+        message=message,
+        explicit_action=AgentActionType.DRAFT_JOB_CRITERIA,
+    )
+    draft = result.tool_results[0].job_draft
+    assert draft is not None and draft.wrong_mode_guidance
+    assert draft.must_have == draft.preferred == []
+    assert provider.jd_draft_call_count == 0
+    jobs = (await db_session.execute(select(Job).where(Job.tenant_id == tenant.id))).scalars().all()
+    assert jobs == []
+
+
 async def test_draft_job_criteria_title_never_becomes_trusted_assistant_headline(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
@@ -1497,10 +1581,10 @@ async def test_nationality_misclassified_as_language_never_reaches_db_backed_dra
 async def test_draft_job_criteria_supports_named_experience_without_inventing_duration(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
-    """Named experience without a threshold remains a named skill; no total
-    or skill-specific duration is invented from the model proposal."""
+    """Named experience without a threshold preserves its family for review;
+    it is never weakened to bare skill presence or given an invented duration."""
     from meyar.agent.schemas import JDCriteriaDraft, JDDraftCriterionItem
-    from meyar.schemas.criteria import CriterionKind, CriterionType
+    from meyar.schemas.criteria import CriterionKind
 
     tenant, user, _password, membership = tenant_and_user
     await db_session.commit()
@@ -1535,12 +1619,13 @@ async def test_draft_job_criteria_supports_named_experience_without_inventing_du
     )
     draft = result.tool_results[0].job_draft
     assert draft is not None
-    assert [c.label for c in draft.must_have] == ["Python", "Backend"]
+    assert [c.label for c in draft.must_have] == ["Python"]
     assert draft.prohibited_count == 0
     assert draft.ungrounded_count == 0
     assert draft.unsupported == []
-    assert draft.must_have[1].kind == CriterionKind.SKILL
-    assert draft.must_have[1].type == CriterionType.MUST_HAVE
+    assert len(draft.needs_review) == 1
+    assert draft.needs_review[0].kind == CriterionKind.SKILL_EXPERIENCE
+    assert draft.needs_review[0].subject == "Backend"
     # Disclosed, never persisted.
     from sqlalchemy import select
 

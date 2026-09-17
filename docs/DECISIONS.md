@@ -4736,3 +4736,72 @@ identity exclusion, canonical confirmation binding and idempotency,
 tenant/session/auth/CSRF controls, protected review endpoints, local-only
 candidate/JD AI, and immutable confirmed versions. No migration, model-default
 change, API-first work, deployment work, push, or merge is included.
+
+## D-061 — Concept-safe protected policy and source-occurrence reconciliation (issue #44)
+
+**Date:** 2026-09-18. **Status:** Local corrective implementation on exact
+independent-audit base `23374bbc43f6a738f7a1b2117accc73fb5ec4aa2`; PR #42 remains open
+and unaccepted.
+
+**Reproduced failures:** unseen Azerbaijani citizenship inflection, English
+comparative age wording, and an English health idiom reached SCORABLE state.
+Whole-clause subtraction retained applicant/predicate/contrast wrappers in
+professional identities; undated named experience was weakened to SKILL; a
+certification quantity became a skill; simple English search in vacancy mode
+missed deterministic guidance; and preferred-to-required follow-up minted a
+new draft id without moving the criterion.
+
+**Root cause:** D-060 still combined phrase-bounded protected lexicons with a
+subtractive whole-clause normalizer. The final typed criterion schema checked
+sensitive labels but did not reject structurally impossible family subjects.
+Material detection and modality vocabulary were narrower than the supported
+natural prose, result-count recognition was not an independent consumed
+occurrence in every form, and follow-up direction was inferred from the mere
+presence of both modality words.
+
+**Decision:**
+- Protected authority now combines bounded protected lexeme families with
+  server-owned AZ/EN concept grammar for nationality/citizenship, comparative
+  age, gender/sex, health/medical-fitness idioms, disability, and common
+  euphemisms. It runs on raw text and canonical spans before family handling,
+  then again on normalized subject and at `CriterionIn`; a wrong model kind or
+  safe-looking model subject cannot authorize protected scoring.
+- Subject identity is selected from exact source occurrences by bounded
+  professional grammar (knowledge/proficiency, AZ knowledge/use inflections,
+  experience scope, language, certification, and education wrappers). Unknown
+  entities remain supported. Ambiguous unhyphenated AZ suffixes are stripped
+  only for reviewed aliases/domains, preventing entity collisions such as an
+  unseen product name ending in `-da`.
+- Professional family is preserved. Named experience without the evaluator's
+  required duration is NEEDS_HUMAN_REVIEW, not weakened to SKILL; generic
+  certification quantities and ambiguous coordinated subjects likewise remain
+  visible and unscored. Every server-owned material span is checked by a
+  one-span/one-terminal-state reconciliation invariant.
+- Result-limit consumption stays separate from requirements. Candidate/result
+  count-only clauses are removed as workflow control; certification quantities
+  cannot become a skill; duration, CEFR, certification quantity, and result
+  limit retain independent source slots.
+- Modality grammar covers required, preferred, optional/desirable/advantageous,
+  negative, and AZ/EN contrast forms. Follow-ups resolve direction from
+  `instead of`, `from ... to ...`, or AZ `... yox, ...`; both promotions and
+  demotions move the unchanged criterion between buckets and persist the new
+  draft. Ambiguous/no-op requests fail truthfully without a new draft id.
+- Deterministic wrong-mode detection now treats equivalent simple AZ/EN
+  candidate-search requests alike, while duration/level/multi-requirement
+  vacancy text is not misclassified. It invokes no model and creates no Job or
+  criteria version.
+
+**Validation:** A fresh loopback `qwen3:1.7b` matrix used unchanged model
+options: 12 new AZ, 10 new EN, 5 protected probes per language, 5 cross-domain,
+5 multi-number/top-K, and 4 modality cases. The initial run exposed the
+wrong-mode overreach; after correction the affected five-case rerun passed,
+and a final real-model probe confirmed the unseen `-da` entity identity fix.
+Corrected aggregate: 46/46 materially correct, zero omissions, hallucinated
+scorable fields, protected violations, or generic failures; 5 repair calls;
+about 526.4 seconds total selected-sample latency, maximum 38.36 seconds.
+
+**Unchanged:** candidate factual authority, canonical JD ownership,
+tenant/session/draft isolation, confirmation idempotency, evidence provenance,
+identity exclusion, deterministic scoring/evaluation date, local-only Ollama,
+and no-fallback provider behavior. No migration, candidate Q&A/result-set
+comparison, deployment, model-option change, push, or merge is included.

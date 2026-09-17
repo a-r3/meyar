@@ -150,13 +150,17 @@ unlabeled number but never guesses that an arbitrary identifier is a phone.
   the visible topic is resolved from a validated profile fact title, or
   omitted in favor of generic server copy; raw model topic text is never
   rendered or persisted as assistant authority.
-- JD criteria use server-owned canonical requirement-span authority (D-055):
+- JD criteria use server-owned canonical requirement-span authority (D-055,
+  strengthened by D-061):
   the original JD is segmented before inference into occurrence-distinct ids,
   exact offsets/text, and a server normalization. A model references an id;
   its `source_text` is never authority. Complete-span subject/type, kind/scope,
   modality, duration/level, and curated exact alias identity must validate
   before a row is scorable. Raw-JD and post-parse prohibited checks remain
-  independent of model kind, including bounded Azerbaijani inflection families.
+  independent of model kind. D-061 adds server-owned protected-concept grammar
+  for AZ/EN inflection, comparison, idiom, paraphrase, and reordered wording;
+  the final typed criterion boundary also rejects clause/count shapes and
+  structurally impossible language subjects before persistence/evaluation.
   Prohibited text is count-only outside the HR user's own original message and
   cannot enter scoring. A dedicated confirmation operation resolves and locks
   the server-held tenant/session draft; browser rows and hidden fields cannot
@@ -221,8 +225,8 @@ actual target Ollama installation, not yet implemented.
 | Prompt injection in CV content | CV text is always framed as quoted data in prompts, never as instructions; structured-output schema has no "instruction" field; dedicated fixture + test (see Test Data) |
 | Malicious upload (zip bomb, path traversal, MIME spoofing, oversized file) | MIME sniffing + extension cross-check, max size enforcement, opaque storage ids, no user-controlled paths |
 | Unvalidated LLM output reaching authoritative tables | All LLM output passes Pydantic v2 schema validation before persistence; validation failure → `MANUAL_REVIEW_REQUIRED`/`FAILED`, never silently coerced |
-| A protected JD phrase being mislabeled as a safe criterion kind | D-060 applies the bounded protected-class scan to raw supported-language text before semantic interpretation and again to each canonical source occurrence plus normalized subject after interpretation. A model kind, subject, modality, omission, or `OTHER` label cannot override either scan. Russian/Cyrillic fails closed before inference and creates no criterion. |
-| A model-authored JD field reaching scoring without source authority | D-060 requires a server-owned `SemanticRequirement`: family, exact subject occurrence, normalized subject, modality occurrence, duration/number occurrence, and proficiency occurrence are independently bound to one canonical span. Only the resulting typed server object can construct `CriterionIn`; model free strings are never scoring authority. |
+| A protected JD phrase being mislabeled as a safe criterion kind | D-061 applies protected-concept policy to raw supported-language text before semantic interpretation and again to each canonical source occurrence plus normalized subject after interpretation. The policy covers AZ/EN nationality/citizenship, age, gender/sex, health, and disability through bounded lexeme families plus comparison/idiom/paraphrase grammar. A model kind, safe-looking subject, modality, omission, or `OTHER` label cannot override either scan; the typed `CriterionIn` boundary is a final backstop. Russian/Cyrillic fails closed before inference and creates no criterion. |
+| A model-authored JD field reaching scoring without source authority | D-061 requires a server-owned `SemanticRequirement`: family, exact bounded subject occurrence, normalized subject, modality occurrence, duration/number occurrence, and proficiency occurrence are independently bound to one canonical span. Every material span reconciles to exactly one explicit terminal state. Result-count occurrences are separate workflow control and typed criterion authorization rejects clause/count subjects. Only the resulting typed server object can construct `CriterionIn`; model free strings are never scoring authority. |
 | Local inference endpoint exposure | Ollama bound to localhost/internal Docker network only, in every environment; never a public route |
 | Secret leakage via logs/git | PII-safe structured logging (ids only); `.claude` hooks block obvious secret patterns and real CV files from commits |
 | Retry-induced duplicate work/cost | `Idempotency-Key` on unsafe writes where relevant |
