@@ -375,30 +375,32 @@ async def test_deterministic_fast_path_is_safely_audited(db_session: AsyncSessio
     assert "ACAMS sertifikatı olan" not in serialized
 
 
-async def test_skill_specific_duration_rejected_deterministically_with_audit(
+async def test_skill_specific_duration_executes_deterministically_with_audit(
     db_session: AsyncSession,
 ) -> None:
-    """The precheck rejection for skill-specific duration (D-027) still
-    goes through zero LLM calls and is still safely audited — proving the
-    clarification flow built on top of this (meyar.ui.router) inherits
-    the same tenant-isolation and PII-safety guarantees."""
+    """The shared source-bound duration primitive executes with no LLM."""
     tenant = await _tenant(db_session)
     result = await plan_candidate_search(
         db_session,
         _never_called(),
         tenant_id=tenant.id,
-        natural_language_request="pythonda 5 il tecrübesi olan",
+        natural_language_request="pythonda 5 il tecrubesi olan namizedleri goster",
         as_of_date=AS_OF_DATE,
         embedding_config=_config(),
     )
-    assert not result.executable
-    assert result.outcome == PlannerOutcome.UNSUPPORTED_SEMANTICS
+    assert result.executable
+    assert result.outcome == PlannerOutcome.EXECUTABLE
     assert result.attempt_count == 0
+    assert result.search_request is not None
+    assert [
+        (item.value, item.min_years)
+        for item in result.search_request.required_filters.skill_experience
+    ] == [("python", 5.0)]
 
     event = await _latest_plan_event(db_session, tenant.id)
-    assert event.event_type == "SEARCH_PLAN_REJECTED"
-    assert "SKILL_SPECIFIC_EXPERIENCE_DURATION_UNSUPPORTED" in event.event_metadata["reason_codes"]
-    assert "pythonda 5 il tecrübesi olan" not in str(event.event_metadata)
+    assert event.event_type == "SEARCH_PLAN_CREATED"
+    assert event.event_metadata["attempt_count"] == 0
+    assert "pythonda 5 il tecrubesi olan" not in str(event.event_metadata)
 
 
 async def test_confirmed_explicit_separation_alternative_preserves_tenant_isolation(

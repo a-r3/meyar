@@ -4682,3 +4682,57 @@ tenant/session isolation, confirmation tamper protection and idempotency,
 deterministic evaluator/date/top-K semantics, score arithmetic, and local-only
 AI. No evaluation-date input, API-first work, deployment work, push, or merge
 is included.
+
+## D-060 — Source-bound AZ/EN semantic requirements and shared search parity (issue #44)
+
+**Date:** 2026-09-17. **Status:** Local corrective implementation on exact
+audit base `1aed40ef66df563f05b1782e9861909176c77fa7`; PR #42 remains open
+and unaccepted.
+
+**Root cause:** D-059 still let the small local model determine too much of
+the material shape. Canonical spans were coarse for ordinary Azerbaijani,
+ASCII input, paragraph lists, and unfamiliar professional vocabulary;
+normalization deleted example-specific tokens rather than bounded grammatical
+wrappers; result-count syntax was narrow; ordinary search rejected semantic
+shapes already supported by the evaluator; and routing never consulted a
+pending draft before treating a follow-up as a new search. The protected-term
+denylist also covered Azerbaijani ``milliyyət`` but not ordinary
+``vətəndaş``/citizenship language, allowing nationality to be recast as a
+scorable language.
+
+**Decision:**
+- Supported HR input is Azerbaijani and English, including safe mixed
+  professional terminology. Cyrillic/Russian fails closed before model
+  inference and before any criterion exists, with guidance to use AZ or EN.
+- The server first scans raw supported-language text for protected classes,
+  creates exact requirement occurrences, derives independently attributed
+  subject/modality/duration/proficiency slots, scans the resulting span and
+  normalized subject again, and only then constructs a typed criterion.
+  Gender/sex, age, nationality/citizenship, health, and disability policy is
+  independent of model kind, subject, modality, omission, or ``OTHER``.
+- Ollama may propose a title and legacy semantic draft, but no model-authored
+  material field is scoring authority. A server-owned ``SemanticRequirement``
+  binds every material field to offsets in one canonical source occurrence.
+  Each occurrence terminates as SCORABLE, NEEDS_HUMAN_REVIEW,
+  UNSUPPORTED_VISIBLE, or PROHIBITED; result count is separate workflow data.
+- Grammar normalization removes only bounded AZ/EN HR wrappers and preserves
+  the remaining exact professional occurrence. Curated aliases still resolve
+  true aliases; unfamiliar safe terms are not rejected for being absent from
+  the taxonomy. Strict ``>`` duration is never weakened to ``>=``.
+- Ordinary search consumes the same source-bound skill duration,
+  domain-duration, language-level, and result-count primitives and delegates
+  evaluation to the existing deterministic criterion evaluators. Unsupported
+  project-scoped meaning remains non-executable rather than becoming a softer
+  skill or semantic query.
+- Before normal model routing, a pending draft accepts only four bounded
+  server-side changes: result limit, CEFR level, duration threshold, and
+  required-to-preferred modality. Each produces a new draft identity and
+  retains the exact modification text; unsafe/ambiguous edits request
+  clarification. A simple search entered in vacancy mode produces guidance
+  and no nonsense criteria.
+
+**Unchanged:** candidate facts and evidence provenance, scoring arithmetic,
+identity exclusion, canonical confirmation binding and idempotency,
+tenant/session/auth/CSRF controls, protected review endpoints, local-only
+candidate/JD AI, and immutable confirmed versions. No migration, model-default
+change, API-first work, deployment work, push, or merge is included.

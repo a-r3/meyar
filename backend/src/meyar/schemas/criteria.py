@@ -4,7 +4,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, Field, model_validator
 
-from meyar.core.text import normalize_azerbaijani_case
+from meyar.core.text import fold_az_ascii, normalize_azerbaijani_case
 
 # Heuristic denylist enforcing docs/SECURITY_PRIVACY.md / MASTER_SPEC.md §4:
 # irrelevant/sensitive attributes must never become matching criteria.
@@ -31,6 +31,8 @@ _SENSITIVE_PATTERNS = [
         r"\bethnicity\b",
         r"\bethnic\b",
         r"\bnationality\b",
+        r"\bcitizenship\b",
+        r"\bcitizen\b",
         r"\breligio(n|us)\b",
         r"\bchristian\b",
         r"\bmuslim\b",
@@ -47,6 +49,7 @@ _SENSITIVE_PATTERNS = [
         r"\bparty affiliation\b",
         r"\bdisabilit(y|ies)\b",
         r"\bhealth condition\b",
+        r"\bhealthy\b",
         r"\bhiv\b",
         r"\bmental health\b",
         r"\bsexual orientation\b",
@@ -64,6 +67,7 @@ _SENSITIVE_PATTERNS = [
         r"\byaş\b",
         r"\bdoğum tarix(?:i|ini|inin|inə|ində|indən)\b",
         r"\bmilliyyət\b",
+        r"\bvətəndaş(?:lıq|ı|lığı)?\b",
         r"\bdin(i|ə)?\b",
         r"\bmüsəlman\b",
         r"\bxristian\b",
@@ -74,6 +78,20 @@ _SENSITIVE_PATTERNS = [
         r"\bsiyasi\b",
         r"\bəlillik\b",
         r"\bsağlamlıq\b",
+        r"\bsağlam\b",
+        # The same bounded Azerbaijani roots after ordinary ASCII-keyboard
+        # folding.  These are needed because the safety scan intentionally
+        # runs before semantic language interpretation.
+        r"\bcinsiyyet\b",
+        r"\bkisi\b",
+        r"\bqadin\b",
+        r"\byas\b",
+        r"\bdogum tarix\w*\b",
+        r"\bmilliyyet\b",
+        r"\bvetendas(?:liq|i|ligi)?\b",
+        r"\belillik\b",
+        r"\bsaglamliq\b",
+        r"\bsaglam\b",
     ]
 ]
 
@@ -96,8 +114,7 @@ _AZ_PROTECTED_TERM_SUFFIXES: tuple[tuple[str, frozenset[str]], ...] = (
     ("qadın", _AZ_BACK_CONSONANT_NOUN_SUFFIXES),
     (
         "yaş",
-        _AZ_BACK_CONSONANT_NOUN_SUFFIXES
-        | {"ını", "ının", "ına", "ında", "ından"},
+        _AZ_BACK_CONSONANT_NOUN_SUFFIXES | {"ını", "ının", "ına", "ında", "ından"},
     ),
     ("milliyyət", _AZ_FRONT_CONSONANT_NOUN_SUFFIXES),
     ("din", _AZ_FRONT_CONSONANT_NOUN_SUFFIXES),
@@ -110,6 +127,7 @@ _AZ_PROTECTED_TERM_SUFFIXES: tuple[tuple[str, frozenset[str]], ...] = (
     ("siyasi", _AZ_FRONT_VOWEL_NOUN_SUFFIXES),
     ("əlillik", _AZ_FRONT_CONSONANT_NOUN_SUFFIXES),
     ("sağlamlıq", _AZ_BACK_CONSONANT_NOUN_SUFFIXES),
+    ("sağlam", _AZ_BACK_CONSONANT_NOUN_SUFFIXES),
 )
 
 # Azerbaijani possessive/case suffixes can soften a final ``q``/``k``.
@@ -167,16 +185,35 @@ def find_prohibited_term(*texts: str) -> str | None:
     for text in texts:
         if not text:
             continue
-        for pattern in _SENSITIVE_PATTERNS:
-            match = pattern.search(text)
-            if match:
-                return match.group(0)
-        for token in re.findall(r"[^\W_]+", text, flags=re.UNICODE):
-            if normalize_azerbaijani_case(token) in _AZ_PROTECTED_MUTATED_FORMS:
-                return token
-            for root, suffixes in _AZ_PROTECTED_TERM_SUFFIXES:
-                if matches_term_or_allowed_az_forms(token, root, suffixes):
+        # Run the same bounded policy over both ordinary Unicode text and
+        # Azerbaijani ASCII-keyboard folding.  This is a safety boundary, not
+        # semantic interpretation: a model cannot evade it by relabelling
+        # ``vətəndaşlıq`` as LANGUAGE, and an HR user typing ``vetendasliq``
+        # receives the identical result.
+        for candidate, _is_ascii_folded in (
+            (text, False),
+            (fold_az_ascii(normalize_azerbaijani_case(text)), True),
+        ):
+            for pattern in _SENSITIVE_PATTERNS:
+                match = pattern.search(candidate)
+                if match:
+                    return match.group(0)
+        for candidate, is_ascii_folded in (
+            (text, False),
+            (fold_az_ascii(normalize_azerbaijani_case(text)), True),
+        ):
+            for token in re.findall(r"[^\W_]+", candidate, flags=re.UNICODE):
+                if normalize_azerbaijani_case(token) in _AZ_PROTECTED_MUTATED_FORMS:
                     return token
+                for root, suffixes in _AZ_PROTECTED_TERM_SUFFIXES:
+                    folded_root = fold_az_ascii(root) if is_ascii_folded else root
+                    folded_suffixes = (
+                        frozenset(fold_az_ascii(value) for value in suffixes)
+                        if is_ascii_folded
+                        else suffixes
+                    )
+                    if matches_term_or_allowed_az_forms(token, folded_root, folded_suffixes):
+                        return token
     return None
 
 
@@ -224,13 +261,9 @@ class CriterionIn(BaseModel):
     def _validate_kind_specific_fields(self) -> "CriterionIn":
         if self.kind == CriterionKind.EXPERIENCE:
             if self.min_years is None:
-                raise ValueError(
-                    f"Criterion '{self.id}': kind EXPERIENCE requires min_years."
-                )
+                raise ValueError(f"Criterion '{self.id}': kind EXPERIENCE requires min_years.")
             if self.value is not None:
-                raise ValueError(
-                    f"Criterion '{self.id}': kind EXPERIENCE does not accept value."
-                )
+                raise ValueError(f"Criterion '{self.id}': kind EXPERIENCE does not accept value.")
         elif self.kind == CriterionKind.SKILL_EXPERIENCE:
             if not self.value:
                 raise ValueError(
@@ -252,9 +285,7 @@ class CriterionIn(BaseModel):
                 f"Criterion '{self.id}': kind {self.kind.value} requires a non-empty value."
             )
         if self.required_level is not None and self.kind != CriterionKind.LANGUAGE:
-            raise ValueError(
-                f"Criterion '{self.id}': required_level is only valid for LANGUAGE."
-            )
+            raise ValueError(f"Criterion '{self.id}': required_level is only valid for LANGUAGE.")
         if self.min_years is not None and self.kind not in (
             CriterionKind.EXPERIENCE,
             CriterionKind.SKILL_EXPERIENCE,
@@ -264,9 +295,7 @@ class CriterionIn(BaseModel):
                 f"Criterion '{self.id}': min_years is not evaluated for {self.kind.value}."
             )
         if not self.evidence_required:
-            raise ValueError(
-                f"Criterion '{self.id}': evidence_required must remain true."
-            )
+            raise ValueError(f"Criterion '{self.id}': evidence_required must remain true.")
         return self
 
     @model_validator(mode="after")

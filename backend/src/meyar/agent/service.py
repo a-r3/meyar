@@ -49,8 +49,12 @@ from meyar.agent.schemas import (
     RequirementSpan,
     RequirementSpanResult,
     RequirementSpanState,
+    SemanticRequirement,
+    SemanticRequirementState,
+    SupportedInputLanguage,
     UnsupportedJDCriterionItem,
 )
+from meyar.agent.semantic_requirements import analyze_hr_text
 from meyar.core.domain_terms import DOMAIN_SYNONYMS, canonicalize_domain
 from meyar.core.result_count import extract_result_count_intent, is_result_count_only
 from meyar.core.text import (
@@ -640,10 +644,15 @@ def _canonical_display_subject(kind: JDDraftCriterionKind, subject: str) -> str:
     if kind == JDDraftCriterionKind.DOMAIN_EXPERIENCE:
         canonical = "banking" if subject == "bank" else canonicalize_domain(subject)
         return canonical.title()
-    normalized = normalize_skill_name(subject) if kind in (
-        JDDraftCriterionKind.SKILL,
-        JDDraftCriterionKind.SKILL_EXPERIENCE,
-    ) else subject
+    normalized = (
+        normalize_skill_name(subject)
+        if kind
+        in (
+            JDDraftCriterionKind.SKILL,
+            JDDraftCriterionKind.SKILL_EXPERIENCE,
+        )
+        else subject
+    )
     return normalized[:1].upper() + normalized[1:]
 
 
@@ -939,34 +948,161 @@ def _build_criterion_from_draft_item(
     return criterion, reason
 
 
-async def _dispatch_draft_job_criteria(llm: LLMProvider, *, jd_text: str) -> AgentToolResult | None:
-    """Returns None only when the drafting call itself never produced a
-    usable JDCriteriaDraft (repeated schema-invalid output, or a
-    provider failure) — the caller turns that into AgentTurnOutcome.
-    JOB_DRAFT_FAILED with no tool_results, mirroring the existing
-    AGENT_PROVIDER_FAILURE/MALFORMED_MODEL_OUTPUT precedent (D-036). A
-    successful call always returns a real AgentToolResult, even with zero
-    criteria."""
-    source_spans = segment_requirement_spans(jd_text)
-    draft: JDCriteriaDraft | None = None
-    for attempt in range(1, MAX_JD_DRAFT_ATTEMPTS + 1):
-        try:
-            draft, _provenance = await llm.draft_job_criteria(
-                jd_text, requirement_spans=source_spans, repair=attempt > 1
+def _build_authorized_semantic_draft(
+    *,
+    jd_text: str,
+    title: str | None,
+    requirements: list[SemanticRequirement],
+    source_spans: list[RequirementSpan],
+    requested_result_limit: int | None,
+    result_limit: int,
+    result_limit_was_bounded: bool,
+    result_limit_needs_review: bool,
+    ungrounded_count: int = 0,
+    unsupported_language: SupportedInputLanguage | None = None,
+    wrong_mode_guidance: bool = False,
+) -> AgentToolResult:
+    """Construct the public draft only from server-owned source slots.
+
+    Model output is intentionally absent from every material field here.  The
+    model may have proposed a classification upstream, but a criterion reaches
+    this function only through an exact source occurrence and the deterministic
+    semantic state assigned to it.
+    """
+    spans_by_id = {span.span_id: span for span in source_spans}
+    used_ids: set[str] = set()
+    must_have: list[CriterionIn] = []
+    preferred: list[CriterionIn] = []
+    unsupported: list[UnsupportedJDCriterionItem] = []
+    needs_review: list[NeedsReviewJDCriterionItem] = []
+    results: list[RequirementSpanResult] = []
+    prohibited_count = 0
+
+    for semantic in requirements:
+        span = spans_by_id[semantic.requirement_span_id]
+        state = semantic.state
+        # Post-parse safety scan: neither a model family nor a normalized
+        # subject can override protected text in the canonical source span.
+        if find_prohibited_term(span.text, semantic.normalized_subject or ""):
+            state = SemanticRequirementState.PROHIBITED
+
+        criterion: CriterionIn | None = None
+        if state == SemanticRequirementState.SCORABLE:
+            assert semantic.criterion_family is not None
+            assert semantic.criterion_type is not None
+            kind = CriterionKind(semantic.criterion_family.value)
+            subject = semantic.normalized_subject or span.text
+            value = None if kind == CriterionKind.EXPERIENCE else subject
+            try:
+                criterion = CriterionIn(
+                    id=slugify_criterion_label(subject, used_ids),
+                    kind=kind,
+                    type=semantic.criterion_type,
+                    label=subject,
+                    value=value,
+                    min_years=semantic.min_years,
+                    required_level=semantic.required_level,
+                    weight=1.0,
+                )
+            except ValidationError:
+                state = SemanticRequirementState.NEEDS_HUMAN_REVIEW
+
+        if criterion is not None:
+            bucket = must_have if criterion.type == CriterionType.MUST_HAVE else preferred
+            bucket.append(criterion)
+        elif state == SemanticRequirementState.PROHIBITED:
+            prohibited_count += 1
+        elif state == SemanticRequirementState.UNSUPPORTED and semantic.criterion_type is not None:
+            unsupported.append(
+                UnsupportedJDCriterionItem(
+                    requirement=span.text,
+                    criterion_type=semantic.criterion_type,
+                )
             )
-            break
-        except ModelSchemaInvalidError:
-            continue
-        except (ModelTimeoutError, ModelUnavailableError, LLMProviderError):
-            return None
-    if draft is None:
-        return None
+        else:
+            needs_review.append(
+                NeedsReviewJDCriterionItem(
+                    requirement=span.text,
+                    criterion_type=semantic.criterion_type,
+                    span_id=(
+                        span.span_id
+                        if state == SemanticRequirementState.NEEDS_HUMAN_REVIEW
+                        and semantic.criterion_family is not None
+                        and semantic.normalized_subject
+                        else None
+                    ),
+                    kind=(
+                        semantic.criterion_family
+                        if state == SemanticRequirementState.NEEDS_HUMAN_REVIEW
+                        and semantic.normalized_subject
+                        else None
+                    ),
+                    subject=(
+                        semantic.normalized_subject
+                        if state == SemanticRequirementState.NEEDS_HUMAN_REVIEW
+                        and semantic.normalized_subject
+                        else None
+                    ),
+                    min_years=semantic.min_years,
+                    required_level=semantic.required_level,
+                    allowed_types=(
+                        [CriterionType.MUST_HAVE, CriterionType.PREFERRED]
+                        if state == SemanticRequirementState.NEEDS_HUMAN_REVIEW
+                        and semantic.criterion_type is None
+                        and semantic.criterion_family not in (None, JDDraftCriterionKind.OTHER)
+                        else []
+                    ),
+                )
+            )
+
+        public_state = RequirementSpanState(state.value)
+        results.append(
+            RequirementSpanResult(
+                span_id=span.span_id,
+                start_offset=span.start_offset,
+                end_offset=span.end_offset,
+                text=None if public_state == RequirementSpanState.PROHIBITED else span.text,
+                normalized=(
+                    None if public_state == RequirementSpanState.PROHIBITED else span.normalized
+                ),
+                state=public_state,
+                criterion_type=semantic.criterion_type,
+                criterion_id=criterion.id if criterion is not None else None,
+            )
+        )
+
+    safe_title = title if title and _title_is_attributed(title, jd_text) else "Vakansiya qaralaması"
+    return AgentToolResult(
+        tool_name=AgentActionType.DRAFT_JOB_CRITERIA,
+        job_draft=AgentJobDraftToolResult(
+            title=safe_title,
+            draft_id=uuid.uuid4(),
+            requested_result_limit=requested_result_limit,
+            result_limit=result_limit,
+            result_limit_was_bounded=result_limit_was_bounded,
+            result_limit_needs_review=result_limit_needs_review,
+            must_have=must_have,
+            preferred=preferred,
+            unsupported=unsupported,
+            needs_review=needs_review,
+            ungrounded_count=ungrounded_count,
+            prohibited_count=prohibited_count,
+            requirements=results,
+            unsupported_language=unsupported_language,
+            wrong_mode_guidance=wrong_mode_guidance,
+        ),
+    )
+
+
+def _build_authorized_model_draft(
+    *, jd_text: str, draft: JDCriteriaDraft, source_spans: list[RequirementSpan]
+) -> AgentToolResult:
+    """Reconcile a model proposal against server-owned source occurrences."""
     safe_title = (
         draft.title
         if draft.title and _title_is_attributed(draft.title, jd_text)
         else "Vakansiya qaralaması"
     )
-
     used_ids: set[str] = set()
     must_have: list[CriterionIn] = []
     preferred: list[CriterionIn] = []
@@ -990,20 +1126,11 @@ async def _dispatch_draft_job_criteria(llm: LLMProvider, *, jd_text: str) -> Age
     ):
         for item in items:
             source_span = spans_by_id.get(item.span_id)
-            # The model may echo a requested top-K as a legacy OTHER row.
-            # Result count is already parsed from the original JD as workflow
-            # metadata and is never a criterion or an ungrounded disclosure.
             if source_span is None and is_result_count_only(item.requirement):
                 continue
-            # Raw-JD prohibition is independently authoritative. A model
-            # reference to that same occurrence cannot create a second
-            # outcome or recast it as an ungrounded fabrication.
             if source_span is not None and source_span.span_id in raw_prohibited_spans:
                 continue
             if source_span is not None and item.span_id in span_states:
-                # One occurrence has one explicit terminal state and can
-                # authorize at most one row. A duplicate model item cannot
-                # manufacture a second criterion from the same source.
                 ungrounded_count += 1
                 continue
             canonical_item = (
@@ -1036,8 +1163,7 @@ async def _dispatch_draft_job_criteria(llm: LLMProvider, *, jd_text: str) -> Age
                 span_criterion_ids[source_span.span_id] = criterion.id
             elif reason == DroppedJDCriterionReason.PROHIBITED:
                 source_not_already_counted = (
-                    source_span is not None
-                    and source_span.span_id not in raw_prohibited_spans
+                    source_span is not None and source_span.span_id not in raw_prohibited_spans
                 ) or (source_span is None and not raw_jd_has_prohibited_text)
                 if source_not_already_counted:
                     prohibited_count += 1
@@ -1065,22 +1191,21 @@ async def _dispatch_draft_job_criteria(llm: LLMProvider, *, jd_text: str) -> Age
     for source_span in source_spans:
         inferred_value = explicit_modality(source_span.text)
         inferred_type = CriterionType(inferred_value) if inferred_value is not None else None
-        state = span_states.get(
-            source_span.span_id, RequirementSpanState.NEEDS_HUMAN_REVIEW
-        )
-        if state == RequirementSpanState.NEEDS_HUMAN_REVIEW:
-            if not any(item.span_id == source_span.span_id for item in needs_review):
-                needs_review.append(
-                    NeedsReviewJDCriterionItem(
-                        requirement=source_span.text, criterion_type=inferred_type
-                    )
+        state = span_states.get(source_span.span_id, RequirementSpanState.NEEDS_HUMAN_REVIEW)
+        if state == RequirementSpanState.NEEDS_HUMAN_REVIEW and not any(
+            item.span_id == source_span.span_id for item in needs_review
+        ):
+            needs_review.append(
+                NeedsReviewJDCriterionItem(
+                    requirement=source_span.text, criterion_type=inferred_type
                 )
+            )
         requirement_results.append(
             RequirementSpanResult(
                 span_id=source_span.span_id,
                 start_offset=source_span.start_offset,
                 end_offset=source_span.end_offset,
-                text=(None if state == RequirementSpanState.PROHIBITED else source_span.text),
+                text=None if state == RequirementSpanState.PROHIBITED else source_span.text,
                 normalized=(
                     None if state == RequirementSpanState.PROHIBITED else source_span.normalized
                 ),
@@ -1107,6 +1232,82 @@ async def _dispatch_draft_job_criteria(llm: LLMProvider, *, jd_text: str) -> Age
             prohibited_count=prohibited_count,
             requirements=requirement_results,
         ),
+    )
+
+
+async def _dispatch_draft_job_criteria(llm: LLMProvider, *, jd_text: str) -> AgentToolResult | None:
+    """Interpret a JD through source-bound server authority.
+
+    Real local inference is still used for interpretation/title assistance,
+    but provider failure cannot erase requirements the server can safely
+    ground. Unsupported languages fail closed before inference and therefore
+    before any criterion is created.
+    """
+    analysis = analyze_hr_text(jd_text)
+    if analysis.language == SupportedInputLanguage.UNSUPPORTED:
+        return _build_authorized_semantic_draft(
+            jd_text=jd_text,
+            title=None,
+            requirements=[],
+            source_spans=[],
+            requested_result_limit=analysis.result_count.requested,
+            result_limit=analysis.result_count.effective,
+            result_limit_was_bounded=analysis.result_count.was_bounded,
+            result_limit_needs_review=analysis.result_count_needs_review,
+            unsupported_language=SupportedInputLanguage.UNSUPPORTED,
+        )
+
+    # Preserve the established model/source reconciliation contract for a
+    # successful model response.  The semantic boundary is an independent
+    # safe fallback and is also shared with ordinary search; it must not turn
+    # a contradictory model proposal into a silently different criterion.
+    source_spans = segment_requirement_spans(jd_text)
+    folded_jd = _fold(jd_text)
+    raw_has_prohibited_text = find_prohibited_term(jd_text) is not None
+    simple_search_in_vacancy_mode = bool(
+        len(analysis.requirements) == 1
+        and re.search(r"\b(?:goster|tap|cixart|show|find)\w*\b", folded_jd)
+        and analysis.requirements[0].min_years is None
+        and analysis.requirements[0].required_level is None
+        and not re.search(r"\b(?:required|preferred|teleb|mutleq|ustunluk|vacib)\w*\b", folded_jd)
+    )
+    draft: JDCriteriaDraft | None = None
+    if not raw_has_prohibited_text and not simple_search_in_vacancy_mode:
+        for attempt in range(1, MAX_JD_DRAFT_ATTEMPTS + 1):
+            try:
+                draft, _provenance = await llm.draft_job_criteria(
+                    jd_text, requirement_spans=source_spans, repair=attempt > 1
+                )
+                break
+            except ModelSchemaInvalidError:
+                continue
+            except (ModelTimeoutError, ModelUnavailableError, LLMProviderError):
+                break
+
+    known_span_ids = {span.span_id for span in source_spans}
+    ungrounded_count = (
+        sum(
+            item.span_id not in known_span_ids and not is_result_count_only(item.requirement)
+            for item in [*draft.must_have, *draft.preferred]
+        )
+        if draft is not None
+        else 0
+    )
+    return _build_authorized_semantic_draft(
+        jd_text=jd_text,
+        title=draft.title if draft is not None else None,
+        requirements=[] if simple_search_in_vacancy_mode else analysis.requirements,
+        source_spans=[] if simple_search_in_vacancy_mode else analysis.spans,
+        requested_result_limit=analysis.result_count.requested,
+        result_limit=analysis.result_count.effective,
+        result_limit_was_bounded=analysis.result_count.was_bounded,
+        result_limit_needs_review=analysis.result_count_needs_review,
+        # This is disclosure only: model proposals never participate in
+        # material authority. Count genuinely source-unbound proposals, but
+        # exclude result-count intent because it is intentionally separate
+        # from canonical requirement spans.
+        ungrounded_count=ungrounded_count,
+        wrong_mode_guidance=simple_search_in_vacancy_mode,
     )
 
 
@@ -1164,6 +1365,158 @@ def resolve_job_draft_review_modality(
     else:
         updates["preferred"] = [*draft.preferred, criterion]
     return draft.model_copy(update=updates)
+
+
+_FOLLOWUP_RE = re.compile(
+    r"(?i)\b(?:yox|et|dəyiş|deyis|saxla|make|change|instead|not\s+mandatory|"
+    r"məcburi\s+etmə|mecburi\s+etme)\b"
+)
+
+
+def _latest_pending_job_draft(conversation: AgentConversation) -> AgentJobDraftToolResult | None:
+    for turn in reversed(conversation.turns):
+        payload = turn.get("pending_job_draft")
+        if not isinstance(payload, dict):
+            continue
+        try:
+            return AgentJobDraftToolResult.model_validate(payload)
+        except ValueError:
+            continue
+    return None
+
+
+def _modified_requirement_results(
+    draft: AgentJobDraftToolResult,
+    *,
+    criterion_id: str,
+    criterion_type: CriterionType | None = None,
+) -> list[RequirementSpanResult]:
+    return [
+        item.model_copy(
+            update={"criterion_type": criterion_type}
+            if item.criterion_id == criterion_id and criterion_type is not None
+            else {}
+        )
+        for item in draft.requirements
+    ]
+
+
+def _apply_pending_draft_followup(
+    draft: AgentJobDraftToolResult, user_message: str
+) -> AgentJobDraftToolResult | None:
+    """Apply only four bounded, source-explicit draft edits.
+
+    The target must be uniquely identifiable in the pending server-held draft;
+    otherwise no change is made and the caller asks HR to clarify/re-analyse.
+    """
+    folded = _fold(user_message)
+    if not _FOLLOWUP_RE.search(folded):
+        return None
+
+    # Result limit: "10 yox, 5 nəfər göstər" / "change 10 to 5 candidates".
+    values = [int(value) for value in re.findall(r"(?<!\w)\d{1,4}(?!\w)", folded)]
+    has_result_noun = re.search(r"\b(?:nefer|namized\w*|candidates?|results?|goster)\b", folded)
+    if len(values) >= 2 and has_result_noun:
+        old, new = values[0], values[-1]
+        if old != draft.result_limit:
+            return None
+        effective = min(max(new, 1), 100)
+        return draft.model_copy(
+            update={
+                "draft_id": uuid.uuid4(),
+                "requested_result_limit": new,
+                "result_limit": effective,
+                "result_limit_was_bounded": effective != new,
+                "result_limit_needs_review": False,
+                "modification_source_text": user_message,
+            }
+        )
+
+    all_criteria = [*draft.must_have, *draft.preferred]
+
+    def is_mentioned(criterion: CriterionIn) -> bool:
+        aliases = {_fold(criterion.label), _fold(criterion.value or "")}
+        if (
+            criterion.kind == CriterionKind.DOMAIN_EXPERIENCE
+            and _fold(criterion.value or "") == "banking"
+        ):
+            aliases.add("bank")
+        if criterion.kind == CriterionKind.LANGUAGE and _fold(criterion.value or "") == "english":
+            aliases.add("ingilis")
+        return any(
+            alias and re.search(rf"(?<!\w){re.escape(alias)}(?!\w)", folded) for alias in aliases
+        )
+
+    targets = [criterion for criterion in all_criteria if is_mentioned(criterion)]
+    if len(targets) != 1:
+        return None
+    target = targets[0]
+
+    levels = re.findall(r"(?i)\b(?:a1|a2|b1|b2|c1|c2)\b", user_message)
+    if target.kind == CriterionKind.LANGUAGE and len(levels) >= 2:
+        if (
+            target.required_level is None
+            or target.required_level.casefold() != levels[0].casefold()
+        ):
+            return None
+        replacement = target.model_copy(update={"required_level": levels[-1].upper()})
+        return draft.model_copy(
+            update={
+                "draft_id": uuid.uuid4(),
+                "must_have": [
+                    replacement if item.id == target.id else item for item in draft.must_have
+                ],
+                "preferred": [
+                    replacement if item.id == target.id else item for item in draft.preferred
+                ],
+                "modification_source_text": user_message,
+            }
+        )
+
+    if target.kind in (CriterionKind.SKILL_EXPERIENCE, CriterionKind.DOMAIN_EXPERIENCE):
+        numeric = [
+            float(value.replace(",", ".")) for value in re.findall(r"\d+(?:[.,]\d+)?", folded)
+        ]
+        if len(numeric) >= 2 and target.min_years == numeric[0]:
+            replacement = target.model_copy(update={"min_years": numeric[-1]})
+            return draft.model_copy(
+                update={
+                    "draft_id": uuid.uuid4(),
+                    "must_have": [
+                        replacement if item.id == target.id else item for item in draft.must_have
+                    ],
+                    "preferred": [
+                        replacement if item.id == target.id else item for item in draft.preferred
+                    ],
+                    "modification_source_text": user_message,
+                }
+            )
+
+    demote = bool(
+        re.search(r"\b(?:ustunluk|preferred)\b", folded)
+        and re.search(r"\b(?:mecburi|mandatory|must)\b", folded)
+    )
+    if demote and target.type == CriterionType.MUST_HAVE:
+        replacement = target.model_copy(update={"type": CriterionType.PREFERRED})
+        return draft.model_copy(
+            update={
+                "draft_id": uuid.uuid4(),
+                "must_have": [item for item in draft.must_have if item.id != target.id],
+                "preferred": [*draft.preferred, replacement],
+                "requirements": _modified_requirement_results(
+                    draft, criterion_id=target.id, criterion_type=CriterionType.PREFERRED
+                ),
+                "modification_source_text": user_message,
+            }
+        )
+    if demote and target.type == CriterionType.PREFERRED:
+        return draft.model_copy(
+            update={
+                "draft_id": uuid.uuid4(),
+                "modification_source_text": user_message,
+            }
+        )
+    return None
 
 
 def _configured_provenance(llm: LLMProvider) -> LLMResultProvenance:
@@ -1283,6 +1636,48 @@ async def run_agent_turn(
         raise ValueError(f"Unsupported explicit_action: {explicit_action}")
     turns: list[dict] = [*conversation.turns, {"role": "user", "text": user_message}]
     last_search_candidate_ids = list(conversation.last_search_candidate_ids)
+    pending_draft = _latest_pending_job_draft(conversation)
+    if (
+        explicit_action is None
+        and pending_draft is not None
+        and _FOLLOWUP_RE.search(_fold(user_message))
+    ):
+        modified = _apply_pending_draft_followup(pending_draft, user_message)
+        provenance = _configured_provenance(llm)
+        if modified is None:
+            result = _build_result(
+                outcome=AgentTurnOutcome.CLARIFICATION_REQUESTED,
+                message=(
+                    "Qaralama dəyişikliyi təhlükəsiz şəkildə tətbiq edilmədi. Dəyişəcək "
+                    "meyarı və əvvəlki/yeni dəyəri dəqiq yazın və ya vakansiyanı "
+                    "yenidən analiz edin."
+                ),
+                tool_results=[],
+                tool_call_count=0,
+                provenance=provenance,
+            )
+        else:
+            result = _build_result(
+                outcome=AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT,
+                message="Vakansiya qaralaması yeni, mənbəyə bağlı versiya kimi yeniləndi.",
+                tool_results=[
+                    AgentToolResult(
+                        tool_name=AgentActionType.DRAFT_JOB_CRITERIA,
+                        job_draft=modified,
+                    )
+                ],
+                tool_call_count=0,
+                provenance=provenance,
+            )
+        return await _finish_turn(
+            db,
+            conversation,
+            tenant_id=tenant_id,
+            turns=turns,
+            last_search_candidate_ids=last_search_candidate_ids,
+            max_context_turns=max_context_turns,
+            result=result,
+        )
     tool_results: list[AgentToolResult] = []
     last_tool_summary: dict | None = None
     tool_calls_made = 0

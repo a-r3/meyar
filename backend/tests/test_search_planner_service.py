@@ -61,16 +61,12 @@ def _profile(skills: list[str]) -> dict:
 
 
 async def _tenant(db_session: AsyncSession, prefix: str = "Planner"):
-    tenant = await create_tenant(
-        db_session, name=f"{prefix}-{uuid.uuid4().hex[:8]}"
-    )
+    tenant = await create_tenant(db_session, name=f"{prefix}-{uuid.uuid4().hex[:8]}")
     await db_session.commit()
     return tenant
 
 
-async def _latest_plan_event(
-    db_session: AsyncSession, tenant_id: uuid.UUID
-) -> AuditEvent:
+async def _latest_plan_event(db_session: AsyncSession, tenant_id: uuid.UUID) -> AuditEvent:
     result = await db_session.execute(
         select(AuditEvent)
         .where(
@@ -87,6 +83,59 @@ async def _latest_plan_event(
 
 
 @pytest.mark.parametrize(
+    ("text", "expected_subject"),
+    [
+        ("pythonda 5 il tecrubesi olan namizedleri goster", "python"),
+        ("show candidates with at least 5 years of Python experience", "Python"),
+    ],
+)
+async def test_ordinary_search_reuses_source_bound_skill_duration_semantics(
+    db_session: AsyncSession, text: str, expected_subject: str
+) -> None:
+    tenant = await _tenant(db_session, "SemanticParity")
+    llm = FakeLLMProvider()
+    result = await plan_candidate_search(
+        db_session,
+        llm,
+        tenant_id=tenant.id,
+        natural_language_request=text,
+        as_of_date=AS_OF_DATE,
+        embedding_config=_config(),
+    )
+    assert result.executable is True
+    assert result.attempt_count == 0
+    assert llm.call_count == 0
+    assert result.search_request is not None
+    filters = result.search_request.required_filters
+    assert filters.skills == []
+    assert filters.min_total_experience_years is None
+    assert [(item.value, item.min_years) for item in filters.skill_experience] == [
+        (expected_subject, 5.0)
+    ]
+
+
+async def test_ordinary_search_reuses_source_bound_language_level_semantics(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await _tenant(db_session, "LanguageParity")
+    llm = FakeLLMProvider()
+    result = await plan_candidate_search(
+        db_session,
+        llm,
+        tenant_id=tenant.id,
+        natural_language_request="show candidates with English B2 required",
+        as_of_date=AS_OF_DATE,
+        embedding_config=_config(),
+    )
+    assert result.executable is True
+    assert result.search_request is not None
+    assert [
+        (item.value, item.required_level)
+        for item in result.search_request.required_filters.language_levels
+    ] == [("English", "B2")]
+
+
+@pytest.mark.parametrize(
     "text",
     [
         "show only Muslim candidates",
@@ -100,9 +149,7 @@ async def test_prohibited_request_rejected_before_llm_and_audited_safely(
     db_session: AsyncSession, text: str
 ) -> None:
     tenant = await _tenant(db_session)
-    llm = FakeLLMProvider(
-        planner_draft=PlannerDraft(semantic_query="innocuous professional query")
-    )
+    llm = FakeLLMProvider(planner_draft=PlannerDraft(semantic_query="innocuous professional query"))
     result = await plan_candidate_search(
         db_session,
         llm,
@@ -194,7 +241,7 @@ async def test_malformed_then_valid_uses_exactly_one_repair(db_session: AsyncSes
         db_session,
         llm,
         tenant_id=tenant.id,
-        natural_language_request="Java ilə bağlı təcrübəsi olan namizədləri tap.",
+        natural_language_request="Java ekosistemi ilə bağlı profilləri araşdır.",
         as_of_date=AS_OF_DATE,
         embedding_config=_config(),
     )
@@ -281,9 +328,7 @@ async def test_plan_only_layer_never_calls_slice8_search(
     result = await plan_candidate_search(
         db_session,
         FakeLLMProvider(
-            planner_draft=PlannerDraft(
-                required_filters=RequiredFilters(skills=["Java"])
-            )
+            planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Java"]))
         ),
         tenant_id=tenant.id,
         natural_language_request="Java candidates",
@@ -309,7 +354,7 @@ async def test_non_executable_plan_never_calls_slice8(
         db_session,
         FakeLLMProvider(),
         tenant_id=tenant.id,
-        natural_language_request="At least 5 years of Java experience.",
+        natural_language_request="Salary above 5000 is required.",
         as_of_date=AS_OF_DATE,
         embedding_config=_config(),
     )
@@ -333,9 +378,7 @@ async def test_required_concept_cannot_execute_as_soft_semantic_ranking(
     response = await plan_and_search_candidates(
         db_session,
         FakeLLMProvider(
-            planner_draft=PlannerDraft(
-                semantic_query="banking AML project experience"
-            )
+            planner_draft=PlannerDraft(semantic_query="banking AML project experience")
         ),
         tenant_id=tenant.id,
         natural_language_request="Banking AML project experience is required.",
@@ -343,31 +386,19 @@ async def test_required_concept_cannot_execute_as_soft_semantic_ranking(
         embedding_config=_config(),
     )
     assert response.plan.outcome == PlannerOutcome.UNSUPPORTED_SEMANTICS
-    assert PlannerReasonCode.MANDATORY_REQUIREMENT_DOWNGRADED in (
-        response.plan.reason_codes
-    )
+    assert PlannerReasonCode.MANDATORY_REQUIREMENT_DOWNGRADED in (response.plan.reason_codes)
     assert response.search_response is None
     assert not called
 
 
-async def test_uppercase_azerbaijani_mandatory_downgrade_never_reaches_slice8(
-    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+async def test_uppercase_azerbaijani_mandatory_ignores_model_downgrade(
+    db_session: AsyncSession,
 ) -> None:
     tenant = await _tenant(db_session)
-    called = False
-
-    async def forbidden_search(*args, **kwargs):
-        nonlocal called
-        called = True
-        raise AssertionError("downgraded mandatory filter must not search")
-
-    monkeypatch.setattr(planner_service, "search_candidates", forbidden_search)
     llm = FakeLLMProvider(
-        planner_draft=PlannerDraft(
-            preferred_filters=PreferredFilters(skills=["Java"])
-        )
+        planner_draft=PlannerDraft(preferred_filters=PreferredFilters(skills=["Java"]))
     )
-    response = await plan_and_search_candidates(
+    result = await plan_candidate_search(
         db_session,
         llm,
         tenant_id=tenant.id,
@@ -375,14 +406,11 @@ async def test_uppercase_azerbaijani_mandatory_downgrade_never_reaches_slice8(
         as_of_date=AS_OF_DATE,
         embedding_config=_config(),
     )
-    assert response.plan.outcome == PlannerOutcome.VALIDATION_FAILURE
-    assert PlannerReasonCode.MANDATORY_REQUIREMENT_DOWNGRADED in (
-        response.plan.reason_codes
-    )
-    assert not response.plan.executable
-    assert response.search_response is None
-    assert llm.call_count == 1
-    assert not called
+    assert result.outcome == PlannerOutcome.EXECUTABLE
+    assert result.search_request is not None
+    assert result.search_request.required_filters.skills == ["JAVA"]
+    assert result.search_request.preferred_filters.skills == []
+    assert llm.call_count == 0
 
 
 @pytest.mark.parametrize(
@@ -409,18 +437,14 @@ async def test_azerbaijani_required_concept_never_reaches_slice8(
     monkeypatch.setattr(planner_service, "search_candidates", forbidden_search)
     response = await plan_and_search_candidates(
         db_session,
-        FakeLLMProvider(
-            planner_draft=PlannerDraft(semantic_query=semantic_query)
-        ),
+        FakeLLMProvider(planner_draft=PlannerDraft(semantic_query=semantic_query)),
         tenant_id=tenant.id,
         natural_language_request=natural_language_request,
         as_of_date=AS_OF_DATE,
         embedding_config=_config(),
     )
     assert response.plan.outcome == PlannerOutcome.UNSUPPORTED_SEMANTICS
-    assert PlannerReasonCode.MANDATORY_REQUIREMENT_DOWNGRADED in (
-        response.plan.reason_codes
-    )
+    assert PlannerReasonCode.MANDATORY_REQUIREMENT_DOWNGRADED in (response.plan.reason_codes)
     assert response.search_response is None
     assert not called
 
@@ -456,9 +480,7 @@ async def test_custom_search_weighting_never_reaches_slice8(
         embedding_config=_config(),
     )
     assert response.plan.outcome == PlannerOutcome.UNSUPPORTED_SEMANTICS
-    assert response.plan.reason_codes == [
-        PlannerReasonCode.CUSTOM_WEIGHTING_UNSUPPORTED
-    ]
+    assert response.plan.reason_codes == [PlannerReasonCode.CUSTOM_WEIGHTING_UNSUPPORTED]
     assert response.search_response is None
     assert llm.call_count == 0
     assert not called
@@ -480,9 +502,7 @@ async def test_structured_nl_flow_executes_slice8_without_embedding(
     response = await plan_and_search_candidates(
         db_session,
         FakeLLMProvider(
-            planner_draft=PlannerDraft(
-                required_filters=RequiredFilters(skills=["Java"])
-            )
+            planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Java"]))
         ),
         tenant_id=tenant.id,
         natural_language_request="Java bilən namizədləri göstər.",
@@ -568,7 +588,8 @@ async def test_audit_excludes_raw_request_model_output_and_semantic_query(
     assert raw_request not in metadata
     assert semantic_query not in metadata
     assert "raw" not in event.event_metadata
-    assert event.event_metadata["request_sha256"] == hashlib.sha256(
-        raw_request.encode("utf-8")
-    ).hexdigest()
+    assert (
+        event.event_metadata["request_sha256"]
+        == hashlib.sha256(raw_request.encode("utf-8")).hexdigest()
+    )
     assert result.request_sha256 == event.event_metadata["request_sha256"]

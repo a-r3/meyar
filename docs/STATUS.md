@@ -1,8 +1,8 @@
 # MEYAR — Status
 
 ## Current phase
-**Issue #44 primary vacancy browser-flow remediation is implemented locally on
-`feat/agent-product-ux-jd-matching` (D-059), not pushed or merged.** D-055's
+**Issue #44 AZ/EN generalization hardening is implemented locally on
+`feat/agent-product-ux-jd-matching` (D-060), not pushed or merged.** D-055's
 canonical `RequirementSpan` architecture and every previously accepted
 candidate/JD/confirmation boundary remain intact. Confirmed agent vacancies
 now round-trip and deterministically evaluate skill-specific duration,
@@ -13,7 +13,13 @@ date; and return the requested top 1–100 eligible results without changing
 scores or requirements. The real local browser path now adapts bounded legacy
 Ollama draft shapes to those typed semantics, exposes supported modality
 ambiguity for protected HR resolution, and provides a stable reloadable
-ranking URL with criterion evidence. PR #42 remains NOT accepted.
+ranking URL with criterion evidence. The source-bound semantic layer now
+supports Azerbaijani and English (plus safe mixed professional terminology),
+blocks protected attributes before and after parsing, preserves unfamiliar
+professional subjects without grammar suffixes, shares skill-duration/domain/
+language-level semantics with ordinary search, binds top-K separately, and
+handles bounded pending-draft edits before search routing. Russian fails closed
+before inference. PR #42 remains NOT accepted.
 
 **Slice 13 — Security + Official Definition-of-Done Acceptance: implementation
 pass 1 MERGED (PR #22, squash SHA `a709ce1`, `Refs #20`); Target-Mac hardware

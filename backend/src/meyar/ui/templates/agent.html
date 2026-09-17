@@ -74,7 +74,7 @@
     {% endif %}
   {% elif tool_result.tool_name == "DRAFT_JOB_CRITERIA" %}
     {% set draft = tool_result.job_draft %}
-    {% if draft.must_have_rows or draft.preferred_rows or draft.unsupported_must_have or draft.unsupported_preferred or draft.needs_review or draft.prohibited_count or draft.ungrounded_count %}
+    {% if draft.must_have_rows or draft.preferred_rows or draft.unsupported_must_have or draft.unsupported_preferred or draft.needs_review or draft.prohibited_count or draft.ungrounded_count or draft.unsupported_language or draft.wrong_mode_guidance %}
     {% set has_scorable = draft.must_have_rows or draft.preferred_rows %}
     {% set confirmation_ready = has_scorable and not draft.requires_resolution %}
     <section class="panel">
@@ -90,10 +90,19 @@
         <p><strong>Nəticələr:</strong> ən çox {{ draft.result_limit }} uyğun namizəd{% if draft.result_limit_was_bounded %} (təhlükəsiz maksimum; sorğuda {{ draft.requested_result_limit }} istənmişdi){% endif %}</p>
       {% else %}
         <h3>{{ draft.title or "Vakansiya qaralaması" }}</h3>
+        {% if draft.unsupported_language %}
+        <div class="alert alert-warning"><p><strong>Bu dil hazırda dəstəklənmir.</strong> Vakansiya mətnini Azərbaycan və ya ingilis dilində göndərin. Heç bir sıralama meyarı yaradılmadı.</p></div>
+        {% elif draft.wrong_mode_guidance %}
+        <div class="alert alert-info"><p><strong>Bu mətn namizəd axtarışına bənzəyir.</strong> Namizədləri vakansiya yaratmadan tapmaq üçün “Namizəd axtarışı” rejimindən istifadə edin; vakansiya rejimində isə tələbləri və onların məcburi/üstünlük statusunu qeyd edin.</p></div>
+        {% else %}
         <div class="alert alert-warning">
           <p><strong>Avtomatik sıralama üçün hazır meyar yoxdur.</strong> Mənbə tələbləri aşağıda görünür, lakin onlar insan baxışı tələb edir və ya sistem tərəfindən hələ ölçülmür. Tələbləri dəqiqləşdirib elanı yenidən analiz edin.</p>
         </div>
+        {% endif %}
       {% endif %}
+        {% if draft.result_limit_needs_review %}
+        <p class="alert alert-warning">Sorğuda nəticə sayı göstərilib, lakin təhlükəsiz şəkildə müəyyən edilmədi. Sayı dəqiqləşdirib yenidən analiz edin.</p>
+        {% endif %}
 
         <h3>Mütləq tələblər</h3>
         {{ criteria_form.criterion_rows("must", draft.must_have_rows, kind_options, true) }}

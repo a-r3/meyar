@@ -294,6 +294,67 @@ class RequirementSpan(BaseModel):
         return self
 
 
+class SupportedInputLanguage(StrEnum):
+    AZERBAIJANI = "AZERBAIJANI"
+    ENGLISH = "ENGLISH"
+    MIXED_AZ_EN = "MIXED_AZ_EN"
+    UNSUPPORTED = "UNSUPPORTED"
+
+
+class SourceOccurrence(BaseModel):
+    """One exact occurrence in the original HR text.
+
+    Semantic values never become authority merely because the model emitted a
+    plausible string.  Every material slot carries the exact source slice and
+    absolute offsets that authorized it.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    start_offset: int = Field(ge=0)
+    end_offset: int = Field(gt=0)
+    text: str = Field(min_length=1, max_length=500)
+
+    @model_validator(mode="after")
+    def _validate_offsets(self) -> "SourceOccurrence":
+        if self.end_offset <= self.start_offset:
+            raise ValueError("SourceOccurrence end_offset must follow start_offset.")
+        return self
+
+
+class SemanticRequirementState(StrEnum):
+    SCORABLE = "SCORABLE"
+    NEEDS_HUMAN_REVIEW = "NEEDS_HUMAN_REVIEW"
+    UNSUPPORTED = "UNSUPPORTED"
+    PROHIBITED = "PROHIBITED"
+
+
+class SemanticRequirement(BaseModel):
+    """Server-authorized semantic slots for one material source requirement.
+
+    The local model may propose a family, but it cannot author a subject,
+    number, level, modality, or result count.  Those fields are accepted only
+    when this structure points to their exact occurrences in the canonical
+    input.  ``result_limit`` is intentionally absent: workflow intent is parsed
+    independently from requirements.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    requirement_span_id: str = Field(pattern=r"^req-\d{4}$")
+    criterion_family: JDDraftCriterionKind | None = None
+    subject: SourceOccurrence | None = None
+    normalized_subject: str | None = Field(default=None, max_length=200)
+    modality: SourceOccurrence | None = None
+    criterion_type: CriterionType | None = None
+    duration_or_number: SourceOccurrence | None = None
+    min_years: float | None = Field(default=None, ge=0, le=60)
+    proficiency: SourceOccurrence | None = None
+    required_level: str | None = Field(default=None, max_length=50)
+    state: SemanticRequirementState
+    comparison: str | None = Field(default=None, max_length=16)
+
+
 class JDDraftCriterionItem(BaseModel):
     """One MODEL-PRODUCED candidate requirement drafted from a JD's own
     text — untrusted input, exactly like every other LLM-produced tool
@@ -495,6 +556,10 @@ class AgentJobDraftToolResult(BaseModel):
     needs_review: list[NeedsReviewJDCriterionItem] = Field(default_factory=list)
     prohibited_count: int = Field(default=0, ge=0)
     ungrounded_count: int = Field(default=0, ge=0)
+    unsupported_language: SupportedInputLanguage | None = None
+    result_limit_needs_review: bool = False
+    wrong_mode_guidance: bool = False
+    modification_source_text: str | None = Field(default=None, max_length=500)
     requirements: list[RequirementSpanResult] = Field(
         default_factory=list, max_length=MAX_JD_REQUIREMENT_SPANS
     )

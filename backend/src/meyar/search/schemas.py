@@ -25,6 +25,20 @@ from meyar.search.policy import (
 _FILTER_MAX_ITEMS = 20
 
 
+class NamedDurationFilter(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    value: str = Field(min_length=1, max_length=200)
+    min_years: float | None = Field(default=None, ge=0, le=60)
+
+
+class LanguageLevelFilter(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    value: str = Field(min_length=1, max_length=200)
+    required_level: str | None = Field(default=None, min_length=1, max_length=50)
+
+
 class SearchMode(StrEnum):
     STRUCTURED_ONLY = "STRUCTURED_ONLY"
     SEMANTIC_ONLY = "SEMANTIC_ONLY"
@@ -43,6 +57,15 @@ class RequiredFilters(BaseModel):
     languages: list[str] = Field(default_factory=list, max_length=_FILTER_MAX_ITEMS)
     education: list[str] = Field(default_factory=list, max_length=_FILTER_MAX_ITEMS)
     min_total_experience_years: float | None = Field(default=None, ge=0, le=60)
+    skill_experience: list[NamedDurationFilter] = Field(
+        default_factory=list, max_length=_FILTER_MAX_ITEMS
+    )
+    domain_experience: list[NamedDurationFilter] = Field(
+        default_factory=list, max_length=_FILTER_MAX_ITEMS
+    )
+    language_levels: list[LanguageLevelFilter] = Field(
+        default_factory=list, max_length=_FILTER_MAX_ITEMS
+    )
 
 
 class PreferredFilters(RequiredFilters):
@@ -129,6 +152,15 @@ class CandidateSearchRequest(BaseModel):
         needs_as_of = (
             self.required_filters.min_total_experience_years is not None
             or self.preferred_filters.min_total_experience_years is not None
+            or any(
+                item.min_years is not None
+                for item in (
+                    *self.required_filters.skill_experience,
+                    *self.required_filters.domain_experience,
+                    *self.preferred_filters.skill_experience,
+                    *self.preferred_filters.domain_experience,
+                )
+            )
         )
         if needs_as_of and self.as_of_date is None:
             raise ValueError(
@@ -150,6 +182,9 @@ class CandidateSearchRequest(BaseModel):
             for category in ("skills", "certifications", "languages", "education"):
                 for value in getattr(filters, category):
                     candidates.append((f"{field_name}.{category}", value))
+            for category in ("skill_experience", "domain_experience", "language_levels"):
+                for value in getattr(filters, category):
+                    candidates.append((f"{field_name}.{category}", value.value))
         for label, text in candidates:
             term = find_prohibited_term(text)
             if term:

@@ -172,7 +172,7 @@ async def test_actual_ui_chat_delegates_and_preserves_backend_order_with_escaped
         data={"query": query, "csrf_token": csrf},
     )
     assert response.status_code == 200
-    assert fake.call_count == 1
+    assert fake.call_count == 0
     expected = sorted([first.id, second.id], key=str)
     assert response.text.index(str(expected[0])) < response.text.index(str(expected[1]))
     assert str(foreign_candidate.id) not in response.text
@@ -211,22 +211,12 @@ async def test_executable_zero_result_is_not_presented_as_infrastructure_error(
     assert "Axtarış xidməti əlçatan deyil" not in response.text
 
 
-async def test_skill_specific_duration_shows_clarification_not_silent_weakening(
+async def test_skill_specific_duration_executes_without_silent_weakening(
     client: AsyncClient,
     tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
-    """Semantic-correctness audit regression (docs/DECISIONS.md D-027):
-    the owner-reported query "pythonda 5 il tecrübesi olan" ("5 years of
-    experience IN Python") must never be silently converted into "Python
-    skill + TOTAL experience >= 5" — MEYAR cannot prove that skill-
-    specific duration from structured evidence (no SkillItem<->
-    EmploymentItem link). It must show an HR-safe clarification instead
-    of a generic failure page, naming the skill and years without any
-    raw internal reason code, and the weaker alternative may only execute
-    after the HR user explicitly confirms it. Zero LLM calls throughout —
-    both the initial precheck rejection and the confirmed alternative
-    (an explicit-separation phrasing) are fully deterministic."""
+    """Ordinary search reuses the typed skill-duration evaluator primitive."""
     _tenant, user, password, _membership = tenant_and_user
     never_called = FakeLLMProvider(error=ModelUnavailableError("must not be called"))
     app.dependency_overrides[get_llm_provider] = lambda: never_called
@@ -234,30 +224,17 @@ async def test_skill_specific_duration_shows_clarification_not_silent_weakening(
 
     response = await client.post(
         "/ui/search",
-        data={"query": "pythonda 5 il tecrübesi olan", "csrf_token": csrf},
+        data={
+            "query": "pythonda 5 il tecrubesi olan namizedleri goster",
+            "csrf_token": csrf,
+        },
     )
     assert response.status_code == 200
-    # The extracted skill preserves the HR user's own typed casing
-    # ("pythonda" -> "python") rather than guessing a canonical form.
-    assert "python üzrə təcrübə müddətini nəzərdə tutursunuz" in response.text
-    assert "Sorğu icra edildi" not in response.text
+    assert "Nəticə tapılmadı" in response.text
     assert "Tələb hazırda dəstəklənmir" not in response.text
     assert "SKILL_SPECIFIC_EXPERIENCE_DURATION_UNSUPPORTED" not in response.text
     assert never_called.call_count == 0
-
-    confirm_match = re.search(r'name="query" value="([^"]+)"', response.text)
-    assert confirm_match is not None
-    confirmed_query = confirm_match.group(1)
-
-    confirm_response = await client.post(
-        "/ui/search",
-        data={"query": confirmed_query, "csrf_token": csrf},
-    )
-    assert confirm_response.status_code == 200
-    assert "Sorğu icra edildi" in confirm_response.text
-    assert never_called.call_count == 0
     assert "Sorğu təhlükəsiz icra edilə bilmədi" not in response.text
-    assert "Tələb hazırda dəstəklənmir" not in response.text
 
 
 @pytest.mark.parametrize(
@@ -270,28 +247,6 @@ async def test_skill_specific_duration_shows_clarification_not_silent_weakening(
             0,
         ),
         (
-            # "5 il Java" (year-first) IS a deterministic, model-independent
-            # precheck rejection — SKILL_SPECIFIC_EXPERIENCE_DURATION_UNSUPPORTED
-            # fires on the raw request text before the LLM is ever called
-            # (0 calls: draft.unsupported_reason_codes below is unreachable
-            # dead weight for this particular query, kept only to show the
-            # outcome is the same either way for a genuine precheck hit).
-            # This reason code is special-cased to the clarification screen
-            # (docs/DECISIONS.md D-027), not the generic outcome message —
-            # see test_skill_specific_duration_shows_clarification_not_silent_weakening.
-            "5 il Java təcrübəsi olan namizədləri göstər.",
-            PlannerDraft(
-                required_filters=RequiredFilters(
-                    skills=["Java"], min_total_experience_years=5
-                ),
-                unsupported_reason_codes=[
-                    PlannerReasonCode.SKILL_SPECIFIC_EXPERIENCE_DURATION_UNSUPPORTED
-                ],
-            ),
-            "Java üzrə təcrübə müddətini nəzərdə tutursunuz",
-            0,
-        ),
-        (
             # Genuine, model-independent product-policy gap: rejected by the
             # deterministic precheck before the LLM is ever called (0 calls)
             # — must keep the original generic message, not the new
@@ -300,24 +255,6 @@ async def test_skill_specific_duration_shows_clarification_not_silent_weakening(
             PlannerDraft(),
             "Tələb hazırda dəstəklənmir",
             0,
-        ),
-        (
-            # The request text itself is ordinary, passes precheck, and is
-            # outside the deterministic fast path's bounded structured
-            # intents (D-026, no digit/"bilən"/"dili"/"sertifikatı" shape
-            # here) so 1 LLM call genuinely happens — but the MODEL's own
-            # draft self-declines, and that must show the distinct
-            # AI-specific message. Root-caused from a live owner-reported
-            # case (see docs/DECISIONS.md D-025).
-            "React biliyi olan namizədləri göstər.",
-            PlannerDraft(
-                required_filters=RequiredFilters(skills=["React"]),
-                unsupported_reason_codes=[
-                    PlannerReasonCode.LANGUAGE_PROFICIENCY_UNSUPPORTED
-                ],
-            ),
-            "AI tələbi tam anlaya bilmədi",
-            1,
         ),
         (
             "Uyğun namizəd tap.",
@@ -357,6 +294,30 @@ async def test_non_executable_ui_plans_never_search(
     assert expected in response.text
     assert fake.call_count == expected_calls
     assert search_calls == 0
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "5 il Java təcrübəsi olan namizədləri göstər.",
+        "React biliyi olan namizədləri göstər.",
+    ],
+)
+async def test_supported_professional_searches_bypass_model(
+    client: AsyncClient,
+    tenant_and_user,
+    local_ui_settings: Settings,
+    query: str,
+) -> None:
+    _tenant, user, password, _membership = tenant_and_user
+    fake = FakeLLMProvider(error=ModelUnavailableError("must not be called"))
+    app.dependency_overrides[get_llm_provider] = lambda: fake
+    csrf = await _login_and_csrf(client, user.username, password)
+    response = await client.post("/ui/search", data={"query": query, "csrf_token": csrf})
+    assert response.status_code == 200
+    assert "Nəticə tapılmadı" in response.text
+    assert "Tələb hazırda dəstəklənmir" not in response.text
+    assert fake.call_count == 0
 
 
 async def test_malformed_planner_output_has_no_fallback_search(

@@ -93,9 +93,7 @@ def test_preferred_criterion_remains_preferred() -> None:
 def test_explicit_and_default_result_limit_fidelity() -> None:
     explicit = _convert(
         "Show me the best 7 candidates with Java.",
-        PlannerDraft(
-            required_filters=RequiredFilters(skills=["Java"]), requested_limit=7
-        ),
+        PlannerDraft(required_filters=RequiredFilters(skills=["Java"]), requested_limit=7),
     )
     defaulted = _convert(
         "Show candidates with Java.",
@@ -122,9 +120,7 @@ def test_mixed_request_derives_hybrid_and_injects_trusted_context() -> None:
     request = _convert(
         text,
         PlannerDraft(
-            required_filters=RequiredFilters(
-                skills=["Java"], min_total_experience_years=5
-            ),
+            required_filters=RequiredFilters(skills=["Java"], min_total_experience_years=5),
             semantic_query="banking AML project experience",
         ),
     )
@@ -139,9 +135,7 @@ def test_mixed_request_derives_hybrid_and_injects_trusted_context() -> None:
 def test_azerbaijani_total_experience_uses_trusted_as_of_date() -> None:
     request = _convert(
         "Ən azı 5 il ümumi iş təcrübəsi olan namizədlər.",
-        PlannerDraft(
-            required_filters=RequiredFilters(min_total_experience_years=5)
-        ),
+        PlannerDraft(required_filters=RequiredFilters(min_total_experience_years=5)),
     )
     assert request.mode == SearchMode.STRUCTURED_ONLY
     assert request.as_of_date == AS_OF_DATE
@@ -173,38 +167,13 @@ def test_azerbaijani_required_plus_semantic_preference_is_hybrid() -> None:
 def test_skill_specific_duration_is_never_silently_weakened_to_total_experience(
     text: str,
 ) -> None:
-    """Semantic-correctness audit regression (docs/DECISIONS.md D-027):
-    "N years of experience IN skill X" is a claim CandidateProfile cannot
-    prove — there is no evidence linking a SkillItem to a specific
-    EmploymentItem date range, only (a) "has skill X" and (b) "has N years
-    of TOTAL career experience" as independent facts. Every equivalent
-    phrasing of this skill-specific-duration intent — an agglutinated
-    locative/ablative case suffix directly on the skill ("Pythonda",
-    "SQL-dan") or an explicit "üzrə"/"ilə" connector — must be rejected
-    identically, never silently reinterpreted as "skill + total
-    experience >= N" (that combination was the exact bug this audit
-    found and fixed: it previously slipped through for the locative/
-    ablative-suffix phrasing only, while the connector phrasing was
-    already, and remains, correctly rejected)."""
-    with pytest.raises(PlannerPolicyError) as exc_info:
-        precheck_natural_language_request(text)
-    assert exc_info.value.outcome == PlannerOutcome.UNSUPPORTED_SEMANTICS
-    assert (
-        PlannerReasonCode.SKILL_SPECIFIC_EXPERIENCE_DURATION_UNSUPPORTED
-        in exc_info.value.reason_codes
-    )
-    # convert_planner_draft shares the same precheck, so even a
-    # (hypothetically) correctly-fidelity-matching draft cannot slip this
-    # shape through the LLM path either.
-    with pytest.raises(PlannerPolicyError):
-        _convert(
-            text,
-            PlannerDraft(
-                required_filters=RequiredFilters(
-                    skills=["Python"], min_total_experience_years=5.0
-                )
-            ),
-        )
+    """The policy admits skill duration for the shared source-bound parser.
+
+    It must never be rewritten as skill + total career duration; the planner
+    service regression asserts the typed SKILL_EXPERIENCE request.
+    """
+    precheck_natural_language_request(text)
+    assert find_skill_specific_duration_mention(text) is not None
 
 
 @pytest.mark.parametrize(
@@ -296,17 +265,13 @@ def test_azerbaijani_mandatory_forms_cannot_be_downgraded(text: str) -> None:
             text,
             PlannerDraft(preferred_filters=PreferredFilters(skills=["Java"])),
         )
-    assert PlannerReasonCode.MANDATORY_REQUIREMENT_DOWNGRADED in (
-        exc_info.value.reason_codes
-    )
+    assert PlannerReasonCode.MANDATORY_REQUIREMENT_DOWNGRADED in (exc_info.value.reason_codes)
 
 
 def test_azerbaijani_explicit_result_count_is_preserved() -> None:
     request = _convert(
         "Mənə Java bilən 7 namizəd göstər.",
-        PlannerDraft(
-            required_filters=RequiredFilters(skills=["Java"]), requested_limit=7
-        ),
+        PlannerDraft(required_filters=RequiredFilters(skills=["Java"]), requested_limit=7),
     )
     assert request.limit == 7
 
@@ -314,17 +279,6 @@ def test_azerbaijani_explicit_result_count_is_preserved() -> None:
 @pytest.mark.parametrize(
     ("text", "reason"),
     [
-        (
-            "At least 5 years of Java experience.",
-            PlannerReasonCode.SKILL_SPECIFIC_EXPERIENCE_DURATION_UNSUPPORTED,
-        ),
-        (
-            "Java üzrə ən azı 5 il təcrübəsi olan namizədlər.",
-            PlannerReasonCode.SKILL_SPECIFIC_EXPERIENCE_DURATION_UNSUPPORTED,
-        ),
-        ("English B2 required.", PlannerReasonCode.LANGUAGE_PROFICIENCY_UNSUPPORTED),
-        ("İngilis dili B2 mütləqdir.", PlannerReasonCode.LANGUAGE_PROFICIENCY_UNSUPPORTED),
-        ("İNGİLİS DİLİ B2 MÜTLƏQDİR.", PlannerReasonCode.LANGUAGE_PROFICIENCY_UNSUPPORTED),
         ("Find candidates named Ali.", PlannerReasonCode.IDENTITY_SEARCH_UNSUPPORTED),
         ("Find Ali", PlannerReasonCode.IDENTITY_SEARCH_UNSUPPORTED),
         (
@@ -354,6 +308,20 @@ def test_known_unsupported_semantics_fail_closed(text: str, reason: PlannerReaso
     # any model call) must never carry the model-self-decline marker — see
     # docs/DECISIONS.md D-025.
     assert PlannerReasonCode.MODEL_DECLINED_INTERPRETATION not in exc_info.value.reason_codes
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "At least 5 years of Java experience.",
+        "Java üzrə ən azı 5 il təcrübəsi olan namizədlər.",
+        "English B2 required.",
+        "İngilis dili B2 mütləqdir.",
+        "İNGİLİS DİLİ B2 MÜTLƏQDİR.",
+    ],
+)
+def test_shared_semantic_primitives_are_admitted_before_source_bound_planning(text: str) -> None:
+    precheck_natural_language_request(text)
 
 
 def test_model_self_declined_interpretation_is_tagged_distinctly() -> None:
@@ -424,9 +392,7 @@ def test_no_invented_numeric_experience() -> None:
         _convert(
             "experienced Python developer",
             PlannerDraft(
-                required_filters=RequiredFilters(
-                    skills=["Python"], min_total_experience_years=5
-                )
+                required_filters=RequiredFilters(skills=["Python"], min_total_experience_years=5)
             ),
         )
     assert PlannerReasonCode.NUMERIC_EXPERIENCE_NOT_SUPPORTED_BY_REQUEST in (
@@ -447,13 +413,9 @@ def test_no_invented_result_limit() -> None:
     with pytest.raises(PlannerPolicyError) as exc_info:
         _convert(
             "Show candidates with Java.",
-            PlannerDraft(
-                required_filters=RequiredFilters(skills=["Java"]), requested_limit=7
-            ),
+            PlannerDraft(required_filters=RequiredFilters(skills=["Java"]), requested_limit=7),
         )
-    assert PlannerReasonCode.RESULT_LIMIT_NOT_SUPPORTED_BY_REQUEST in (
-        exc_info.value.reason_codes
-    )
+    assert PlannerReasonCode.RESULT_LIMIT_NOT_SUPPORTED_BY_REQUEST in (exc_info.value.reason_codes)
 
 
 def test_explicit_result_limit_may_not_be_omitted() -> None:
@@ -469,9 +431,7 @@ def test_explicit_result_limit_may_not_be_omitted() -> None:
     "draft",
     [
         PlannerDraft(required_filters=RequiredFilters(skills=["Kubernetes"])),
-        PlannerDraft(
-            required_filters=RequiredFilters(certifications=["AML certification"])
-        ),
+        PlannerDraft(required_filters=RequiredFilters(certifications=["AML certification"])),
     ],
 )
 def test_invented_structured_fact_is_rejected(draft: PlannerDraft) -> None:
@@ -500,9 +460,7 @@ def test_required_concept_cannot_be_weakened_into_semantic_ranking() -> None:
             PlannerDraft(semantic_query="banking AML project experience"),
         )
     assert exc_info.value.outcome == PlannerOutcome.UNSUPPORTED_SEMANTICS
-    assert PlannerReasonCode.MANDATORY_REQUIREMENT_DOWNGRADED in (
-        exc_info.value.reason_codes
-    )
+    assert PlannerReasonCode.MANDATORY_REQUIREMENT_DOWNGRADED in (exc_info.value.reason_codes)
 
 
 def test_azerbaijani_required_concept_cannot_be_soft_semantic_ranking() -> None:
@@ -512,9 +470,7 @@ def test_azerbaijani_required_concept_cannot_be_soft_semantic_ranking() -> None:
             PlannerDraft(semantic_query="Bank AML layihə təcrübəsi"),
         )
     assert exc_info.value.outcome == PlannerOutcome.UNSUPPORTED_SEMANTICS
-    assert PlannerReasonCode.MANDATORY_REQUIREMENT_DOWNGRADED in (
-        exc_info.value.reason_codes
-    )
+    assert PlannerReasonCode.MANDATORY_REQUIREMENT_DOWNGRADED in (exc_info.value.reason_codes)
 
 
 def test_yasil_professional_concept_is_not_misclassified_as_age() -> None:
@@ -552,9 +508,7 @@ def test_mandatory_filter_cannot_be_omitted() -> None:
             "Java is required; banking is preferred.",
             PlannerDraft(semantic_query="banking"),
         )
-    assert PlannerReasonCode.MANDATORY_REQUIREMENT_DOWNGRADED in (
-        exc_info.value.reason_codes
-    )
+    assert PlannerReasonCode.MANDATORY_REQUIREMENT_DOWNGRADED in (exc_info.value.reason_codes)
 
 
 def test_short_skill_name_requires_a_whole_term_match() -> None:

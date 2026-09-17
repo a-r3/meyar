@@ -74,7 +74,10 @@ async def search_candidates(
             continue
         assert version.profile_content is not None
         required_result = evaluate_required_filters(
-            profile, request.required_filters, as_of_year=as_of_year
+            profile,
+            request.required_filters,
+            as_of_year=as_of_year,
+            as_of_date=request.as_of_date,
         )
         if not required_result.satisfied:
             continue
@@ -96,7 +99,10 @@ async def search_candidates(
     if request.mode in (SearchMode.STRUCTURED_ONLY, SearchMode.HYBRID):
         for candidate_id, _pv_id, profile, _content, _req_matches in eligible:
             preferred_result = evaluate_preferred_filters(
-                profile, request.preferred_filters, as_of_year=as_of_year
+                profile,
+                request.preferred_filters,
+                as_of_year=as_of_year,
+                as_of_date=request.as_of_date,
             )
             structured_scores[candidate_id] = (preferred_result.score, preferred_result.matches)
     else:
@@ -151,8 +157,7 @@ async def search_candidates(
         if not is_valid_query_vector(embed_result.vector):
             raise SearchRequestError(
                 "QUERY_VECTOR_INVALID",
-                "Query embedding vector must be non-empty and contain only finite "
-                "numeric values.",
+                "Query embedding vector must be non-empty and contain only finite numeric values.",
             )
         if (
             embed_result.dimensions != config.embedding_dimensions

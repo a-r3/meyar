@@ -5,10 +5,7 @@ LLM-draft -> deterministic-validation -> review-result orchestration step.
 They intentionally do not test private lexical helpers in isolation.
 """
 
-import asyncio
-
 import pytest
-from fakes import FakeLLMProvider
 
 from meyar.agent.jd_authority import segment_requirement_spans
 from meyar.agent.schemas import (
@@ -18,21 +15,18 @@ from meyar.agent.schemas import (
     JDDraftCriterionKind,
     RequirementSpanState,
 )
-from meyar.agent.service import _dispatch_draft_job_criteria, resolve_job_draft_review_modality
+from meyar.agent.service import _build_authorized_model_draft, resolve_job_draft_review_modality
 from meyar.core.result_count import DEFAULT_RESULT_LIMIT, extract_result_count_intent
 from meyar.schemas.criteria import CriterionKind, CriterionType
 
 
 def _draft(source: str, *, must=(), preferred=()):
-    result = asyncio.run(
-        _dispatch_draft_job_criteria(
-            FakeLLMProvider(
-                jd_draft=JDCriteriaDraft(
-                    title="Role", must_have=list(must), preferred=list(preferred)
-                )
-            ),
-            jd_text=source,
-        )
+    result = _build_authorized_model_draft(
+        jd_text=source,
+        draft=JDCriteriaDraft(
+            title="Role", must_have=list(must), preferred=list(preferred)
+        ),
+        source_spans=segment_requirement_spans(source),
     )
     assert result is not None and result.job_draft is not None
     return result.job_draft

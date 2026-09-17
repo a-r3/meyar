@@ -23,7 +23,16 @@ _RESULT_COUNT_PATTERNS = (
     ),
     re.compile(
         r"(?i)\b(?P<count>\d{1,4})\s+nefer(?:\s+namized)?\s+"
-        r"(?:goster|gosterin|qaytar)\b"
+        r"(?:goster|gosterin|qaytar|cixart)\b"
+    ),
+    re.compile(
+        r"(?i)\b(?:en\s+(?:uygun|yaxsi)\s+)?(?P<count>\d{1,4})\s+"
+        r"(?:nefer(?:i)?|namized(?:i|e|ler|leri)?)\s*"
+        r"(?:goster|gosterin|qaytar|cixart)?\b"
+    ),
+    re.compile(
+        r"(?i)\b(?:show|display|list|return|find)\s+(?:up\s+to\s+)?"
+        r"(?:the\s+)?(?:best\s+|top\s+)?(?P<count>\d{1,4})\b"
     ),
 )
 
@@ -61,5 +70,10 @@ def is_result_count_only(text: str) -> bool:
     remainder = normalized
     for pattern in _RESULT_COUNT_PATTERNS:
         remainder = pattern.sub(" ", remainder)
+    remainder = re.sub(
+        r"(?i)\b(?:show|display|list|return|find|goster\w*|qaytar\w*|cixart\w*)\b",
+        " ",
+        remainder,
+    )
     remainder = re.sub(r"[^a-z0-9]+", " ", remainder).strip()
     return not remainder

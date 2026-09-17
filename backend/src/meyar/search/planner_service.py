@@ -3,9 +3,16 @@
 import hashlib
 import uuid
 from datetime import date
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meyar.agent.schemas import (
+    JDDraftCriterionKind,
+    SemanticRequirementState,
+    SupportedInputLanguage,
+)
+from meyar.agent.semantic_requirements import analyze_hr_text
 from meyar.embedding.provider import EmbeddingProvider
 from meyar.llm.provider import (
     LLMProvider,
@@ -32,7 +39,15 @@ from meyar.search.planner_schemas import (
     PlannerReasonCode,
     SearchPlanResult,
 )
-from meyar.search.schemas import EmbeddingSearchConfig
+from meyar.search.schemas import (
+    CandidateSearchRequest,
+    EmbeddingSearchConfig,
+    LanguageLevelFilter,
+    NamedDurationFilter,
+    PreferredFilters,
+    RequiredFilters,
+    SearchMode,
+)
 from meyar.search.service import search_candidates
 from meyar.services.audit_repo import record_event
 
@@ -61,9 +76,7 @@ def _configured_provenance(llm: LLMProvider) -> LLMResultProvenance:
     )
 
 
-def _provenance_matches(
-    configured: LLMResultProvenance, actual: LLMResultProvenance
-) -> bool:
+def _provenance_matches(configured: LLMResultProvenance, actual: LLMResultProvenance) -> bool:
     return (
         configured.provider == actual.provider
         and configured.model_name == actual.model_name
@@ -161,6 +174,110 @@ async def plan_candidate_search(
             provenance=configured_provenance,
             attempt_count=0,
             reason_codes=exc.reason_codes,
+        )
+        await _audit_plan_result(db, tenant_id=tenant_id, result=result)
+        return result
+
+    semantic = analyze_hr_text(natural_language_request)
+    if semantic.language == SupportedInputLanguage.UNSUPPORTED:
+        result = _result(
+            outcome=PlannerOutcome.UNSUPPORTED_SEMANTICS,
+            request_sha256=request_hash,
+            provenance=DETERMINISTIC_PLANNER_PROVENANCE,
+            attempt_count=0,
+            reason_codes=[PlannerReasonCode.UNSUPPORTED_INPUT_LANGUAGE],
+        )
+        await _audit_plan_result(db, tenant_id=tenant_id, result=result)
+        return result
+
+    if semantic.requirements and all(
+        item.state == SemanticRequirementState.SCORABLE for item in semantic.requirements
+    ):
+        required_data: dict[str, Any] = {
+            "skills": [],
+            "certifications": [],
+            "languages": [],
+            "education": [],
+            "skill_experience": [],
+            "domain_experience": [],
+            "language_levels": [],
+        }
+        preferred_data: dict[str, Any] = {
+            "skills": [],
+            "certifications": [],
+            "languages": [],
+            "education": [],
+            "skill_experience": [],
+            "domain_experience": [],
+            "language_levels": [],
+        }
+        total_experience: dict[bool, float | None] = {True: None, False: None}
+        for item in semantic.requirements:
+            assert item.criterion_family is not None
+            assert item.criterion_type is not None
+            target = required_data if item.criterion_type.value == "MUST_HAVE" else preferred_data
+            if item.criterion_family != JDDraftCriterionKind.EXPERIENCE:
+                assert item.normalized_subject is not None
+            if item.criterion_family == JDDraftCriterionKind.SKILL:
+                assert item.normalized_subject is not None
+                target["skills"].append(item.normalized_subject)
+            elif item.criterion_family == JDDraftCriterionKind.CERTIFICATION:
+                assert item.normalized_subject is not None
+                target["certifications"].append(item.normalized_subject)
+            elif item.criterion_family == JDDraftCriterionKind.EDUCATION:
+                assert item.normalized_subject is not None
+                target["education"].append(item.normalized_subject)
+            elif item.criterion_family == JDDraftCriterionKind.LANGUAGE:
+                assert item.normalized_subject is not None
+                if item.required_level:
+                    target["language_levels"].append(
+                        LanguageLevelFilter(
+                            value=item.normalized_subject, required_level=item.required_level
+                        )
+                    )
+                else:
+                    target["languages"].append(item.normalized_subject)
+            elif item.criterion_family == JDDraftCriterionKind.SKILL_EXPERIENCE:
+                assert item.normalized_subject is not None
+                target["skill_experience"].append(
+                    NamedDurationFilter(value=item.normalized_subject, min_years=item.min_years)
+                )
+            elif item.criterion_family == JDDraftCriterionKind.DOMAIN_EXPERIENCE:
+                assert item.normalized_subject is not None
+                target["domain_experience"].append(
+                    NamedDurationFilter(value=item.normalized_subject, min_years=item.min_years)
+                )
+            elif item.criterion_family == JDDraftCriterionKind.EXPERIENCE:
+                total_experience[item.criterion_type.value == "MUST_HAVE"] = item.min_years
+
+        required_filters = RequiredFilters(
+            **required_data,
+            min_total_experience_years=total_experience[True],
+        )
+        preferred_filters = PreferredFilters(
+            **preferred_data,
+            min_total_experience_years=total_experience[False],
+        )
+        uses_duration = any(item.min_years is not None for item in semantic.requirements)
+        search_request = CandidateSearchRequest(
+            mode=SearchMode.STRUCTURED_ONLY,
+            required_filters=required_filters,
+            preferred_filters=preferred_filters,
+            as_of_date=as_of_date if uses_duration else None,
+            limit=semantic.result_count.effective,
+        )
+        semantic_draft = PlannerDraft(
+            required_filters=required_filters,
+            preferred_filters=preferred_filters,
+            requested_limit=semantic.result_count.requested,
+        )
+        result = _result(
+            outcome=PlannerOutcome.EXECUTABLE,
+            request_sha256=request_hash,
+            provenance=DETERMINISTIC_PLANNER_PROVENANCE,
+            attempt_count=0,
+            draft=semantic_draft,
+            search_request=search_request,
         )
         await _audit_plan_result(db, tenant_id=tenant_id, result=result)
         return result

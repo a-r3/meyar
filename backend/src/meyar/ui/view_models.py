@@ -230,6 +230,9 @@ class AgentJobDraftView(BaseModel):
     # JD, so its own text must never be redisplayed either (that would
     # itself misattribute invented content to the source document).
     ungrounded_count: int = 0
+    unsupported_language: bool = False
+    result_limit_needs_review: bool = False
+    wrong_mode_guidance: bool = False
 
 
 class AgentToolResultView(BaseModel):

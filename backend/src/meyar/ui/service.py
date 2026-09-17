@@ -538,8 +538,7 @@ async def get_candidate_detail_view(
             if profile_version is None
             else (
                 "UNAVAILABLE"
-                if profile_version.status == PROFILE_STATUS_COMPLETED
-                and not profile_authorized
+                if profile_version.status == PROFILE_STATUS_COMPLETED and not profile_authorized
                 else profile_version.status
             )
         ),
@@ -679,9 +678,7 @@ async def build_search_result_views(
     return views
 
 
-def _criterion_row_view(
-    criterion: CriterionIn, *, span_id: str | None = None
-) -> CriterionRowView:
+def _criterion_row_view(criterion: CriterionIn, *, span_id: str | None = None) -> CriterionRowView:
     return CriterionRowView(
         kind=criterion.kind.value,
         kind_label=CRITERION_KIND_LABELS.get(criterion.kind.value, criterion.kind.value),
@@ -828,9 +825,7 @@ def build_agent_job_draft_view(draft: AgentJobDraftToolResult) -> AgentJobDraftV
             _criterion_row_view(
                 criterion,
                 span_id=next(
-                    item.span_id
-                    for item in draft.requirements
-                    if item.criterion_id == criterion.id
+                    item.span_id for item in draft.requirements if item.criterion_id == criterion.id
                 ),
             )
             for criterion in draft.must_have
@@ -839,9 +834,7 @@ def build_agent_job_draft_view(draft: AgentJobDraftToolResult) -> AgentJobDraftV
             _criterion_row_view(
                 criterion,
                 span_id=next(
-                    item.span_id
-                    for item in draft.requirements
-                    if item.criterion_id == criterion.id
+                    item.span_id for item in draft.requirements if item.criterion_id == criterion.id
                 ),
             )
             for criterion in draft.preferred
@@ -875,6 +868,9 @@ def build_agent_job_draft_view(draft: AgentJobDraftToolResult) -> AgentJobDraftV
         requires_resolution=any(item.allowed_types for item in draft.needs_review),
         prohibited_count=draft.prohibited_count,
         ungrounded_count=draft.ungrounded_count,
+        unsupported_language=draft.unsupported_language is not None,
+        result_limit_needs_review=draft.result_limit_needs_review,
+        wrong_mode_guidance=draft.wrong_mode_guidance,
     )
 
 
@@ -966,9 +962,7 @@ def _agent_turn_headline(
                     "çıxarıldı"
                 )
             if draft.needs_review:
-                notes.append(
-                    f"{len(draft.needs_review)} tələb dəqiqləşdirmə tələb edir"
-                )
+                notes.append(f"{len(draft.needs_review)} tələb dəqiqləşdirmə tələb edir")
             note_text = f" ({'; '.join(notes)}.)" if notes else ""
             return (
                 f"Vakansiya qaralaması üçün {len(draft.must_have_rows)} mütləq və "
@@ -1117,9 +1111,7 @@ async def build_ranked_candidate_views(
                     profile,
                     evaluation_as_of_date=result.evaluation_as_of_date,
                 )
-                scored_locations = {
-                    (ref.page, ref.block_index) for ref in item.evidence_references
-                }
+                scored_locations = {(ref.page, ref.block_index) for ref in item.evidence_references}
                 displayed_locations = {
                     (ref.page, ref.block_index) for ref in displayed_result.evidence
                 }

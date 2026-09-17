@@ -842,7 +842,7 @@ async def test_draft_job_criteria_drops_prohibited_item_and_notes_it(
     assert "işlə bağlı peşəkar tələblə əvəz edin" in response.text
 
 
-async def test_draft_job_criteria_discloses_unsupported_requirement_visibly(
+async def test_draft_job_criteria_preserves_certification_semantics(
     client: AsyncClient, tenant_and_user, local_ui_settings: Settings
 ) -> None:
     """D-043/D-045 (PR #42 owner correction, issue #33): a non-sensitive
@@ -886,11 +886,11 @@ async def test_draft_job_criteria_discloses_unsupported_requirement_visibly(
     )
     assert response.status_code == 200
     assert 'value="Python"' in response.text
+    assert 'value="ACAMS"' in response.text
     assert "ACAMS sertifikatı üzrə təcrübə tələb olunur" in response.text
-    # Never an editable criterion row or browser-authority hidden field.
-    assert 'name="must_requirement_1" value="ACAMS sertifikatı təcrübəsi"' not in response.text
+    # The browser still receives no free-form hidden field as authority.
     assert 'name="unsupported_must_have"' not in response.text
-    assert "Məlumat üçün — qiymətləndirməyə daxil edilmir" in response.text
+    assert "Məlumat üçün — qiymətləndirməyə daxil edilmir" not in response.text
 
 
 async def test_draft_job_criteria_explicit_intent_routes_without_magic_wording(
@@ -1821,7 +1821,7 @@ async def test_omitted_source_requirement_survives_confirmation_without_scoring(
     omitted = "Candidate must be willing to travel"
     assert omitted in draft_response.text
     assert 'name="needs_review_requirement"' not in draft_response.text
-    assert "İnsan baxışı tələb edir — qiymətləndirməyə daxil edilmir" in draft_response.text
+    assert "Məlumat üçün — qiymətləndirməyə daxil edilmir" in draft_response.text
     for internal_code in ("NEEDS_HUMAN_REVIEW", "UNGROUNDED", "PROHIBITED", "UNSUPPORTED"):
         assert internal_code not in draft_response.text
     confirm_path = _draft_confirm_path(draft_response.text)
@@ -1841,7 +1841,7 @@ async def test_omitted_source_requirement_survives_confirmation_without_scoring(
     )
     assert create.status_code == 200
     assert omitted in create.text
-    assert "heç bir namizədin balına/sırasına təsir etmir" in create.text
+    assert "heç bir namizədin balına və ya sırasına təsir etmir" in create.text
 
     version = (
         await db_session.execute(
@@ -2360,7 +2360,7 @@ async def test_primary_hr_request_requires_server_authorized_language_resolution
     assert "ən çox 10 uyğun namizəd" in reloaded.text
 
 
-async def test_draft_job_criteria_provider_failure_renders_safe_message(
+async def test_draft_job_criteria_provider_failure_preserves_grounded_requirements(
     client: AsyncClient, tenant_and_user, local_ui_settings: Settings
 ) -> None:
     from meyar.llm.provider import ModelUnavailableError
@@ -2372,9 +2372,13 @@ async def test_draft_job_criteria_provider_failure_renders_safe_message(
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake
     csrf = await _login_and_csrf(client, user.username, password)
-    response = await client.post("/ui/agent", data={"message": "JD mətni", "csrf_token": csrf})
+    response = await client.post(
+        "/ui/agent", data={"message": "Python tələb olunur.", "csrf_token": csrf}
+    )
     assert response.status_code == 200
-    assert "kriteriya qaralaması hazırlana bilmədi" in response.text
+    assert 'value="Python"' in response.text
+    assert "Tələbləri təsdiqlə və namizədləri sırala" in response.text
+    assert "simulated outage" not in response.text
 
 
 async def test_agent_reset_clears_this_sessions_conversation_state(

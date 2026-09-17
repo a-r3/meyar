@@ -100,7 +100,7 @@ async def test_plan_only_cli_success_is_safe(
     assert query not in output
 
 
-async def test_plan_cli_unsupported_request_exit_2(
+async def test_plan_cli_skill_duration_is_executable_without_model(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -108,15 +108,16 @@ async def test_plan_cli_unsupported_request_exit_2(
     tenant = await _tenant(db_session)
     llm = FakeLLMProvider()
     _patch_common(monkeypatch, db_session, llm)
-    with pytest.raises(SystemExit) as exc_info:
-        await cli._plan_search(
-            str(tenant.id),
-            "Java üzrə ən azı 5 il təcrübəsi olan",
-            "2026-08-23",
-            execute=False,
-        )
-    assert exc_info.value.code == 2
-    assert "UNSUPPORTED_SEMANTICS" in capsys.readouterr().out
+    await cli._plan_search(
+        str(tenant.id),
+        "Java üzrə ən azı 5 il təcrübəsi olan namizədləri göstər",
+        "2026-08-23",
+        execute=False,
+    )
+    output = capsys.readouterr().out
+    assert "Executable: True" in output
+    assert "'value': 'Java'" in output
+    assert "'min_years': 5.0" in output
     assert llm.call_count == 0
 
 

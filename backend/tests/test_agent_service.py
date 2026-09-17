@@ -628,13 +628,12 @@ async def test_repeated_schema_invalid_output_is_a_safe_typed_failure(
 async def test_skill_specific_duration_is_never_silently_weakened(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
-    """Reuses the existing D-027 planner guarantee through the agent's
-    search_candidates tool: 'N years of Java' must never silently become
-    'Java skill + N years total experience'."""
+    """Skill duration stays a typed, evidence-backed skill-duration filter;
+    it never becomes skill + total career duration."""
     tenant, user, _password, membership = tenant_and_user
     await db_session.commit()
 
-    from meyar.search.planner_schemas import PlannerDraft, PlannerReasonCode
+    from meyar.search.planner_schemas import PlannerDraft
     from meyar.search.schemas import RequiredFilters
 
     draft = PlannerDraft(
@@ -663,11 +662,14 @@ async def test_skill_specific_duration_is_never_silently_weakened(
     )
     search = result.tool_results[0].search
     assert search is not None
-    assert search.response.plan.executable is False
-    assert (
-        PlannerReasonCode.SKILL_SPECIFIC_EXPERIENCE_DURATION_UNSUPPORTED
-        in search.response.plan.reason_codes
-    )
+    assert search.response.plan.executable is True
+    request = search.response.plan.search_request
+    assert request is not None
+    assert request.required_filters.skills == []
+    assert request.required_filters.min_total_experience_years is None
+    assert [(item.value, item.min_years) for item in request.required_filters.skill_experience] == [
+        ("Java", 5.0)
+    ]
 
 
 async def test_prohibited_attribute_in_search_query_is_rejected(
@@ -1264,13 +1266,17 @@ async def test_draft_job_criteria_builds_valid_criteria_from_llm_draft(
             must_have=[
                 JDDraftCriterionItem(
                     span_id="req-0001",
-                    kind=CriterionKind.SKILL, requirement="Python", source_text="Python bilməlidir"
+                    kind=CriterionKind.SKILL,
+                    requirement="Python",
+                    source_text="Python bilməlidir",
                 )
             ],
             preferred=[
                 JDDraftCriterionItem(
                     span_id="req-0002",
-                    kind=CriterionKind.SKILL, requirement="AWS", source_text="AWS üstünlükdür"
+                    kind=CriterionKind.SKILL,
+                    requirement="AWS",
+                    source_text="AWS üstünlükdür",
                 )
             ],
         ),
@@ -1300,6 +1306,44 @@ async def test_draft_job_criteria_builds_valid_criteria_from_llm_draft(
     assert llm.agent_call_count == 1
 
 
+async def test_pending_draft_followup_is_modified_before_search_routing(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    from meyar.agent.schemas import JDCriteriaDraft
+
+    tenant, user, _password, membership = tenant_and_user
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    initial = await _run(
+        db_session,
+        FakeLLMProvider(jd_draft=JDCriteriaDraft(title="Backend")),
+        tenant_id=tenant.id,
+        conversation=conversation,
+        message="Python minimum 5 il tələb olunur. 10 nəfər göstər.",
+        explicit_action=AgentActionType.DRAFT_JOB_CRITERIA,
+    )
+    assert initial.tool_results[0].job_draft is not None
+    await db_session.refresh(conversation)
+
+    routing_probe = FakeLLMProvider(
+        agent_decision=AgentDecision(
+            action=AgentActionType.SEARCH_CANDIDATES,
+            search_query="Python",
+        )
+    )
+    modified = await _run(
+        db_session,
+        routing_probe,
+        tenant_id=tenant.id,
+        conversation=conversation,
+        message="10 yox, 5 nəfər göstər.",
+    )
+    assert routing_probe.agent_call_count == 0
+    assert modified.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
+    assert modified.tool_results[0].tool_name == AgentActionType.DRAFT_JOB_CRITERIA
+    draft = modified.tool_results[0].job_draft
+    assert draft is not None and draft.result_limit == 5
+
+
 async def test_draft_job_criteria_title_never_becomes_trusted_assistant_headline(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
@@ -1318,7 +1362,9 @@ async def test_draft_job_criteria_title_never_becomes_trusted_assistant_headline
             must_have=[
                 JDDraftCriterionItem(
                     span_id="req-0001",
-                    kind=CriterionKind.SKILL, requirement="Python", source_text="Python bilməlidir"
+                    kind=CriterionKind.SKILL,
+                    requirement="Python",
+                    source_text="Python bilməlidir",
                 )
             ],
         ),
@@ -1380,11 +1426,15 @@ async def test_draft_job_criteria_drops_prohibited_attribute_item(
             must_have=[
                 JDDraftCriterionItem(
                     span_id="req-0002",
-                    kind=CriterionKind.SKILL, requirement="Python", source_text="Python bilməlidir"
+                    kind=CriterionKind.SKILL,
+                    requirement="Python",
+                    source_text="Python bilməlidir",
                 ),
                 JDDraftCriterionItem(
                     span_id="req-0001",
-                    kind=CriterionKind.SKILL, requirement="kişi", source_text="kişi olmalıdır"
+                    kind=CriterionKind.SKILL,
+                    requirement="kişi",
+                    source_text="kişi olmalıdır",
                 ),
             ],
         ),
@@ -1406,14 +1456,49 @@ async def test_draft_job_criteria_drops_prohibited_attribute_item(
     assert "kişi" not in rendered
 
 
-async def test_draft_job_criteria_discloses_unsupported_non_sensitive_item(
+async def test_nationality_misclassified_as_language_never_reaches_db_backed_draft(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
-    """A non-sensitive requirement that CriterionIn cannot represent (here:
-    an EXPERIENCE item the JD text gave no derivable duration for) must
-    remain visible to HR as an unsupported requirement — never silently
-    lost like a PROHIBITED one's own text (D-043, PR #42 owner correction,
-    issue #33's ACAMS example)."""
+    from meyar.agent.schemas import JDCriteriaDraft, JDDraftCriterionItem
+    from meyar.schemas.criteria import CriterionKind
+
+    tenant, user, _password, membership = tenant_and_user
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    source = "Namizəd Azərbaycan vətəndaşı olmalıdır."
+    llm = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        jd_draft=JDCriteriaDraft(
+            title="Rol",
+            must_have=[
+                JDDraftCriterionItem(
+                    span_id="req-0001",
+                    kind=CriterionKind.LANGUAGE,
+                    requirement="Azerbaijani",
+                    source_text=source,
+                )
+            ],
+        ),
+    )
+    result = await _run(
+        db_session,
+        llm,
+        tenant_id=tenant.id,
+        conversation=conversation,
+        message=source,
+    )
+    draft = result.tool_results[0].job_draft
+    assert draft is not None
+    assert draft.must_have == []
+    assert draft.preferred == []
+    assert draft.prohibited_count == 1
+    assert source not in result.model_dump_json()
+
+
+async def test_draft_job_criteria_supports_named_experience_without_inventing_duration(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    """Named experience without a threshold remains a named skill; no total
+    or skill-specific duration is invented from the model proposal."""
     from meyar.agent.schemas import JDCriteriaDraft, JDDraftCriterionItem
     from meyar.schemas.criteria import CriterionKind, CriterionType
 
@@ -1427,16 +1512,17 @@ async def test_draft_job_criteria_discloses_unsupported_non_sensitive_item(
             must_have=[
                 JDDraftCriterionItem(
                     span_id="req-0001",
-                    kind=CriterionKind.SKILL, requirement="Python", source_text="Python bilməlidir"
+                    kind=CriterionKind.SKILL,
+                    requirement="Python",
+                    source_text="Python bilməlidir",
                 ),
-                    # Skill-scoped experience without a duration cannot be
-                    # round-tripped by the current agent review form.
-                    JDDraftCriterionItem(
-                        span_id="req-0002",
-                        kind="SKILL_EXPERIENCE",
-                        requirement="Backend",
-                        source_text="Backend təcrübəsi tələb olunur",
-                    ),
+                # No min_years is present in either model or source.
+                JDDraftCriterionItem(
+                    span_id="req-0002",
+                    kind="SKILL_EXPERIENCE",
+                    requirement="Backend",
+                    source_text="Backend təcrübəsi tələb olunur",
+                ),
             ],
         ),
     )
@@ -1449,12 +1535,12 @@ async def test_draft_job_criteria_discloses_unsupported_non_sensitive_item(
     )
     draft = result.tool_results[0].job_draft
     assert draft is not None
-    assert [c.label for c in draft.must_have] == ["Python"]
+    assert [c.label for c in draft.must_have] == ["Python", "Backend"]
     assert draft.prohibited_count == 0
     assert draft.ungrounded_count == 0
-    assert len(draft.unsupported) == 1
-    assert draft.unsupported[0].requirement == "Backend təcrübəsi tələb olunur"
-    assert draft.unsupported[0].criterion_type == CriterionType.MUST_HAVE
+    assert draft.unsupported == []
+    assert draft.must_have[1].kind == CriterionKind.SKILL
+    assert draft.must_have[1].type == CriterionType.MUST_HAVE
     # Disclosed, never persisted.
     from sqlalchemy import select
 
@@ -1486,7 +1572,9 @@ async def test_draft_job_criteria_other_kind_is_unsupported_never_scored(
             must_have=[
                 JDDraftCriterionItem(
                     span_id="req-0001",
-                    kind=CriterionKind.SKILL, requirement="Python", source_text="Python bilməlidir"
+                    kind=CriterionKind.SKILL,
+                    requirement="Python",
+                    source_text="Python bilməlidir",
                 )
             ],
             preferred=[
@@ -1646,7 +1734,9 @@ async def test_explicit_draft_job_criteria_action_never_calls_the_routing_model(
             must_have=[
                 JDDraftCriterionItem(
                     span_id="req-0001",
-                    kind=CriterionKind.SKILL, requirement="Python", source_text="Python bilməlidir"
+                    kind=CriterionKind.SKILL,
+                    requirement="Python",
+                    source_text="Python bilməlidir",
                 )
             ],
         ),
@@ -1689,7 +1779,9 @@ async def test_explicit_draft_job_criteria_action_cannot_become_a_search(
             must_have=[
                 JDDraftCriterionItem(
                     span_id="req-0001",
-                    kind=CriterionKind.SKILL, requirement="Python", source_text="Python bilməlidir"
+                    kind=CriterionKind.SKILL,
+                    requirement="Python",
+                    source_text="Python bilməlidir",
                 )
             ],
         ),
@@ -1763,8 +1855,14 @@ async def test_draft_job_criteria_provider_failure_is_a_safe_typed_failure(
     result = await _run(
         db_session, llm, tenant_id=tenant.id, conversation=conversation, message="JD mətni"
     )
-    assert result.outcome == AgentTurnOutcome.JOB_DRAFT_FAILED
-    assert result.tool_results == []
+    assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
+    assert len(result.tool_results) == 1
+    draft = result.tool_results[0].job_draft
+    assert draft is not None
+    assert draft.must_have == []
+    assert draft.preferred == []
+    assert draft.wrong_mode_guidance is False
+    assert draft.requirements == []
 
 
 async def test_evidence_topic_is_resolved_from_profile_fact_not_rendered_raw(
@@ -1856,5 +1954,11 @@ async def test_draft_job_criteria_repeated_schema_invalid_is_a_safe_typed_failur
     result = await _run(
         db_session, llm, tenant_id=tenant.id, conversation=conversation, message="JD mətni"
     )
-    assert result.outcome == AgentTurnOutcome.JOB_DRAFT_FAILED
-    assert result.tool_results == []
+    assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
+    assert len(result.tool_results) == 1
+    draft = result.tool_results[0].job_draft
+    assert draft is not None
+    assert draft.must_have == []
+    assert draft.preferred == []
+    assert draft.wrong_mode_guidance is False
+    assert draft.requirements == []
