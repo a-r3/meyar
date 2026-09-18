@@ -137,8 +137,11 @@ _SOFT_UNSUPPORTED_RE = re.compile(
 )
 _UNSCORABLE_SCOPE_RE = re.compile(r"\b(?:project|layihe)\w*\b", re.I)
 _SEARCH_PREAMBLE_RE = re.compile(
-    r"^(?:(?:please\s+)?(?:find|show|display|list|return)\b.*?\b"
-    r"(?:candidates?|applicants?|namized\w*)\s+(?:with|who\s+have)\s+|"
+    r"^(?:(?:(?:for|to)\b[^,.;]{0,80},?\s+)?"
+    r"(?:(?:we|i)\s+(?:need|want|seek|are\s+looking\s+for)\s+)?"
+    r"(?:candidates?|applicants?)\s+(?:with|who\s+(?:have|possess))\s+|"
+    r"(?:please\s+)?(?:find|show|display|list|return)\b.*?\b"
+    r"(?:candidates?|applicants?|namized\w*)\s+(?:with|who\s+(?:have|possess))\s+|"
     r"(?:\d+|bir|iki|uc|dord|bes|alti|yeddi|sekkiz|doqquz|on)\s+"
     r"(?:nefer\s+)?namized\w*\s+(?:goster|tap|cixart)\w*\s*:?\s*)",
     re.I,
@@ -171,6 +174,10 @@ _KNOWLEDGE_QUALIFIER_RE = re.compile(
 )
 _SUBJECT_SYNTAX_PATTERNS = (
     re.compile(
+        rf"(?i)^\s*(?:(?:at\s+least|minimum|min\.?)\s+)?{_NUMBER_TOKEN}\s+"
+        r"(?:years?|yrs?)\s+(?:of\s+)?(?P<subject>.+?)\s+experience\b"
+    ),
+    re.compile(
         r"(?i)^\s*(?:(?:applicants?|candidates?)\s+(?:(?:are|must|should)\s+)?"
         r"(?:be\s+|have\s+)?)?(?:proficient|skilled|experienced)\s+in\s+"
         r"(?P<subject>.+?)(?=\s+(?:and\s+)?it\s+is\s+"
@@ -202,6 +209,11 @@ _SUBJECT_SYNTAX_PATTERNS = (
         r"(?:required|preferred|optional|mandatory)\b"
     ),
     re.compile(
+        r"(?i)^\s*(?:(?:but|however|and)\s+)?(?P<subject>.+?)"
+        r"(?:\s+(?:domain|sector))?\s+(?:experience|background|exposure)"
+        r"(?:\s+is)?\s+(?:required|preferred|optional|mandatory)\b"
+    ),
+    re.compile(
         r"(?i)^\s*(?P<subject>.+?)\s+(?:language|dili)\b"
     ),
 )
@@ -212,12 +224,16 @@ _PREFERRED_CONTRAST_RE = re.compile(
 )
 _BOUNDARY_RE = re.compile(r"(?:\r?\n)+|(?<=[.!?;])\s+")
 _BULLET_RE = re.compile(r"\s*(?:[-*•]|\d+[.)])\s*")
-_COORD_RE = re.compile(r"\s+(?:and|ve(?:\s+ya)?|or)\s+", re.I)
+_COORD_RE = re.compile(r"\s+(?:and|ve(?:\s+ya)?|or|while|whereas)\s+", re.I)
 _RESULT_TAIL_RE = re.compile(
-    r"\s+(?:(?:olan|bilen)\w*\s+)?(?:\d+\s+)?"
-    r"(?:nefer\s+)?(?:namized\w*\s+)?(?:goster|tap|cixart)\w*\s*$|"
+    r"\s+(?:(?:olan|bilen)\w*\s+)?(?:namized\w*\s+)?"
+    r"(?:\d+\s+)?(?:nefer\s+)?(?:namized\w*\s+)?"
+    r"(?:goster|tap|cixart)\w*\s*$|"
     r"\s+\d+\s+(?:nefer|namized\w*)\s*$",
     re.I,
+)
+_SUBORDINATE_PREFIX_RE = re.compile(
+    r"(?i)^\s*(?:although|though|while|whereas|because|if|when|unless)\b"
 )
 
 _LANGUAGE_ALIASES = {
@@ -257,9 +273,11 @@ _DOMAIN_HEADS = frozenset(
         "ifrs",
         "muhasibat",
         "project management",
+        "retail",
         "risk",
         "sales",
         "satis",
+        "treasury",
         "operations",
     }
 )
@@ -714,7 +732,7 @@ def _family(subject: str, source: str) -> JDDraftCriterionKind:
             return JDDraftCriterionKind.EXPERIENCE
         domain = canonicalize_domain(normalized)
         if (
-            re.search(r"\b(?:sahe\w*|sector\w*|domain)\b", folded)
+            re.search(r"\b(?:sahe\w*|sektor\w*|sector\w*|domain)\b", folded)
             or normalized in _DOMAIN_HEADS
             or domain in DOMAIN_SYNONYMS
             or any(normalized.endswith(f" {suffix}") for suffix in _DOMAIN_HEADS)
@@ -727,7 +745,7 @@ def _family(subject: str, source: str) -> JDDraftCriterionKind:
         return JDDraftCriterionKind.EDUCATION
     if _LANGUAGE_RE.search(folded) or _LANGUAGE_WRAPPER_RE.search(folded):
         return JDDraftCriterionKind.LANGUAGE
-    if re.search(r"\b(?:sahe\w*|sector\w*|domain)\b", folded):
+    if re.search(r"\b(?:sahe\w*|sektor\w*|sector\w*|domain)\b", folded):
         return JDDraftCriterionKind.DOMAIN_EXPERIENCE
     return JDDraftCriterionKind.SKILL
 
@@ -753,9 +771,15 @@ def _normalized_subject(family: JDDraftCriterionKind, source_subject: str, sourc
             return display_aliases.get(canonical, canonical)
         return normalized
     if family == JDDraftCriterionKind.DOMAIN_EXPERIENCE:
+        normalized = re.sub(r"(?i)(?:\s+|[-/])(?:domain|sector)$", "", normalized).strip()
         canonical = canonicalize_domain(_fold(normalized))
-        normalized = re.sub(r"(?i)\s+(?:domain|sector)$", "", normalized).strip()
-        return "Banking" if canonical == "banking" or _fold(normalized) == "bank" else normalized
+        if canonical == "banking" or _fold(normalized) == "bank":
+            return "Banking"
+        if canonical == "aml":
+            return "AML"
+        if canonical != _fold(normalized):
+            return canonical.title()
+        return normalized
     return normalized
 
 
@@ -782,6 +806,10 @@ def analyze_hr_text(jd_text: str) -> SemanticAnalysis:
     for start, end, shared in _split_units(jd_text):
         source = jd_text[start:end]
         if not source.strip() or is_result_count_only(source):
+            continue
+        if _SUBORDINATE_PREFIX_RE.search(source) and not _material(source):
+            # A sentence-level trailing modality must not turn an introductory
+            # subordinate clause into a professional requirement.
             continue
         if _ROLE_REQUEST_RE.search(_fold(source)):
             continue
@@ -827,7 +855,9 @@ def analyze_hr_text(jd_text: str) -> SemanticAnalysis:
             state = SemanticRequirementState.PROHIBITED
         elif negated:
             state = SemanticRequirementState.UNSUPPORTED
-        elif _COUNT_ENTITY_RE.search(_fold(source)):
+        elif _COUNT_ENTITY_RE.search(_fold(source)) and not (
+            result_count.requested is not None and _RESULT_TAIL_RE.search(_fold(source))
+        ):
             # Candidate/result quantities are workflow control, never a
             # professional criterion. Ambiguous count wording stays visible
             # for review; an unambiguous count-only unit was already consumed
@@ -848,11 +878,7 @@ def analyze_hr_text(jd_text: str) -> SemanticAnalysis:
         elif not normalized_subject and family != JDDraftCriterionKind.EXPERIENCE:
             state = SemanticRequirementState.NEEDS_HUMAN_REVIEW
         elif (
-            family
-            in (
-                JDDraftCriterionKind.EXPERIENCE,
-                JDDraftCriterionKind.SKILL_EXPERIENCE,
-            )
+            family in (JDDraftCriterionKind.EXPERIENCE, JDDraftCriterionKind.SKILL_EXPERIENCE)
             and min_years is None
         ):
             # Preserve the source family. A named experience claim without a

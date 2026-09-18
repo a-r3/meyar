@@ -47,6 +47,16 @@ DOMAIN_SYNONYMS: dict[str, frozenset[str]] = {
             "pulun yuyulmasinin qarsisinin alinmasi",
         }
     ),
+    "finance": frozenset(
+        {
+            "finance",
+            "financial sector",
+            "finance sector",
+            "maliyye",
+            "maliyye sahesi",
+            "maliyye sektoru",
+        }
+    ),
 }
 
 

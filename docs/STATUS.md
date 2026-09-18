@@ -2,7 +2,7 @@
 
 ## Current phase
 **Issue #44 AZ/EN generalization hardening has an independent-audit corrective
-implementation locally on `feat/agent-product-ux-jd-matching` (D-061), not
+implementation locally on `feat/agent-product-ux-jd-matching` (D-061/D-062), not
 pushed or merged.** D-055's
 canonical `RequirementSpan` architecture and every previously accepted
 candidate/JD/confirmation boundary remain intact. Confirmed agent vacancies
@@ -26,7 +26,13 @@ preserves professional families, rejects count expressions at the typed
 criterion boundary, reconciles every material span to one terminal state,
 supports truthful bidirectional modality follow-ups, and gives equivalent
 simple-search-in-vacancy-mode guidance in AZ/EN. Russian fails closed before
-inference. PR #42 remains NOT accepted.
+inference. D-062 completes the exact-browser correction: English recruitment
+wrappers and coordinating clauses retain only their attributable professional
+subjects; explicit presence-only domain experience uses the evaluator's
+existing optional-duration contract; context-only modality changes resolve
+only a unique source bucket; duration/top-K search executes deterministically;
+and wrong-mode guidance suppresses incompatible review copy.
+PR #42 remains NOT accepted.
 
 **Slice 13 — Security + Official Definition-of-Done Acceptance: implementation
 pass 1 MERGED (PR #22, squash SHA `a709ce1`, `Refs #20`); Target-Mac hardware

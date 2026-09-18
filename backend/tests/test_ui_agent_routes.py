@@ -2461,3 +2461,155 @@ async def test_agent_reset_does_not_affect_another_sessions_conversation(
 
     workspace_a = await client.get("/ui/agent")
     assert "salam" in workspace_a.text
+
+
+async def test_real_route_english_source_spans_render_without_wrappers(
+    client: AsyncClient, tenant_and_user, local_ui_settings: Settings
+) -> None:
+    from meyar.agent.schemas import JDCriteriaDraft
+
+    _tenant, user, password, _membership = tenant_and_user
+    app.dependency_overrides[get_llm_provider] = lambda: FakeLLMProvider(
+        jd_draft=JDCriteriaDraft(title="Reporting analyst")
+    )
+    csrf = await _login_and_csrf(client, user.username, password)
+    response = await client.post(
+        "/ui/agent",
+        data={
+            "message": (
+                "We need candidates with at least three years of Power BI experience. "
+                "English B2 is required, and retail experience is preferred. "
+                "Show the best 5 candidates."
+            ),
+            "intent": "draft_job_criteria",
+            "csrf_token": csrf,
+        },
+    )
+    assert response.status_code == 200
+    assert "Power BI" in response.text
+    assert "Retail" in response.text
+    assert "English" in response.text and "B2" in response.text
+    assert "ən çox 5 uyğun namizəd" in response.text
+    assert "We need candidates with</span>" not in response.text
+    assert 'data-value="and retail experience' not in response.text
+
+
+async def test_real_route_context_only_modality_followups_persist_both_directions(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
+) -> None:
+    from sqlalchemy import select
+
+    from meyar.agent.schemas import JDCriteriaDraft
+    from meyar.models.agent_conversation import AgentConversation
+
+    _tenant, user, password, _membership = tenant_and_user
+    app.dependency_overrides[get_llm_provider] = lambda: FakeLLMProvider(
+        jd_draft=JDCriteriaDraft(title="Backend")
+    )
+    csrf = await _login_and_csrf(client, user.username, password)
+    initial = await client.post(
+        "/ui/agent",
+        data={
+            "message": "SQL required. Python preferred.",
+            "intent": "draft_job_criteria",
+            "csrf_token": csrf,
+        },
+    )
+    assert initial.status_code == 200
+
+    promoted = await client.post(
+        "/ui/agent",
+        data={
+            "message": "Bu tələbi artıq üstünlük yox, əsas tələb et.",
+            "csrf_token": csrf,
+        },
+    )
+    assert promoted.status_code == 200
+    assert promoted.text.count('data-row-prefix="must"') == 2
+    assert promoted.text.count('data-row-prefix="pref"') == 0
+    assert "təhlükəsiz şəkildə tətbiq edilmədi" not in promoted.text
+
+    demoted = await client.post(
+        "/ui/agent",
+        data={
+            "message": "SQL-i əsas tələb yox, üstünlük et.",
+            "csrf_token": csrf,
+        },
+    )
+    assert demoted.status_code == 200
+    assert demoted.text.count('data-row-prefix="must"') == 1
+    assert demoted.text.count('data-row-prefix="pref"') == 1
+    conversation = (await db_session.execute(select(AgentConversation))).scalar_one()
+    pending = conversation.turns[-1]["pending_job_draft"]
+    assert [item["value"] for item in pending["must_have"]] == ["Python"]
+    assert [item["value"] for item in pending["preferred"]] == ["SQL"]
+
+
+async def test_real_route_duration_search_executes_without_generic_service_failure(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
+) -> None:
+    from sqlalchemy import func, select
+
+    from meyar.models.job import Job
+    from meyar.models.job_criteria_version import JobCriteriaVersion
+
+    _tenant, user, password, _membership = tenant_and_user
+    app.dependency_overrides[get_llm_provider] = lambda: FakeLLMProvider(
+        agent_decisions=[
+            AgentDecision(
+                action=AgentActionType.SEARCH_CANDIDATES,
+                search_query=(
+                    "Java üzrə minimum 4 il təcrübəsi olan namizədlərdən 5 nəfər göstər."
+                ),
+            ),
+            AgentDecision(
+                action=AgentActionType.FINAL_ANSWER,
+                response_code=AgentResponseCode.ACKNOWLEDGEMENT,
+            ),
+        ]
+    )
+    csrf = await _login_and_csrf(client, user.username, password)
+    response = await client.post(
+        "/ui/agent",
+        data={
+            "message": "Java üzrə minimum 4 il təcrübəsi olan namizədlərdən 5 nəfər göstər.",
+            "csrf_token": csrf,
+        },
+    )
+    assert response.status_code == 200
+    assert "MEYAR AI xidməti hazırda əlçatan deyil" not in response.text
+    assert "Sorğu etibarlı şəkildə icra olundu" in response.text
+    assert await db_session.scalar(select(func.count()).select_from(Job)) == 0
+    assert await db_session.scalar(select(func.count()).select_from(JobCriteriaVersion)) == 0
+
+
+async def test_wrong_mode_guidance_suppresses_incompatible_review_headings(
+    client: AsyncClient, tenant_and_user, local_ui_settings: Settings
+) -> None:
+    from meyar.agent.schemas import JDCriteriaDraft
+
+    _tenant, user, password, _membership = tenant_and_user
+    app.dependency_overrides[get_llm_provider] = lambda: FakeLLMProvider(
+        jd_draft=JDCriteriaDraft(title="unused")
+    )
+    csrf = await _login_and_csrf(client, user.username, password)
+    response = await client.post(
+        "/ui/agent",
+        data={
+            "message": "Show 5 candidates who know Java.",
+            "intent": "draft_job_criteria",
+            "csrf_token": csrf,
+        },
+    )
+    assert response.status_code == 200
+    assert "Bu mətn namizəd axtarışına bənzəyir" in response.text
+    assert "Aşağıdan əl ilə kriteriya əlavə edə bilərsiniz" not in response.text
+    assert "Mütləq tələblər" not in response.text
+    assert "Üstünlük tələbləri" not in response.text
+    assert "AI tərəfindən hazırlanmış qaralamadır" not in response.text

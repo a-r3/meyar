@@ -926,6 +926,11 @@ def _agent_turn_headline(
         if latest_view.tool_name == AgentActionType.DRAFT_JOB_CRITERIA.value:
             draft = latest_view.job_draft
             assert draft is not None
+            if draft.wrong_mode_guidance:
+                return (
+                    "Bu mətn namizəd axtarışına bənzəyir. Namizəd axtarışı rejimindən "
+                    "istifadə edin."
+                )
             total = len(draft.must_have_rows) + len(draft.preferred_rows)
             unsupported_total = len(draft.unsupported_must_have) + len(draft.unsupported_preferred)
             if (

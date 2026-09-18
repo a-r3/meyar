@@ -104,6 +104,7 @@
         <p class="alert alert-warning">Sorğuda nəticə sayı göstərilib, lakin təhlükəsiz şəkildə müəyyən edilmədi. Sayı dəqiqləşdirib yenidən analiz edin.</p>
         {% endif %}
 
+        {% if not draft.wrong_mode_guidance %}
         <h3>Mütləq tələblər</h3>
         {{ criteria_form.criterion_rows("must", draft.must_have_rows, kind_options, true) }}
         {% if draft.unsupported_must_have %}
@@ -155,11 +156,15 @@
         <p class="alert alert-warning">{{ draft.ungrounded_count }} tələb JD mətnində aydın təsdiqlənmədiyi üçün çıxarıldı.</p>
         {% endif %}
 
+        {% endif %}
+
+        {% if not draft.wrong_mode_guidance %}
         <p class="field-help">Bu, AI tərəfindən hazırlanmış qaralamadır — yekun qərar deyil. MEYAR-ın anladığı tələbləri yoxlayın. Tələbi dəyişmək, silmək və ya əlavə etmək üçün elanı yenidən analiz edin və ya ayrıca əl ilə vakansiya yaradın.</p>
         {% if confirmation_ready %}
         <button class="button" type="submit">Tələbləri təsdiqlə və namizədləri sırala</button>
         {% elif has_scorable and draft.requires_resolution %}
         <p class="field-help">Əvvəlcə yuxarıdakı dəqiqləşdirməni yadda saxlayın. Bundan sonra sıralama təsdiqi görünəcək.</p>
+        {% endif %}
         {% endif %}
       {% if confirmation_ready %}
       </form>

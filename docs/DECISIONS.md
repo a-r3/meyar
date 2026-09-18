@@ -4805,3 +4805,49 @@ tenant/session/draft isolation, confirmation idempotency, evidence provenance,
 identity exclusion, deterministic scoring/evaluation date, local-only Ollama,
 and no-fallback provider behavior. No migration, candidate Q&A/result-set
 comparison, deployment, model-option change, push, or merge is included.
+
+## D-062 — Exact-browser subject, domain-presence, follow-up, and search correction (issue #44)
+
+**Date:** 2026-09-18. **Status:** Local corrective implementation on exact
+audit base `12392c5113f38b25880ba36417ba5f3aefc57063`; PR #42 remains open
+and unaccepted.
+
+**Root causes:** English subject extraction did not consume ordinary
+recruitment prose and could attach sentence wrappers to the first experience
+criterion; coordinating/subordinate clauses were not always separated before
+slot assignment. Azerbaijani `sektorunda` was absent from generic domain
+grammar, while D-061's no-duration guard incorrectly included
+`DOMAIN_EXPERIENCE` despite its accepted optional `min_years` schema/evaluator
+contract. A context-only modality follow-up required a literal criterion name
+and did not recognize `əsas tələb`; the exact Java duration/top-K request was
+therefore also left to the model planner after a consumed result count made its
+otherwise-valid requirement look ambiguous. Wrong-mode template rows were
+empty, but the deterministic headline still promised criteria below.
+
+**Decision:**
+- Bounded leading recruitment prose, duration-first English experience syntax,
+  coordinating `while`/`whereas`, and non-material subordinate prefixes are
+  handled before one-to-one terminal-state reconciliation. Subject identity
+  remains an exact source occurrence; no product/domain sentence is special
+  cased.
+- Explicit sector/domain grammar remains open to unfamiliar professional
+  domains. Presence-only `DOMAIN_EXPERIENCE(subject, min_years=null)` is
+  scorable; duration remains mandatory for `SKILL_EXPERIENCE`. Central domain
+  aliases canonicalize Azerbaijani finance wording without limiting generic
+  sector grammar. IFRS is preserved as a presence-only domain acronym.
+- A pronoun/context-only modality request may select an unnamed target only
+  when exactly one criterion exists in the source modality. Named mismatches
+  and multiple possible targets still request clarification; successful
+  changes mint and persist a new server-owned pending-draft identity.
+- A recognized result-count tail is workflow control and no longer converts
+  the attached duration requirement to review. Ordinary search therefore
+  builds a structured Java-duration plan and treats zero matches as a valid
+  result, not provider failure.
+- Wrong-mode guidance now replaces the incompatible headline, headings,
+  actions, and draft-review help text; routing and persistence behavior are
+  unchanged.
+
+**Unchanged:** protected policy, candidate/JD factual authority, deterministic
+evaluator and scoring, tenant/session/CSRF/draft authorization, confirmation
+idempotency, identity exclusion, local-only Ollama, and the prohibition on
+candidate result-set Q&A/comparison. No migration, push, or merge is included.

@@ -543,6 +543,157 @@ def test_pending_followup_moves_modality_both_directions_without_mutating_other_
 
 
 @pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            "For this reporting role, we need applicants with at least four years of "
+            "Tableau experience.",
+            ("Tableau", JDDraftCriterionKind.SKILL_EXPERIENCE, 4.0),
+        ),
+        (
+            "Candidates who possess at least two years of Kubernetes experience are required.",
+            ("Kubernetes", JDDraftCriterionKind.SKILL_EXPERIENCE, 2.0),
+        ),
+        (
+            "Although the role is senior, at least five years of Python experience is required.",
+            ("Python", JDDraftCriterionKind.SKILL_EXPERIENCE, 5.0),
+        ),
+        (
+            "Experience in insurance sector is preferred.",
+            ("insurance", JDDraftCriterionKind.DOMAIN_EXPERIENCE, None),
+        ),
+        (
+            "Treasury experience is preferred while English C1 is required.",
+            ("Treasury", JDDraftCriterionKind.DOMAIN_EXPERIENCE, None),
+        ),
+    ],
+)
+def test_fresh_english_professional_phrasings_keep_exact_subjects(text: str, expected) -> None:
+    analysis = analyze_hr_text(text)
+    matches = [item for item in analysis.requirements if item.normalized_subject == expected[0]]
+    assert matches, [(item.normalized_subject, item.state) for item in analysis.requirements]
+    assert (matches[0].criterion_family, matches[0].min_years) == expected[1:]
+    assert matches[0].state == SemanticRequirementState.SCORABLE
+
+
+def test_english_coordinating_clause_reconciles_each_material_requirement_once() -> None:
+    analysis = analyze_hr_text(
+        "Treasury experience is preferred while English C1 is required."
+    )
+    assert [
+        (
+            item.state,
+            item.criterion_family,
+            item.normalized_subject,
+            item.criterion_type,
+            item.required_level,
+        )
+        for item in analysis.requirements
+    ] == [
+        (
+            SemanticRequirementState.SCORABLE,
+            JDDraftCriterionKind.DOMAIN_EXPERIENCE,
+            "Treasury",
+            CriterionType.PREFERRED,
+            None,
+        ),
+        (
+            SemanticRequirementState.SCORABLE,
+            JDDraftCriterionKind.LANGUAGE,
+            "English",
+            CriterionType.MUST_HAVE,
+            "C1",
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("text", "subject", "criterion_type"),
+    [
+        ("Sığorta sektorunda təcrübə üstünlükdür.", "Sığorta", CriterionType.PREFERRED),
+        ("Audit sahəsində təcrübə tələb olunur.", "Audit", CriterionType.MUST_HAVE),
+        ("Logistika sahəsində təcrübə arzuolunandır.", "Logistika", CriterionType.PREFERRED),
+        ("Enerji sektorunda təcrübə vacibdir.", "Enerji", CriterionType.MUST_HAVE),
+        ("Pərakəndə sahəsində təcrübə üstünlük sayılsın.", "Pərakəndə", CriterionType.PREFERRED),
+    ],
+)
+def test_fresh_azerbaijani_domain_phrasings_are_presence_capable(
+    text: str, subject: str, criterion_type: CriterionType
+) -> None:
+    item = analyze_hr_text(text).requirements[0]
+    assert item.state == SemanticRequirementState.SCORABLE
+    assert item.criterion_family == JDDraftCriterionKind.DOMAIN_EXPERIENCE
+    assert item.normalized_subject == subject
+    assert item.criterion_type == criterion_type
+    assert item.min_years is None
+
+
+def test_ifrs_presence_only_domain_matches_the_evaluator_contract() -> None:
+    result = asyncio.run(
+        _dispatch_draft_job_criteria(
+            FakeLLMProvider(jd_draft=JDCriteriaDraft(title="Accountant")),
+            jd_text="IFRS təcrübəsi tələb olunur.",
+        )
+    )
+    assert result is not None and result.job_draft is not None
+    assert len(result.job_draft.must_have) == 1
+    criterion = result.job_draft.must_have[0]
+    assert (
+        criterion.kind,
+        criterion.value,
+        criterion.min_years,
+        criterion.type,
+    ) == (
+        CriterionKind.DOMAIN_EXPERIENCE,
+        "IFRS",
+        None,
+        CriterionType.MUST_HAVE,
+    )
+
+    accounting = asyncio.run(
+        _dispatch_draft_job_criteria(
+            FakeLLMProvider(jd_draft=JDCriteriaDraft(title="Accountant")),
+            jd_text="Minimum 4 il mühasibat təcrübəsi tələb olunur.",
+        )
+    )
+    assert accounting is not None and accounting.job_draft is not None
+    assert accounting.job_draft.must_have[0].value == "Mühasibat"
+
+
+@pytest.mark.parametrize(
+    ("text", "subject", "years", "limit"),
+    [
+        ("Show 9 candidates with at least 3 years of Rust experience.", "Rust", 3.0, 9),
+        ("Go üzrə minimum 6 il təcrübəsi olan 4 namizəd göstər.", "Go", 6.0, 4),
+        (
+            "Return the best 7 applicants with 2+ years of Snowflake experience.",
+            "Snowflake",
+            2.0,
+            7,
+        ),
+    ],
+)
+def test_duration_and_top_k_remain_independent_on_fresh_forms(
+    text: str, subject: str, years: float, limit: int
+) -> None:
+    analysis = analyze_hr_text(text)
+    assert analysis.result_count.requested == limit
+    assert len(analysis.requirements) == 1
+    item = analysis.requirements[0]
+    assert (
+        item.state,
+        item.criterion_family,
+        item.normalized_subject,
+        item.min_years,
+    ) == (
+        SemanticRequirementState.SCORABLE,
+        JDDraftCriterionKind.SKILL_EXPERIENCE,
+        subject,
+        years,
+    )
+
+
+@pytest.mark.parametrize(
     "text",
     [
         "ClickHouse bilən namizədləri göstər",

@@ -643,7 +643,11 @@ def _source_language_level(span: RequirementSpan) -> str | None:
 def _canonical_display_subject(kind: JDDraftCriterionKind, subject: str) -> str:
     if kind == JDDraftCriterionKind.DOMAIN_EXPERIENCE:
         canonical = "banking" if subject == "bank" else canonicalize_domain(subject)
-        return canonical.title()
+        if subject.isupper():
+            return subject
+        if canonical != _normalize_source_text(subject):
+            return canonical.title()
+        return subject[:1].upper() + subject[1:]
     normalized = (
         normalize_skill_name(subject)
         if kind
@@ -992,6 +996,8 @@ def _build_authorized_semantic_draft(
             assert semantic.criterion_type is not None
             kind = CriterionKind(semantic.criterion_family.value)
             subject = semantic.normalized_subject or span.text
+            if semantic.criterion_family == JDDraftCriterionKind.DOMAIN_EXPERIENCE:
+                subject = _canonical_display_subject(semantic.criterion_family, subject)
             value = None if kind == CriterionKind.EXPERIENCE else subject
             try:
                 criterion = CriterionIn(
@@ -1392,13 +1398,19 @@ _FOLLOWUP_RE = re.compile(
     r"(?i)\b(?:yox|et|dəyiş|deyis|saxla|make|change|instead|not\s+mandatory|"
     r"məcburi\s+etmə|mecburi\s+etme|required|preferred|ustunluk|mecburi)\b"
 )
+_CONTEXT_ONLY_TARGET_RE = re.compile(
+    r"(?i)\b(?:(?:this|that|the)\s+(?:(?:required|preferred)\s+)?"
+    r"(?:requirement|criterion)|(?:bu|hemin)\s+teleb\w*)\b"
+)
 
 
 def _requested_followup_modality(text: str) -> CriterionType | None:
     """Resolve an explicit modality mutation without guessing from keywords."""
     folded = _fold(text)
     preferred = r"(?:preferred|ustunluk\w*)"
-    required = r"(?:required|mandatory|must(?:\s+have)?|mecburi\w*|mutleq\w*)"
+    required = (
+        r"(?:required|mandatory|must(?:\s+have)?|mecburi\w*|mutleq\w*|esas\s+teleb)"
+    )
     # In "X instead of Y", X is the requested state. In "from X to Y"
     # and Azerbaijani "X yox, Y", Y is the requested state.
     instead = re.search(r"(?i)\binstead\s+of\b", folded)
@@ -1505,7 +1517,18 @@ def _apply_pending_draft_followup(
             alias and re.search(rf"(?<!\w){re.escape(alias)}(?!\w)", folded) for alias in aliases
         )
 
+    requested_type = _requested_followup_modality(user_message)
     targets = [criterion for criterion in all_criteria if is_mentioned(criterion)]
+    if (
+        not targets
+        and requested_type is not None
+        and _CONTEXT_ONLY_TARGET_RE.search(folded)
+    ):
+        # A context-only phrase such as "make this preferred requirement
+        # required" is safe only when the pending server-owned draft has
+        # exactly one criterion in the source modality.  More than one is
+        # genuinely ambiguous and must continue to fail truthfully.
+        targets = [criterion for criterion in all_criteria if criterion.type != requested_type]
     if len(targets) != 1:
         return None
     target = targets[0]
@@ -1550,7 +1573,6 @@ def _apply_pending_draft_followup(
                 }
             )
 
-    requested_type = _requested_followup_modality(user_message)
     if requested_type is not None and requested_type != target.type:
         replacement = target.model_copy(update={"type": requested_type})
         updated_must_have = [item for item in draft.must_have if item.id != target.id]
