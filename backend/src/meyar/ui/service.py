@@ -711,6 +711,27 @@ async def _agent_candidate_profile_view(
     )
 
 
+def _search_presentation_key(view: AgentToolResultView) -> str:
+    """Identify only search results that render identically for HR.
+
+    The agent may retain multiple search tool calls for audit/provenance, but
+    repeating the same effective candidates (or the same empty answer) is one
+    user-visible result set.  Match labels, evidence, order, and semantic-score
+    visibility remain part of the key so genuinely distinct result sets are
+    never collapsed.
+    """
+    assert view.search_outcome is not None
+    if not view.search_results:
+        return "empty"
+    return json.dumps(
+        {
+            "show_semantic_score": view.search_outcome.mode in ("SEMANTIC_ONLY", "HYBRID"),
+            "results": [item.model_dump(mode="json") for item in view.search_results],
+        },
+        sort_keys=True,
+    )
+
+
 async def build_agent_turn_view(
     db: AsyncSession, *, tenant_id: uuid.UUID, result: AgentTurnResult
 ) -> AgentTurnView:
@@ -721,6 +742,7 @@ async def build_agent_turn_view(
     already run; this function never feeds anything back into a model
     prompt. See docs/DECISIONS.md D-035."""
     tool_result_views: list[AgentToolResultView] = []
+    visible_search_presentations: set[str] = set()
     for tool_result in result.tool_results:
         if tool_result.tool_name == AgentActionType.SEARCH_CANDIDATES:
             assert tool_result.search is not None
@@ -730,16 +752,22 @@ async def build_agent_turn_view(
                 if search_response is not None
                 else []
             )
-            tool_result_views.append(
-                AgentToolResultView(
-                    tool_name=tool_result.tool_name.value,
-                    search_outcome=planner_outcome_view(
-                        tool_result.search.response.plan,
-                        result_count=search_response.result_count if search_response else None,
-                    ),
-                    search_results=search_results,
-                )
+            search_view = AgentToolResultView(
+                tool_name=tool_result.tool_name.value,
+                search_outcome=planner_outcome_view(
+                    tool_result.search.response.plan,
+                    result_count=search_response.result_count if search_response else None,
+                ),
+                search_results=search_results,
             )
+            search_outcome = search_view.search_outcome
+            assert search_outcome is not None
+            if search_outcome.executable:
+                presentation_key = _search_presentation_key(search_view)
+                if presentation_key in visible_search_presentations:
+                    continue
+                visible_search_presentations.add(presentation_key)
+            tool_result_views.append(search_view)
         elif tool_result.tool_name == AgentActionType.DRAFT_JOB_CRITERIA:
             assert tool_result.job_draft is not None
             draft = tool_result.job_draft

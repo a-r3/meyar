@@ -13,7 +13,7 @@
 {% for tool_result in latest.tool_results %}
   {% if tool_result.tool_name == "SEARCH_CANDIDATES" and tool_result.search_outcome.executable %}
   {% if not tool_result.search_results %}
-  <div class="empty-state"><h2>Nəticə tapılmadı</h2><p>Sorğu etibarlı şəkildə icra olundu, lakin uyğun namizəd yoxdur.</p></div>
+  <div class="empty-state"><h2>Nəticə tapılmadı</h2><p>Sorğu şərtləri əsasında uyğun namizəd yoxdur.</p></div>
   {% endif %}
   <div class="result-list">
     {% for item in tool_result.search_results %}

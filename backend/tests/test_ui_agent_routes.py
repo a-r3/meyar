@@ -229,6 +229,76 @@ async def test_search_candidates_turn_renders_grounded_results_not_model_text(
     assert response.status_code == 200
     assert str(candidate.id) in response.text
     assert "Python tələbinə uyğun 1 namizəd tapdım." in response.text
+    assert response.text.count('class="result-card"') == 1
+    assert 'class="empty-state"' not in response.text
+
+
+async def test_equivalent_zero_result_search_tools_render_one_empty_state(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
+) -> None:
+    """Distinct internal calls that converge to one visible answer stay audited.
+
+    A small local model can rephrase its follow-up SEARCH_CANDIDATES decision,
+    bypassing the exact-query guard while producing the same effective empty
+    result.  The presentation must collapse that one answer without deleting
+    either underlying tool operation.
+    """
+    from sqlalchemy import select
+
+    from meyar.models.audit_event import AuditEvent
+
+    tenant, user, password, _membership = tenant_and_user
+    fake = FakeLLMProvider(
+        planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["NoMatch"])),
+        agent_decisions=[
+            AgentDecision(
+                action=AgentActionType.SEARCH_CANDIDATES,
+                search_query="NoMatch üzrə namizədləri göstər",
+            ),
+            AgentDecision(
+                action=AgentActionType.SEARCH_CANDIDATES,
+                search_query="NoMatch bacarığı olan namizədləri göstər",
+            ),
+            AgentDecision(
+                action=AgentActionType.FINAL_ANSWER,
+                response_code=AgentResponseCode.ACKNOWLEDGEMENT,
+            ),
+        ],
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake
+    csrf = await _login_and_csrf(client, user.username, password)
+
+    response = await client.post(
+        "/ui/agent", data={"message": "NoMatch namizədlərini göstər", "csrf_token": csrf}
+    )
+
+    assert response.status_code == 200
+    assert response.text.count('class="empty-state"') == 1
+    assert response.text.count("Nəticə tapılmadı") == 1
+    assert "Sorğu şərtləri əsasında uyğun namizəd yoxdur." in response.text
+    assert response.text.count('class="agent-turn agent-turn-user"') == 1
+    assert response.text.count('class="agent-turn agent-turn-assistant"') == 1
+    assert response.text.index('class="agent-turn agent-turn-user"') < response.text.index(
+        'class="agent-turn agent-turn-assistant"'
+    ) < response.text.index('class="composer-panel"')
+
+    executed = (
+        await db_session.execute(
+            select(AuditEvent).where(
+                AuditEvent.tenant_id == tenant.id,
+                AuditEvent.event_type == "agent.tool.executed",
+            )
+        )
+    ).scalars()
+    search_events = [
+        event
+        for event in executed
+        if event.event_metadata.get("tool_name") == AgentActionType.SEARCH_CANDIDATES.value
+    ]
+    assert [event.event_metadata["tool_call_index"] for event in search_events] == [1, 2]
 
 
 async def test_multi_turn_ordinal_reference_over_http(
@@ -2584,7 +2654,7 @@ async def test_real_route_duration_search_executes_without_generic_service_failu
     )
     assert response.status_code == 200
     assert "MEYAR AI xidməti hazırda əlçatan deyil" not in response.text
-    assert "Sorğu etibarlı şəkildə icra olundu" in response.text
+    assert "Sorğu şərtləri əsasında uyğun namizəd yoxdur." in response.text
     assert await db_session.scalar(select(func.count()).select_from(Job)) == 0
     assert await db_session.scalar(select(func.count()).select_from(JobCriteriaVersion)) == 0
 
