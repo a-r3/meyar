@@ -155,8 +155,27 @@ _AZ_PROTECTED_MUTATED_FORMS = frozenset(
 _PROTECTED_CONCEPT_PATTERNS = (
     # Nationality / citizenship.
     re.compile(
-        r"(?i)\b(?:national(?:ity|ities)|citizen(?:ship)?|passport\s+holder|"
-        r"right\s+to\s+citizenship)\b"
+        r"(?i)\b(?:nationalit(?:y|ies)|citizen(?:s|ship)?|"
+        r"right\s+to\s+citizenship|country\s+of\s+citizenship)\b"
+    ),
+    # Personal passport-holder eligibility is a citizenship proxy. Keep the
+    # person/holder grammar mandatory so technical uses such as "passport
+    # authentication system" remain valid professional material.
+    re.compile(
+        r"(?i)\b(?:"
+        r"passport(?:s|['’]s)?\s+(?:holders?|holding\s+(?:applicants?|candidates?|people|persons?))|"
+        r"passport[- ]holding\s+(?:applicants?|candidates?|people|persons?)|"
+        r"holders?\s+of\s+(?:(?:this|that|the|their|our|a)\s+)?"
+        r"(?:country(?:['’]s)?\s+)?passports?|"
+        r"(?:applicants?|candidates?|people|persons?)\s+(?:who\s+)?hold(?:ing|s)?\s+"
+        r"(?:(?:this|that|the|their|our|a)\s+)?(?:country(?:['’]s)?\s+)?passports?|"
+        r"(?:this|that|the|their|our)\s+country(?:['’]s)?\s+passport\s+holders?"
+        r")\b"
+    ),
+    re.compile(
+        r"(?i)\b(?:nationals\b|nationals?\s+of\s+(?:this|that|the|a|an|our|their)\s+country|"
+        r"(?:applicants?|candidates?|people|persons?)\s+(?:must\s+be|are|who\s+are)\s+"
+        r"(?:a\s+)?nationals?)\b"
     ),
     re.compile(r"(?i)\b(?:vetendas|milliyyet)\w*\b"),
     # Age expressed directly, comparatively, or as an age band.
@@ -293,8 +312,12 @@ _NON_SUBJECT_GRAMMAR_RE = re.compile(
     r"nice\s+to\s+have|teleb\w*|mecburi\w*|ustunluk\w*)\b"
 )
 _COUNT_LIKE_SUBJECT_RE = re.compile(
-    r"(?i)^\s*(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+"
-    r"(?:certificat(?:e|ion)s?|degrees?|skills?|languages?|candidates?|results?)\s*$"
+    r"(?i)^\s*(?:(?:at\s+least|minimum|en\s+azi|maksimum|en\s+cox)\s+)?"
+    r"(?:\d+(?:[.,]\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|"
+    r"bir|iki|uc|dord|bes|alti|yeddi|sekkiz|doqquz|on)"
+    r"(?:\s+(?:eded|den[eə]|nefer|certificat(?:e|ion)s?|sertifikat\w*|degrees?|"
+    r"skills?|languages?|candidates?|applicants?|results?|profiles?|namized\w*|"
+    r"netice\w*))?\s*$"
 )
 _LANGUAGE_SUBJECT_RE = re.compile(
     r"(?i)^[^\W\d_]+(?:[- ][^\W\d_]+){0,2}(?:\s+(?:language|dili))?$"

@@ -893,7 +893,10 @@ def build_agent_job_draft_view(draft: AgentJobDraftToolResult) -> AgentJobDraftV
             )
             for item in draft.needs_review
         ],
-        requires_resolution=any(item.allowed_types for item in draft.needs_review),
+        requires_resolution=(
+            draft.result_limit_needs_review
+            or any(item.allowed_types for item in draft.needs_review)
+        ),
         prohibited_count=draft.prohibited_count,
         ungrounded_count=draft.ungrounded_count,
         unsupported_language=draft.unsupported_language is not None,

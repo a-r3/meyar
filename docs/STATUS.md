@@ -34,6 +34,18 @@ only a unique source bucket; duration/top-K search executes deterministically;
 and wrong-mode guidance suppresses incompatible review copy.
 PR #42 remains NOT accepted.
 
+**Issue #44 final-audit parser correction (D-063) is implemented locally on
+the required independent-audit base.** Passport-holder/national eligibility
+proxies are protected by person-context grammar while technical passport
+systems remain professional material; result-limit parsing exposes explicit
+ABSENT/VALID/AMBIGUOUS/OUT_OF_RANGE state plus complete consumed source
+occurrences; quantifiers cannot become typed professional identities; named
+certifications survive adjacent quantity language; discourse wrappers are
+excluded from exact subject offsets; and unambiguous English presence-only
+domain experience uses the accepted optional-duration evaluator contract.
+The accepted scoring, candidate authority, session/confirmation, ordinary
+search, local-only Ollama, and presentation architectures are unchanged.
+
 **Slice 13 — Security + Official Definition-of-Done Acceptance: implementation
 pass 1 MERGED (PR #22, squash SHA `a709ce1`, `Refs #20`); Target-Mac hardware
 gate PENDING.** Original-CV access, no-exfiltration formal verification,

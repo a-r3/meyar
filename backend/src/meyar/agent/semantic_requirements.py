@@ -24,6 +24,7 @@ from meyar.agent.schemas import (
 from meyar.core.domain_terms import DOMAIN_SYNONYMS, canonicalize_domain
 from meyar.core.result_count import (
     ResultCountIntent,
+    ResultCountState,
     extract_result_count_intent,
     is_result_count_only,
 )
@@ -85,7 +86,8 @@ _REQUIRED_RE = re.compile(
     re.I,
 )
 _MINIMUM_RE = re.compile(
-    rf"\b(?:at\s+least|minimum|min\.?|en\s+azi)\s+(?P<number>{_NUMBER_TOKEN})\b|"
+    rf"\b(?:at\s+least|minimum|min\.?|en\s+azi)\s+(?P<number>{_NUMBER_TOKEN})\s*"
+    r"(?:years?|yrs?|il)\b|"
     rf"\b(?P<plus>{_NUMBER_TOKEN})\s*\+\s*(?:years?|yrs?|il)\b|"
     rf"\b(?P<not_less>{_NUMBER_TOKEN})\s*(?:years?|yrs?|il)(?:den)?\s+az\s+olmasin\b",
     re.I,
@@ -110,8 +112,14 @@ _LANGUAGE_RE = re.compile(
 _LANGUAGE_WRAPPER_RE = re.compile(
     r"(?i)\b(?P<subject>[^,.;:\d]{2,60}?)\s+(?:language|dili)\b"
 )
-_CERT_RE = re.compile(r"\b(?:certificat(?:e|ion|ed)?s?|sertifikat\w*)\b", re.I)
+_CERT_RE = re.compile(
+    r"\b(?:certificat(?:e|ion|ed)?s?|credentials?|sertifikat\w*)\b", re.I
+)
 _CERTIFICATION_NAMES = frozenset({"acca", "acams", "cfa", "cia", "cisa", "pmp"})
+_CERT_QUANTITY_RE = re.compile(
+    rf"(?i)\b(?:(?:at\s+least|minimum|en\s+azi)\s+)?{_NUMBER_TOKEN}\s+"
+    r"(?:relevant\s+|cloud\s+)?(?:certificat(?:e|ion)s?|credentials?|sertifikat\w*)\b"
+)
 _EDUCATION_RE = re.compile(
     r"\b(?:education|degree|bachelor(?:['’]s)?|master(?:['’]s)?|university|"
     r"tehsil\w*|bakalavr\w*|magistr\w*)\b",
@@ -119,7 +127,7 @@ _EDUCATION_RE = re.compile(
 )
 _EDUCATION_SUBJECT_RE = re.compile(
     r"\b(?:bachelor(?:['’]s)?(?:\s+degree)?|master(?:['’]s)?(?:\s+degree)?|"
-    r"university\s+degree|bakalavr\w*|magistr\w*)"
+    r"university\s+degree|bakalavr\w*(?:\s+derece\w*)?|magistr\w*(?:\s+derece\w*)?)"
     r"(?:\s+(?:in|uzre)\s+[a-z0-9əçşöüğ\s&+./-]+?)?"
     r"(?=\s+(?:is\s+)?(?:required|preferred|optional|mandatory|teleb\w*|"
     r"ustunluk\w*|mecburi\w*)\b|[.,;:]|$)",
@@ -165,7 +173,7 @@ _PROFESSIONAL_CUE_RE = re.compile(
 )
 _COUNT_ENTITY_RE = re.compile(
     rf"(?i)\b(?:top\s*)?{_NUMBER_TOKEN}\s+"
-    r"(?:candidates?|applicants?|results?|profiles?|namized\w*|nefer)\b|"
+    r"(?:candidates?|applicants?|results?|profiles?|namized\w*|netice\w*|nefer(?:i)?)\b|"
     rf"\b(?:show|find|display|list|return|goster\w*|tap\w*|cixart\w*)\s+"
     rf"(?:up\s+to\s+|at\s+most\s+|en\s+cox\s+)?{_NUMBER_TOKEN}\b"
 )
@@ -194,18 +202,18 @@ _SUBJECT_SYNTAX_PATTERNS = (
         r"(?i)^\s*(?P<subject>.+?)(?:-(?:dan|den))?\s+istifade\w*\b"
     ),
     re.compile(
-        r"(?i)^\s*(?:(?:amma|lakin|hemcinin|ve|but|however|and)\s+)?"
+        r"(?i)^\s*(?:(?:amma|lakin|hemcinin|ve|but|however|and|while|whereas)\s+)?"
         r"(?P<subject>.+?)(?:-(?:ni|nu|n[uü]|i|ı|u|ü))?\s+"
         r"(?:(?:yaxsi|ela|guclu)\s+)?(?:biliy\w*|bilm\w*|bils\w*|bacariq\w*)\b"
     ),
     re.compile(
-        r"(?i)^\s*(?:(?:amma|lakin|hemcinin|ve|but|however|and)\s+)?"
+        r"(?i)^\s*(?:(?:amma|lakin|hemcinin|ve|but|however|and|while|whereas)\s+)?"
         r"(?P<subject>.+?)\s+(?:uzre|sahesinde|sektorunda)\s+"
         r"(?:tecrube\w*|islemis|isley\w*)\b"
     ),
     re.compile(
-        r"(?i)^\s*(?:experience|background|exposure)\s+in\s+"
-        r"(?P<subject>.+?)(?:\s+(?:domain|sector))?(?:\s+is)?\s+"
+        r"(?i)^\s*(?:experience|background|exposure)\s+(?:in|within)\s+"
+        r"(?:the\s+)?(?P<subject>.+?)(?:\s+(?:domain|sector|industry))?(?:\s+is)?\s+"
         r"(?:required|preferred|optional|mandatory)\b"
     ),
     re.compile(
@@ -379,7 +387,29 @@ def _split_units(text: str) -> list[tuple[int, int, tuple[int, int] | None]]:
             + list(_REQUIRED_RE.finditer(folded_sentence))
         )
         shared: tuple[int, int] | None = None
-        if len(modality_matches) == 1 and not _PREFERRED_RE.search(modality_matches[0].group(0)):
+        certification_list = bool(
+            _CERT_RE.search(folded_sentence)
+            and re.search(r"(?i)\b(?:including|include|such\s+as|namely)\b", folded_sentence)
+        )
+        certification_list_match = re.search(
+            r"(?i)\b(?:including|include|such\s+as|namely)\b", folded_sentence
+        )
+        certification_shared: tuple[int, int] | None = None
+        if certification_list and certification_list_match:
+            preceding_modalities = [
+                match
+                for match in modality_matches
+                if match.end() <= certification_list_match.start()
+            ]
+            if preceding_modalities:
+                match = max(preceding_modalities, key=lambda item: item.end())
+                certification_shared = (
+                    sentence_start + match.start(),
+                    sentence_start + match.end(),
+                )
+        if len(modality_matches) == 1 and (
+            not _PREFERRED_RE.search(modality_matches[0].group(0)) or certification_list
+        ):
             match = modality_matches[0]
             # Folding preserves character count for the supported alphabet.
             shared = (sentence_start + match.start(), sentence_start + match.end())
@@ -437,6 +467,20 @@ def _split_units(text: str) -> list[tuple[int, int, tuple[int, int] | None]]:
                 clause = text[clause_start:clause_end]
 
             local_shared = shared
+            if local_shared is None and preamble:
+                with_match = re.search(r"(?i)\b(?:with|who\s+have)\b", sentence)
+                if with_match:
+                    local_shared = (
+                        sentence_start + with_match.start(),
+                        sentence_start + with_match.end(),
+                    )
+            if (
+                local_shared is None
+                and certification_shared is not None
+                and certification_list_match is not None
+                and clause_end > sentence_start + certification_list_match.start()
+            ):
+                local_shared = certification_shared
             local_folded = _fold(clause)
             local_modalities = (
                 list(_NEGATIVE_RE.finditer(local_folded))
@@ -467,6 +511,13 @@ def _split_units(text: str) -> list[tuple[int, int, tuple[int, int] | None]]:
                 and (
                     _material(clause[: coordinated[0].start()])
                     or _material(clause[coordinated[0].end() :])
+                    or (
+                        local_shared is not None
+                        and certification_list
+                        and re.search(
+                            r"(?i)\b(?:including|include|such\s+as|namely)\b", clause
+                        )
+                    )
                 )
             )
             if not should_split:
@@ -592,6 +643,13 @@ def _subject_bounds(text: str, start: int, end: int) -> tuple[int, int]:
         if match:
             subject_start = start + match.start("subject")
             subject_end = start + match.end("subject")
+            discourse_prefix = re.match(
+                r"(?i)\s*(?:while|whereas|and|but|however|"
+                r"hemcinin|ve|amma|lakin|ise|de|da)\s+",
+                _fold(text[subject_start:subject_end]),
+            )
+            if discourse_prefix:
+                subject_start += discourse_prefix.end()
             while subject_end > subject_start and text[subject_end - 1] in " .;,:":
                 subject_end -= 1
             hyphen_case = re.search(
@@ -627,18 +685,18 @@ def _subject_bounds(text: str, start: int, end: int) -> tuple[int, int]:
     # substituting) so the surviving subject offsets remain exact.
     wrapper_patterns = (
         re.compile(
-            r"(?i)^\s*(?:(?:but|however|and|amma|lakin|hemcinin)\s+)?"
+            r"(?i)^\s*(?:(?:but|however|and|while|whereas|amma|lakin|hemcinin|ve|ise|de|da)\s+)?"
             r"(?:minimum|at\s+least|en\s+azi|find|show|mene|applicants?|namizəd\w*|"
             r"namized\w*|candidates?)\s+(?:are\s+|must\s+(?:be\s+|have\s+)?|"
             r"should\s+(?:be\s+|have\s+)?)?"
         ),
         re.compile(
-            r"(?i)^\s*(?:(?:but|however|and|amma|lakin|hemcinin)\s+|"
+            r"(?i)^\s*(?:(?:but|however|and|while|whereas|amma|lakin|hemcinin|ve|ise|de|da)\s+|"
             r"(?:are|be|have)\s+|(?:proficient|skilled|experienced)\s+in\s+|"
             r"(?:knowledge|command)\s+of\s+|(?:familiarity|familiar)\s+with\s+)+"
         ),
         re.compile(
-            r"(?i)\s+(?:uzre|ile|sahesi|sahesinde|sektorunda(?:\s+is)?|"
+            r"(?i)\s+(?:uzre|ucun|ile|sahesi|sahesinde|sektorunda(?:\s+is)?|"
             r"sector\s+experience|bilen(?:lere)?|olan|olan\s+namized\w*|"
             r"olan\s+namized\w*\s+(?:goster|tap|cixart)\w*|at|or\s+higher|higher)\s*$"
         ),
@@ -654,6 +712,8 @@ def _subject_bounds(text: str, start: int, end: int) -> tuple[int, int]:
         re.compile(r"(?i)^\s*(?:of|in|with)\s+"),
         re.compile(r"(?i)\s+(?:but\s+it|is|it\s+is)\s*$"),
         re.compile(r"(?i)^\s*(?:de|da)\s+"),
+        re.compile(r"(?i)^\s*(?:including|include|such\s+as|namely)\s+"),
+        re.compile(r"(?i)\s+(?:ise|de|da)\s*$"),
     )
     changed = True
     while changed:
@@ -718,7 +778,9 @@ def _language_subject(source: str) -> str | None:
     return None
 
 
-def _family(subject: str, source: str) -> JDDraftCriterionKind:
+def _family(
+    subject: str, source: str, *, certification_context: bool = False
+) -> JDDraftCriterionKind:
     folded = _fold(source)
     if _SOFT_UNSUPPORTED_RE.search(folded):
         return JDDraftCriterionKind.OTHER
@@ -731,6 +793,31 @@ def _family(subject: str, source: str) -> JDDraftCriterionKind:
         if not normalized:
             return JDDraftCriterionKind.EXPERIENCE
         domain = canonicalize_domain(normalized)
+        # Presence-only experience has no skill-duration semantics. Treat the
+        # explicit English family wrappers as domain authority unless the
+        # subject is structurally technical (known alias, acronym, camel case,
+        # or syntax-bearing product identity). This is grammar-based and does
+        # not require a sector whitelist; genuinely ambiguous technical names
+        # remain SKILL_EXPERIENCE and therefore review-only without duration.
+        source_subject = subject.strip()
+        technical_identity = (
+            normalized in SKILL_ALIASES
+            or normalize_skill_name(normalized) in SKILL_ALIASES.values()
+            or bool(re.search(r"[0-9+#./]", source_subject))
+            or (source_subject.isupper() and len(source_subject) > 1)
+            or bool(re.search(r"[a-z][A-Z]", source_subject))
+        )
+        english_presence_wrapper = bool(
+            not _DURATION_RE.search(folded)
+            and re.search(
+                r"(?i)(?:\bexperience\s+(?:in|within)\b|\bbackground\s+in\b|"
+                r"\b(?:experience|background)\s+(?:within\s+)?(?:the\s+)?[^.;,]+\s+"
+                r"(?:sector|industry)\b|\b[^.;,]+\s+(?:experience|background)\b)",
+                folded,
+            )
+        )
+        if english_presence_wrapper and not technical_identity:
+            return JDDraftCriterionKind.DOMAIN_EXPERIENCE
         if (
             re.search(r"\b(?:sahe\w*|sektor\w*|sector\w*|domain)\b", folded)
             or normalized in _DOMAIN_HEADS
@@ -739,7 +826,15 @@ def _family(subject: str, source: str) -> JDDraftCriterionKind:
         ):
             return JDDraftCriterionKind.DOMAIN_EXPERIENCE
         return JDDraftCriterionKind.SKILL_EXPERIENCE
-    if _CERT_RE.search(folded) or _fold(subject).strip(" .,:;-") in _CERTIFICATION_NAMES:
+    if (
+        _CERT_RE.search(folded)
+        or _fold(subject).strip(" .,:;-") in _CERTIFICATION_NAMES
+        or (
+            certification_context
+            and not _is_quantifier_only(subject)
+            and bool(re.search(r"[^\W\d_]", subject, re.UNICODE))
+        )
+    ):
         return JDDraftCriterionKind.CERTIFICATION
     if _EDUCATION_RE.search(folded):
         return JDDraftCriterionKind.EDUCATION
@@ -783,18 +878,40 @@ def _normalized_subject(family: JDDraftCriterionKind, source_subject: str, sourc
     return normalized
 
 
+def _is_quantifier_only(subject: str) -> bool:
+    folded = _fold(subject).strip(" .,:;-/")
+    return bool(
+        re.fullmatch(
+            rf"(?i)(?:(?:at\s+least|minimum|en\s+azi|maksimum|en\s+cox)\s+)?"
+            rf"{_NUMBER_TOKEN}(?:\s+(?:eded|dene|denə|nefer|netice\w*|namized\w*))?",
+            folded,
+        )
+    )
+
+
+def _without_control_spans(
+    text: str, start: int, end: int, result_count: ResultCountIntent
+) -> list[tuple[int, int]]:
+    """Subtract complete RESULT_LIMIT occurrences from one material unit."""
+    segments = [(start, end)]
+    for control in result_count.control_spans:
+        updated: list[tuple[int, int]] = []
+        for left, right in segments:
+            if control.end_offset <= left or control.start_offset >= right:
+                updated.append((left, right))
+                continue
+            if left < control.start_offset:
+                updated.append(_trim(text, left, control.start_offset))
+            if control.end_offset < right:
+                updated.append(_trim(text, control.end_offset, right))
+        segments = [(left, right) for left, right in updated if left < right]
+    return segments
+
+
 def analyze_hr_text(jd_text: str) -> SemanticAnalysis:
     language = classify_supported_language(jd_text)
     result_count = extract_result_count_intent(jd_text)
-    folded_jd = _fold(jd_text)
-    explicit_result_count = bool(
-        re.search(
-            r"(?i)(?:\btop\s*\d+\b|\b\d+\s+(?:nefer|namized\w*|candidates?)\b|"
-            r"\b(?:show|find|goster|cixart)\s+(?:the\s+best\s+)?\d+\b)",
-            folded_jd,
-        )
-    )
-    result_count_needs_review = explicit_result_count and result_count.requested is None
+    result_count_needs_review = result_count.state == ResultCountState.AMBIGUOUS
     if language == SupportedInputLanguage.UNSUPPORTED:
         return SemanticAnalysis(
             language, [], [], result_count, result_count_needs_review=result_count_needs_review
@@ -803,7 +920,41 @@ def analyze_hr_text(jd_text: str) -> SemanticAnalysis:
     spans: list[RequirementSpan] = []
     requirements: list[SemanticRequirement] = []
     seen_ranges: set[tuple[int, int]] = set()
-    for start, end, shared in _split_units(jd_text):
+    certification_context_ranges: list[tuple[int, int]] = []
+    sentence_ranges = _sentences(jd_text)
+    for sentence_index, (sentence_start, sentence_end) in enumerate(sentence_ranges):
+        sentence_folded = _fold(jd_text[sentence_start:sentence_end])
+        if not _CERT_RE.search(sentence_folded):
+            continue
+        list_cue = re.search(
+            r"(?i)\b(?:including|include|such\s+as|namely)\b", sentence_folded
+        )
+        if list_cue:
+            certification_context_ranges.append(
+                (sentence_start + list_cue.start(), sentence_end)
+            )
+        if (
+            sentence_index > 0
+            and _CERT_QUANTITY_RE.search(sentence_folded)
+            and re.match(r"(?i)\s*(?:having|holding|possessing)\b", sentence_folded)
+        ):
+            # A semicolon-linked "X preferred; having N certifications ..."
+            # construction attributes the preceding bounded acronym to the
+            # certification family without maintaining a credential-name list.
+            certification_context_ranges.append(sentence_ranges[sentence_index - 1])
+    material_units: list[tuple[int, int, tuple[int, int] | None]] = []
+    for unit_start, unit_end, shared in _split_units(jd_text):
+        control_overlap = bool(
+            shared
+            and any(
+                control.start_offset < shared[1] and shared[0] < control.end_offset
+                for control in result_count.control_spans
+            )
+        )
+        for start, end in _without_control_spans(jd_text, unit_start, unit_end, result_count):
+            material_units.append((start, end, None if control_overlap else shared))
+
+    for start, end, shared in material_units:
         source = jd_text[start:end]
         if not source.strip() or is_result_count_only(source):
             continue
@@ -826,7 +977,14 @@ def analyze_hr_text(jd_text: str) -> SemanticAnalysis:
         min_years, duration_occurrence, comparison = _duration(jd_text, start, end)
         subject_start, subject_end = _subject_bounds(jd_text, start, end)
         subject_text = jd_text[subject_start:subject_end].strip()
-        family = _family(subject_text, source)
+        family = _family(
+            subject_text,
+            source,
+            certification_context=any(
+                sentence_start <= start < sentence_end
+                for sentence_start, sentence_end in certification_context_ranges
+            ),
+        )
         if family == JDDraftCriterionKind.EDUCATION:
             education = _EDUCATION_SUBJECT_RE.search(_fold(source))
             if education:
@@ -863,7 +1021,13 @@ def analyze_hr_text(jd_text: str) -> SemanticAnalysis:
             # for review; an unambiguous count-only unit was already consumed
             # above by is_result_count_only().
             state = SemanticRequirementState.NEEDS_HUMAN_REVIEW
-        elif re.search(r"(?i)\s+d[ea]\s+", _fold(source)):
+        elif (
+            (particle := re.search(r"(?i)\s+d[ea]\s+", _fold(source))) is not None
+            and not (
+                _REQUIRED_RE.match(_fold(source)[particle.end() :].lstrip())
+                or _PREFERRED_RE.match(_fold(source)[particle.end() :].lstrip())
+            )
+        ):
             # Azerbaijani additive particles can coordinate multiple subjects
             # under one trailing modality. Without a distinct source-bound
             # subject occurrence for each side, the clause must not become one
@@ -877,6 +1041,10 @@ def analyze_hr_text(jd_text: str) -> SemanticAnalysis:
             state = SemanticRequirementState.NEEDS_HUMAN_REVIEW
         elif not normalized_subject and family != JDDraftCriterionKind.EXPERIENCE:
             state = SemanticRequirementState.NEEDS_HUMAN_REVIEW
+        elif normalized_subject and _is_quantifier_only(normalized_subject):
+            # A number or counter has no professional identity occurrence and
+            # can never become a typed criterion, regardless of model family.
+            state = SemanticRequirementState.NEEDS_HUMAN_REVIEW
         elif (
             family in (JDDraftCriterionKind.EXPERIENCE, JDDraftCriterionKind.SKILL_EXPERIENCE)
             and min_years is None
@@ -887,6 +1055,7 @@ def analyze_hr_text(jd_text: str) -> SemanticAnalysis:
             state = SemanticRequirementState.NEEDS_HUMAN_REVIEW
         elif family == JDDraftCriterionKind.CERTIFICATION and (
             not normalized_subject
+            or _CERT_QUANTITY_RE.search(_fold(source))
             or re.fullmatch(r"\d+(?:[.,]\d+)?", normalized_subject)
             or re.fullmatch(
                 r"(?i)(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)?\s*"
@@ -937,6 +1106,12 @@ def analyze_hr_text(jd_text: str) -> SemanticAnalysis:
     requirement_ids = [item.requirement_span_id for item in requirements]
     if len(span_ids) != len(set(span_ids)) or requirement_ids != span_ids:
         raise RuntimeError("Material requirement reconciliation invariant failed.")
+    for span in spans:
+        if any(
+            control.start_offset < span.end_offset and span.start_offset < control.end_offset
+            for control in result_count.control_spans
+        ):
+            raise RuntimeError("Result-control/material authority overlap invariant failed.")
     return SemanticAnalysis(
         language,
         spans,

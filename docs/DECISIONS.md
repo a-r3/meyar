@@ -4851,3 +4851,59 @@ empty, but the deterministic headline still promised criteria below.
 evaluator and scoring, tenant/session/CSRF/draft authorization, confirmation
 idempotency, identity exclusion, local-only Ollama, and the prohibition on
 candidate result-set Q&A/comparison. No migration, push, or merge is included.
+
+## D-063 — Result-control and professional-identity authority completion (issue #44)
+
+**Date:** 2026-09-19. **Status:** Local corrective implementation on exact
+independent-audit base `5bb13d5dc566d6796072cbde53905962e3cc99bd`; PR #42 remains open
+and unaccepted.
+
+**Root causes:** Passport-holder eligibility was outside the protected
+citizenship grammar. Result-limit extraction returned the same shape for an
+absent and an unresolved explicit count and retained no complete source range,
+so count fragments could be reparsed as material. Subject validation rejected
+some count-plus-noun shapes but not a bare number word. Certification quantity
+masking discarded adjacent named identities. Discourse wrappers could survive
+as subject prefixes, and bare English domain experience still depended on a
+small sector list despite the evaluator accepting `min_years=null`.
+
+**Decision:**
+- Protected grammar recognizes personal citizen/national/passport-holder and
+  country-of-citizenship eligibility constructions independently of model
+  family. Passport authentication/document systems do not match without the
+  personal holder/eligibility grammar; ambiguous personal context fails closed.
+- `ResultCountIntent` carries ABSENT, VALID, AMBIGUOUS, or OUT_OF_RANGE and
+  exact `ResultControlSpan` occurrences. Only ABSENT receives default 20;
+  unresolved explicit wording blocks confirmation with review state. Complete
+  control occurrences are subtracted by offset before material parsing, and a
+  runtime reconciliation assertion rejects any control/material overlap.
+- A shared typed boundary rejects pure digits, AZ/EN number words, counters,
+  result nouns, and generic quantity phrases as SKILL, DOMAIN_EXPERIENCE,
+  CERTIFICATION, EDUCATION, or LANGUAGE identities. Server semantic parsing
+  applies the same non-quantifier identity invariant before SCORABLE state.
+- Certification-list grammar propagates source modality through `including`,
+  `such as`, and `namely` lists and preserves each exact named identity. Generic
+  certification counts remain review-visible and unscored.
+- Exact subject offsets exclude leading/trailing AZ/EN connectives, discourse
+  preambles, modality wrappers, and bounded case particles. Presence-only
+  English experience wrappers classify unambiguous non-technical subjects as
+  DOMAIN_EXPERIENCE without inventing duration; structurally technical or
+  ambiguous names remain on the review-safe path.
+
+**Validation:** The new structural matrix contains 8 fresh protected forms, 10
+AZ result-limit forms, 6 multi-number cases, 6 certification/count cases, 8
+English domain cases, 10 connective/subject identities, typed-boundary probes,
+and safe passport-system controls. Real loopback `qwen3:1.7b` acceptance used
+unchanged options across 32 independent-style requests: 32/32 materially
+correct, 3 bounded repairs, zero generic failures, hallucinated scorable
+fields, protected violations, or silent omissions; 261.49 seconds total and
+32.833 seconds maximum latency. Authenticated Playwright/Google Chrome checks
+against the real local app passed 5/5 rendered semantic states with synthetic
+data. Focused authority/security/search/evaluator/UI regression: 682 passed;
+the full repository suite passed 1,422 tests.
+
+**Unchanged:** deterministic scoring, candidate factual authority, model-output
+authority, tenant/session and pending-draft ownership, confirmation idempotency,
+ordinary-search persistence/presentation, identity exclusion, no-exfiltration,
+default Ollama configuration, and the ban on candidate result-set conversation.
+No migration, push, or merge is included.
