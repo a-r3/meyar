@@ -698,6 +698,7 @@ def test_duration_and_top_k_remain_independent_on_fresh_forms(
     [
         "ClickHouse bilən namizədləri göstər",
         "Show candidates who know ClickHouse",
+        "Return top 12 profiles with 5 years of GraphQL experience",
     ],
 )
 def test_wrong_mode_guidance_is_deterministic_for_az_and_en_without_model_call(text: str) -> None:

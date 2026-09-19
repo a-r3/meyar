@@ -4854,7 +4854,7 @@ candidate result-set Q&A/comparison. No migration, push, or merge is included.
 
 ## D-063 — Result-control and professional-identity authority completion (issue #44)
 
-**Date:** 2026-09-19. **Status:** Local corrective implementation on exact
+**Date:** 2026-09-20. **Status:** Local corrective implementation on exact
 independent-audit base `5bb13d5dc566d6796072cbde53905962e3cc99bd`; PR #42 remains open
 and unaccepted.
 
@@ -4907,3 +4907,40 @@ authority, tenant/session and pending-draft ownership, confirmation idempotency,
 ordinary-search persistence/presentation, identity exclusion, no-exfiltration,
 default Ollama configuration, and the ban on candidate result-set conversation.
 No migration, push, or merge is included.
+
+## D-064 — Structural span-role and family-authorization boundary (issue #44)
+
+**Date:** 2026-09-19. **Status:** Local corrective implementation on exact
+independent-audit base `ee5f9f2d9f4bbe1b77cbc5300c17670762f66af9`; PR #42 remains open
+and unaccepted.
+
+**Root cause:** D-063 retained exact source occurrences but still allowed the
+subject extractor and a narrow count-shape check to confer authority. Generic
+quantifiers outside that shape became professional identities, recruitment
+wrappers contaminated subjects, certification quantities displaced named
+credentials, and result-count extraction could call an unfamiliar explicit
+construction ABSENT or select one of two competing values.
+
+**Decision:** Every relevant source occurrence is reconciled into exact-offset
+roles (`SUBJECT`, `RELATION`, `QUANTITY`, `DURATION`, `PROFICIENCY`, `MODALITY`,
+`CONTROL_RESULT_COUNT`, connective/preamble/protected/generic/other) and one
+terminal owner. Result-control ownership is consumed before material parsing;
+runtime reconciliation rejects incompatible overlap. Family classification is
+not authorization: each scorable family must have an identity-bearing subject,
+its required source relation, source modality/material fields, and no personal
+eligibility or workflow-control meaning. Pure quantity/result/person shapes fail
+again at `CriterionIn`, independent of parser or model kind.
+
+Result-count candidacy now precedes ABSENT. A locally attached number plus a
+result noun and ranking/listing intent resolves to VALID/OUT_OF_RANGE or, when
+values compete, AMBIGUOUS; unrelated duration and certification quantities do
+not participate. Generic certification counts remain review-visible while
+separately attributable named credentials survive. Subject extraction is
+relation-centered and removes grammatical recruitment/connective wrappers
+without altering the original canonical text.
+
+Ordinary search authorizes `with` as filter modality and can deterministically
+execute top-K plus skill duration. The same request submitted through vacancy
+analysis is identified as wrong-mode search intent rather than minting vacancy
+modality. No scoring arithmetic, evaluator semantics, default Ollama model,
+candidate-result conversation, migration, push, or merge is changed.

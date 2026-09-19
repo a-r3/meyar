@@ -19,6 +19,9 @@ from meyar.agent.schemas import (
     SemanticRequirement,
     SemanticRequirementState,
     SourceOccurrence,
+    SourceRoleAssignment,
+    SourceSpanOwner,
+    SourceSpanRole,
     SupportedInputLanguage,
 )
 from meyar.core.domain_terms import DOMAIN_SYNONYMS, canonicalize_domain
@@ -117,8 +120,10 @@ _CERT_RE = re.compile(
 )
 _CERTIFICATION_NAMES = frozenset({"acca", "acams", "cfa", "cia", "cisa", "pmp"})
 _CERT_QUANTITY_RE = re.compile(
-    rf"(?i)\b(?:(?:at\s+least|minimum|en\s+azi)\s+)?{_NUMBER_TOKEN}\s+"
-    r"(?:relevant\s+|cloud\s+)?(?:certificat(?:e|ion)s?|credentials?|sertifikat\w*)\b"
+    rf"(?i)\b(?:(?:at\s+least|minimum|en\s+azi)\s+)?"
+    rf"(?:{_NUMBER_TOKEN}|a\s+pair\s+of|a\s+couple\s+of|bir\s+cut)"
+    r"(?:\s+[^\W\d_]+){0,3}\s+"
+    r"(?:certificat(?:e|ion)s?|credentials?|sertifikat\w*)\b"
 )
 _EDUCATION_RE = re.compile(
     r"\b(?:education|degree|bachelor(?:['’]s)?|master(?:['’]s)?|university|"
@@ -149,7 +154,8 @@ _SEARCH_PREAMBLE_RE = re.compile(
     r"(?:(?:we|i)\s+(?:need|want|seek|are\s+looking\s+for)\s+)?"
     r"(?:candidates?|applicants?)\s+(?:with|who\s+(?:have|possess))\s+|"
     r"(?:please\s+)?(?:find|show|display|list|return)\b.*?\b"
-    r"(?:candidates?|applicants?|namized\w*)\s+(?:with|who\s+(?:have|possess))\s+|"
+    r"(?:candidates?|applicants?|profiles?|results?|namized\w*)\s+"
+    r"(?:with|who\s+(?:have|possess))\s+|"
     r"(?:\d+|bir|iki|uc|dord|bes|alti|yeddi|sekkiz|doqquz|on)\s+"
     r"(?:nefer\s+)?namized\w*\s+(?:goster|tap|cixart)\w*\s*:?\s*)",
     re.I,
@@ -180,9 +186,32 @@ _COUNT_ENTITY_RE = re.compile(
 _KNOWLEDGE_QUALIFIER_RE = re.compile(
     r"(?i)\b(?:good|strong|solid|working|advanced|yaxsi|ela|guclu)\b"
 )
+_PERSONAL_ELIGIBILITY_RE = re.compile(
+    r"(?i)\b(?:holders?|owners?|possessors?|custodians?|applicants?|persons?|people|"
+    r"individuals?|sexsler|sahib\w*|namized\w*)\b[^.;]{0,80}\b"
+    r"(?:pass?port\w*|citizenship|nationality|vetendas\w*|milliyyet\w*|age|health|"
+    r"disabilit\w*|yas\w*|saglam\w*|elill\w*)\b|"
+    r"\b(?:pass?port\w*|citizenship|nationality|vetendas\w*|milliyyet\w*|age|health|"
+    r"disabilit\w*|yas\w*|saglam\w*|elill\w*)\b[^.;]{0,80}\b"
+    r"(?:holders?|owners?|possessors?|applicants?|persons?|people|individuals?|sexsler|"
+    r"sahib\w*|namized\w*)\b"
+)
+_GENERIC_IDENTITY_TOKEN_RE = re.compile(
+    r"(?i)^(?:\d+(?:[.,]\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|"
+    r"bir|iki|uc|dord|bes|alti|yeddi|sekkiz|doqquz|on|many|several|multiple|"
+    r"coxlu|nece|results?|candidates?|applicants?|profiles?|persons?|people|"
+    r"netice\w*|namized\w*|nefer\w*|certificat(?:e|ion)s?|credentials?|"
+    r"sertifikat\w*|professional|relevant|generic)$"
+)
+_GENERIC_PERSON_RE = re.compile(
+    r"(?i)\b(?:holders?|owners?|possessors?|custodians?|applicants?|candidates?|"
+    r"persons?|people|individuals?|sexsler|sahib\w*|namized\w*)\b"
+)
 _SUBJECT_SYNTAX_PATTERNS = (
     re.compile(
-        rf"(?i)^\s*(?:(?:at\s+least|minimum|min\.?)\s+)?{_NUMBER_TOKEN}\s+"
+        rf"(?i)^\s*(?:(?:(?:we|i)\s+(?:need|want|seek)|"
+        rf"(?:applicants?|candidates?)\s+(?:should|must)\s+have)\s+)?"
+        rf"(?:(?:at\s+least|minimum|min\.?)\s+)?{_NUMBER_TOKEN}\s+"
         r"(?:years?|yrs?)\s+(?:of\s+)?(?P<subject>.+?)\s+experience\b"
     ),
     re.compile(
@@ -190,6 +219,10 @@ _SUBJECT_SYNTAX_PATTERNS = (
         r"(?:be\s+|have\s+)?)?(?:proficient|skilled|experienced)\s+in\s+"
         r"(?P<subject>.+?)(?=\s+(?:and\s+)?it\s+is\s+"
         r"(?:preferred|required|optional)\s*$|\s*$)"
+    ),
+    re.compile(
+        r"(?i)^\s*(?:(?:applicants?|candidates?)\s+(?:are\s+)?(?:expected|required)\s+"
+        r"to\s+have\s+)(?P<subject>.+?)\s+experience\b"
     ),
     re.compile(
         r"(?i)^\s*(?:(?:applicants?|candidates?)\s+(?:(?:are|must|should)\s+)?"
@@ -298,6 +331,7 @@ class SemanticAnalysis:
     requirements: list[SemanticRequirement]
     result_count: ResultCountIntent
     result_count_needs_review: bool = False
+    role_assignments: tuple[SourceRoleAssignment, ...] = ()
 
 
 def _fold(text: str) -> str:
@@ -650,6 +684,12 @@ def _subject_bounds(text: str, start: int, end: int) -> tuple[int, int]:
             )
             if discourse_prefix:
                 subject_start += discourse_prefix.end()
+            recruitment_subject = re.match(
+                r"(?i)\s*(?:applicants?|candidates?|namized\w*)\s+",
+                _fold(text[subject_start:subject_end]),
+            )
+            if recruitment_subject:
+                subject_start += recruitment_subject.end()
             while subject_end > subject_start and text[subject_end - 1] in " .;,:":
                 subject_end -= 1
             hyphen_case = re.search(
@@ -676,6 +716,10 @@ def _subject_bounds(text: str, start: int, end: int) -> tuple[int, int]:
         _PROFESSIONAL_CUE_RE,
         _KNOWLEDGE_QUALIFIER_RE,
     ):
+        if pattern is _EDUCATION_RE and _CERT_RE.search(folded):
+            # In a credential relation, words such as "Scrum Master" are
+            # certification identity, not an education-family observation.
+            continue
         masks.extend((match.start(), match.end()) for match in pattern.finditer(folded))
     chars = list(raw)
     for mask_start, mask_end in masks:
@@ -878,15 +922,220 @@ def _normalized_subject(family: JDDraftCriterionKind, source_subject: str, sourc
     return normalized
 
 
+def _professional_identity_tokens(subject: str) -> list[str]:
+    """Return identity-bearing tokens after excluding grammatical roles."""
+    return [
+        token
+        for token in re.findall(r"[^\W_]+(?:[+#./-][^\W_]+)*", _fold(subject), re.UNICODE)
+        if not _GENERIC_IDENTITY_TOKEN_RE.fullmatch(token)
+    ]
+
+
 def _is_quantifier_only(subject: str) -> bool:
-    folded = _fold(subject).strip(" .,:;-/")
-    return bool(
-        re.fullmatch(
-            rf"(?i)(?:(?:at\s+least|minimum|en\s+azi|maksimum|en\s+cox)\s+)?"
-            rf"{_NUMBER_TOKEN}(?:\s+(?:eded|dene|denə|nefer|netice\w*|namized\w*))?",
-            folded,
+    return not _professional_identity_tokens(subject)
+
+
+def _family_authorized(
+    family: JDDraftCriterionKind,
+    *,
+    source: str,
+    subject: str,
+    min_years: float | None,
+    required_level: str | None,
+    certification_context: bool,
+) -> bool:
+    """Typed server authority; a proposed family never authorizes itself."""
+    folded = _fold(source)
+    if _PERSONAL_ELIGIBILITY_RE.search(folded):
+        return False
+    if _GENERIC_PERSON_RE.search(folded) and not (
+        _PROFESSIONAL_CUE_RE.search(folded)
+        or _EXPERIENCE_RE.search(folded)
+        or _CERT_RE.search(folded)
+        or _EDUCATION_RE.search(folded)
+        or _LANGUAGE_RE.search(folded)
+        or re.search(r"(?i)\b(?:with|olan|bilen)\b", folded)
+    ):
+        return False
+    if family == JDDraftCriterionKind.EXPERIENCE:
+        return min_years is not None and bool(_EXPERIENCE_RE.search(folded))
+    if not subject or not _professional_identity_tokens(subject):
+        return False
+    if family == JDDraftCriterionKind.SKILL_EXPERIENCE:
+        return min_years is not None and bool(
+            _EXPERIENCE_RE.search(folded) or _DURATION_RE.search(folded)
         )
+    if family == JDDraftCriterionKind.DOMAIN_EXPERIENCE:
+        return bool(
+            _EXPERIENCE_RE.search(folded)
+            or re.search(r"(?i)\b(?:sector|industry|domain|sahe\w*|sektor\w*)\b", folded)
+        )
+    if family == JDDraftCriterionKind.LANGUAGE:
+        return bool(
+            _LANGUAGE_RE.search(folded)
+            or _LANGUAGE_WRAPPER_RE.search(folded)
+            or required_level is not None
+        )
+    if family == JDDraftCriterionKind.CERTIFICATION:
+        return bool(_CERT_RE.search(folded) or certification_context)
+    if family == JDDraftCriterionKind.EDUCATION:
+        return bool(_EDUCATION_RE.search(folded))
+    if family == JDDraftCriterionKind.SKILL:
+        return not bool(_COUNT_ENTITY_RE.search(folded))
+    return False
+
+
+def _owner_for_state(state: SemanticRequirementState) -> SourceSpanOwner:
+    return {
+        SemanticRequirementState.SCORABLE: SourceSpanOwner.SCORABLE,
+        SemanticRequirementState.NEEDS_HUMAN_REVIEW: SourceSpanOwner.NEEDS_HUMAN_REVIEW,
+        SemanticRequirementState.UNSUPPORTED: SourceSpanOwner.UNSUPPORTED_VISIBLE,
+        SemanticRequirementState.PROHIBITED: SourceSpanOwner.PROHIBITED,
+    }[state]
+
+
+def _role_registry(
+    text: str,
+    spans: list[RequirementSpan],
+    requirements: list[SemanticRequirement],
+    result_count: ResultCountIntent,
+) -> tuple[SourceRoleAssignment, ...]:
+    """Reconcile exact roles into one non-conflicting consumption registry."""
+    assignments: list[SourceRoleAssignment] = []
+
+    def occupied(start: int, end: int) -> bool:
+        return any(item.start_offset < end and start < item.end_offset for item in assignments)
+
+    def add(
+        start: int,
+        end: int,
+        role: SourceSpanRole,
+        owner: SourceSpanOwner,
+        span_id: str | None = None,
+    ) -> None:
+        if start >= end or occupied(start, end):
+            return
+        assignments.append(
+            SourceRoleAssignment(
+                start_offset=start,
+                end_offset=end,
+                text=text[start:end],
+                role=role,
+                owner=owner,
+                requirement_span_id=span_id,
+            )
+        )
+
+    for control in result_count.control_spans:
+        add(
+            control.start_offset,
+            control.end_offset,
+            SourceSpanRole.CONTROL_RESULT_COUNT,
+            SourceSpanOwner.WORKFLOW_CONTROL,
+        )
+
+    by_id = {item.requirement_span_id: item for item in requirements}
+    relation_re = re.compile(
+        r"(?i)\b(?:experience|background|exposure|knowledge|proficien\w*|language|"
+        r"certificat\w*|credentials?|degree|education|tecrube\w*|bilik\w*|"
+        r"dil\w*|sertifikat\w*|tehsil\w*)\b"
     )
+    connective_re = re.compile(
+        r"(?i)^(?:and|but|while|whereas|however|ve|amma|lakin|hemcinin|ise|de|da)$"
+    )
+    quantity_re = re.compile(rf"(?i)^(?:{_NUMBER_TOKEN}|many|several|multiple|coxlu|nece)$")
+    generic_re = re.compile(
+        r"(?i)^(?:candidates?|applicants?|profiles?|results?|persons?|people|"
+        r"namized\w*|netice\w*|nefer\w*)$"
+    )
+    recruitment_re = re.compile(
+        r"(?i)^(?:we|need|want|seek|find|show|display|list|return|expected|hiring|"
+        r"axtar\w*|goster\w*|tap\w*|cixart\w*)$"
+    )
+    for span in spans:
+        semantic = by_id[span.span_id]
+        owner = _owner_for_state(semantic.state)
+        if semantic.state == SemanticRequirementState.PROHIBITED:
+            for token in re.finditer(r"\S+", text[span.start_offset : span.end_offset]):
+                add(
+                    span.start_offset + token.start(),
+                    span.start_offset + token.end(),
+                    SourceSpanRole.PROTECTED_CUE,
+                    owner,
+                    span.span_id,
+                )
+            continue
+        subject_occurrence = semantic.subject
+        if (
+            semantic.state != SemanticRequirementState.SCORABLE
+            and semantic.normalized_subject
+            and _is_quantifier_only(semantic.normalized_subject)
+        ):
+            subject_occurrence = None
+        for occurrence, role in (
+            (subject_occurrence, SourceSpanRole.SUBJECT),
+            (semantic.duration_or_number, SourceSpanRole.DURATION),
+            (semantic.proficiency, SourceSpanRole.PROFICIENCY),
+            (semantic.modality, SourceSpanRole.MODALITY),
+        ):
+            if occurrence is not None:
+                add(
+                    occurrence.start_offset,
+                    occurrence.end_offset,
+                    role,
+                    owner,
+                    span.span_id,
+                )
+        local = _fold(text[span.start_offset : span.end_offset])
+        for relation in relation_re.finditer(local):
+            add(
+                span.start_offset + relation.start(),
+                span.start_offset + relation.end(),
+                SourceSpanRole.RELATION,
+                owner,
+                span.span_id,
+            )
+        for token in re.finditer(r"[^\W_]+", text[span.start_offset : span.end_offset], re.UNICODE):
+            token_start = span.start_offset + token.start()
+            token_end = span.start_offset + token.end()
+            folded_token = _fold(token.group(0))
+            role = (
+                SourceSpanRole.CONNECTIVE
+                if connective_re.fullmatch(folded_token)
+                else SourceSpanRole.QUANTITY
+                if quantity_re.fullmatch(folded_token)
+                else SourceSpanRole.GENERIC_PERSON_OR_RESULT_NOUN
+                if generic_re.fullmatch(folded_token)
+                else SourceSpanRole.RECRUITMENT_PREAMBLE
+                if recruitment_re.fullmatch(folded_token)
+                else SourceSpanRole.OTHER
+            )
+            add(token_start, token_end, role, owner, span.span_id)
+
+    # Reconcile the remainder explicitly as non-requirement text. This keeps
+    # headings and prose visible in the registry without granting them
+    # criterion authority or silently dropping their source occurrences.
+    for token in re.finditer(r"[^\W_]+", text, re.UNICODE):
+        token_start, token_end = token.span()
+        folded_token = _fold(token.group(0))
+        role = (
+            SourceSpanRole.CONNECTIVE
+            if connective_re.fullmatch(folded_token)
+            else SourceSpanRole.QUANTITY
+            if quantity_re.fullmatch(folded_token)
+            else SourceSpanRole.GENERIC_PERSON_OR_RESULT_NOUN
+            if generic_re.fullmatch(folded_token)
+            else SourceSpanRole.RECRUITMENT_PREAMBLE
+            if recruitment_re.fullmatch(folded_token)
+            else SourceSpanRole.OTHER
+        )
+        add(token_start, token_end, role, SourceSpanOwner.NON_REQUIREMENT_TEXT)
+
+    ordered = tuple(sorted(assignments, key=lambda item: (item.start_offset, item.end_offset)))
+    for left, right in zip(ordered, ordered[1:], strict=False):
+        if left.end_offset > right.start_offset and left.owner != right.owner:
+            raise RuntimeError("Incompatible source-role ownership overlap invariant failed.")
+    return ordered
 
 
 def _without_control_spans(
@@ -977,13 +1226,14 @@ def analyze_hr_text(jd_text: str) -> SemanticAnalysis:
         min_years, duration_occurrence, comparison = _duration(jd_text, start, end)
         subject_start, subject_end = _subject_bounds(jd_text, start, end)
         subject_text = jd_text[subject_start:subject_end].strip()
+        certification_context = any(
+            sentence_start <= start < sentence_end
+            for sentence_start, sentence_end in certification_context_ranges
+        )
         family = _family(
             subject_text,
             source,
-            certification_context=any(
-                sentence_start <= start < sentence_end
-                for sentence_start, sentence_end in certification_context_ranges
-            ),
+            certification_context=certification_context,
         )
         if family == JDDraftCriterionKind.EDUCATION:
             education = _EDUCATION_SUBJECT_RE.search(_fold(source))
@@ -1041,9 +1291,17 @@ def analyze_hr_text(jd_text: str) -> SemanticAnalysis:
             state = SemanticRequirementState.NEEDS_HUMAN_REVIEW
         elif not normalized_subject and family != JDDraftCriterionKind.EXPERIENCE:
             state = SemanticRequirementState.NEEDS_HUMAN_REVIEW
-        elif normalized_subject and _is_quantifier_only(normalized_subject):
-            # A number or counter has no professional identity occurrence and
-            # can never become a typed criterion, regardless of model family.
+        elif not _family_authorized(
+            family,
+            source=source,
+            subject=normalized_subject,
+            min_years=min_years,
+            required_level=required_level,
+            certification_context=certification_context,
+        ):
+            # Family authorization is independent from classification. Pure
+            # quantities, workflow/result nouns, personal eligibility, or a
+            # missing required relationship cannot become scoring authority.
             state = SemanticRequirementState.NEEDS_HUMAN_REVIEW
         elif (
             family in (JDDraftCriterionKind.EXPERIENCE, JDDraftCriterionKind.SKILL_EXPERIENCE)
@@ -1112,10 +1370,12 @@ def analyze_hr_text(jd_text: str) -> SemanticAnalysis:
             for control in result_count.control_spans
         ):
             raise RuntimeError("Result-control/material authority overlap invariant failed.")
+    roles = _role_registry(jd_text, spans, requirements, result_count)
     return SemanticAnalysis(
         language,
         spans,
         requirements,
         result_count,
         result_count_needs_review=result_count_needs_review,
+        role_assignments=roles,
     )

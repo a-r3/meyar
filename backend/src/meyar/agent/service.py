@@ -1272,21 +1272,15 @@ async def _dispatch_draft_job_criteria(llm: LLMProvider, *, jd_text: str) -> Age
     raw_has_prohibited_text = find_prohibited_term(jd_text) is not None
     simple_search_in_vacancy_mode = bool(
         not raw_has_prohibited_text
-        and (
-            not analysis.requirements
-            or (
-                len(analysis.requirements) == 1
-                and analysis.requirements[0].criterion_family == JDDraftCriterionKind.SKILL
-                and analysis.requirements[0].min_years is None
-                and analysis.requirements[0].required_level is None
-            )
-        )
         and re.search(
             r"\b(?:show|find|display|list|return|search\s+for|goster\w*|tap\w*|"
             r"cixart\w*|axtar\w*)\b",
             folded_jd,
         )
-        and re.search(r"\b(?:candidates?|applicants?|namized\w*)\b", folded_jd)
+        and re.search(
+            r"\b(?:candidates?|applicants?|profiles?|results?|namized\w*|netice\w*)\b",
+            folded_jd,
+        )
         and not re.search(
             r"\b(?:vacancy|job\s+description|role\s+requirements?|vakansiya|"
             r"vezife\s+telebleri)\b",

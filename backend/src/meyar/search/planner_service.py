@@ -13,6 +13,7 @@ from meyar.agent.schemas import (
     SupportedInputLanguage,
 )
 from meyar.agent.semantic_requirements import analyze_hr_text
+from meyar.core.result_count import ResultCountState
 from meyar.embedding.provider import EmbeddingProvider
 from meyar.llm.provider import (
     LLMProvider,
@@ -186,6 +187,17 @@ async def plan_candidate_search(
             provenance=DETERMINISTIC_PLANNER_PROVENANCE,
             attempt_count=0,
             reason_codes=[PlannerReasonCode.UNSUPPORTED_INPUT_LANGUAGE],
+        )
+        await _audit_plan_result(db, tenant_id=tenant_id, result=result)
+        return result
+
+    if semantic.result_count.state == ResultCountState.AMBIGUOUS:
+        result = _result(
+            outcome=PlannerOutcome.AMBIGUOUS_REQUEST,
+            request_sha256=request_hash,
+            provenance=DETERMINISTIC_PLANNER_PROVENANCE,
+            attempt_count=0,
+            reason_codes=[PlannerReasonCode.RESULT_LIMIT_OMITTED],
         )
         await _audit_plan_result(db, tenant_id=tenant_id, result=result)
         return result

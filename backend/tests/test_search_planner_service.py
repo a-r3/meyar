@@ -114,6 +114,46 @@ async def test_ordinary_search_reuses_source_bound_skill_duration_semantics(
     ]
 
 
+async def test_ordinary_search_top_k_duration_is_deterministic_filter_semantics(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await _tenant(db_session, "TopKDuration")
+    llm = FakeLLMProvider()
+    result = await plan_candidate_search(
+        db_session,
+        llm,
+        tenant_id=tenant.id,
+        natural_language_request="Return top 12 profiles with 5 years of GraphQL experience",
+        as_of_date=AS_OF_DATE,
+        embedding_config=_config(),
+    )
+    assert result.outcome == PlannerOutcome.EXECUTABLE
+    assert result.attempt_count == llm.call_count == 0
+    assert result.search_request is not None and result.search_request.limit == 12
+    assert [
+        (item.value, item.min_years)
+        for item in result.search_request.required_filters.skill_experience
+    ] == [("GraphQL", 5.0)]
+
+
+async def test_competing_explicit_result_counts_are_ambiguous_before_model(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await _tenant(db_session, "AmbiguousTopK")
+    llm = FakeLLMProvider()
+    result = await plan_candidate_search(
+        db_session,
+        llm,
+        tenant_id=tenant.id,
+        natural_language_request="Show 3 or 5 candidates with GraphQL knowledge",
+        as_of_date=AS_OF_DATE,
+        embedding_config=_config(),
+    )
+    assert result.outcome == PlannerOutcome.AMBIGUOUS_REQUEST
+    assert result.search_request is None
+    assert result.attempt_count == llm.call_count == 0
+
+
 async def test_ordinary_search_reuses_source_bound_language_level_semantics(
     db_session: AsyncSession,
 ) -> None:

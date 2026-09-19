@@ -322,6 +322,57 @@ class SourceOccurrence(BaseModel):
         return self
 
 
+class SourceSpanRole(StrEnum):
+    """Server-observed grammatical role for one exact source occurrence."""
+
+    SUBJECT = "SUBJECT"
+    RELATION = "RELATION"
+    QUANTITY = "QUANTITY"
+    DURATION = "DURATION"
+    PROFICIENCY = "PROFICIENCY"
+    MODALITY = "MODALITY"
+    CONTROL_RESULT_COUNT = "CONTROL_RESULT_COUNT"
+    CONNECTIVE = "CONNECTIVE"
+    RECRUITMENT_PREAMBLE = "RECRUITMENT_PREAMBLE"
+    PROTECTED_CUE = "PROTECTED_CUE"
+    GENERIC_PERSON_OR_RESULT_NOUN = "GENERIC_PERSON_OR_RESULT_NOUN"
+    OTHER = "OTHER"
+
+
+class SourceSpanOwner(StrEnum):
+    """Terminal authority owner for a role occurrence.
+
+    Role observations may be proposed in several ways while parsing, but the
+    reconciled registry contains one non-conflicting owner per source byte.
+    """
+
+    WORKFLOW_CONTROL = "WORKFLOW_CONTROL"
+    SCORABLE = "SCORABLE"
+    NEEDS_HUMAN_REVIEW = "NEEDS_HUMAN_REVIEW"
+    UNSUPPORTED_VISIBLE = "UNSUPPORTED_VISIBLE"
+    PROHIBITED = "PROHIBITED"
+    NON_REQUIREMENT_TEXT = "NON_REQUIREMENT_TEXT"
+
+
+class SourceRoleAssignment(BaseModel):
+    """One exact, final role/ownership entry in the consumption registry."""
+
+    model_config = {"extra": "forbid"}
+
+    start_offset: int = Field(ge=0)
+    end_offset: int = Field(gt=0)
+    text: str = Field(min_length=1, max_length=4000)
+    role: SourceSpanRole
+    owner: SourceSpanOwner
+    requirement_span_id: str | None = Field(default=None, pattern=r"^req-\d{4}$")
+
+    @model_validator(mode="after")
+    def _validate_offsets(self) -> "SourceRoleAssignment":
+        if self.end_offset <= self.start_offset:
+            raise ValueError("SourceRoleAssignment end_offset must follow start_offset.")
+        return self
+
+
 class SemanticRequirementState(StrEnum):
     SCORABLE = "SCORABLE"
     NEEDS_HUMAN_REVIEW = "NEEDS_HUMAN_REVIEW"

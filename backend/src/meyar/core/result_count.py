@@ -17,6 +17,16 @@ _AZ_RESULT_ENTITY = r"(?:nefer(?:i)?(?:\s+namized\w*)?|namized\w*|netice\w*)"
 _AZ_ACTION = r"(?:goster\w*|qaytar\w*|cixart\w*|tap\w*)"
 _EN_RESULT_ENTITY = r"(?:candidates?|applicants?|results?|profiles?)"
 _EN_ACTION = r"(?:show|display|list|return|find)"
+_RESULT_NOUN_RE = re.compile(
+    rf"(?i)\b(?:{_AZ_RESULT_ENTITY}|{_EN_RESULT_ENTITY}|profil\w*|"
+    r"persons?|people|sexsler|adamlar)\b"
+)
+_RESULT_INTENT_RE = re.compile(
+    rf"(?i)\b(?:{_AZ_ACTION}|{_EN_ACTION}|siyahiya\s+al\w*|rank\w*|shortlist\w*|"
+    r"en\s+(?:uygun|yaxsi)|best|top)\b"
+)
+_ANY_COUNT_RE = re.compile(rf"(?i)(?<!\w)(?P<count>\d{{1,4}}|{_NUMBER_WORD})(?!\w)")
+_DURATION_AFTER_RE = re.compile(r"(?i)^\s*(?:\+\s*)?(?:years?|yrs?|il)\b")
 
 # Each match is the complete source-attributable workflow-control occurrence,
 # not merely the number token. Folding preserves supported AZ/EN offsets.
@@ -87,8 +97,84 @@ def _value(token: str) -> int:
     return _NUMBER_VALUES.get(token, int(token) if token.isdigit() else 0)
 
 
+def _locally_attached_to_result_noun(sentence: str, start: int, end: int) -> bool:
+    """A count candidate must be locally attached to the result entity.
+
+    This excludes other material quantities in the same sentence (years,
+    certification counts) while retaining alternatives such as
+    ``3 or 5 candidates`` where both numbers govern one nearby result noun.
+    """
+    window_start = max(0, start - 32)
+    window_end = min(len(sentence), end + 32)
+    return _RESULT_NOUN_RE.search(sentence[window_start:window_end]) is not None
+
+
 def extract_result_count_intent(text: str) -> ResultCountIntent:
     normalized = fold_az_ascii(normalize_azerbaijani_case(text))
+    # Detect candidacy before the narrower extraction patterns.  A source
+    # construction containing a result noun, ranking/listing intent, and a
+    # count can never truthfully be called ABSENT.  Duration numbers are not
+    # count candidates ("top 12 profiles with 5 years ...").
+    candidate_occurrences: list[tuple[int, int, int]] = []
+    sentence_start = 0
+    for boundary in re.finditer(r"(?<=[.!?;])\s+|\n+", normalized):
+        sentence_end = boundary.start()
+        sentence = normalized[sentence_start:sentence_end]
+        if _RESULT_NOUN_RE.search(sentence) and _RESULT_INTENT_RE.search(sentence):
+            for number in _ANY_COUNT_RE.finditer(sentence):
+                if _DURATION_AFTER_RE.match(sentence[number.end() :]):
+                    continue
+                if not _locally_attached_to_result_noun(
+                    sentence, number.start(), number.end()
+                ):
+                    continue
+                candidate_occurrences.append(
+                    (
+                        sentence_start + number.start(),
+                        sentence_start + number.end(),
+                        _value(number.group("count").casefold()),
+                    )
+                )
+        sentence_start = boundary.end()
+    sentence = normalized[sentence_start:]
+    if _RESULT_NOUN_RE.search(sentence) and _RESULT_INTENT_RE.search(sentence):
+        for number in _ANY_COUNT_RE.finditer(sentence):
+            if _DURATION_AFTER_RE.match(sentence[number.end() :]):
+                continue
+            if not _locally_attached_to_result_noun(sentence, number.start(), number.end()):
+                continue
+            candidate_occurrences.append(
+                (
+                    sentence_start + number.start(),
+                    sentence_start + number.end(),
+                    _value(number.group("count").casefold()),
+                )
+            )
+
+    candidate_values = {value for _, _, value in candidate_occurrences}
+    if len(candidate_values) > 1:
+        first = min(item[0] for item in candidate_occurrences)
+        last = max(item[1] for item in candidate_occurrences)
+        start = max(
+            normalized.rfind(";", 0, first),
+            normalized.rfind(".", 0, first),
+            normalized.rfind("!", 0, first),
+            normalized.rfind("?", 0, first),
+            normalized.rfind(":", 0, first),
+        ) + 1
+        following_boundary = re.search(r"[.!?;:]", normalized[last:])
+        end = last + following_boundary.end() if following_boundary else len(normalized)
+        while start < end and text[start].isspace():
+            start += 1
+        while end > start and text[end - 1].isspace():
+            end -= 1
+        return ResultCountIntent(
+            requested=None,
+            effective=MIN_RESULT_LIMIT,
+            was_bounded=False,
+            state=ResultCountState.AMBIGUOUS,
+            control_spans=(ResultControlSpan(start, end, text[start:end], 0),),
+        )
     matches: dict[tuple[int, int], ResultControlSpan] = {}
     for pattern in _RESULT_COUNT_PATTERNS:
         for match in pattern.finditer(normalized):
@@ -112,6 +198,35 @@ def extract_result_count_intent(text: str) -> ResultCountIntent:
         non_overlapping.append(candidate)
     spans = tuple(sorted(non_overlapping, key=lambda item: item.start_offset))
     if not spans:
+        if len(candidate_values) == 1:
+            requested = candidate_values.pop()
+            # Consume the complete attributable result-control construction,
+            # not only its number token, so material parsing cannot reuse the
+            # noun/action tail under another authority role.
+            first = min(item[0] for item in candidate_occurrences)
+            last = max(item[1] for item in candidate_occurrences)
+            left = max(
+                normalized.rfind(";", 0, first),
+                normalized.rfind(":", 0, first),
+            ) + 1
+            right_match = re.search(r"[.!?;:]", normalized[last:])
+            right = last + right_match.end() if right_match else len(normalized)
+            while left < right and text[left].isspace():
+                left += 1
+            while right > left and text[right - 1].isspace():
+                right -= 1
+            effective = min(max(requested, MIN_RESULT_LIMIT), MAX_RESULT_LIMIT)
+            return ResultCountIntent(
+                requested=requested,
+                effective=effective,
+                was_bounded=effective != requested,
+                state=(
+                    ResultCountState.VALID
+                    if MIN_RESULT_LIMIT <= requested <= MAX_RESULT_LIMIT
+                    else ResultCountState.OUT_OF_RANGE
+                ),
+                control_spans=(ResultControlSpan(left, right, text[left:right], requested),),
+            )
         ambiguous = _AMBIGUOUS_RESULT_CUE_RE.search(normalized)
         if ambiguous:
             return ResultCountIntent(

@@ -319,6 +319,20 @@ _COUNT_LIKE_SUBJECT_RE = re.compile(
     r"skills?|languages?|candidates?|applicants?|results?|profiles?|namized\w*|"
     r"netice\w*))?\s*$"
 )
+_NON_IDENTITY_TOKEN_RE = re.compile(
+    r"(?i)^(?:\d+(?:[.,]\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|"
+    r"bir|iki|uc|dord|bes|alti|yeddi|sekkiz|doqquz|on|many|several|multiple|"
+    r"coxlu|nece|results?|candidates?|applicants?|profiles?|persons?|people|"
+    r"netice\w*|namized\w*|nefer\w*|certificat(?:e|ion)s?|credentials?|"
+    r"sertifikat\w*|professional|relevant|generic)$"
+)
+_GENERIC_QUANTITY_PHRASE_RE = re.compile(
+    r"(?i)^(?:a\s+(?:pair|couple)\s+of|bir\s+cut)(?:\s+[^\W_]+){0,4}$"
+)
+_LEADING_QUANTITY_RE = re.compile(
+    r"(?i)^(?:\d+(?:[.,]\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|"
+    r"bir|iki|uc|dord|bes|alti|yeddi|sekkiz|doqquz|on)\b"
+)
 _LANGUAGE_SUBJECT_RE = re.compile(
     r"(?i)^[^\W\d_]+(?:[- ][^\W\d_]+){0,2}(?:\s+(?:language|dili))?$"
 )
@@ -344,6 +358,20 @@ def _check_kind_subject_authority(criterion: "CriterionIn") -> None:
     if _COUNT_LIKE_SUBJECT_RE.fullmatch(folded):
         raise ValueError(
             f"Criterion '{criterion.id}': a count expression cannot be a criterion subject."
+        )
+    if _GENERIC_QUANTITY_PHRASE_RE.fullmatch(folded) or (
+        criterion.kind == CriterionKind.CERTIFICATION
+        and _LEADING_QUANTITY_RE.match(folded)
+    ):
+        raise ValueError(
+            f"Criterion '{criterion.id}': quantity cannot authorize a named identity."
+        )
+    identity_tokens = re.findall(r"[^\W_]+(?:[+#./-][^\W_]+)*", folded, re.UNICODE)
+    if identity_tokens and not any(
+        not _NON_IDENTITY_TOKEN_RE.fullmatch(token) for token in identity_tokens
+    ):
+        raise ValueError(
+            f"Criterion '{criterion.id}': value has no professional identity component."
         )
     if criterion.kind == CriterionKind.LANGUAGE and not _LANGUAGE_SUBJECT_RE.fullmatch(value):
         raise ValueError(
