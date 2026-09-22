@@ -205,3 +205,121 @@ def test_certification_list_parity_no_identity_vanishes(text: str) -> None:
     for item in analysis.requirements:
         assert item.state != SemanticRequirementState.PROHIBITED
     assert analysis.spans, "the full certification clause must remain a visible material span"
+
+
+# ---------------------------------------------------------------------------
+# Final blocker — duration/comparator numbers must not compete with an
+# explicit result-count number (numeric-role ownership).
+#
+# A number already attributable to a non-result semantic role (experience
+# duration, in any inflected AZ form) must never become a RESULT_COUNT
+# candidate. AZ duration nouns are agglutinative — "il" ("year") + a
+# case/plural suffix glued directly onto the stem, e.g. "ildən" ("than
+# years", used in "5 ildən çox" = "more than 5 years") — so a fix scoped to
+# only the literal phrase "ildən çox" would still miss other real duration
+# inflections. These cases require the duration number and the result-count
+# number to sit close enough together (within the result-noun attachment
+# window) that the historical bug — matching bare "il\b"/"ay\b" and missing
+# "ildən"/"illik"/"ay dan"-style forms — actually manifests.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "limit", "years"),
+    [
+        # A. AZ: duration 5, result_limit 10.
+        ("5 ildən çox Terraform təcrübəli 10 namizəd göstər.", 10, 5.0),
+        ("Terraform üzrə 5 ildən çox təcrübəsi olan ən uyğun 10 namizədi göstər.", 10, 5.0),
+        # further AZ agglutinated/inflected duration forms, same shape
+        ("Minimum 5 il təcrübəli 10 namizəd göstər.", 10, 5.0),
+        ("Ən azı 5 il təcrübəli 10 namizəd göstər.", 10, 5.0),
+    ],
+)
+def test_fresh_az_duration_number_never_competes_with_result_count(
+    text: str, limit: int, years: float
+) -> None:
+    analysis = analyze_hr_text(text)
+    assert analysis.result_count.state == ResultCountState.VALID
+    assert analysis.result_count.requested == limit
+    assert any(item.min_years == years for item in analysis.requirements)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Further AZ agglutinated duration inflections: the result-count
+        # extractor must exclude these from candidacy even where the
+        # analyze_hr_text duration *value* extractor (a separate, unrelated
+        # component) does not itself resolve a numeric min_years for this
+        # inflection — this test only asserts result-count ownership.
+        "5 illik təcrübəli 10 namizəd göstər.",
+        "5 ildə bir dəfə keçirilən müsahibədə 10 namizəd göstər.",
+    ],
+)
+def test_fresh_az_duration_inflections_excluded_from_result_count_only(text: str) -> None:
+    intent = extract_result_count_intent(text)
+    assert intent.state == ResultCountState.VALID
+    assert intent.requested == 10
+
+
+@pytest.mark.parametrize(
+    ("text", "limit", "years"),
+    [
+        # B. EN: duration 4, limit 8.
+        ("Show the top 8 candidates with at least 4 years of Kafka experience.", 8, 4.0),
+        ("Show top 8 candidates with more than 4 years of Kafka experience.", 8, 4.0),
+        ("Show top 8 candidates with minimum 4 years of Kafka experience.", 8, 4.0),
+    ],
+)
+def test_fresh_en_duration_number_never_competes_with_result_count(
+    text: str, limit: int, years: float
+) -> None:
+    analysis = analyze_hr_text(text)
+    assert analysis.result_count.state == ResultCountState.VALID
+    assert analysis.result_count.requested == limit
+    assert any(item.min_years == years for item in analysis.requirements)
+
+
+def test_multi_component_az_duration_result_limit_remains_material() -> None:
+    # C. "3 il 6 ay" (years + months) — both duration components stay
+    # material; only the true result-count number governs the limit.
+    intent = extract_result_count_intent("3 il 6 ay təcrübəli 5 namizəd göstər.")
+    assert intent.state == ResultCountState.VALID
+    assert intent.requested == 5
+
+
+def test_multi_component_en_duration_result_limit_remains_material() -> None:
+    intent = extract_result_count_intent(
+        "3 years 6 months of experience, show top 5 candidates."
+    )
+    assert intent.state == ResultCountState.VALID
+    assert intent.requested == 5
+
+
+def test_competing_true_result_counts_remain_ambiguous() -> None:
+    # D. Two independent result-count numbers (no duration involved) must
+    # still be AMBIGUOUS — the duration fix must not weaken this.
+    intent = extract_result_count_intent("Show 3 or 5 candidates.")
+    assert intent.state == ResultCountState.AMBIGUOUS
+    assert intent.requested is None
+
+
+def test_duration_only_with_no_result_count_defaults_to_twenty() -> None:
+    # E. A duration present with no result-count intent at all is a true
+    # absence — not ambiguity, not accidental adoption of the duration value.
+    intent = extract_result_count_intent("Terraform üzrə 5 ildən çox təcrübə tələb olunur.")
+    assert intent.state == ResultCountState.ABSENT
+    assert intent.effective == DEFAULT_RESULT_LIMIT
+    assert intent.requested is None
+
+
+def test_vague_result_count_with_duration_stays_ambiguous_duration_material() -> None:
+    # F. A vague result-count quantifier co-occurring with a duration: the
+    # result count is AMBIGUOUS (never coerced to the duration's value or to
+    # 1), and the duration remains a separate, material criterion signal.
+    text = "Bir neçə namizəd, minimum 4 il təcrübə tələb olunur."
+    intent = extract_result_count_intent(text)
+    assert intent.state == ResultCountState.AMBIGUOUS
+    assert intent.requested is None
+    analysis = analyze_hr_text(text)
+    assert any(item.min_years == 4.0 for item in analysis.requirements)

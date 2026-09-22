@@ -26,7 +26,19 @@ _RESULT_INTENT_RE = re.compile(
     r"en\s+(?:uygun|yaxsi)|best|top)\b"
 )
 _ANY_COUNT_RE = re.compile(rf"(?i)(?<!\w)(?P<count>\d{{1,4}}|{_NUMBER_WORD})(?!\w)")
-_DURATION_AFTER_RE = re.compile(r"(?i)^\s*(?:\+\s*)?(?:years?|yrs?|il)\b")
+# A number is a duration/comparator continuation — never a result-count
+# candidate — when it is immediately followed by a duration unit. AZ duration
+# nouns are agglutinative ("il" + a case/plural suffix), so a bare "il\b" or
+# "ay\b" word boundary misses real inflected forms such as "ildən" ("than
+# years", used in "5 ildən çox" = "more than 5 years"): the suffix "-dən" is
+# a word character glued directly onto the stem with no boundary between
+# them. Enumerate the HR-relevant inflections explicitly rather than a bare
+# "il\w*"/"ay\w*" wildcard, so this stays a duration-only exclusion and does
+# not accidentally swallow unrelated "il-"/"ay-" prefixed vocabulary.
+_DURATION_AFTER_RE = re.compile(
+    r"(?i)^\s*(?:\+\s*)?(?:years?|yrs?|months?|mos?|"
+    r"il(?:den|de|lik|ler)?|ay(?:dan|da|liq|lar)?)\b"
+)
 
 # Each match is the complete source-attributable workflow-control occurrence,
 # not merely the number token. Folding preserves supported AZ/EN offsets.
