@@ -60,6 +60,21 @@ _AMBIGUOUS_RESULT_CUE_RE = re.compile(
     rf"(?i)\b(?:texminen|bir\s+nece|bir\s+qeder|about|approximately)\s+"
     rf"(?:\d{{1,4}}\s+)?(?:{_AZ_RESULT_ENTITY}|{_EN_RESULT_ENTITY})\b"
 )
+# A vague quantifier ("a few", "several", "some", "bir neçə", "bir qədər",
+# "çoxlu", ...) is never an exact count, even when it sits in the same
+# sentence as a result noun/action. It is only checked once that sentence is
+# already known to express result-count intent (_RESULT_NOUN_RE and
+# _RESULT_INTENT_RE both match), so ordinary prose mentioning "some
+# candidates" descriptively is not affected.
+_VAGUE_QUANTIFIER_RE = re.compile(
+    r"(?i)\b(?:texminen|bir\s+nece|bir\s+qeder|coxlu|about|approximately|"
+    r"few|several|some|many)\b"
+)
+# "bir" (the AZ word for "one") is also the first word of the idiom
+# "bir neçə"/"bir qədər" ("a few"/"some"). Folded to ASCII this collapses to
+# "bir nece"/"bir qeder" — a number-word match immediately continued by
+# either must never be treated as an exact-count candidate.
+_VAGUE_QUANTIFIER_CONTINUATION_RE = re.compile(r"(?i)^\s*(?:nece|qeder)\b")
 
 _NUMBER_VALUES = {
     "bir": 1, "iki": 2, "uc": 3, "dord": 4, "bes": 5,
@@ -109,6 +124,28 @@ def _locally_attached_to_result_noun(sentence: str, start: int, end: int) -> boo
     return _RESULT_NOUN_RE.search(sentence[window_start:window_end]) is not None
 
 
+def _expand_to_clause(normalized: str, text: str, first: int, last: int) -> tuple[int, int]:
+    """Consume the complete attributable clause around [first, last).
+
+    A workflow-control occurrence must never leave a dangling remainder
+    (e.g. a bare trailing action verb) for material parsing to reuse.
+    """
+    start = max(
+        normalized.rfind(";", 0, first),
+        normalized.rfind(".", 0, first),
+        normalized.rfind("!", 0, first),
+        normalized.rfind("?", 0, first),
+        normalized.rfind(":", 0, first),
+    ) + 1
+    following_boundary = re.search(r"[.!?;:]", normalized[last:])
+    end = last + following_boundary.end() if following_boundary else len(normalized)
+    while start < end and text[start].isspace():
+        start += 1
+    while end > start and text[end - 1].isspace():
+        end -= 1
+    return start, end
+
+
 def extract_result_count_intent(text: str) -> ResultCountIntent:
     normalized = fold_az_ascii(normalize_azerbaijani_case(text))
     # Detect candidacy before the narrower extraction patterns.  A source
@@ -116,30 +153,18 @@ def extract_result_count_intent(text: str) -> ResultCountIntent:
     # count can never truthfully be called ABSENT.  Duration numbers are not
     # count candidates ("top 12 profiles with 5 years ...").
     candidate_occurrences: list[tuple[int, int, int]] = []
-    sentence_start = 0
-    for boundary in re.finditer(r"(?<=[.!?;])\s+|\n+", normalized):
-        sentence_end = boundary.start()
-        sentence = normalized[sentence_start:sentence_end]
-        if _RESULT_NOUN_RE.search(sentence) and _RESULT_INTENT_RE.search(sentence):
-            for number in _ANY_COUNT_RE.finditer(sentence):
-                if _DURATION_AFTER_RE.match(sentence[number.end() :]):
-                    continue
-                if not _locally_attached_to_result_noun(
-                    sentence, number.start(), number.end()
-                ):
-                    continue
-                candidate_occurrences.append(
-                    (
-                        sentence_start + number.start(),
-                        sentence_start + number.end(),
-                        _value(number.group("count").casefold()),
-                    )
-                )
-        sentence_start = boundary.end()
-    sentence = normalized[sentence_start:]
-    if _RESULT_NOUN_RE.search(sentence) and _RESULT_INTENT_RE.search(sentence):
+    vague_occurrences: list[tuple[int, int]] = []
+
+    def _scan_sentence(sentence: str, sentence_start: int) -> None:
+        if not (_RESULT_NOUN_RE.search(sentence) and _RESULT_INTENT_RE.search(sentence)):
+            return
         for number in _ANY_COUNT_RE.finditer(sentence):
             if _DURATION_AFTER_RE.match(sentence[number.end() :]):
+                continue
+            # "bir neçə"/"bir qədər" ("a few"/"some") fold to "bir nece"/
+            # "bir qeder": the leading number word "bir" ("one") is part of
+            # a vague-quantity idiom here, never an exact count on its own.
+            if _VAGUE_QUANTIFIER_CONTINUATION_RE.match(sentence[number.end() :]):
                 continue
             if not _locally_attached_to_result_noun(sentence, number.start(), number.end()):
                 continue
@@ -150,24 +175,24 @@ def extract_result_count_intent(text: str) -> ResultCountIntent:
                     _value(number.group("count").casefold()),
                 )
             )
+        vague_match = _VAGUE_QUANTIFIER_RE.search(sentence)
+        if vague_match:
+            vague_occurrences.append(
+                (sentence_start + vague_match.start(), sentence_start + vague_match.end())
+            )
+
+    sentence_start = 0
+    for boundary in re.finditer(r"(?<=[.!?;])\s+|\n+", normalized):
+        sentence_end = boundary.start()
+        _scan_sentence(normalized[sentence_start:sentence_end], sentence_start)
+        sentence_start = boundary.end()
+    _scan_sentence(normalized[sentence_start:], sentence_start)
 
     candidate_values = {value for _, _, value in candidate_occurrences}
     if len(candidate_values) > 1:
         first = min(item[0] for item in candidate_occurrences)
         last = max(item[1] for item in candidate_occurrences)
-        start = max(
-            normalized.rfind(";", 0, first),
-            normalized.rfind(".", 0, first),
-            normalized.rfind("!", 0, first),
-            normalized.rfind("?", 0, first),
-            normalized.rfind(":", 0, first),
-        ) + 1
-        following_boundary = re.search(r"[.!?;:]", normalized[last:])
-        end = last + following_boundary.end() if following_boundary else len(normalized)
-        while start < end and text[start].isspace():
-            start += 1
-        while end > start and text[end - 1].isspace():
-            end -= 1
+        start, end = _expand_to_clause(normalized, text, first, last)
         return ResultCountIntent(
             requested=None,
             effective=MIN_RESULT_LIMIT,
@@ -226,6 +251,20 @@ def extract_result_count_intent(text: str) -> ResultCountIntent:
                     else ResultCountState.OUT_OF_RANGE
                 ),
                 control_spans=(ResultControlSpan(left, right, text[left:right], requested),),
+            )
+        if vague_occurrences:
+            # A vague quantifier co-occurring with a result noun/action in
+            # the same sentence expresses real count intent with no unique
+            # exact value — never the default, and never coerced to 1.
+            first = min(item[0] for item in vague_occurrences)
+            last = max(item[1] for item in vague_occurrences)
+            start, end = _expand_to_clause(normalized, text, first, last)
+            return ResultCountIntent(
+                requested=None,
+                effective=MIN_RESULT_LIMIT,
+                was_bounded=False,
+                state=ResultCountState.AMBIGUOUS,
+                control_spans=(ResultControlSpan(start, end, text[start:end], 0),),
             )
         ambiguous = _AMBIGUOUS_RESULT_CUE_RE.search(normalized)
         if ambiguous:

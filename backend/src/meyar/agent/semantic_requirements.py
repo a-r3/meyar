@@ -24,6 +24,7 @@ from meyar.agent.schemas import (
     SourceSpanRole,
     SupportedInputLanguage,
 )
+from meyar.agent.segmentation_authority import coordinated_split_authorized
 from meyar.core.domain_terms import DOMAIN_SYNONYMS, canonicalize_domain
 from meyar.core.result_count import (
     ResultCountIntent,
@@ -540,11 +541,24 @@ def _split_units(text: str) -> list[tuple[int, int, tuple[int, int] | None]]:
                 _fold(clause),
             ):
                 coordinated = []
+            def _side_authorized(
+                piece: str, *, _shared: tuple[int, int] | None = local_shared
+            ) -> bool:
+                # D-055: a coordinated side may only split from its sibling
+                # if it can independently stand as a requirement — either it
+                # carries its own material content, or an already-attributed
+                # governing modality (``local_shared``, e.g. a preceding
+                # "with"/"required"/"preferred" occurrence) covers it. A side
+                # with neither must never be silently dropped by splitting.
+                return bool(_material(piece)) or _shared is not None
+
             should_split = bool(coordinated) and (
                 len(coordinated) == 1
                 and (
-                    _material(clause[: coordinated[0].start()])
-                    or _material(clause[coordinated[0].end() :])
+                    coordinated_split_authorized(
+                        [clause[: coordinated[0].start()], clause[coordinated[0].end() :]],
+                        _side_authorized,
+                    )
                     or (
                         local_shared is not None
                         and certification_list
@@ -679,7 +693,7 @@ def _subject_bounds(text: str, start: int, end: int) -> tuple[int, int]:
             subject_end = start + match.end("subject")
             discourse_prefix = re.match(
                 r"(?i)\s*(?:while|whereas|and|but|however|"
-                r"hemcinin|ve|amma|lakin|ise|de|da)\s+",
+                r"hemcinin|ve|amma|lakin|ise|de|da|ile)\s+",
                 _fold(text[subject_start:subject_end]),
             )
             if discourse_prefix:
@@ -753,7 +767,7 @@ def _subject_bounds(text: str, start: int, end: int) -> tuple[int, int]:
             r"(?i)\s+(?:is|are|be|iş|is|olaraq|olunur|sayılsın|sayilsin|"
             r"verilir|ver|et)\s*$"
         ),
-        re.compile(r"(?i)^\s*(?:of|in|with)\s+"),
+        re.compile(r"(?i)^\s*(?:of|in|with|ile)\s+"),
         re.compile(r"(?i)\s+(?:but\s+it|is|it\s+is)\s*$"),
         re.compile(r"(?i)^\s*(?:de|da)\s+"),
         re.compile(r"(?i)^\s*(?:including|include|such\s+as|namely)\s+"),
@@ -837,33 +851,18 @@ def _family(
         if not normalized:
             return JDDraftCriterionKind.EXPERIENCE
         domain = canonicalize_domain(normalized)
-        # Presence-only experience has no skill-duration semantics. Treat the
-        # explicit English family wrappers as domain authority unless the
-        # subject is structurally technical (known alias, acronym, camel case,
-        # or syntax-bearing product identity). This is grammar-based and does
-        # not require a sector whitelist; genuinely ambiguous technical names
-        # remain SKILL_EXPERIENCE and therefore review-only without duration.
-        source_subject = subject.strip()
-        technical_identity = (
-            normalized in SKILL_ALIASES
-            or normalize_skill_name(normalized) in SKILL_ALIASES.values()
-            or bool(re.search(r"[0-9+#./]", source_subject))
-            or (source_subject.isupper() and len(source_subject) > 1)
-            or bool(re.search(r"[a-z][A-Z]", source_subject))
-        )
-        english_presence_wrapper = bool(
-            not _DURATION_RE.search(folded)
-            and re.search(
-                r"(?i)(?:\bexperience\s+(?:in|within)\b|\bbackground\s+in\b|"
-                r"\b(?:experience|background)\s+(?:within\s+)?(?:the\s+)?[^.;,]+\s+"
-                r"(?:sector|industry)\b|\b[^.;,]+\s+(?:experience|background)\b)",
-                folded,
-            )
-        )
-        if english_presence_wrapper and not technical_identity:
-            return JDDraftCriterionKind.DOMAIN_EXPERIENCE
+        # Family authority comes only from explicit domain/sector/industry
+        # grammar or a server-known domain taxonomy match — never from
+        # orthography (digits, symbols, casing, acronym shape). Two
+        # structurally identical "<X> experience" sentences must behave
+        # identically regardless of how X happens to be spelled (issue #44
+        # F2). A subject that is neither a recognized domain nor a
+        # recognized skill identity stays SKILL_EXPERIENCE, which
+        # review-gates on duration exactly like any other unnamed skill
+        # claim — ambiguous family classification prefers human review over
+        # inconsistent scoring.
         if (
-            re.search(r"\b(?:sahe\w*|sektor\w*|sector\w*|domain)\b", folded)
+            re.search(r"\b(?:sahe\w*|sektor\w*|sector\w*|domain|industry)\b", folded)
             or normalized in _DOMAIN_HEADS
             or domain in DOMAIN_SYNONYMS
             or any(normalized.endswith(f" {suffix}") for suffix in _DOMAIN_HEADS)

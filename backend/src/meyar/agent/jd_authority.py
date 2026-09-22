@@ -9,6 +9,7 @@ against the complete resulting occurrence.
 import re
 
 from meyar.agent.schemas import MAX_JD_REQUIREMENT_SPANS, RequirementSpan
+from meyar.agent.segmentation_authority import coordinated_split_authorized
 from meyar.core.result_count import is_result_count_only
 from meyar.core.text import fold_az_ascii, normalize_azerbaijani_case
 from meyar.evaluation.normalization import SKILL_ALIASES
@@ -171,11 +172,15 @@ def _split_safe_clauses(jd_text: str, start: int, end: int) -> list[tuple[int, i
     if piece_start < piece_end:
         pieces.append((piece_start, piece_end))
 
-    if len(pieces) > 1 and all(
-        explicit_modality(jd_text[a:b])
-        or _is_reviewable_implicit_clause(jd_text[a:b])
-        or is_result_count_only(jd_text[a:b])
-        for a, b in pieces
+    def _piece_authorized(piece: str) -> bool:
+        return bool(
+            explicit_modality(piece)
+            or _is_reviewable_implicit_clause(piece)
+            or is_result_count_only(piece)
+        )
+
+    if coordinated_split_authorized(
+        [jd_text[a:b] for a, b in pieces], _piece_authorized
     ):
         return [
             (a, b, False)

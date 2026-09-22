@@ -4944,3 +4944,70 @@ execute top-K plus skill duration. The same request submitted through vacancy
 analysis is identified as wrong-mode search intent rather than minting vacancy
 modality. No scoring arithmetic, evaluator semantics, default Ollama model,
 candidate-result conversation, migration, push, or merge is changed.
+
+## D-065 — Result-count branch ordering, shared coordination-split authority, and orthography-independent family (issue #44)
+
+**Date:** 2026-09-22. **Status:** Local corrective implementation on exact
+independent-audit base `989569bc3789b2a0b3c46764c54e8f86c65909e4`; PR #42
+remains open and unaccepted.
+
+**F1 root cause:** `extract_result_count_intent`'s single-exact-candidate
+branch returned `VALID` before its own ambiguous-cue safeguard could run, and
+treated the AZ number word `bir` ("one") as an exact count candidate even when
+it was the first word of the vague-quantity idiom `bir neçə`/`bir qədər`
+("a few"/"some"). **Decision:** a number-word candidate immediately continued
+by `neçə`/`qədər` is never counted as an exact value; a sentence expressing
+result-count intent (a result noun plus a ranking/listing action) that
+contains a vague quantifier (`bir neçə`, `bir qədər`, `çoxlu`, `few`,
+`several`, `some`, `many`, `texminen`, `about`, `approximately`) with no
+independently attributable exact number resolves to `AMBIGUOUS`, never
+`VALID(1)`. Only true absence of any count-intent construction defaults to 20.
+
+**F3 root cause:** `jd_authority.segment_requirement_spans` already
+implemented D-055 (a same-sentence coordination splits only when every side
+has its own explicit modality), but
+`semantic_requirements.analyze_hr_text`'s independent `_split_units`
+segmenter decided the same question by "is either side material by keyword,"
+which could split a shared-modality clause with only one materially-cued
+side and silently drop the other (`"<X> should hold ACCA and CFA
+certifications"` lost ACCA entirely). **Decision:** the D-055 split rule is
+extracted once into `meyar.agent.segmentation_authority
+.coordinated_split_authorized`, used by both segmenters. A coordinated side
+may split from its sibling only when it is independently material or an
+already-attributed governing modality (a preceding `with`/`required`/
+`preferred`/enumeration-list occurrence) covers it; otherwise the complete
+clause is retained as one attributable material span. Nothing is silently
+dropped; independently modalized sides (`"X required and Y preferred"`)
+still split and both survive.
+
+**F2 root cause:** `_family()`'s bare-`"<X> experience"` classification used
+orthography (digits/symbols/ALL-CAPS/camelCase) as a `technical_identity`
+proxy to decide `SKILL_EXPERIENCE` vs `DOMAIN_EXPERIENCE`, so structurally
+identical sentences behaved differently purely by spelling (`Java` →
+scorable `DOMAIN_EXPERIENCE`, `JavaScript` → review-only `SKILL_EXPERIENCE`).
+**Decision:** family authority for a bare, duration-less `"<X> experience"`
+now comes only from explicit sector/industry/domain grammar or a server-known
+domain-taxonomy match (`_DOMAIN_HEADS`/`DOMAIN_SYNONYMS`, now including the
+word `industry`); a subject with neither stays `SKILL_EXPERIENCE`, which
+review-gates on duration exactly like any other unnamed skill claim. Known
+domain words (e.g. `Banking`, `Risk`/`Credit Risk`) and known collision pairs
+(`Java`/`JavaScript`, `C`/`C++`, `Go`/`Django`, `SQL`/`NoSQL`) now behave
+consistently; a handful of previously orthography-authorized bare domain
+words with no taxonomy/grammar signal (`Aviation`, `Hospitality`,
+`Construction`, `Healthcare`, `Manufacturing`, bare `Background/Experience in
+X`) now correctly fall to `NEEDS_HUMAN_REVIEW` instead of inconsistent
+scoring.
+
+**AZ wrapper:** a leading Azerbaijani postposition `ilə` ("with") was not
+excluded from the professional subject when it began the remaining relation
+text (`"ilə SQL"`), only when trailing. Added to the same leading
+discourse-prefix strip already used for `and`/`but`/`while`/`amma`/`lakin`/
+etc., in both the mask-based subject-bounds path and the
+`_SUBJECT_SYNTAX_PATTERNS` discourse-prefix post-strip. No SQL-specific
+logic was added.
+
+**Explicit deferrals:** no scoring arithmetic, evaluator semantics, default
+Ollama model, candidate-result conversation, migration, push, or merge is
+changed. Certification-list enumeration splitting (`"including CPA and
+CISA"`) is unchanged — it is a distinct, already-authorized shared-modality
+list construction, not the bare coordination this fix targets.

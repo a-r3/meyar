@@ -204,19 +204,19 @@ def test_fresh_certification_quantity_preserves_only_attributable_identities(
 @pytest.mark.parametrize(
     ("text", "subject"),
     [
-        ("Aviation experience is required.", "Aviation"),
-        ("Hospitality experience is preferred.", "Hospitality"),
-        ("Construction experience is required.", "Construction"),
-        ("Healthcare experience is preferred.", "Healthcare"),
-        ("Manufacturing experience is required.", "Manufacturing"),
-        ("Background in logistics is preferred.", "logistics"),
-        ("Experience in insurance is required.", "insurance"),
+        ("Banking experience is required.", "Banking"),
+        ("Retail experience is preferred.", "Retail"),
+        ("AML experience is required.", "AML"),
+        ("Experience in the logistics sector is preferred.", "logistics"),
         ("Experience within the energy industry is preferred.", "energy"),
     ],
 )
-def test_fresh_english_presence_only_domains_are_scorable_without_duration(
+def test_fresh_explicit_domain_grammar_is_scorable_without_duration(
     text: str, subject: str
 ) -> None:
+    """DOMAIN_EXPERIENCE authority comes from a known domain/taxonomy match
+    or explicit sector/industry grammar — never from orthography (issue #44
+    F2)."""
     item = analyze_hr_text(text).requirements[0]
     assert (
         item.state,
@@ -229,6 +229,29 @@ def test_fresh_english_presence_only_domains_are_scorable_without_duration(
         subject,
         None,
     )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Aviation experience is required.",
+        "Hospitality experience is preferred.",
+        "Construction experience is required.",
+        "Healthcare experience is preferred.",
+        "Manufacturing experience is required.",
+        "Background in logistics is preferred.",
+        "Experience in insurance is required.",
+    ],
+)
+def test_fresh_bare_experience_without_taxonomy_signal_needs_review(text: str) -> None:
+    """A bare "<X> experience/background" mention with no explicit
+    sector/industry/domain grammar and no known domain-taxonomy match
+    cannot be deterministically authorized as skill vs domain from spelling
+    alone; it must fall to review rather than default to either family
+    (issue #44 F2 — orthography must not decide professional family)."""
+    item = analyze_hr_text(text).requirements[0]
+    assert item.state == SemanticRequirementState.NEEDS_HUMAN_REVIEW
+    assert item.min_years is None
 
 
 @pytest.mark.parametrize(
