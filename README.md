@@ -237,7 +237,7 @@ Three distinct things, not one:
 
 | | Model | Status |
 |---|---|---|
-| Source/default (dev, tests, integration default) | `qwen3:0.6b` | Intentional lightweight development setting — **not** a production approval |
+| Source/default development/integration setting | `qwen3:0.6b` | Intentional lightweight default — **not** a production approval |
 | Recent acceptance/browser verification override | `qwen3:1.7b` | Used for stronger local acceptance testing during recent development — **not** a production approval |
 | Final production model | **TBD** | Selected only via the real target-hardware benchmark (issue #36) on the actual Mac mini M4 Pro — that measurement is authority, not either model above |
 
@@ -637,7 +637,8 @@ Two further capabilities are scoped but **not implemented**:
   `docs/DEPLOYMENT_AND_OPERATIONS.md`.
 - No formal penetration test has been performed, and no security
   validation has occurred on target deployment hardware.
-- OCR fallback for scanned PDFs is not implemented — digital PDFs only.
+- Scanned/image-only PDFs have no OCR fallback yet; text-based PDFs and
+  DOCX remain supported.
 - No rate limiting is enforced yet (`MEYAR_RATE_LIMIT_PER_MINUTE` exists in
   config but is not yet wired into request handling).
 - No CORS policy is configured; the current same-origin UI + internal API
