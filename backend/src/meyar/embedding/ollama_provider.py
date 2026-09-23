@@ -83,3 +83,21 @@ class OllamaEmbeddingProvider:
             model_name=self.model_name,
             model_revision=self.model_revision,
         )
+
+    async def health(self) -> dict:
+        """Mirrors OllamaLLMProvider.health() — same Ollama daemon, same
+        `/api/tags` reachability/model-availability check, same 5s bound."""
+        try:
+            async with build_local_only_async_client(
+                timeout=5.0, transport=self._transport
+            ) as client:
+                resp = await client.get(f"{self._base_url}/api/tags")
+                resp.raise_for_status()
+                tags = [m.get("name") for m in resp.json().get("models", [])]
+                return {
+                    "reachable": True,
+                    "model": self.model_name,
+                    "model_available": self.model_name in tags,
+                }
+        except httpx.HTTPError:
+            return {"reachable": False, "model": self.model_name, "model_available": False}

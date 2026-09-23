@@ -36,8 +36,14 @@ canonical references it points to — read this alongside, not instead of:
   and the executed synthetic acceptance proof.
 - [`docs/TARGET_MAC_BENCHMARK.md`](TARGET_MAC_BENCHMARK.md) — reference
   hardware, benchmark harness, model-approval gate.
+- [`docs/MEYAR_OPS.md`](MEYAR_OPS.md) — the `meyar-ops` operator CLI
+  (issue #35): local preflight/status/readiness checks and release-
+  artifact verification. PR1 foundation only — see its own #35/#46
+  boundary section; it does not yet replace any manual step in this
+  runbook.
 - [`docs/DECISIONS.md`](DECISIONS.md) — the full decision log, including
-  D-020 (tested security/acceptance boundary).
+  D-020 (tested security/acceptance boundary) and D-066 (`meyar-ops`
+  foundation).
 - [`docs/STATUS.md`](STATUS.md) — current slice/milestone/matrix status.
 
 ## 2. Environment roles
@@ -493,6 +499,12 @@ Never use `git reset --hard` or an unverified `alembic downgrade` as a
 default/universal production rollback mechanism.
 
 ## 16. Post-deployment verification
+
+`uv run meyar-ops status` and `uv run meyar-ops readiness` (see
+`docs/MEYAR_OPS.md`) give a machine-readable, read-only snapshot covering
+several of the items below (database/Alembic-head/storage/Ollama/model
+reachability) in one call — useful as a quick local aid, but they do not
+yet replace this manual checklist; run both.
 
 Compact checklist, grounded in MEYAR's actual surfaces:
 

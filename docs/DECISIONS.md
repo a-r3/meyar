@@ -5011,3 +5011,149 @@ Ollama model, candidate-result conversation, migration, push, or merge is
 changed. Certification-list enumeration splitting (`"including CPA and
 CISA"`) is unchanged — it is a distinct, already-authorized shared-modality
 list construction, not the bare coordination this fix targets.
+
+## D-066 — `meyar-ops` foundation: manifests, preflight/status/readiness, release verification (issue #35 PR1)
+
+**Date:** 2026-09-23. **Status:** Local implementation on
+`feat/meyar-ops-foundation`, branched from accepted `main`
+`dddd6eb0967bb1a9225fb43470c2468db30da5d6`; PR not yet merged.
+
+**Scope.** First bounded PR for issue #35 (Slice 6 — Agentless Mac
+Deployment Readiness, M9). Adds `backend/src/meyar/ops/` as normal typed/
+tested/linted package code (never an ad-hoc shell script), with a
+`meyar-ops` console entry point (`backend/pyproject.toml`
+`[project.scripts]`) and four commands: `preflight`, `status`,
+`readiness`, `verify-release`. Full detail: `docs/MEYAR_OPS.md`.
+
+**Result contract.** One stable JSON envelope (`meyar.ops.result.OpsResult`)
+for every command — `action`, `ok`, `started_at`, `finished_at`,
+`findings[]`, each a typed `Finding` (`component`, `status`, `code`,
+`message`). `ok` is defined uniformly across all four commands as "no
+`Finding` has status `FAIL`" — `WARN`/`SKIPPED` never affect it. This was
+chosen over a per-command-bespoke definition so a caller never has to
+special-case which command it invoked to interpret `ok`/the exit code.
+Exit codes are a 4-value `OpsExitCode` (`SUCCESS=0`, `CHECK_FAILURE=1`,
+`INVALID_INVOCATION=2`, `INFRASTRUCTURE_FAILURE=3`); argparse's own
+invalid-argument exit code is already `2`, so no special-casing was
+needed there either.
+
+**Ops config kept separate from application config.** `meyar.ops.config
+.OpsSettings` (env prefix `MEYAR_OPS_`) is its own `pydantic-settings`
+class, not an addition to `meyar.config.Settings` — meyar-ops is
+operationally separate tooling (per `.claude/rules/architecture.md`), and
+keeping its handful of settings (disk-space minimum, an alembic.ini
+override) out of the widely-imported application `Settings` avoids
+coupling business-config surface area to deployment-tooling surface area.
+
+**Embedding provider gained `health()`.** `meyar.embedding.provider
+.EmbeddingProvider` and `OllamaEmbeddingProvider` gained a `health()`
+method mirroring the existing `LLMProvider.health()` (same `/api/tags`
+reachability/model-availability check, same boundary). This was necessary
+so `meyar-ops status`/`readiness` can report configured-embedding-model
+availability through the existing approved local-only boundary
+(`meyar.llm.loopback.build_local_only_async_client` +
+`require_loopback_url`) instead of ops code constructing its own Ollama
+HTTP call — see the static `test_ops_package_never_imports_httpx_directly`
+proof in `test_ops_no_exfiltration.py`. `tests/fakes.FakeEmbeddingProvider`
+and `demo_seed_service._DemoEmbeddingProvider` both gained a matching
+`health()` so they still satisfy the `EmbeddingProvider` protocol under
+mypy.
+
+**Release-identity uses `pyproject.toml`'s `[project].version`
+(currently `0.1.0`), never the FastAPI/OpenAPI display version
+(`meyar.main.app.version`, currently `1.0.0`).** These two numbers are
+already inconsistent in the repository today; this PR does not change
+either value or attempt to reconcile them — that is a separate, later
+decision if ever made. `release_id` is deterministic:
+`meyar-{release_version}+{source_sha[:12]}` from the full 40-character
+`source_sha`, never randomly generated, so re-verifying the same accepted
+commit always yields the same identity.
+
+**Release-artifact integrity model.** Tarball + release manifest +
+external `SHA256SUMS` — the artifact's own SHA-256 is never computed over
+bytes that are themselves inside that same artifact (no self-referential
+hashing). The release manifest *may* also be embedded inside the archive
+(for installed-state identity once deployed); `verify-release` treats
+that as an optional additional consistency check against the external
+manifest, never as the source of truth for the checksum. Archive member
+metadata (`meyar.ops.archive_safety`) is inspected for absolute paths,
+`..` traversal, symlinks, hard links, device/special files, and paths
+escaping the one expected top-level root (`release_id/`) — a violation is
+a hard failure and the archive is never extracted (`extractall`/`extract`
+are never called anywhere in this PR; `verify-release` only ever reads
+one designated member's bytes into memory via `extractfile`, and only
+after every member has already passed the safety inspection with zero
+violations).
+
+**No production model approved; no artifact built.** `meyar.ops
+.model_manifest` defines the three-state approval contract
+(`DEVELOPMENT_INTEGRATION` / `BENCHMARKED_PENDING_APPROVAL` /
+`PRODUCTION_APPROVED`) but this PR ships no instance anywhere in the repo
+with `PRODUCTION_APPROVED` — current truth stays `qwen3:0.6b` (source
+default) and `qwen3:1.7b` (recent local acceptance override), both
+`DEVELOPMENT_INTEGRATION`; production selection remains TBD, blocked on
+issue #36's real Target-Mac benchmark. Release-artifact *building* is
+explicitly deferred to a later #35 PR — this PR's `verify-release` only
+verifies synthetic fixtures.
+
+**#35/#46 boundary preserved.** No HTTP `/ready` route was added; `/api/v1
+/health` is untouched (liveness-only). `meyar-ops readiness` is a local
+CLI composition of existing primitives, not an authenticated HTTP
+endpoint — that, plus in-application degraded-state semantics and
+production config fail-closed hardening, remains issue #46.
+
+**Corrective hardening (pre-merge independent review, same branch/PR).**
+Five defects found in independent review of the above before merge, fixed
+in one follow-up commit, still #35 PR1 scope — no new command, no #36/#46
+work pulled forward:
+
+1. `internal_manifest_consistency` compared only `release_id`/
+   `release_version`/`source_sha`, so an embedded manifest could disagree
+   on `uv_lock_sha256`, `alembic_heads`, `rollback_compatibility`,
+   `model_manifest`, `required_python_version`, or `artifact_format`(`_version`)
+   and still report `INTERNAL_MANIFEST_CONSISTENT`. Now compares the full
+   typed `ReleaseManifest` (structured field equality, not raw JSON
+   text/order) — any field mismatch is `INTERNAL_MANIFEST_MISMATCH`.
+2. `uv_lock_sha256` was only syntactically validated (64 hex chars) and
+   never checked against anything — a "valid" artifact could omit
+   `backend/uv.lock` entirely. `verify-release` now locates the exact
+   `release_id/backend/uv.lock` member (missing/duplicate/non-regular is
+   a hard failure), streams its SHA-256 in bounded chunks, and compares
+   it to the manifest's declared digest.
+3. `probe_storage_writable` called `mkdir(parents=True, exist_ok=True)`,
+   so a readiness *check* silently provisioned the storage root. It now
+   only reports truthfully on an already-provisioned root (missing root
+   or non-directory ⇒ not writable) and never creates anything —
+   provisioning remains a later #35 step.
+4. `get_db_alembic_revision` caught every `SQLAlchemyError` from the
+   revision query and returned `None`, conflating "table never migrated"
+   with a genuine query/permission failure, and read only `.first()`.
+   It now does a PostgreSQL-specific table-existence probe first, reads
+   every revision row, and raises a distinct `AlembicRevisionQueryError`
+   for a post-connection query failure so `status`/`readiness` can report
+   it truthfully (`ALEMBIC_REVISION_QUERY_FAILED`) instead of as "no
+   revision", and report more-than-one DB revision row as its own
+   `MULTIPLE_DB_REVISIONS` instead of silently using the first.
+5. Archive inspection was otherwise unbounded (`TarFile.getmembers()`
+   eagerly parses every header; `SHA256SUMS` duplicate filenames resolved
+   last-write-wins). `archive_safety.inspect_archive_members` now scans
+   via `TarFile.next()` and aborts the instant member count, member-name
+   length, or aggregate declared uncompressed size exceeds a documented
+   bound; the two members `verify-release` reads by name each have their
+   own declared-size bound checked before any read; and a duplicate
+   `SHA256SUMS` entry for the target artifact filename is rejected as
+   `CHECKSUM_ENTRY_AMBIGUOUS` rather than silently resolved.
+
+Also added, same review: `ModelManifestEntry` now requires a non-empty
+`benchmark_reference` for `BENCHMARKED_PENDING_APPROVAL`/
+`PRODUCTION_APPROVED` (schema-level only — no stronger cross-field rule
+invented; still ships no `PRODUCTION_APPROVED` instance, still #36's
+call). No behavior changed for candidate/search/scoring, no HTTP `/ready`
+was added, no launchd/update/rollback orchestration was added, and no
+production model was approved.
+
+**Explicit deferrals:** no candidate/search/scoring semantics changed, no
+launchd/service lifecycle, no update/rollback orchestration, no Apple
+Silicon runtime claim (Linux-verified only in this PR), no bank-Mac
+verification claim, no PostgreSQL/Homebrew/Docker production provisioning
+topology chosen.

@@ -44,6 +44,7 @@ class FakeLLMProvider:
         jd_draft: JDCriteriaDraft | None = None,
         jd_draft_error: LLMProviderError | None = None,
         jd_draft_fail_first_n_calls: int = 0,
+        health_result: dict | None = None,
     ) -> None:
         self._extraction = extraction
         self._identity_extraction = identity_extraction
@@ -71,6 +72,7 @@ class FakeLLMProvider:
         self.jd_draft_call_count = 0
         self.last_jd_text: str | None = None
         self.last_requirement_spans: list[RequirementSpan] | None = None
+        self._health_result = health_result
 
     async def extract_candidate_profile(
         self, view: ProfessionalDocumentView
@@ -99,6 +101,8 @@ class FakeLLMProvider:
         return self._identity_extraction, self.model_name
 
     async def health(self) -> dict:
+        if self._health_result is not None:
+            return self._health_result
         return {"reachable": True, "model": self.model_name, "model_available": True}
 
     async def plan_candidate_search(
@@ -223,12 +227,14 @@ class FakeEmbeddingProvider:
         model_name: str = "fake-embedding-model-v1",
         model_revision: str = "",
         error: EmbeddingProviderError | None = None,
+        health_result: dict | None = None,
     ) -> None:
         self._vector = vector if vector is not None else [0.1 * i for i in range(dimensions)]
         self._error = error
         self.model_name = model_name
         self.model_revision = model_revision
         self.call_count = 0
+        self._health_result = health_result
 
     async def embed(self, text: str) -> EmbeddingResult:
         self.call_count += 1
@@ -241,3 +247,8 @@ class FakeEmbeddingProvider:
             model_name=self.model_name,
             model_revision=self.model_revision,
         )
+
+    async def health(self) -> dict:
+        if self._health_result is not None:
+            return self._health_result
+        return {"reachable": True, "model": self.model_name, "model_available": True}

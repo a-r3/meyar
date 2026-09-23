@@ -187,6 +187,9 @@ class _DemoEmbeddingProvider:
             model_revision=self.model_revision,
         )
 
+    async def health(self) -> dict:
+        return {"reachable": True, "model": self.model_name, "model_available": True}
+
 
 @dataclass(frozen=True)
 class _DemoCandidate:
