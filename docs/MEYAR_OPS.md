@@ -322,13 +322,27 @@ whole build before a single byte is written — reported as
 `UNSAFE_GIT_TREE_ENTRY`. Nothing is ever written to `--output-dir` when
 provenance/allowlist validation fails.
 
-**Alembic heads come from the selected commit's own migration tree.**
-`build_release` materializes only the selected commit's
-`backend/alembic.ini` + `backend/alembic/**` blobs into a throwaway temp
-directory (never the working tree's copies) and calls the existing,
-unmodified `meyar.ops.alembic_introspect.get_code_alembic_heads` against
-it — the exact same head-computation logic `status`/`readiness` already
-use, just pointed at commit-derived files instead of disk files.
+**Alembic heads come from the selected commit's own migration tree,
+parsed — never executed.** (PR #56 security-corrective pass.)
+`backend/alembic.ini`'s presence in the selected commit is still
+required, but only as a presence check. Heads themselves are computed by
+`meyar.ops.alembic_static_metadata.compute_static_alembic_heads`, which
+parses each selected-commit `backend/alembic/versions/*.py` blob with
+Python's `ast` module and extracts only the static `revision`/
+`down_revision` literal assignments (via `ast.literal_eval`, which
+accepts only literal shapes and rejects a function call, an attribute
+lookup, a name reference, an f-string, or any other computed
+expression) — **never** Alembic's own `ScriptDirectory`, which loads
+each migration file as a Python module and would execute its top-level
+code as a side effect of building its revision map. A selected commit's
+migration file cannot run any code during a `build-release` invocation,
+by construction — proven by
+`test_malicious_migration_top_level_side_effect_is_never_executed`.
+`meyar.ops.alembic_introspect.get_code_alembic_heads` (real
+`ScriptDirectory`) is unchanged and remains the correct mechanism for
+`status`/`readiness`/`preflight`, which only ever point it at the
+trusted, already-running working tree — not an arbitrary selected
+commit.
 
 **Archive layout** — a single top-level root, `<release_id>/`:
 
@@ -383,6 +397,28 @@ files, only the file(s) *this invocation itself created* are removed
 never a file a concurrent actor has since swapped in at the same path.
 `--output-dir` must already exist and be a directory; this command never
 creates a parent directory tree.
+
+**Release-derived output names are validated as path-safe (PR #56
+security-corrective pass).** `release_version` is read from the selected
+commit's `pyproject.toml` — attacker-controlled content for any commit
+an operator selects, exactly like every other selected-commit blob.
+Before either `release_version` or the `release_id` derived from it can
+reach an output filename or archive member root, both are validated as
+safe single filesystem path components (non-empty; not `.`/`..`; no `/`
+or `\`; no ASCII control character) by a build-release-specific
+validator. An unsafe value fails the build truthfully
+(`RELEASE_VERSION_UNSAFE`/`RELEASE_ID_UNSAFE`) before any output file or
+archive member is created — it is never silently normalized into a
+different, "safe-looking" value. `compute_release_id()`'s own contract
+and `ReleaseManifest`'s existing length constraints are unchanged.
+
+**Output write ownership is failure-safe (PR #56 security-corrective
+pass).** `_create_exclusive` explicitly owns the raw file descriptor
+returned by `os.open()` until `os.fdopen()` succeeds; if `os.fdopen()`
+itself fails — a case the original implementation did not explicitly
+handle — the still-owned raw descriptor is closed directly (a redundant-
+close `OSError` is suppressed) before the existing identity-checked path
+cleanup runs, and the original exception always propagates unmasked.
 
 **Self-check before publishing.** Immediately after writing the
 artifact, `build-release` runs the exact same

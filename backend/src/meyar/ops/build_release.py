@@ -51,6 +51,19 @@ invocation itself created (identity-checked via `(st_dev, st_ino)`,
 exactly like `service_plist._unlink_if_same_file`) — a pre-existing file
 at the same path, or a file some other process swapped in afterward, is
 never touched.
+
+**READ selected source metadata, never EXECUTE it (PR #56 corrective
+pass).** Alembic heads for the manifest are derived by parsing selected-
+commit `backend/alembic/versions/*.py` blobs with `ast`
+(`meyar.ops.alembic_static_metadata`) — never Alembic's own
+`ScriptDirectory`, which imports/executes each migration module as a
+side effect of building its revision map. `release_version` (read from
+the selected commit's `pyproject.toml`, itself attacker-controlled
+content for any selected commit) and the `release_id` derived from it
+are validated as safe single filesystem path components before either
+can reach an output filename or archive member root
+(`_validate_filesystem_safe_component`) — an unsafe value fails the
+build truthfully rather than being silently normalized.
 """
 
 from __future__ import annotations
@@ -63,14 +76,17 @@ import os
 import re
 import subprocess
 import tarfile
-import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Protocol
 
-from meyar.ops.alembic_introspect import AlembicIntrospectionError, get_code_alembic_heads
+from meyar.ops import archive_safety
+from meyar.ops.alembic_static_metadata import (
+    AlembicStaticMetadataError,
+    compute_static_alembic_heads,
+)
 from meyar.ops.archive_safety import ArchiveBoundExceededError, inspect_archive_members
 from meyar.ops.model_manifest import ModelApprovalStatus
 from meyar.ops.redact import safe_exception_text
@@ -194,6 +210,41 @@ class RequiredReleaseFileMissingError(Exception):
         super().__init__(f"selected commit has no '{path}' — required for a release build")
 
 
+class GitBlobTooLargeError(Exception):
+    """Raised when a selected-commit blob's Git-declared size (`git
+    cat-file -s`) already exceeds the release-artifact aggregate size
+    bound — checked before that blob's content is ever read via `git
+    cat-file -p`, so a pathologically large allowlisted blob can never be
+    fully buffered into memory first and rejected only afterward (see
+    module docstring "Resource-safety review", PR #56 corrective pass)."""
+
+    def __init__(self, path: str, declared_size: int, limit: int) -> None:
+        self.path = path
+        self.declared_size = declared_size
+        self.limit = limit
+        super().__init__(
+            f"blob for '{path}' has declared size {declared_size} bytes, exceeding the "
+            f"release-artifact aggregate bound of {limit} bytes"
+        )
+
+
+class ReleaseIdentityUnsafeError(Exception):
+    """Raised when a commit-derived release-identity value (`release_version`
+    from the selected commit's `pyproject.toml`, or the `release_id`
+    computed from it) is unsafe to use as a filesystem path component.
+    `release_version` is attacker-controlled content for any commit an
+    operator selects — a value containing a path separator or traversal
+    sequence must never reach `os.open(..., dir_fd=output_dir_fd)`, which
+    would otherwise let a malicious selected commit write outside
+    `--output-dir`."""
+
+    def __init__(self, field: str, value: str, reason: str) -> None:
+        self.field = field
+        self.value = value
+        self.reason = reason
+        super().__init__(f"{field} is unsafe for filesystem use ({reason}): {value!r}")
+
+
 class OutputDirInvalidError(Exception):
     def __init__(self, output_dir: Path, reason: str) -> None:
         self.output_dir = output_dir
@@ -210,6 +261,28 @@ class OutputTargetExistsError(Exception):
 def validate_source_sha(value: str) -> None:
     if not _FULL_SHA_RE.fullmatch(value):
         raise ValueError("source_sha must be exactly 40 lowercase hex characters")
+
+
+_CONTROL_CHARS = frozenset(chr(c) for c in range(0x20)) | {chr(0x7F)}
+
+
+def _validate_filesystem_safe_component(value: str, *, field: str) -> None:
+    """Validates `value` is safe to use as a single filesystem path
+    component — a release-bundle output basename or the basename prefix
+    embedded in one. Never normalizes/coerces an unsafe value into a safe
+    one; the caller must fail the build truthfully instead. Rejects:
+    empty; `.`/`..`; any path separator (`/` or `\\`, so a value cannot
+    itself introduce a multi-component path or a Windows-style separator
+    on a system that honors it); and any ASCII control character
+    (0x00-0x1F, 0x7F), which also covers embedded NUL."""
+    if not value:
+        raise ReleaseIdentityUnsafeError(field, value, "empty")
+    if value in (".", ".."):
+        raise ReleaseIdentityUnsafeError(field, value, "'.' or '..' is not a valid path component")
+    if "/" in value or "\\" in value:
+        raise ReleaseIdentityUnsafeError(field, value, "contains a path separator")
+    if any(ch in _CONTROL_CHARS for ch in value):
+        raise ReleaseIdentityUnsafeError(field, value, "contains a control character")
 
 
 def _run_git(argv: list[str], *, cwd: Path, runner: GitRunner) -> bytes:
@@ -312,35 +385,58 @@ def _read_blob(blob_sha: str, *, repo_root: Path, runner: GitRunner) -> bytes:
     return _run_git(["cat-file", "-p", blob_sha], cwd=repo_root, runner=runner)
 
 
+def _blob_declared_size(blob_sha: str, *, repo_root: Path, runner: GitRunner) -> int:
+    """Reads the blob's size from Git's own object metadata (`git
+    cat-file -s`) — a small, fixed-size response — without reading any of
+    the blob's actual content."""
+    raw = _run_git(["cat-file", "-s", blob_sha], cwd=repo_root, runner=runner)
+    return int(raw.decode("ascii").strip())
+
+
 def _fetch_all_blobs(
     entries: list[GitTreeEntry], *, repo_root: Path, runner: GitRunner
 ) -> dict[str, bytes]:
-    return {
-        entry.path: _read_blob(entry.blob_sha, repo_root=repo_root, runner=runner)
-        for entry in entries
-    }
+    """Fetches every entry's blob content, but checks each blob's
+    Git-declared size against the release artifact's own accepted
+    aggregate-size bound (`archive_safety.MAX_AGGREGATE_UNCOMPRESSED_SIZE`)
+    *before* reading that blob's content — so neither a single
+    pathologically large allowlisted blob nor several blobs whose sizes
+    sum past the bound can be fully buffered into memory first and
+    rejected only afterward (the running total already includes the
+    current blob's declared size before its content is ever read)."""
+    content_by_path: dict[str, bytes] = {}
+    aggregate_declared_size = 0
+    for entry in entries:
+        declared_size = _blob_declared_size(entry.blob_sha, repo_root=repo_root, runner=runner)
+        aggregate_declared_size += declared_size
+        if aggregate_declared_size > archive_safety.MAX_AGGREGATE_UNCOMPRESSED_SIZE:
+            raise GitBlobTooLargeError(
+                entry.path, declared_size, archive_safety.MAX_AGGREGATE_UNCOMPRESSED_SIZE
+            )
+        content_by_path[entry.path] = _read_blob(
+            entry.blob_sha, repo_root=repo_root, runner=runner
+        )
+    return content_by_path
 
 
 def _compute_alembic_heads(content_by_path: dict[str, bytes]) -> list[str]:
-    """Materializes only the selected commit's `backend/alembic.ini` +
-    `backend/alembic/**` blobs into a throwaway temp directory so the
-    existing, unmodified `get_code_alembic_heads` (real `alembic.config
-    .Config` + `alembic.script.ScriptDirectory`) can compute heads from
-    the SELECTED COMMIT's migration tree — never the working tree's.
-    `alembic.ini`'s `script_location = %(here)s/alembic` resolves
-    relative to the ini file's own directory, so this works regardless of
-    where the temp directory lives."""
-    with tempfile.TemporaryDirectory(prefix="meyar-build-release-alembic-") as tmp:
-        tmp_backend = Path(tmp) / "backend"
-        for path, content in content_by_path.items():
-            if path == "backend/alembic.ini" or path.startswith("backend/alembic/"):
-                dest = tmp_backend / path.removeprefix("backend/")
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                dest.write_bytes(content)
-        ini_path = tmp_backend / "alembic.ini"
-        if not ini_path.is_file():
-            raise RequiredReleaseFileMissingError("backend/alembic.ini")
-        return get_code_alembic_heads(ini_path)
+    """Computes Alembic heads for the SELECTED COMMIT's migration set
+    without ever executing any of its Python code. `backend/alembic.ini`'s
+    presence is still required (matching this command's prior observable
+    contract), but only as a presence check — it is never parsed/loaded
+    here. Heads themselves come from `alembic_static_metadata
+    .compute_static_alembic_heads`, which parses each `backend/alembic/
+    versions/*.py` blob with `ast` and extracts only the static
+    `revision`/`down_revision` literals — never Alembic's own
+    `ScriptDirectory`, which would import (execute) each migration module
+    as a side effect of building its revision map. See
+    `meyar.ops.alembic_static_metadata`'s module docstring for the full
+    rationale; `get_code_alembic_heads` (real `ScriptDirectory`) remains
+    unchanged and is still correctly used by `status`/`readiness`/
+    `preflight` against the trusted working tree."""
+    if "backend/alembic.ini" not in content_by_path:
+        raise RequiredReleaseFileMissingError("backend/alembic.ini")
+    return compute_static_alembic_heads(content_by_path)
 
 
 def _build_tar_gz_bytes(members: list[tuple[str, bytes]]) -> bytes:
@@ -378,13 +474,48 @@ class _CreatedFile:
 def _create_exclusive(
     *, dir_fd: int, basename: str, data: bytes, output_dir: Path
 ) -> _CreatedFile:
+    """`O_CREAT | O_EXCL` create, with explicit raw-fd ownership discipline:
+    this function owns the raw `fd` returned by `os.open()` until
+    ownership is explicitly transferred to the `os.fdopen()`-wrapped file
+    object. `os.fdopen()` does not itself guarantee closing `fd` on its
+    own failure, so a failure between `os.open()` and a successful
+    `os.fdopen()` — including `os.fstat(fd)` itself raising — closes the
+    still-owned raw `fd` directly here before any cleanup/re-raise, never
+    leaking it. Cleanup of the just-created path is always identity-
+    checked via `(st_dev, st_ino)` (`_cleanup_created_file`, which already
+    suppresses its own `OSError`s), so it can never delete a pre-existing
+    file or one a concurrent actor has since swapped in at the same
+    basename, and it can never mask the original exception being
+    propagated."""
     try:
         fd = os.open(basename, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644, dir_fd=dir_fd)
     except FileExistsError:
         raise OutputTargetExistsError(output_dir / basename) from None
-    created_stat = os.fstat(fd)
+
     try:
-        with os.fdopen(fd, "wb") as fh:
+        created_stat = os.fstat(fd)
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        raise
+
+    try:
+        fh = os.fdopen(fd, "wb")
+    except BaseException:
+        # Ownership of `fd` never transferred to a file object — this
+        # function still owns it and must close it directly. `fd` may or
+        # may not already be closed depending on how `os.fdopen()` failed;
+        # either way this close is safe, since a double-close's `OSError`
+        # is suppressed rather than propagated.
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        _cleanup_created_file(dir_fd=dir_fd, basename=basename, expected_stat=created_stat)
+        raise
+
+    # Ownership of `fd` has now transferred to `fh` — from here `fd` must
+    # never be closed directly; closing `fh` is the only remaining path.
+    try:
+        with fh:
             fh.write(data)
     except BaseException:
         _cleanup_created_file(dir_fd=dir_fd, basename=basename, expected_stat=created_stat)
@@ -548,6 +679,14 @@ def build_release(
 
     try:
         content_by_path = _fetch_all_blobs(entries, repo_root=repo_root, runner=run_git)
+    except GitBlobTooLargeError as exc:
+        builder.add(
+            component="blob_content_fetch",
+            status=FindingStatus.FAIL,
+            code="GIT_BLOB_TOO_LARGE",
+            message=safe_exception_text(exc),
+        )
+        return builder.build()
     except GitCommandError as exc:
         builder.add(
             component="blob_content_fetch",
@@ -602,6 +741,22 @@ def build_release(
         message=f"release_version={release_version} from the selected commit's pyproject.toml",
     )
 
+    # `release_version` is attacker-controlled content for any commit an
+    # operator selects (it comes straight from that commit's
+    # pyproject.toml) — validated here as a safe filesystem path component
+    # BEFORE it can reach `release_id`/output filenames/archive member
+    # roots, never silently normalized into a different value.
+    try:
+        _validate_filesystem_safe_component(release_version, field="release_version")
+    except ReleaseIdentityUnsafeError as exc:
+        builder.add(
+            component="release_identity_safety",
+            status=FindingStatus.FAIL,
+            code="RELEASE_VERSION_UNSAFE",
+            message=safe_exception_text(exc),
+        )
+        return builder.build()
+
     try:
         alembic_heads = _compute_alembic_heads(content_by_path)
     except RequiredReleaseFileMissingError as exc:
@@ -612,11 +767,11 @@ def build_release(
             message=safe_exception_text(exc),
         )
         return builder.build()
-    except AlembicIntrospectionError as exc:
+    except AlembicStaticMetadataError as exc:
         builder.add(
             component="alembic_heads",
             status=FindingStatus.FAIL,
-            code="ALEMBIC_HEADS_UNAVAILABLE",
+            code="ALEMBIC_STATIC_METADATA_INVALID",
             message=safe_exception_text(exc),
         )
         return builder.build()
@@ -628,6 +783,22 @@ def build_release(
     )
 
     release_id = compute_release_id(release_version=release_version, source_sha=request.source_sha)
+    try:
+        _validate_filesystem_safe_component(release_id, field="release_id")
+    except ReleaseIdentityUnsafeError as exc:
+        builder.add(
+            component="release_identity_safety",
+            status=FindingStatus.FAIL,
+            code="RELEASE_ID_UNSAFE",
+            message=safe_exception_text(exc),
+        )
+        return builder.build()
+    builder.add(
+        component="release_identity_safety",
+        status=FindingStatus.OK,
+        code="RELEASE_IDENTITY_SAFE",
+        message="release_version and release_id are safe filesystem path components",
+    )
 
     artifact_name = f"{release_id}.tar.gz"
     manifest_name = f"{release_id}.release-manifest.json"

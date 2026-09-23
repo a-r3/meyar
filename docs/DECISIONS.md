@@ -5419,3 +5419,78 @@ offline Python runtime/`uv`/wheelhouse provisioning, host install layout,
 install/activation, service lifecycle, update/rollback orchestration,
 issue #36 benchmark/model selection, production-model approval, issue
 #46 runtime hardening, HTTPS/reverse-proxy/PKI topology.
+
+**Corrective update (PR #56 acceptance pass, 2026-09-24).** An
+independent acceptance audit of the PR3 diff above found three blockers
+in `build_release`'s selected-commit handling, fixed on the same branch
+without broadening PR3's scope:
+
+1. **Selected migration Python was executed, not just read.** The
+   original Alembic-heads step (described two sections up) materialized
+   the selected commit's `backend/alembic.ini` + `backend/alembic/**`
+   blobs into a temp directory and called the real, unmodified
+   `alembic_introspect.get_code_alembic_heads`, which loads every
+   migration `.py` file as a Python module via Alembic's own
+   `ScriptDirectory` — executing its top-level code. That is correct for
+   `status`/`readiness`, which point it at the trusted, already-running
+   working tree, but wrong for `build-release`, whose whole contract is
+   to READ an arbitrary selected commit's metadata, never EXECUTE it.
+   Fixed by a new module, `meyar.ops.alembic_static_metadata`, that
+   parses each `backend/alembic/versions/*.py` blob with `ast` and
+   extracts only the static `revision`/`down_revision` literal
+   assignments (via `ast.literal_eval`, which rejects calls, attribute
+   lookups, name references, f-strings, and computed expressions) to
+   derive heads from the resulting revision graph — no `exec`, `eval`,
+   `importlib`, `runpy`, or Python subprocess involved anywhere.
+   `get_code_alembic_heads` itself is unchanged and remains correctly
+   used by `status`/`readiness`/`preflight`.
+   Proven by `test_malicious_migration_top_level_side_effect_is_never_
+   executed`, which ships a migration file whose import-time side effect
+   would write a sentinel file — the build succeeds (its static metadata
+   is valid) and the sentinel is never created.
+
+2. **`release_version` (attacker-controlled selected-commit content) had
+   no filesystem-safety validation before reaching output filenames.**
+   `release_version` comes from the selected commit's `pyproject.toml`,
+   which is not more trustworthy than any other blob at an operator-
+   selected commit; `release_id`/output basenames were built from it and
+   passed straight to `os.open(..., dir_fd=output_dir_fd)` with no check
+   for `/`, `\`, control characters, or `.`/`..`. Fixed with a build-
+   release-specific validator, `_validate_filesystem_safe_component`,
+   applied to both `release_version` and the derived `release_id` before
+   either can reach an output filename or archive member root; an unsafe
+   value fails the build truthfully (`RELEASE_VERSION_UNSAFE`/
+   `RELEASE_ID_UNSAFE`) rather than being silently normalized.
+   `compute_release_id()`'s own semantics and `ReleaseManifest`'s
+   existing length constraints are unchanged.
+
+3. **`_create_exclusive`'s raw fd could leak if `os.fdopen()` itself
+   failed.** The original code took no explicit ownership stance on the
+   fd returned by `os.open()` before it was wrapped by `os.fdopen()`; a
+   failure in `os.fdopen()` itself (before ownership transfer to the
+   resulting file object) left the raw fd unclosed. Fixed by explicit
+   ownership discipline: `_create_exclusive` owns the raw fd until
+   `os.fdopen()` succeeds, closes it directly (suppressing a possible
+   redundant-close `OSError`) on any failure up to and including
+   `os.fdopen()` itself, and only then runs the existing identity-checked
+   path cleanup — never masking the original exception.
+
+**Resource-safety review (same pass).** Selected-commit blob content was
+read via `git cat-file -p` (`subprocess.run(capture_output=True)`, which
+buffers all of stdout) with no bound of its own — a pathologically large
+allowlisted blob could be fully read into memory before the existing
+archive self-check ever ran. Fixed with the smallest defensible
+check: `git cat-file -s <blob-sha>` reads each blob's declared size
+first, and a running aggregate is compared against the already-accepted
+`archive_safety.MAX_AGGREGATE_UNCOMPRESSED_SIZE` bound before that blob's
+content is fetched — so the check happens strictly before the
+oversized/aggregate-exceeding blob's bytes are ever requested from Git.
+No existing verifier bound was weakened.
+
+All three fixes and the resource-safety addition ship with focused
+regression tests in `test_ops_build_release.py` (16 new tests: 7 for
+non-execution, 5 for release-identity path safety, 3 for fd-ownership
+failure handling, 1 for the blob-size bound); the full backend suite
+(1,883 tests), `ruff`, `mypy`, and `alembic heads` all pass unchanged.
+PR #56 remains open for re-audit; issue #36 and issue #46 remain
+untouched and unstarted.

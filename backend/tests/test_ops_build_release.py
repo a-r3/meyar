@@ -6,6 +6,7 @@ purpose. No real MEYAR repository history is ever touched."""
 
 from __future__ import annotations
 
+import os
 import subprocess
 import tarfile
 from collections.abc import Callable
@@ -740,3 +741,340 @@ def test_two_real_time_builds_of_the_same_commit_differ_in_built_at(tmp_path: Pa
     manifest1 = next(out1.glob("*.release-manifest.json")).read_bytes()
     manifest2 = next(out2.glob("*.release-manifest.json")).read_bytes()
     assert manifest1 != manifest2
+
+
+# --- H. non-executing Alembic static metadata (PR #56 security-corrective pass) --
+
+
+def test_malicious_migration_top_level_side_effect_is_never_executed(tmp_path: Path) -> None:
+    """The whole point of the corrective fix: a selected commit's migration
+    file can contain arbitrary top-level Python — build-release must never
+    run it while deriving `alembic_heads`. Proven here by a migration file
+    that would write a sentinel file as an import-time side effect; the
+    build must still succeed (its static revision/down_revision metadata is
+    valid) while the sentinel is never created."""
+    sentinel_path = tmp_path / "SENTINEL_EXECUTED"
+    repo = _init_repo(tmp_path)
+    _write_fixture_repo_files(repo)
+    malicious_migration = (
+        '"""fixture migration with a top-level side effect"""\n'
+        "from pathlib import Path\n"
+        f"Path({str(sentinel_path)!r}).write_text('executed')\n"
+        "revision = 'sentinelrev'\n"
+        "down_revision = None\n"
+    )
+    (repo / "backend" / "alembic" / "versions" / "0001_initial.py").write_text(malicious_migration)
+    sha = _commit_all(repo)
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+
+    result = build_release(
+        _default_request(source_sha=sha, output_dir=output_dir),
+        invocation_cwd=repo,
+        clock=_fixed_clock(FIXED_BUILT_AT),
+    )
+    assert result.ok is True, result.model_dump_json()
+    assert not sentinel_path.exists(), "migration module code must never be executed"
+    manifest_path = next(output_dir.glob("*.release-manifest.json"))
+    manifest = ReleaseManifest.model_validate_json(manifest_path.read_text())
+    assert manifest.alembic_heads == ["sentinelrev"]
+
+
+def test_simple_alembic_revision_chain_computes_single_head(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    _write_fixture_repo_files(repo)  # 0001_initial: revision=0001initial, down_revision=None
+    (repo / "backend" / "alembic" / "versions" / "0002_second.py").write_text(
+        _migration_script("0002second", "0001initial")
+    )
+    (repo / "backend" / "alembic" / "versions" / "0003_third.py").write_text(
+        _migration_script("0003third", "0002second")
+    )
+    sha = _commit_all(repo)
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    result = build_release(
+        _default_request(source_sha=sha, output_dir=output_dir),
+        invocation_cwd=repo,
+        clock=_fixed_clock(FIXED_BUILT_AT),
+    )
+    assert result.ok is True, result.model_dump_json()
+    manifest_path = next(output_dir.glob("*.release-manifest.json"))
+    manifest = ReleaseManifest.model_validate_json(manifest_path.read_text())
+    assert manifest.alembic_heads == ["0003third"]
+
+
+def test_multiple_alembic_heads_are_all_reported(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    _write_fixture_repo_files(repo)  # 0001_initial: revision=0001initial, down_revision=None
+    (repo / "backend" / "alembic" / "versions" / "0002_branch_a.py").write_text(
+        _migration_script("branch_a", "0001initial")
+    )
+    (repo / "backend" / "alembic" / "versions" / "0003_branch_b.py").write_text(
+        _migration_script("branch_b", "0001initial")
+    )
+    sha = _commit_all(repo)
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    result = build_release(
+        _default_request(source_sha=sha, output_dir=output_dir),
+        invocation_cwd=repo,
+        clock=_fixed_clock(FIXED_BUILT_AT),
+    )
+    assert result.ok is True, result.model_dump_json()
+    manifest_path = next(output_dir.glob("*.release-manifest.json"))
+    manifest = ReleaseManifest.model_validate_json(manifest_path.read_text())
+    assert manifest.alembic_heads == ["branch_a", "branch_b"]
+
+
+def test_duplicate_alembic_revision_id_rejected(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    _write_fixture_repo_files(repo)  # 0001_initial: revision=0001initial
+    (repo / "backend" / "alembic" / "versions" / "0002_dup.py").write_text(
+        _migration_script("0001initial", None)
+    )
+    sha = _commit_all(repo)
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    result = build_release(
+        _default_request(source_sha=sha, output_dir=output_dir), invocation_cwd=repo
+    )
+    assert result.ok is False
+    assert _finding(result, "alembic_heads").code == "ALEMBIC_STATIC_METADATA_INVALID"
+    assert list(output_dir.iterdir()) == []
+
+
+def test_alembic_missing_parent_revision_rejected(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    _write_fixture_repo_files(repo)
+    (repo / "backend" / "alembic" / "versions" / "0002_orphan.py").write_text(
+        _migration_script("orphanrev", "does-not-exist")
+    )
+    sha = _commit_all(repo)
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    result = build_release(
+        _default_request(source_sha=sha, output_dir=output_dir), invocation_cwd=repo
+    )
+    assert result.ok is False
+    assert _finding(result, "alembic_heads").code == "ALEMBIC_STATIC_METADATA_INVALID"
+    assert list(output_dir.iterdir()) == []
+
+
+def test_alembic_dynamic_computed_revision_rejected(tmp_path: Path) -> None:
+    """A `revision` value that is anything other than a plain string
+    literal (a function call, here) must be rejected rather than silently
+    evaluated or ignored — this is exactly the "never execute" boundary."""
+    repo = _init_repo(tmp_path)
+    _write_fixture_repo_files(repo)
+    dynamic_migration = (
+        '"""fixture migration with a computed revision"""\n'
+        "import hashlib\n"
+        "revision = hashlib.sha1(b'x').hexdigest()[:12]\n"
+        "down_revision = None\n"
+    )
+    (repo / "backend" / "alembic" / "versions" / "0001_initial.py").write_text(dynamic_migration)
+    sha = _commit_all(repo)
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    result = build_release(
+        _default_request(source_sha=sha, output_dir=output_dir), invocation_cwd=repo
+    )
+    assert result.ok is False
+    assert _finding(result, "alembic_heads").code == "ALEMBIC_STATIC_METADATA_INVALID"
+    assert list(output_dir.iterdir()) == []
+
+
+def test_alembic_malformed_missing_revision_assignment_rejected(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    _write_fixture_repo_files(repo)
+    malformed_migration = '"""fixture migration missing revision"""\ndown_revision = None\n'
+    (repo / "backend" / "alembic" / "versions" / "0001_initial.py").write_text(malformed_migration)
+    sha = _commit_all(repo)
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    result = build_release(
+        _default_request(source_sha=sha, output_dir=output_dir), invocation_cwd=repo
+    )
+    assert result.ok is False
+    assert _finding(result, "alembic_heads").code == "ALEMBIC_STATIC_METADATA_INVALID"
+    assert list(output_dir.iterdir()) == []
+
+
+# --- I. release-identity path safety (PR #56 security-corrective pass) -----------
+
+
+def _build_with_unsafe_version(tmp_path: Path, version_toml_literal: str):
+    """`version_toml_literal` is the exact TOML-source text for the
+    `[project].version` value (e.g. `"'../evil'"` for a TOML literal
+    string), so tests can construct a `pyproject.toml` whose parsed
+    `release_version` contains characters an f-string-interpolated plain
+    version never could (a literal backslash, a raw control character via
+    a `\\uXXXX` escape, ...)."""
+    repo = _init_repo(tmp_path)
+    _write_fixture_repo_files(repo)
+    (repo / "backend" / "pyproject.toml").write_text(
+        f'[project]\nname = "meyar"\nversion = {version_toml_literal}\n'
+        'requires-python = ">=3.12"\n'
+    )
+    sha = _commit_all(repo)
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    result = build_release(
+        _default_request(source_sha=sha, output_dir=output_dir),
+        invocation_cwd=repo,
+        clock=_fixed_clock(FIXED_BUILT_AT),
+    )
+    return result, output_dir
+
+
+def test_release_version_containing_traversal_sequence_rejected(tmp_path: Path) -> None:
+    result, output_dir = _build_with_unsafe_version(tmp_path, "'../evil'")
+    assert result.ok is False
+    assert _finding(result, "release_identity_safety").code == "RELEASE_VERSION_UNSAFE"
+    assert list(output_dir.iterdir()) == []
+
+
+def test_release_version_containing_forward_slash_rejected(tmp_path: Path) -> None:
+    result, output_dir = _build_with_unsafe_version(tmp_path, "'1.0/beta'")
+    assert result.ok is False
+    assert _finding(result, "release_identity_safety").code == "RELEASE_VERSION_UNSAFE"
+    assert list(output_dir.iterdir()) == []
+
+
+def test_release_version_containing_backslash_rejected(tmp_path: Path) -> None:
+    # TOML literal (single-quoted) string: backslash is not an escape
+    # introducer, so this embeds one literal backslash character.
+    result, output_dir = _build_with_unsafe_version(tmp_path, "'bad\\path'")
+    assert result.ok is False
+    assert _finding(result, "release_identity_safety").code == "RELEASE_VERSION_UNSAFE"
+    assert list(output_dir.iterdir()) == []
+
+
+def test_release_version_containing_control_character_rejected(tmp_path: Path) -> None:
+    # TOML basic (double-quoted) string with a \u escape: a genuine control
+    # character (U+0001) in the parsed Python string, not merely its text
+    # representation.
+    result, output_dir = _build_with_unsafe_version(tmp_path, '"bad\\u0001char"')
+    assert result.ok is False
+    assert _finding(result, "release_identity_safety").code == "RELEASE_VERSION_UNSAFE"
+    assert list(output_dir.iterdir()) == []
+
+
+def test_release_version_normal_value_is_accepted(tmp_path: Path) -> None:
+    result, output_dir = _build_with_unsafe_version(tmp_path, "'0.1.0'")
+    assert result.ok is True, result.model_dump_json()
+    assert _finding(result, "release_identity_safety").code == "RELEASE_IDENTITY_SAFE"
+    assert next(output_dir.glob("*.tar.gz")).name.startswith("meyar-0.1.0+")
+
+
+# --- J. fd ownership on os.fdopen()/setup failure (PR #56 security-corrective) ---
+
+
+def test_create_exclusive_closes_raw_fd_and_removes_output_on_fdopen_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    dir_fd = os.open(str(output_dir), os.O_RDONLY | os.O_DIRECTORY)
+    opened_fds: list[int] = []
+
+    def _raising_fdopen(fd, *args, **kwargs):  # noqa: ANN001, ARG001
+        opened_fds.append(fd)
+        raise OSError("simulated fdopen failure")
+
+    monkeypatch.setattr(os, "fdopen", _raising_fdopen)
+    try:
+        with pytest.raises(OSError, match="simulated fdopen failure"):
+            _create_exclusive(
+                dir_fd=dir_fd, basename="target.txt", data=b"data", output_dir=output_dir
+            )
+    finally:
+        monkeypatch.undo()
+
+    assert opened_fds, "os.fdopen should have been invoked exactly once"
+    leaked_fd = opened_fds[0]
+    # The raw fd must have been explicitly closed by _create_exclusive
+    # itself: operating on it again must fail with EBADF, not succeed.
+    with pytest.raises(OSError):
+        os.fstat(leaked_fd)
+    # The partially-created output file must have been removed.
+    assert not (output_dir / "target.txt").exists()
+    os.close(dir_fd)
+
+
+def test_create_exclusive_fdopen_failure_never_deletes_a_swapped_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Combines the two failure-handling properties: even when `os.fdopen`
+    fails AND a concurrent actor has already swapped in a different real
+    file at the same basename (atomic rename) before the failure handler
+    runs, cleanup must still only ever remove the exact inode this
+    invocation created — never the replacement."""
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    dir_fd = os.open(str(output_dir), os.O_RDONLY | os.O_DIRECTORY)
+    real_open = os.open
+
+    def _open_then_swap(path, *args, **kwargs):  # noqa: ANN001, ARG001
+        fd = real_open(path, *args, **kwargs)
+        if path == "target.txt":
+            replacement_src = output_dir / "replacement_src.txt"
+            replacement_src.write_bytes(b"replacement, different inode")
+            os.replace(replacement_src, output_dir / "target.txt")
+        return fd
+
+    def _raising_fdopen(fd, *args, **kwargs):  # noqa: ANN001, ARG001
+        raise OSError("simulated fdopen failure")
+
+    monkeypatch.setattr(os, "open", _open_then_swap)
+    monkeypatch.setattr(os, "fdopen", _raising_fdopen)
+    try:
+        with pytest.raises(OSError, match="simulated fdopen failure"):
+            _create_exclusive(
+                dir_fd=dir_fd, basename="target.txt", data=b"data", output_dir=output_dir
+            )
+    finally:
+        monkeypatch.undo()
+
+    assert (output_dir / "target.txt").read_bytes() == b"replacement, different inode"
+    os.close(dir_fd)
+
+
+def test_create_exclusive_succeeds_normally_after_fd_ownership_fix(tmp_path: Path) -> None:
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    dir_fd = os.open(str(output_dir), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        created = _create_exclusive(
+            dir_fd=dir_fd, basename="target.txt", data=b"ordinary content", output_dir=output_dir
+        )
+        assert created.path.read_bytes() == b"ordinary content"
+    finally:
+        os.close(dir_fd)
+
+
+# --- K. resource safety: Git blob size bound (PR #56 security-corrective pass) ---
+
+
+def test_git_blob_size_bound_enforced_before_content_is_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every allowlisted blob's Git-declared size must be checked against
+    the accepted archive aggregate-size bound BEFORE its content is ever
+    read via `git cat-file -p` — proven here by lowering the bound far
+    below the fixture repo's real (tiny) file sizes and asserting the
+    build fails truthfully instead of buffering an oversized blob first."""
+    repo = _init_repo(tmp_path)
+    _write_fixture_repo_files(repo)
+    sha = _commit_all(repo)
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+
+    monkeypatch.setattr("meyar.ops.archive_safety.MAX_AGGREGATE_UNCOMPRESSED_SIZE", 4)
+
+    result = build_release(
+        _default_request(source_sha=sha, output_dir=output_dir), invocation_cwd=repo
+    )
+    assert result.ok is False
+    assert _finding(result, "blob_content_fetch").code == "GIT_BLOB_TOO_LARGE"
+    assert list(output_dir.iterdir()) == []
