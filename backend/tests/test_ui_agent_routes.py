@@ -1176,7 +1176,7 @@ async def test_confirmation_survives_transcript_reset_and_new_database_session(
     await db_session.commit()
 
     assert db_session.bind is not None
-    engine = create_async_engine(str(db_session.bind.url))
+    engine = create_async_engine(db_session.bind.url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         async with factory() as reconstructed:
@@ -2017,7 +2017,7 @@ async def test_concurrent_confirmation_creates_exactly_one_canonical_object(
 
     _tenant, user, password, _membership = tenant_and_user
     assert db_session.bind is not None
-    engine = create_async_engine(str(db_session.bind.url))
+    engine = create_async_engine(db_session.bind.url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
 
     async def independent_db() -> AsyncGenerator[IndependentSession, None]:
