@@ -119,14 +119,23 @@ and is **fully** consistent with the external manifest — every field, via
 typed model equality, not only `release_id`/`release_version`/
 `source_sha`. Archive inspection is bounded (member count, member-name
 length, aggregate declared uncompressed size — see
-`meyar.ops.archive_safety`), and every sidecar this module reads has its
-own bound checked *before* any byte is read: the two archive members read
-by name (embedded manifest, `uv.lock`) are bounded by declared size, and
-the two external sidecar files (release manifest, `SHA256SUMS`) — read via
-`Path.read_text()`, which has no built-in bound — are bounded by a `stat()`
-size check before that read (`meyar.ops.verify_release`). Inspection stops
-the instant a bound is exceeded, reported as its own
-`ARCHIVE_RESOURCE_BOUND_EXCEEDED`/`*_TOO_LARGE` finding. Release-artifact
+`meyar.ops.archive_safety`), and every sidecar this module reads is
+bounded: the two archive members read by name (embedded manifest,
+`uv.lock`) are bounded by their declared tar-member size, and the two
+external sidecar files (release manifest, `SHA256SUMS`) are bounded by
+the read call itself — `meyar.ops.verify_release._read_bounded_text`
+opens the file and calls `_read_bounded_from_stream`, which never
+requests more than `limit + 1` bytes from the open binary handle
+(`fh.read(limit + 1)`), rejecting the file as `MANIFEST_TOO_LARGE`/
+`SHA256SUMS_TOO_LARGE` the instant the observed byte count exceeds the
+configured limit, before any UTF-8 decoding is attempted. This bound is
+enforced by the read call itself, not by a `stat()` taken beforehand: a
+`stat()` size is a TOCTOU-vulnerable pre-check (the file can grow between
+the `stat()` and the read) and is never used as the bound for these two
+sidecars; an I/O failure while reading is reported as
+`MANIFEST_UNREADABLE`/`SHA256SUMS_UNREADABLE`. Archive-member inspection
+stops the instant its own declared-size bound is exceeded, reported as its
+own `ARCHIVE_RESOURCE_BOUND_EXCEEDED`/`*_TOO_LARGE` finding. Release-artifact
 *building* is deferred to a later #35 PR — this PR's tests use synthetic
 fixtures built on the fly, never real repository binaries.
 

@@ -105,6 +105,16 @@ identifiable commit on `main` that went through PR review and CI.
 
 ## 4. Fresh host provisioning
 
+The `git clone`/`git pull` sequence below is the current, manual,
+source-checkout-based runbook — it is not the final intended bank
+production mechanism. Issue #35's target production path is an immutable,
+owner-accepted release artifact (built, verified, installed, and updated
+by `meyar-ops` tooling); `meyar-ops verify-release` (PR1, D-066) exists
+today, but the corresponding artifact build/install/update tooling is not
+yet implemented and lands in later #35 PRs. Until then, this
+source-checkout runbook is the accurate description of how a host is
+actually provisioned.
+
 Prerequisites (from `README.md` §Prerequisites, unchanged here):
 
 - Git

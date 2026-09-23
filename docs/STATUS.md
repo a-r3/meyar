@@ -21,14 +21,15 @@ setup/service-lifecycle/healthcheck/backup-restore/update-rollback/
 diagnostics tooling, with no Claude Code/Codex/AI-coding-agent dependency
 on the target deployment host.
 
-**PR1 for #35 (`meyar-ops` foundation, D-066) is local on
-`feat/meyar-ops-foundation`, branched from accepted `main`
-`dddd6eb0967bb1a9225fb43470c2468db30da5d6` — not yet merged.** Adds the
+**PR1 for #35 (`meyar-ops` foundation, D-066) is MERGED — squash SHA
+`91c4e7e02ac7d9851a70efe4f5a11d061ee61b28` on `main` (PR #52).** Added the
 typed `meyar-ops` CLI (`preflight`/`status`/`readiness`/`verify-release`),
 the release/model manifest contracts, and release-artifact verification
 (no artifact building yet). See `docs/MEYAR_OPS.md`. Verified on Linux
 only; Apple-Silicon/Mac-mini-M4-Pro rehearsal remains **UNCONFIRMED**
 (issue #36's scope), and no production model is approved by this PR.
+Issue #35 remains OPEN as the current active engineering phase (further
+PRs for #35 are still to come); issue #36 remains OPEN and not started.
 
 **Next phase: issue #36 — Real Target-Mac Model Selection & Benchmark
 (M9).** Executes `backend/scripts/target_mac_benchmark.py` on the actual
