@@ -558,3 +558,161 @@ def test_render_to_file_cleanup_does_not_delete_replacement_file(
         render_service_plist_to_file(_valid_spec(), output)
 
     assert output.read_bytes() == sentinel_content
+
+
+def test_render_to_file_cleans_up_partial_output_after_fdopen_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Regression: a failed `os.fdopen()` (not only a failed write) must
+    not leave the just-created partial output file behind."""
+    import meyar.ops.service_plist as service_plist_module
+
+    output = tmp_path / "meyar.plist"
+
+    def _fake_fdopen(fd: int, mode: str) -> object:
+        raise OSError("simulated fdopen failure")
+
+    monkeypatch.setattr(service_plist_module.os, "fdopen", _fake_fdopen)
+
+    with pytest.raises(OSError, match="simulated fdopen failure"):
+        render_service_plist_to_file(_valid_spec(), output)
+
+    assert not output.exists()
+
+
+def test_render_to_file_fdopen_failure_cleanup_does_not_delete_replacement_file(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Same TOCTOU cleanup-identity regression as
+    `test_render_to_file_cleanup_does_not_delete_replacement_file`, but for
+    a failure raised by `os.fdopen()` itself rather than by the write."""
+    import meyar.ops.service_plist as service_plist_module
+
+    output = tmp_path / "meyar.plist"
+    sentinel_content = b"sentinel-must-survive-fdopen-cleanup"
+
+    def _fake_fdopen(fd: int, mode: str) -> object:
+        # `fd` (this invocation's own descriptor) is deliberately left open
+        # here, matching the realistic race: the concurrent actor swaps the
+        # *pathname*, but this invocation has not released its own fd yet.
+        # Closing it first would let the kernel immediately recycle the
+        # freed inode number for the replacement file on some filesystems
+        # (observed on tmpfs), which would make the identity check pass
+        # for the wrong reason instead of proving pathname-vs-inode safety.
+        output.unlink()
+        output.write_bytes(sentinel_content)
+        raise OSError("simulated fdopen failure after concurrent pathname replacement")
+
+    monkeypatch.setattr(service_plist_module.os, "fdopen", _fake_fdopen)
+
+    with pytest.raises(OSError, match="simulated fdopen failure after concurrent"):
+        render_service_plist_to_file(_valid_spec(), output)
+
+    assert output.read_bytes() == sentinel_content
+
+
+# --- 18. symlink-aware output-parent-directory boundary ---------------------
+
+
+def test_render_to_file_rejects_parent_symlink_resolving_into_privileged_target(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A lexically innocuous output path (e.g.
+    `/tmp/staging-link/com.meyar.plist`) must still be rejected when
+    `staging-link` is a symlink whose canonical target is the configured
+    privileged directory — this is the actual attack the lexical-only
+    `abspath()` check in `_reject_privileged_output_path` cannot catch.
+    The privileged-directory constant is monkeypatched to a tmp-path
+    target so this proves the resolution logic without needing write
+    access to the real `/Library/LaunchDaemons`."""
+    import meyar.ops.service_plist as service_plist_module
+
+    fake_privileged = tmp_path / "priv" / "LaunchDaemons"
+    fake_privileged.mkdir(parents=True)
+    monkeypatch.setattr(
+        service_plist_module, "_PRIVILEGED_LAUNCHDAEMONS_DIR", str(fake_privileged)
+    )
+    staging_link = tmp_path / "staging-link"
+    staging_link.symlink_to(fake_privileged, target_is_directory=True)
+    output = staging_link / "com.meyar.plist"
+
+    with pytest.raises(ServiceRenderOutputPathPrivilegedError):
+        render_service_plist_to_file(_valid_spec(), output)
+
+    assert list(fake_privileged.iterdir()) == []
+
+
+def test_render_to_file_symlinked_privileged_target_never_gets_a_created_file(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Explicit proof that no file creation (`os.open`) is ever attempted
+    once the resolved parent is identified as the privileged target: the
+    resolved directory stays empty, and `os.open` is never called with a
+    dir_fd anchored to it."""
+    import meyar.ops.service_plist as service_plist_module
+
+    fake_privileged = tmp_path / "priv" / "LaunchDaemons"
+    fake_privileged.mkdir(parents=True)
+    monkeypatch.setattr(
+        service_plist_module, "_PRIVILEGED_LAUNCHDAEMONS_DIR", str(fake_privileged)
+    )
+    staging_link = tmp_path / "staging-link"
+    staging_link.symlink_to(fake_privileged, target_is_directory=True)
+    output = staging_link / "com.meyar.plist"
+
+    real_open = os.open
+
+    def _fail_if_creating_basename(*args: object, **kwargs: object) -> int:
+        if args and args[0] == "com.meyar.plist":
+            raise AssertionError(
+                "os.open must not create a file once the parent resolves to the "
+                "privileged target"
+            )
+        return real_open(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(service_plist_module.os, "open", _fail_if_creating_basename)
+
+    with pytest.raises(ServiceRenderOutputPathPrivilegedError):
+        render_service_plist_to_file(_valid_spec(), output)
+
+    assert list(fake_privileged.iterdir()) == []
+
+
+def test_render_to_file_rejects_direct_privileged_target_dir_fd_open(tmp_path: Path) -> None:
+    """The low-level helper rejects a privileged parent before ever
+    opening a dir-fd to it, proven directly against a tmp-path stand-in
+    for the privileged constant (no monkeypatching needed for the
+    default-argument override path)."""
+    from meyar.ops.service_plist import _open_anchored_output_parent_dir
+
+    privileged = tmp_path / "LaunchDaemons"
+    privileged.mkdir()
+    output = privileged / "com.meyar.plist"
+
+    with pytest.raises(ServiceRenderOutputPathPrivilegedError):
+        _open_anchored_output_parent_dir(output, privileged_dir=str(privileged))
+
+
+def test_render_to_file_nonprivileged_symlinked_parent_still_succeeds(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A parent-directory symlink that resolves somewhere ordinary (not
+    the privileged target) must still be allowed — this module does not
+    blanket-reject symlinks, only ones resolving into the privileged
+    directory."""
+    import meyar.ops.service_plist as service_plist_module
+
+    fake_privileged = tmp_path / "priv" / "LaunchDaemons"
+    fake_privileged.mkdir(parents=True)
+    monkeypatch.setattr(
+        service_plist_module, "_PRIVILEGED_LAUNCHDAEMONS_DIR", str(fake_privileged)
+    )
+    real_staging = tmp_path / "real-staging"
+    real_staging.mkdir()
+    staging_link = tmp_path / "staging-link"
+    staging_link.symlink_to(real_staging, target_is_directory=True)
+    output = staging_link / "com.meyar.plist"
+
+    render_service_plist_to_file(_valid_spec(), output)
+
+    assert (real_staging / "com.meyar.plist").exists()

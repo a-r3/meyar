@@ -192,66 +192,123 @@ class ServiceRenderOutputPathPrivilegedError(Exception):
         )
 
 
+def _is_privileged_location(candidate: str, *, privileged_dir: str) -> bool:
+    return candidate == privileged_dir or candidate.startswith(privileged_dir + os.sep)
+
+
 def _reject_privileged_output_path(output_path: Path) -> None:
-    """Rejects, before any filesystem write, an output path whose
-    lexically normalized absolute destination is the privileged
-    LaunchDaemon installation directory or a descendant of it.
-    Normalization (`os.path.abspath`, itself lexical `normpath`) collapses
-    a `..` traversal component without resolving any symlink — the same
-    lexical-only discipline as every other path check in this module."""
+    """Cheap, filesystem-independent pre-filter: rejects an output path
+    whose lexically normalized absolute destination is the privileged
+    LaunchDaemon installation directory or a descendant of it. Runs
+    before any filesystem access, so it still catches the direct/`..`-
+    traversal case even on a host where that directory does not exist
+    (e.g. Linux CI). This is defense-in-depth only — the actual boundary
+    against a *symlinked* parent directory is the resolved-parent check
+    in `_open_anchored_output_parent_dir` below; see its docstring for
+    why a lexical-only check is not sufficient on its own."""
     normalized = os.path.abspath(str(output_path))
-    if normalized == _PRIVILEGED_LAUNCHDAEMONS_DIR or normalized.startswith(
-        _PRIVILEGED_LAUNCHDAEMONS_DIR + os.sep
-    ):
+    if _is_privileged_location(normalized, privileged_dir=_PRIVILEGED_LAUNCHDAEMONS_DIR):
         raise ServiceRenderOutputPathPrivilegedError(output_path)
 
 
-def _unlink_if_same_file(path: Path, expected_stat: os.stat_result) -> None:
-    """Cleanup after a write/close failure must remove only the exact
+def _open_anchored_output_parent_dir(
+    output_path: Path, *, privileged_dir: str | None = None
+) -> int:
+    """The real output-destination boundary. Resolves `output_path`'s
+    parent directory — which must already exist; this never creates it —
+    to its canonical filesystem location, following every symlink
+    component (`os.path.realpath(..., strict=True)`), and rejects it if
+    that canonical location is the privileged LaunchDaemon installation
+    directory or a descendant of it. This is what catches an output path
+    like `/tmp/staging-link/com.meyar.plist` where `staging-link` is a
+    symlink to `/Library/LaunchDaemons`: a purely lexical check on the
+    original path string would miss it, since the symlink component
+    never lexically spells out the privileged directory.
+
+    Returns an open dir-fd anchored to the *resolved* parent. The caller
+    creates the output file's basename relative to this fd
+    (`os.open(..., dir_fd=...)`) rather than by re-walking the original
+    path string, so a symlink swapped into the original parent path
+    after this check returns cannot redirect where the file actually
+    gets created.
+
+    `privileged_dir` defaults to the real production constant (read at
+    call time, not bind time, so tests can monkeypatch the module
+    constant); tests may also pass an explicit value under a tmp
+    directory to exercise the symlink-resolution logic without needing
+    write access to the real `/Library/LaunchDaemons`."""
+    target = _PRIVILEGED_LAUNCHDAEMONS_DIR if privileged_dir is None else privileged_dir
+    resolved_parent = os.path.realpath(str(output_path.parent), strict=True)
+    if _is_privileged_location(resolved_parent, privileged_dir=target):
+        raise ServiceRenderOutputPathPrivilegedError(output_path)
+    return os.open(resolved_parent, os.O_RDONLY | os.O_DIRECTORY)
+
+
+def _unlink_if_same_file(basename: str, dir_fd: int, expected_stat: os.stat_result) -> None:
+    """Cleanup after a write/fdopen failure must remove only the exact
     file this invocation created via `O_CREAT | O_EXCL` — never a
     replacement pathname a concurrent actor swapped in afterward.
-    `os.lstat` (no symlink follow) is compared by `(st_dev, st_ino)`
-    against the identity captured immediately after `os.open()`; the
-    pathname is left untouched on any mismatch, and a failure to stat it
-    (e.g. it no longer exists) is not itself an error."""
+    Resolved relative to the anchored parent dir-fd (see
+    `_open_anchored_output_parent_dir`), not by re-walking the original
+    (possibly symlinked) output path. `os.lstat`/`os.unlink` (dir_fd-
+    relative, no symlink follow) are compared/scoped by `(st_dev,
+    st_ino)` against the identity captured immediately after
+    `os.open()`; the pathname is left untouched on any mismatch, and a
+    failure to stat it (e.g. it no longer exists) is not itself an
+    error."""
     with contextlib.suppress(OSError):
-        current_stat = os.lstat(path)
+        current_stat = os.lstat(basename, dir_fd=dir_fd)
         if (current_stat.st_dev, current_stat.st_ino) == (
             expected_stat.st_dev,
             expected_stat.st_ino,
         ):
-            path.unlink()
+            os.unlink(basename, dir_fd=dir_fd)
 
 
 def render_service_plist_to_file(spec: ServiceSpec, output_path: Path) -> None:
     """Writes the rendered plist to `output_path`. Validation happens
     first (via `render_service_plist`, then the privileged-output-path
-    check), so invalid input never creates or touches the output file.
-    The file is created with `O_CREAT | O_EXCL` so an existing path is
-    never silently overwritten — this is an atomic create-exclusive
-    check, not a `Path.exists()` pre-check, so there is no TOCTOU race
-    with a concurrent writer. Any failure during the write removes the
-    partial file it created (identity-checked, never a replacement),
-    leaving no partial file behind and no leaked descriptor."""
+    checks), so invalid input never creates or touches the output file.
+    The file is created with `O_CREAT | O_EXCL` relative to an fd already
+    anchored to the resolved, non-privileged parent directory (see
+    `_open_anchored_output_parent_dir`) — an existing path is never
+    silently overwritten, and a symlink swapped into the parent path
+    after validation cannot redirect the write. Any failure after the
+    file is created — including a failed `os.fdopen()`, not only a
+    failed write — removes the partial file it created (identity-
+    checked, never a replacement), leaving no partial file behind and no
+    leaked descriptor."""
     data = render_service_plist(spec)
     _reject_privileged_output_path(output_path)
+    parent_dir_fd = _open_anchored_output_parent_dir(output_path)
     try:
-        fd = os.open(str(output_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-    except FileExistsError:
-        raise ServiceRenderOutputExistsError(output_path) from None
-    created_stat = os.fstat(fd)
-    try:
-        fh = os.fdopen(fd, "wb")
-    except BaseException:
+        basename = output_path.name
+        try:
+            fd = os.open(
+                basename,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o644,
+                dir_fd=parent_dir_fd,
+            )
+        except FileExistsError:
+            raise ServiceRenderOutputExistsError(output_path) from None
+        created_stat = os.fstat(fd)
+        try:
+            fh = os.fdopen(fd, "wb")
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+            _unlink_if_same_file(basename, parent_dir_fd, created_stat)
+            raise
+        try:
+            with fh:
+                fh.write(data)
+        except BaseException:
+            _unlink_if_same_file(basename, parent_dir_fd, created_stat)
+            raise
+    finally:
         with contextlib.suppress(OSError):
-            os.close(fd)
-        raise
-    try:
-        with fh:
-            fh.write(data)
-    except BaseException:
-        _unlink_if_same_file(output_path, created_stat)
-        raise
+            os.close(parent_dir_fd)
 
 
 def run_service_render(spec: ServiceSpec, output_path: Path) -> OpsResult:
