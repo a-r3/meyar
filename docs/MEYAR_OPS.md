@@ -69,10 +69,20 @@ revision"; more than one DB revision row is its own truthful
 *already-provisioned* storage root — never creates the root or any
 parent directory, never overwrites an existing file, always cleans up,
 fails safely — truthfully "not writable" — on a missing or unwritable
-root), `ollama` (daemon reachability), `llm_model`, and `embedding_model`
-(configured-model availability). Every component's `Finding` is preserved
-even when another component fails. No candidate data is read to
-determine readiness.
+root; a probe-path UUID collision with a pre-existing file is reported as
+not writable and that pre-existing file is never deleted, since this
+invocation never created it), `ollama` (daemon reachability), `llm_model`,
+and `embedding_model` (configured-model availability). Every component's
+`Finding` is preserved even when another component fails — including when
+LLM/embedding provider construction or `.health()` raises a
+non-normalized exception (a malformed local Ollama response, an
+unexpected provider-internal failure): that is isolated per provider and
+reported as its own truthful `OLLAMA_HEALTH_CHECK_ERROR` /
+`EMBEDDING_HEALTH_CHECK_ERROR` finding, never allowed to escape
+`run_readiness()` and discard findings already collected. `status` applies
+the same per-provider isolation to `ollama_reachability` /
+`configured_llm_identity` / `configured_embedding_identity`. No candidate
+data is read to determine readiness.
 
 ### `verify-release`
 
@@ -84,22 +94,38 @@ deterministic `(release_version, source_sha)` identity (and, if
 `SHA256SUMS` file's format (a filename with more than one well-formed
 digest entry is rejected as ambiguous, never resolved last-write-wins);
 the artifact's actual SHA-256 against that external checksum (a **hard
-failure** on mismatch); archive member safety (rejects absolute paths,
-`..` traversal, symlinks, hard links, device/special files, and any path
-escaping the expected `release_id/` root — `extractall`/`extract` are
-never called anywhere in this command); that the archive's
-`release_id/backend/uv.lock` member is present exactly once, is a
-regular file, and its SHA-256 matches `ReleaseManifest.uv_lock_sha256`
-(binding the manifest's declared lockfile digest to the artifact's actual
-contents, not just to hex-string syntax); and, if the archive carries an
-embedded `release_id/release_manifest.json`, that it is **fully**
-consistent with the external manifest — every field, via typed model
-equality, not only `release_id`/`release_version`/`source_sha`. Archive
-inspection is bounded (member count, member-name length, aggregate
-declared uncompressed size — see `meyar.ops.archive_safety`), and the two
-specific members read by name each have their own declared-size bound
-checked before any byte is read (`meyar.ops.verify_release`) — inspection
-stops the instant a bound is exceeded, reported as its own
+failure** on mismatch); **the external release manifest's own SHA-256
+against a `SHA256SUMS` entry keyed by the manifest's filename** (a
+missing, ambiguous, or mismatched manifest entry is its own hard
+failure) — the release bundle is artifact + manifest + `SHA256SUMS`
+together, and a single `release_bundle_integrity` finding is `OK` only
+when both the artifact and the manifest checksums matched (`SHA256SUMS`
+is deliberately never included in its own checksum set — this stays
+integrity verification, not code signing/publisher identity); archive
+member safety (rejects absolute paths, `..` traversal, symlinks, hard
+links, device/special files, and any path escaping the expected
+`release_id/` root — `extractall`/`extract` are never called anywhere in
+this command); that the archive's `release_id/backend/uv.lock` member is
+present exactly once, is a regular file, and its SHA-256 matches
+`ReleaseManifest.uv_lock_sha256` (binding the manifest's declared
+lockfile digest to the artifact's actual contents, not just to
+hex-string syntax); and, if the archive carries an embedded
+`release_id/release_manifest.json`, that it is present **at most once**
+(an ambiguous duplicate — never silently resolved by
+`TarFile.getmember()`'s last-write-wins behavior — is its own hard
+failure, `INTERNAL_MANIFEST_AMBIGUOUS`), is a regular file (a
+directory/non-regular member is rejected as `INTERNAL_MANIFEST_NOT_REGULAR_FILE`),
+and is **fully** consistent with the external manifest — every field, via
+typed model equality, not only `release_id`/`release_version`/
+`source_sha`. Archive inspection is bounded (member count, member-name
+length, aggregate declared uncompressed size — see
+`meyar.ops.archive_safety`), and every sidecar this module reads has its
+own bound checked *before* any byte is read: the two archive members read
+by name (embedded manifest, `uv.lock`) are bounded by declared size, and
+the two external sidecar files (release manifest, `SHA256SUMS`) — read via
+`Path.read_text()`, which has no built-in bound — are bounded by a `stat()`
+size check before that read (`meyar.ops.verify_release`). Inspection stops
+the instant a bound is exceeded, reported as its own
 `ARCHIVE_RESOURCE_BOUND_EXCEEDED`/`*_TOO_LARGE` finding. Release-artifact
 *building* is deferred to a later #35 PR — this PR's tests use synthetic
 fixtures built on the fly, never real repository binaries.

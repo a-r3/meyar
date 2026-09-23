@@ -54,11 +54,16 @@ def probe_storage_writable(root: str | Path) -> StorageProbeResult:
         )
 
     fd = None
+    created = False
     try:
         # O_EXCL: fails instead of overwriting if the path already exists
         # (it never should, given the fresh UUID, but this makes "never
         # overwrite an existing file" an enforced guarantee, not a hope).
+        # A collision here means some other process already holds this
+        # exact name — `created` stays False, and cleanup below must never
+        # unlink a file this invocation did not create.
         fd = os.open(probe_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        created = True
         os.write(fd, b"meyar-ops storage write probe\n")
     except OSError as exc:
         return StorageProbeResult(
@@ -67,9 +72,10 @@ def probe_storage_writable(root: str | Path) -> StorageProbeResult:
     finally:
         if fd is not None:
             os.close(fd)
-        try:
-            probe_path.unlink(missing_ok=True)
-        except OSError:
-            pass  # best-effort cleanup; the write result already determined
+        if created:
+            try:
+                probe_path.unlink(missing_ok=True)
+            except OSError:
+                pass  # best-effort cleanup; the write result already determined
 
     return StorageProbeResult(writable=True, message="storage root is writable")

@@ -14,6 +14,8 @@ from meyar.ops.archive_safety import MAX_ARCHIVE_MEMBER_COUNT
 from meyar.ops.release_manifest import compute_release_id
 from meyar.ops.verify_release import (
     _MAX_EMBEDDED_MANIFEST_SIZE,
+    _MAX_EXTERNAL_MANIFEST_SIZE,
+    _MAX_SHA256SUMS_SIZE,
     _MAX_UV_LOCK_SIZE,
     parse_sha256sums,
     verify_release,
@@ -97,10 +99,27 @@ def _build_artifact(
     return artifact_path
 
 
-def _write_sha256sums(tmp_path: Path, artifact_path: Path, *, digest: str | None = None) -> Path:
+def _write_sha256sums(
+    tmp_path: Path,
+    artifact_path: Path,
+    manifest_path: Path | None = None,
+    *,
+    digest: str | None = None,
+    manifest_digest: str | None = None,
+    include_manifest_entry: bool = True,
+) -> Path:
+    """A full release bundle's SHA256SUMS covers both the artifact tarball
+    and the external release manifest (Blocker 1 — corrective review): the
+    manifest checksum entry is included by default whenever a
+    ``manifest_path`` is given, so a "valid release" fixture passes both
+    `artifact_checksum` and `manifest_checksum`, not just the former."""
     actual = digest or hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+    lines = [f"{actual}  {artifact_path.name}"]
+    if manifest_path is not None and include_manifest_entry:
+        m_digest = manifest_digest or hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+        lines.append(f"{m_digest}  {manifest_path.name}")
     sums_path = tmp_path / "SHA256SUMS"
-    sums_path.write_text(f"{actual}  {artifact_path.name}\n")
+    sums_path.write_text("\n".join(lines) + "\n")
     return sums_path
 
 
@@ -108,7 +127,7 @@ def test_fully_valid_release_verifies_ok(tmp_path: Path) -> None:
     manifest_path = tmp_path / "manifest.json"
     _write_manifest(manifest_path)
     artifact_path = _build_artifact(tmp_path)
-    sums_path = _write_sha256sums(tmp_path, artifact_path)
+    sums_path = _write_sha256sums(tmp_path, artifact_path, manifest_path)
 
     result = verify_release(
         manifest_path=manifest_path, sha256sums_path=sums_path, artifact_path=artifact_path
@@ -118,6 +137,8 @@ def test_fully_valid_release_verifies_ok(tmp_path: Path) -> None:
     assert codes["manifest_schema"] == "OK"
     assert codes["release_identity"] == "OK"
     assert codes["artifact_checksum"] == "OK"
+    assert codes["manifest_checksum"] == "OK"
+    assert codes["release_bundle_integrity"] == "OK"
     assert codes["archive_safety"] == "OK"
     assert codes["uv_lock_binding"] == "OK"
     assert codes["internal_manifest_consistency"] == "OK"
@@ -272,7 +293,7 @@ def test_no_internal_manifest_is_skipped_not_failed(tmp_path: Path) -> None:
     manifest_path = tmp_path / "manifest.json"
     _write_manifest(manifest_path)
     artifact_path = _build_artifact(tmp_path, embed_manifest=False)
-    sums_path = _write_sha256sums(tmp_path, artifact_path)
+    sums_path = _write_sha256sums(tmp_path, artifact_path, manifest_path)
 
     result = verify_release(
         manifest_path=manifest_path, sha256sums_path=sums_path, artifact_path=artifact_path
@@ -431,7 +452,7 @@ def test_uv_lock_correct_digest_passes(tmp_path: Path) -> None:
     manifest_path = tmp_path / "manifest.json"
     _write_manifest(manifest_path)
     artifact_path = _build_artifact(tmp_path)
-    sums_path = _write_sha256sums(tmp_path, artifact_path)
+    sums_path = _write_sha256sums(tmp_path, artifact_path, manifest_path)
 
     result = verify_release(
         manifest_path=manifest_path, sha256sums_path=sums_path, artifact_path=artifact_path
@@ -455,6 +476,203 @@ def test_uv_lock_too_large_fails(tmp_path: Path) -> None:
     assert result.ok is False
     by_component = {f.component: f for f in result.findings}
     assert by_component["uv_lock_binding"].code == "UV_LOCK_MEMBER_TOO_LARGE"
+
+
+# ---------------------------------------------------------------------
+# Corrective review (PR #52) — bind the external release manifest itself
+# to SHA256SUMS, so it is no longer the sole unverified authority for
+# source_sha/release_id/rollback_compatibility/Alembic heads/model
+# reference/Python requirement/artifact format.
+# ---------------------------------------------------------------------
+
+
+def test_manifest_checksum_missing_entry_fails(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path)
+    artifact_path = _build_artifact(tmp_path)
+    # Artifact entry only — no manifest entry at all.
+    sums_path = _write_sha256sums(tmp_path, artifact_path, manifest_path=None)
+
+    result = verify_release(
+        manifest_path=manifest_path, sha256sums_path=sums_path, artifact_path=artifact_path
+    )
+    assert result.ok is False
+    by_component = {f.component: f for f in result.findings}
+    assert by_component["manifest_checksum"].code == "MANIFEST_CHECKSUM_ENTRY_MISSING"
+    assert by_component["artifact_checksum"].status.value == "OK"
+    assert by_component["release_bundle_integrity"].code == "RELEASE_BUNDLE_INTEGRITY_FAILED"
+
+
+def test_manifest_checksum_duplicate_entry_is_ambiguous_fail(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path)
+    artifact_path = _build_artifact(tmp_path)
+    artifact_digest = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+    manifest_digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    sums_path = tmp_path / "SHA256SUMS"
+    sums_path.write_text(
+        f"{artifact_digest}  {artifact_path.name}\n"
+        f"{manifest_digest}  {manifest_path.name}\n"
+        f"{'0' * 64}  {manifest_path.name}\n"
+    )
+
+    result = verify_release(
+        manifest_path=manifest_path, sha256sums_path=sums_path, artifact_path=artifact_path
+    )
+    assert result.ok is False
+    by_component = {f.component: f for f in result.findings}
+    assert by_component["manifest_checksum"].code == "MANIFEST_CHECKSUM_ENTRY_AMBIGUOUS"
+    assert by_component["release_bundle_integrity"].code == "RELEASE_BUNDLE_INTEGRITY_FAILED"
+
+
+def test_manifest_checksum_mismatch_fails(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path)
+    artifact_path = _build_artifact(tmp_path)
+    sums_path = _write_sha256sums(
+        tmp_path, artifact_path, manifest_path, manifest_digest="0" * 64
+    )
+
+    result = verify_release(
+        manifest_path=manifest_path, sha256sums_path=sums_path, artifact_path=artifact_path
+    )
+    assert result.ok is False
+    by_component = {f.component: f for f in result.findings}
+    assert by_component["manifest_checksum"].code == "MANIFEST_CHECKSUM_MISMATCH"
+    assert by_component["release_bundle_integrity"].code == "RELEASE_BUNDLE_INTEGRITY_FAILED"
+
+
+def test_artifact_checksum_valid_but_manifest_checksum_invalid_is_overall_fail(
+    tmp_path: Path,
+) -> None:
+    """The release bundle is artifact + manifest + SHA256SUMS together —
+    a valid artifact checksum alone must never report overall success."""
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path)
+    artifact_path = _build_artifact(tmp_path)
+    sums_path = _write_sha256sums(
+        tmp_path, artifact_path, manifest_path, manifest_digest="f" * 64
+    )
+
+    result = verify_release(
+        manifest_path=manifest_path, sha256sums_path=sums_path, artifact_path=artifact_path
+    )
+    assert result.ok is False
+    by_component = {f.component: f for f in result.findings}
+    assert by_component["artifact_checksum"].status.value == "OK"
+    assert by_component["manifest_checksum"].code == "MANIFEST_CHECKSUM_MISMATCH"
+    assert by_component["release_bundle_integrity"].status.value == "FAIL"
+
+
+def test_artifact_and_manifest_checksums_both_correct_passes(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path)
+    artifact_path = _build_artifact(tmp_path)
+    sums_path = _write_sha256sums(tmp_path, artifact_path, manifest_path)
+
+    result = verify_release(
+        manifest_path=manifest_path, sha256sums_path=sums_path, artifact_path=artifact_path
+    )
+    assert result.ok is True
+    by_component = {f.component: f for f in result.findings}
+    assert by_component["artifact_checksum"].code == "CHECKSUM_MATCHES"
+    assert by_component["manifest_checksum"].code == "MANIFEST_CHECKSUM_MATCHES"
+    assert by_component["release_bundle_integrity"].code == "RELEASE_BUNDLE_INTEGRITY_OK"
+
+
+def test_oversized_external_manifest_fails_before_unbounded_read(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    oversized = b"{" + b" " * (_MAX_EXTERNAL_MANIFEST_SIZE + 1) + b"}"
+    manifest_path.write_bytes(oversized)
+    artifact_path = _build_artifact(tmp_path)
+    sums_path = _write_sha256sums(tmp_path, artifact_path, manifest_path=None)
+
+    result = verify_release(
+        manifest_path=manifest_path, sha256sums_path=sums_path, artifact_path=artifact_path
+    )
+    assert result.ok is False
+    by_component = {f.component: f for f in result.findings}
+    assert by_component["manifest_schema"].code == "MANIFEST_TOO_LARGE"
+
+
+def test_oversized_sha256sums_fails_before_unbounded_read(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path)
+    artifact_path = _build_artifact(tmp_path)
+    sums_path = tmp_path / "SHA256SUMS"
+    sums_path.write_bytes(b"#" + b" " * (_MAX_SHA256SUMS_SIZE + 1) + b"\n")
+
+    result = verify_release(
+        manifest_path=manifest_path, sha256sums_path=sums_path, artifact_path=artifact_path
+    )
+    assert result.ok is False
+    by_component = {f.component: f for f in result.findings}
+    assert by_component["sha256sums_format"].code == "SHA256SUMS_TOO_LARGE"
+
+
+# ---------------------------------------------------------------------
+# Corrective review (PR #52) — embedded manifest ambiguity: a duplicate
+# `release_id/release_manifest.json` member must never be silently
+# resolved (TarFile.getmember() is last-write-wins); a non-regular member
+# must be rejected truthfully.
+# ---------------------------------------------------------------------
+
+
+def test_duplicate_embedded_manifest_is_ambiguous_fail(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path)
+    payload = json.dumps(_manifest_dict()).encode()
+    artifact_path = tmp_path / "meyar-release.tar.gz"
+    with tarfile.open(artifact_path, mode="w:gz") as tf:
+        _add_file_member(tf, f"{RELEASE_ID}/release_manifest.json", payload)
+        _add_file_member(tf, f"{RELEASE_ID}/release_manifest.json", payload)
+        _add_file_member(tf, f"{RELEASE_ID}/backend/uv.lock", UV_LOCK_CONTENT)
+        _add_file_member(tf, f"{RELEASE_ID}/app/main.py", b"hello")
+    sums_path = _write_sha256sums(tmp_path, artifact_path, manifest_path)
+
+    result = verify_release(
+        manifest_path=manifest_path, sha256sums_path=sums_path, artifact_path=artifact_path
+    )
+    assert result.ok is False
+    by_component = {f.component: f for f in result.findings}
+    assert by_component["internal_manifest_consistency"].code == "INTERNAL_MANIFEST_AMBIGUOUS"
+
+
+def test_embedded_manifest_as_directory_is_rejected(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path)
+    artifact_path = tmp_path / "meyar-release.tar.gz"
+    with tarfile.open(artifact_path, mode="w:gz") as tf:
+        info = tarfile.TarInfo(name=f"{RELEASE_ID}/release_manifest.json")
+        info.type = tarfile.DIRTYPE
+        tf.addfile(info)
+        _add_file_member(tf, f"{RELEASE_ID}/backend/uv.lock", UV_LOCK_CONTENT)
+        _add_file_member(tf, f"{RELEASE_ID}/app/main.py", b"hello")
+    sums_path = _write_sha256sums(tmp_path, artifact_path, manifest_path)
+
+    result = verify_release(
+        manifest_path=manifest_path, sha256sums_path=sums_path, artifact_path=artifact_path
+    )
+    assert result.ok is False
+    by_component = {f.component: f for f in result.findings}
+    assert (
+        by_component["internal_manifest_consistency"].code
+        == "INTERNAL_MANIFEST_NOT_REGULAR_FILE"
+    )
+
+
+def test_single_valid_embedded_manifest_still_passes(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path)
+    artifact_path = _build_artifact(tmp_path)
+    sums_path = _write_sha256sums(tmp_path, artifact_path, manifest_path)
+
+    result = verify_release(
+        manifest_path=manifest_path, sha256sums_path=sums_path, artifact_path=artifact_path
+    )
+    assert result.ok is True
+    by_component = {f.component: f for f in result.findings}
+    assert by_component["internal_manifest_consistency"].code == "INTERNAL_MANIFEST_CONSISTENT"
 
 
 # ---------------------------------------------------------------------
@@ -545,7 +763,7 @@ def test_command_never_extracts_to_disk(tmp_path: Path, monkeypatch) -> None:
     manifest_path = tmp_path / "manifest.json"
     _write_manifest(manifest_path)
     artifact_path = _build_artifact(tmp_path)
-    sums_path = _write_sha256sums(tmp_path, artifact_path)
+    sums_path = _write_sha256sums(tmp_path, artifact_path, manifest_path)
 
     result = verify_release(
         manifest_path=manifest_path, sha256sums_path=sums_path, artifact_path=artifact_path

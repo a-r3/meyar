@@ -340,3 +340,125 @@ async def test_readiness_never_exposes_database_credentials(
     result = await readiness_module.run_readiness()
     payload = result.model_dump_json()
     assert "super-secret-password" not in payload
+
+
+# ---------------------------------------------------------------------
+# Corrective review (PR #52, Blocker 3) — readiness component exception
+# isolation. A non-normalized exception from provider construction or
+# `.health()` must never escape `run_readiness()`: doing so would drop
+# every already-collected finding (database/db_migration/storage_write)
+# and surface only a generic UNCAUGHT_EXCEPTION at the CLI boundary.
+# ---------------------------------------------------------------------
+
+_ALL_READINESS_COMPONENTS = {
+    "database",
+    "db_migration",
+    "storage_write",
+    "ollama",
+    "llm_model",
+    "embedding_model",
+}
+
+
+class _CrashingHealthProvider:
+    """A provider whose `.health()` raises a non-normalized exception —
+    simulating a malformed local Ollama response or an unexpected
+    provider-internal failure, not a documented reachability outcome."""
+
+    async def health(self) -> dict:
+        raise RuntimeError("simulated provider health check crash")
+
+
+def _raise_on_construction() -> None:
+    raise RuntimeError("simulated provider construction failure")
+
+
+async def test_llm_health_raise_is_isolated_and_embedding_still_runs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    settings = Settings(database_url=TEST_DATABASE_URL, storage_root=str(tmp_path))
+    monkeypatch.setattr(readiness_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(readiness_module, "get_llm_provider", lambda: _CrashingHealthProvider())
+    embedding = FakeEmbeddingProvider()
+    monkeypatch.setattr(readiness_module, "get_embedding_provider", lambda: embedding)
+
+    async with _alembic_version_row(_real_code_head()):
+        result = await readiness_module.run_readiness()  # must not raise
+
+    assert {f.component for f in result.findings} == _ALL_READINESS_COMPONENTS
+    assert _by_component(result, "ollama").status is FindingStatus.FAIL
+    assert _by_component(result, "llm_model").status is FindingStatus.SKIPPED
+    # the independent embedding provider still ran and succeeded
+    assert _by_component(result, "embedding_model").status is FindingStatus.OK
+    # already-collected findings from earlier components survive
+    assert _by_component(result, "database").status is FindingStatus.OK
+    assert _by_component(result, "db_migration").status is FindingStatus.OK
+    assert _by_component(result, "storage_write").status is FindingStatus.OK
+    assert result.ok is False
+
+
+async def test_llm_provider_construction_raise_is_isolated(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    settings = Settings(database_url=TEST_DATABASE_URL, storage_root=str(tmp_path))
+    monkeypatch.setattr(readiness_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(readiness_module, "get_llm_provider", _raise_on_construction)
+    monkeypatch.setattr(
+        readiness_module, "get_embedding_provider", lambda: FakeEmbeddingProvider()
+    )
+
+    async with _alembic_version_row(_real_code_head()):
+        result = await readiness_module.run_readiness()  # must not raise
+
+    assert {f.component for f in result.findings} == _ALL_READINESS_COMPONENTS
+    assert _by_component(result, "ollama").status is FindingStatus.FAIL
+    assert _by_component(result, "llm_model").status is FindingStatus.SKIPPED
+    assert _by_component(result, "embedding_model").status is FindingStatus.OK
+    assert result.ok is False
+
+
+async def test_embedding_health_raise_is_isolated_and_does_not_discard_llm_findings(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    settings = Settings(database_url=TEST_DATABASE_URL, storage_root=str(tmp_path))
+    monkeypatch.setattr(readiness_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(readiness_module, "get_llm_provider", lambda: FakeLLMProvider())
+    monkeypatch.setattr(
+        readiness_module, "get_embedding_provider", lambda: _CrashingHealthProvider()
+    )
+
+    async with _alembic_version_row(_real_code_head()):
+        result = await readiness_module.run_readiness()  # must not raise
+
+    assert {f.component for f in result.findings} == _ALL_READINESS_COMPONENTS
+    assert _by_component(result, "embedding_model").status is FindingStatus.FAIL
+    # the independent LLM provider still ran and succeeded
+    assert _by_component(result, "ollama").status is FindingStatus.OK
+    assert _by_component(result, "llm_model").status is FindingStatus.OK
+    assert _by_component(result, "database").status is FindingStatus.OK
+    assert _by_component(result, "db_migration").status is FindingStatus.OK
+    assert _by_component(result, "storage_write").status is FindingStatus.OK
+    assert result.ok is False
+
+
+async def test_provider_health_exception_text_is_redacted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class _LeakyProvider:
+        async def health(self) -> dict:
+            raise RuntimeError(
+                "upstream call to postgresql+asyncpg://meyar:supersecret@127.0.0.1/meyar failed"
+            )
+
+    settings = Settings(database_url=TEST_DATABASE_URL, storage_root=str(tmp_path))
+    monkeypatch.setattr(readiness_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(readiness_module, "get_llm_provider", lambda: _LeakyProvider())
+    monkeypatch.setattr(
+        readiness_module, "get_embedding_provider", lambda: FakeEmbeddingProvider()
+    )
+
+    async with _alembic_version_row(_real_code_head()):
+        result = await readiness_module.run_readiness()
+
+    payload = result.model_dump_json()
+    assert "supersecret" not in payload

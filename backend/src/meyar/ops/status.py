@@ -224,29 +224,61 @@ def _check_storage_root_accessible(builder: OpsResultBuilder) -> None:
 
 
 async def _check_ollama_and_models(builder: OpsResultBuilder) -> None:
+    """Each provider is isolated in its own try/except so a non-normalized
+    exception from provider construction or `.health()` never discards the
+    package/version/platform/DB findings already collected above, and one
+    broken provider never prevents the other's check from running."""
     settings = get_settings()
 
-    llm_health = await get_llm_provider().health()
-    llm_reachable = bool(llm_health.get("reachable"))
-    llm_available = bool(llm_health.get("model_available"))
-    builder.add(
-        component="ollama_reachability",
-        status=FindingStatus.OK if llm_reachable else FindingStatus.FAIL,
-        code="OLLAMA_REACHABLE" if llm_reachable else "OLLAMA_UNREACHABLE",
-        message=f"base_url configured, reachable={llm_reachable}",
-    )
-    builder.add(
-        component="configured_llm_identity",
-        status=FindingStatus.OK if llm_available else FindingStatus.WARN,
-        code="LLM_MODEL_AVAILABLE" if llm_available else "LLM_MODEL_UNAVAILABLE",
-        message=f"model={settings.ollama_model} available={llm_available}",
-    )
+    try:
+        llm_health = await get_llm_provider().health()
+    except Exception as exc:  # noqa: BLE001 - per-provider isolation boundary
+        builder.add(
+            component="ollama_reachability",
+            status=FindingStatus.FAIL,
+            code="OLLAMA_HEALTH_CHECK_ERROR",
+            message=f"LLM provider health check raised: {safe_exception_text(exc)}",
+        )
+        builder.add(
+            component="configured_llm_identity",
+            status=FindingStatus.WARN,
+            code="LLM_MODEL_IDENTITY_UNKNOWN",
+            message="unknown: LLM provider health check raised an exception",
+        )
+    else:
+        llm_reachable = bool(llm_health.get("reachable"))
+        llm_available = bool(llm_health.get("model_available"))
+        builder.add(
+            component="ollama_reachability",
+            status=FindingStatus.OK if llm_reachable else FindingStatus.FAIL,
+            code="OLLAMA_REACHABLE" if llm_reachable else "OLLAMA_UNREACHABLE",
+            message=f"base_url configured, reachable={llm_reachable}",
+        )
+        builder.add(
+            component="configured_llm_identity",
+            status=FindingStatus.OK if llm_available else FindingStatus.WARN,
+            code="LLM_MODEL_AVAILABLE" if llm_available else "LLM_MODEL_UNAVAILABLE",
+            message=f"model={settings.ollama_model} available={llm_available}",
+        )
 
-    embedding_health = await get_embedding_provider().health()
-    embedding_available = bool(embedding_health.get("model_available"))
-    builder.add(
-        component="configured_embedding_identity",
-        status=FindingStatus.OK if embedding_available else FindingStatus.WARN,
-        code="EMBEDDING_MODEL_AVAILABLE" if embedding_available else "EMBEDDING_MODEL_UNAVAILABLE",
-        message=f"model={settings.ollama_embedding_model} available={embedding_available}",
-    )
+    try:
+        embedding_health = await get_embedding_provider().health()
+    except Exception as exc:  # noqa: BLE001 - per-provider isolation boundary
+        builder.add(
+            component="configured_embedding_identity",
+            status=FindingStatus.FAIL,
+            code="EMBEDDING_HEALTH_CHECK_ERROR",
+            message=f"embedding provider health check raised: {safe_exception_text(exc)}",
+        )
+    else:
+        embedding_available = bool(embedding_health.get("model_available"))
+        builder.add(
+            component="configured_embedding_identity",
+            status=FindingStatus.OK if embedding_available else FindingStatus.WARN,
+            code=(
+                "EMBEDDING_MODEL_AVAILABLE"
+                if embedding_available
+                else "EMBEDDING_MODEL_UNAVAILABLE"
+            ),
+            message=f"model={settings.ollama_embedding_model} available={embedding_available}",
+        )

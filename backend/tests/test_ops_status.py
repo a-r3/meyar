@@ -207,3 +207,75 @@ async def test_status_never_exposes_database_credentials(
     result = await status_module.run_status()
     payload = result.model_dump_json()
     assert "super-secret-password" not in payload
+
+
+# ---------------------------------------------------------------------
+# Corrective review (PR #52, Blocker 3) — apply the same provider-health
+# exception isolation to `status`: one broken provider must not discard
+# the package/version/platform/DB findings already collected.
+# ---------------------------------------------------------------------
+
+_ALL_STATUS_COMPONENTS = {
+    "package_version",
+    "release_identity",
+    "python_version",
+    "platform",
+    "code_alembic_head",
+    "db_current_revision",
+    "storage_root_accessible",
+    "ollama_reachability",
+    "configured_llm_identity",
+    "configured_embedding_identity",
+}
+
+
+class _CrashingHealthProvider:
+    async def health(self) -> dict:
+        raise RuntimeError("simulated provider health check crash")
+
+
+def _status_by_component(result, component: str):
+    matches = [f for f in result.findings if f.component == component]
+    assert matches, f"no finding for component {component!r}"
+    return matches[0]
+
+
+async def test_llm_health_raise_does_not_discard_earlier_status_findings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(database_url=TEST_DATABASE_URL)
+    monkeypatch.setattr(status_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(status_module, "get_llm_provider", lambda: _CrashingHealthProvider())
+    monkeypatch.setattr(status_module, "get_embedding_provider", lambda: FakeEmbeddingProvider())
+
+    result = await status_module.run_status()  # must not raise
+
+    assert {f.component for f in result.findings} == _ALL_STATUS_COMPONENTS
+    assert _status_by_component(result, "ollama_reachability").status is FindingStatus.FAIL
+    assert _status_by_component(result, "configured_llm_identity").status is FindingStatus.WARN
+    # earlier findings survive
+    assert _status_by_component(result, "package_version").status is FindingStatus.OK
+    assert _status_by_component(result, "platform").status is FindingStatus.OK
+    assert result.ok is False
+
+
+async def test_embedding_health_raise_does_not_discard_llm_findings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(database_url=TEST_DATABASE_URL)
+    monkeypatch.setattr(status_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(status_module, "get_llm_provider", lambda: FakeLLMProvider())
+    monkeypatch.setattr(
+        status_module, "get_embedding_provider", lambda: _CrashingHealthProvider()
+    )
+
+    result = await status_module.run_status()  # must not raise
+
+    assert {f.component for f in result.findings} == _ALL_STATUS_COMPONENTS
+    assert (
+        _status_by_component(result, "configured_embedding_identity").status
+        is FindingStatus.FAIL
+    )
+    # the independent LLM provider check still ran and succeeded
+    assert _status_by_component(result, "ollama_reachability").status is FindingStatus.OK
+    assert result.ok is False

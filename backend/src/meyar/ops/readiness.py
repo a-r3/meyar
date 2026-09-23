@@ -173,39 +173,73 @@ def _check_storage_write(builder: OpsResultBuilder) -> None:
 
 
 async def _check_ollama_and_models(builder: OpsResultBuilder) -> None:
+    """Each provider is isolated in its own try/except: a non-normalized
+    exception from provider construction or `.health()` (a malformed local
+    Ollama response, an unexpected provider failure) must never escape
+    `run_readiness()` — that would drop every already-collected finding
+    (database, db_migration, storage_write) and surface only a generic
+    `UNCAUGHT_EXCEPTION` at the CLI boundary. The LLM and embedding
+    providers are checked independently so one crashing never prevents the
+    other from running."""
     settings = get_settings()
 
-    llm_health = await get_llm_provider().health()
-    reachable = bool(llm_health.get("reachable"))
-    builder.add(
-        component="ollama",
-        status=FindingStatus.OK if reachable else FindingStatus.FAIL,
-        code="OLLAMA_REACHABLE" if reachable else "OLLAMA_UNREACHABLE",
-        message=f"Ollama daemon reachable={reachable}",
-    )
+    try:
+        llm_health = await get_llm_provider().health()
+    except Exception as exc:  # noqa: BLE001 - per-provider isolation boundary
+        builder.add(
+            component="ollama",
+            status=FindingStatus.FAIL,
+            code="OLLAMA_HEALTH_CHECK_ERROR",
+            message=f"LLM provider health check raised: {safe_exception_text(exc)}",
+        )
+        builder.add(
+            component="llm_model",
+            status=FindingStatus.SKIPPED,
+            code="OLLAMA_HEALTH_CHECK_ERROR",
+            message="skipped: LLM provider health check raised an exception",
+        )
+    else:
+        reachable = bool(llm_health.get("reachable"))
+        builder.add(
+            component="ollama",
+            status=FindingStatus.OK if reachable else FindingStatus.FAIL,
+            code="OLLAMA_REACHABLE" if reachable else "OLLAMA_UNREACHABLE",
+            message=f"Ollama daemon reachable={reachable}",
+        )
 
-    llm_available = bool(llm_health.get("model_available"))
-    builder.add(
-        component="llm_model",
-        status=FindingStatus.OK if (reachable and llm_available) else FindingStatus.FAIL,
-        code="LLM_MODEL_AVAILABLE" if (reachable and llm_available) else "LLM_MODEL_UNAVAILABLE",
-        message=f"model={settings.ollama_model} available={llm_available}",
-    )
+        llm_available = bool(llm_health.get("model_available"))
+        builder.add(
+            component="llm_model",
+            status=FindingStatus.OK if (reachable and llm_available) else FindingStatus.FAIL,
+            code=(
+                "LLM_MODEL_AVAILABLE" if (reachable and llm_available) else "LLM_MODEL_UNAVAILABLE"
+            ),
+            message=f"model={settings.ollama_model} available={llm_available}",
+        )
 
-    embedding_health = await get_embedding_provider().health()
-    embedding_reachable = bool(embedding_health.get("reachable"))
-    embedding_available = bool(embedding_health.get("model_available"))
-    builder.add(
-        component="embedding_model",
-        status=(
-            FindingStatus.OK
-            if (embedding_reachable and embedding_available)
-            else FindingStatus.FAIL
-        ),
-        code=(
-            "EMBEDDING_MODEL_AVAILABLE"
-            if (embedding_reachable and embedding_available)
-            else "EMBEDDING_MODEL_UNAVAILABLE"
-        ),
-        message=f"model={settings.ollama_embedding_model} available={embedding_available}",
-    )
+    try:
+        embedding_health = await get_embedding_provider().health()
+    except Exception as exc:  # noqa: BLE001 - per-provider isolation boundary
+        builder.add(
+            component="embedding_model",
+            status=FindingStatus.FAIL,
+            code="EMBEDDING_HEALTH_CHECK_ERROR",
+            message=f"embedding provider health check raised: {safe_exception_text(exc)}",
+        )
+    else:
+        embedding_reachable = bool(embedding_health.get("reachable"))
+        embedding_available = bool(embedding_health.get("model_available"))
+        builder.add(
+            component="embedding_model",
+            status=(
+                FindingStatus.OK
+                if (embedding_reachable and embedding_available)
+                else FindingStatus.FAIL
+            ),
+            code=(
+                "EMBEDDING_MODEL_AVAILABLE"
+                if (embedding_reachable and embedding_available)
+                else "EMBEDDING_MODEL_UNAVAILABLE"
+            ),
+            message=f"model={settings.ollama_embedding_model} available={embedding_available}",
+        )

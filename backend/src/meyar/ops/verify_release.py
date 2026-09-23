@@ -43,6 +43,16 @@ _MAX_EMBEDDED_MANIFEST_SIZE = 1 * 1024 * 1024
 # headroom for future dependency growth while still bounding the read.
 _MAX_UV_LOCK_SIZE = 16 * 1024 * 1024
 
+# The two external sidecar files (release manifest, SHA256SUMS) are both
+# operator/attacker-controlled inputs read via `Path.read_text()`, which
+# allocates the full file as one in-memory string — unlike the artifact
+# and archive-member reads elsewhere in this module, that call has no
+# built-in bound. Stat the file and fail before that read, rather than
+# trusting its declared size. Both are expected to be a few KB; 1 MiB is
+# generous headroom.
+_MAX_EXTERNAL_MANIFEST_SIZE = 1 * 1024 * 1024
+_MAX_SHA256SUMS_SIZE = 1 * 1024 * 1024
+
 
 def _bounded(text: str, limit: int = _MAX_FINDING_TEXT) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
@@ -109,7 +119,11 @@ def verify_release(
     manifest = _check_manifest_schema(builder, manifest_path)
     expected_root = _check_release_identity(builder, manifest, expected_release_id)
     parsed_sums = _check_sha256sums_format(builder, sha256sums_path)
-    _check_artifact_checksum(builder, parsed_sums, artifact_path)
+    artifact_checksum_status = _check_artifact_checksum(builder, parsed_sums, artifact_path)
+    manifest_checksum_status = _check_manifest_checksum(builder, parsed_sums, manifest_path)
+    _check_release_bundle_integrity(
+        builder, parsed_sums, artifact_checksum_status, manifest_checksum_status
+    )
     archive_ok = _check_archive_safety(builder, artifact_path, expected_root)
     _check_uv_lock_binding(builder, manifest, artifact_path, expected_root, archive_ok)
     _check_internal_manifest(builder, manifest, artifact_path, expected_root, archive_ok)
@@ -120,6 +134,27 @@ def verify_release(
 def _check_manifest_schema(
     builder: OpsResultBuilder, manifest_path: Path
 ) -> ReleaseManifest | None:
+    try:
+        size = manifest_path.stat().st_size
+    except OSError as exc:
+        builder.add(
+            component="manifest_schema",
+            status=FindingStatus.FAIL,
+            code="MANIFEST_UNREADABLE",
+            message=_bounded(f"could not read release manifest: {safe_exception_text(exc)}"),
+        )
+        return None
+    if size > _MAX_EXTERNAL_MANIFEST_SIZE:
+        builder.add(
+            component="manifest_schema",
+            status=FindingStatus.FAIL,
+            code="MANIFEST_TOO_LARGE",
+            message=_bounded(
+                f"release manifest size {size} exceeds bound of "
+                f"{_MAX_EXTERNAL_MANIFEST_SIZE} bytes"
+            ),
+        )
+        return None
     try:
         raw = manifest_path.read_text()
     except OSError as exc:
@@ -224,6 +259,26 @@ def _check_sha256sums_format(
     builder: OpsResultBuilder, sha256sums_path: Path
 ) -> ParsedChecksums | None:
     try:
+        size = sha256sums_path.stat().st_size
+    except OSError as exc:
+        builder.add(
+            component="sha256sums_format",
+            status=FindingStatus.FAIL,
+            code="SHA256SUMS_UNREADABLE",
+            message=_bounded(f"could not read SHA256SUMS: {safe_exception_text(exc)}"),
+        )
+        return None
+    if size > _MAX_SHA256SUMS_SIZE:
+        builder.add(
+            component="sha256sums_format",
+            status=FindingStatus.FAIL,
+            code="SHA256SUMS_TOO_LARGE",
+            message=_bounded(
+                f"SHA256SUMS size {size} exceeds bound of {_MAX_SHA256SUMS_SIZE} bytes"
+            ),
+        )
+        return None
+    try:
         text = sha256sums_path.read_text()
     except OSError as exc:
         builder.add(
@@ -254,7 +309,7 @@ def _check_sha256sums_format(
 
 def _check_artifact_checksum(
     builder: OpsResultBuilder, parsed: ParsedChecksums | None, artifact_path: Path
-) -> None:
+) -> FindingStatus:
     if parsed is None:
         builder.add(
             component="artifact_checksum",
@@ -262,7 +317,7 @@ def _check_artifact_checksum(
             code="SHA256SUMS_INVALID",
             message="skipped: SHA256SUMS could not be parsed",
         )
-        return
+        return FindingStatus.SKIPPED
 
     artifact_name = artifact_path.name
     if artifact_name in parsed.ambiguous_filenames:
@@ -274,7 +329,7 @@ def _check_artifact_checksum(
                 f"multiple SHA256SUMS entries for '{artifact_name}' — ambiguous, not resolved"
             ),
         )
-        return
+        return FindingStatus.FAIL
 
     expected_digest = parsed.digests.get(artifact_name)
     if expected_digest is None:
@@ -284,7 +339,7 @@ def _check_artifact_checksum(
             code="CHECKSUM_ENTRY_MISSING",
             message=_bounded(f"no SHA256SUMS entry for '{artifact_name}'"),
         )
-        return
+        return FindingStatus.FAIL
 
     try:
         actual_digest = _sha256_file(artifact_path)
@@ -295,7 +350,7 @@ def _check_artifact_checksum(
             code="ARTIFACT_UNREADABLE",
             message=_bounded(f"could not read artifact: {safe_exception_text(exc)}"),
         )
-        return
+        return FindingStatus.FAIL
 
     if actual_digest == expected_digest:
         builder.add(
@@ -304,13 +359,121 @@ def _check_artifact_checksum(
             code="CHECKSUM_MATCHES",
             message="artifact SHA-256 matches the external SHA256SUMS entry",
         )
-    else:
+        return FindingStatus.OK
+    builder.add(
+        component="artifact_checksum",
+        status=FindingStatus.FAIL,
+        code="CHECKSUM_MISMATCH",
+        message="artifact SHA-256 does not match the external SHA256SUMS entry",
+    )
+    return FindingStatus.FAIL
+
+
+def _check_manifest_checksum(
+    builder: OpsResultBuilder, parsed: ParsedChecksums | None, manifest_path: Path
+) -> FindingStatus:
+    """Binds the external release manifest itself to `SHA256SUMS` — without
+    this, the manifest (the sole authority for source_sha, release_id,
+    rollback_compatibility, Alembic heads, model-manifest reference, the
+    required Python version, and artifact format) could be swapped for a
+    different one after `SHA256SUMS` was published, while only the
+    artifact tarball's own checksum was ever verified."""
+    if parsed is None:
         builder.add(
-            component="artifact_checksum",
-            status=FindingStatus.FAIL,
-            code="CHECKSUM_MISMATCH",
-            message="artifact SHA-256 does not match the external SHA256SUMS entry",
+            component="manifest_checksum",
+            status=FindingStatus.SKIPPED,
+            code="SHA256SUMS_INVALID",
+            message="skipped: SHA256SUMS could not be parsed",
         )
+        return FindingStatus.SKIPPED
+
+    manifest_name = manifest_path.name
+    if manifest_name in parsed.ambiguous_filenames:
+        builder.add(
+            component="manifest_checksum",
+            status=FindingStatus.FAIL,
+            code="MANIFEST_CHECKSUM_ENTRY_AMBIGUOUS",
+            message=_bounded(
+                f"multiple SHA256SUMS entries for '{manifest_name}' — ambiguous, not resolved"
+            ),
+        )
+        return FindingStatus.FAIL
+
+    expected_digest = parsed.digests.get(manifest_name)
+    if expected_digest is None:
+        builder.add(
+            component="manifest_checksum",
+            status=FindingStatus.FAIL,
+            code="MANIFEST_CHECKSUM_ENTRY_MISSING",
+            message=_bounded(f"no SHA256SUMS entry for '{manifest_name}'"),
+        )
+        return FindingStatus.FAIL
+
+    try:
+        actual_digest = _sha256_file(manifest_path)
+    except OSError as exc:
+        builder.add(
+            component="manifest_checksum",
+            status=FindingStatus.FAIL,
+            code="MANIFEST_UNREADABLE",
+            message=_bounded(f"could not read release manifest: {safe_exception_text(exc)}"),
+        )
+        return FindingStatus.FAIL
+
+    if actual_digest == expected_digest:
+        builder.add(
+            component="manifest_checksum",
+            status=FindingStatus.OK,
+            code="MANIFEST_CHECKSUM_MATCHES",
+            message="external release manifest SHA-256 matches the SHA256SUMS entry",
+        )
+        return FindingStatus.OK
+    builder.add(
+        component="manifest_checksum",
+        status=FindingStatus.FAIL,
+        code="MANIFEST_CHECKSUM_MISMATCH",
+        message="external release manifest SHA-256 does not match the SHA256SUMS entry",
+    )
+    return FindingStatus.FAIL
+
+
+def _check_release_bundle_integrity(
+    builder: OpsResultBuilder,
+    parsed: ParsedChecksums | None,
+    artifact_status: FindingStatus,
+    manifest_status: FindingStatus,
+) -> None:
+    """The release bundle is artifact + external manifest + SHA256SUMS
+    together — this is the single finding that reports the *combined*
+    integrity property, OK only when both sidecar-bound checksums matched.
+    SHA256SUMS itself is deliberately never included in its own checksum
+    set; this stays integrity verification, not publisher-identity/
+    signing verification."""
+    if parsed is None:
+        builder.add(
+            component="release_bundle_integrity",
+            status=FindingStatus.SKIPPED,
+            code="SHA256SUMS_INVALID",
+            message="skipped: SHA256SUMS could not be parsed",
+        )
+        return
+    if artifact_status is FindingStatus.OK and manifest_status is FindingStatus.OK:
+        builder.add(
+            component="release_bundle_integrity",
+            status=FindingStatus.OK,
+            code="RELEASE_BUNDLE_INTEGRITY_OK",
+            message=(
+                "artifact and external release manifest checksums both verified "
+                "against SHA256SUMS"
+            ),
+        )
+        return
+    builder.add(
+        component="release_bundle_integrity",
+        status=FindingStatus.FAIL,
+        code="RELEASE_BUNDLE_INTEGRITY_FAILED",
+        message="artifact and/or external release manifest checksum verification failed",
+    )
 
 
 def _check_archive_safety(
@@ -514,14 +677,38 @@ def _check_internal_manifest(
     member_path = f"{expected_root}/{INTERNAL_MANIFEST_MEMBER_NAME}"
     try:
         with tarfile.open(artifact_path, mode="r:*") as archive:
-            try:
-                member = archive.getmember(member_path)
-            except KeyError:
+            # `TarFile.getmember()` resolves a duplicate name silently
+            # (last-write-wins) via its internal name index — exactly the
+            # ambiguity this module refuses to resolve for SHA256SUMS
+            # entries and the uv.lock member. Scan explicitly instead so a
+            # duplicate embedded manifest is its own truthful hard failure
+            # rather than one arbitrarily "winning" unnoticed.
+            matches = [m for m in archive.getmembers() if m.name == member_path]
+            if not matches:
                 builder.add(
                     component="internal_manifest_consistency",
                     status=FindingStatus.SKIPPED,
                     code="NO_INTERNAL_MANIFEST",
                     message="no embedded release manifest found inside the archive",
+                )
+                return
+            if len(matches) > 1:
+                builder.add(
+                    component="internal_manifest_consistency",
+                    status=FindingStatus.FAIL,
+                    code="INTERNAL_MANIFEST_AMBIGUOUS",
+                    message=_bounded(
+                        f"{len(matches)} archive members found at '{member_path}' — ambiguous"
+                    ),
+                )
+                return
+            member = matches[0]
+            if not member.isfile():
+                builder.add(
+                    component="internal_manifest_consistency",
+                    status=FindingStatus.FAIL,
+                    code="INTERNAL_MANIFEST_NOT_REGULAR_FILE",
+                    message=_bounded(f"'{member_path}' is not a regular file"),
                 )
                 return
             if member.size > _MAX_EMBEDDED_MANIFEST_SIZE:
