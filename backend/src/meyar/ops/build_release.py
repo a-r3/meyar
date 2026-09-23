@@ -50,7 +50,13 @@ created one or more of the three files removes only the files this
 invocation itself created (identity-checked via `(st_dev, st_ino)`,
 exactly like `service_plist._unlink_if_same_file`) — a pre-existing file
 at the same path, or a file some other process swapped in afterward, is
-never touched.
+never touched. The one exception is the rare case where `os.fstat(fd)`
+itself fails immediately after this invocation's own create succeeded:
+there is then no `(st_dev, st_ino)` to identity-check against, so cleanup
+is deliberately skipped rather than guessed — see
+`OutputIdentityUnavailableError` — and the created file is left in place
+for operator inspection while the raw fd is still always closed and no
+later bundle file is ever published.
 
 **READ selected source metadata, never EXECUTE it (PR #56 corrective
 pass).** Alembic heads for the manifest are derived by parsing selected-
@@ -258,6 +264,32 @@ class OutputTargetExistsError(Exception):
         super().__init__(f"output target already exists: {path}")
 
 
+class OutputIdentityUnavailableError(Exception):
+    """Raised when `os.fstat(fd)` itself fails immediately after this
+    invocation's own `O_CREAT | O_EXCL` create succeeded (PR #56 final
+    resource-safety corrective pass). This is the one point in
+    `_create_exclusive` where no `(st_dev, st_ino)` identity is available
+    for the file this invocation just created — every later failure path
+    already holds `created_stat` and can identity-check cleanup exactly
+    like `_cleanup_created_file` does everywhere else.
+
+    Deliberately fail-closed: this invocation never guesses that the
+    on-disk path is still the file it just created and unlinks it anyway —
+    a concurrent actor may already have replaced it at the same basename,
+    and an un-identity-checked delete is exactly the race this module's
+    cleanup discipline exists to prevent (see `_cleanup_created_file`). The
+    raw fd is always closed regardless; only the on-disk path is left
+    untouched, for operator inspection/removal. No later bundle file
+    (manifest, SHA256SUMS) is ever written once this is raised."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        super().__init__(
+            "could not verify identity of the file just created (os.fstat failed) — "
+            f"left in place, un-cleaned, for operator inspection: {path}"
+        )
+
+
 def validate_source_sha(value: str) -> None:
     if not _FULL_SHA_RE.fullmatch(value):
         raise ValueError("source_sha must be exactly 40 lowercase hex characters")
@@ -395,7 +427,7 @@ def _blob_declared_size(blob_sha: str, *, repo_root: Path, runner: GitRunner) ->
 
 def _fetch_all_blobs(
     entries: list[GitTreeEntry], *, repo_root: Path, runner: GitRunner
-) -> dict[str, bytes]:
+) -> tuple[dict[str, bytes], int]:
     """Fetches every entry's blob content, but checks each blob's
     Git-declared size against the release artifact's own accepted
     aggregate-size bound (`archive_safety.MAX_AGGREGATE_UNCOMPRESSED_SIZE`)
@@ -403,7 +435,12 @@ def _fetch_all_blobs(
     pathologically large allowlisted blob nor several blobs whose sizes
     sum past the bound can be fully buffered into memory first and
     rejected only afterward (the running total already includes the
-    current blob's declared size before its content is ever read)."""
+    current blob's declared size before its content is ever read).
+
+    Returns `(content_by_path, aggregate_declared_size)` — the caller
+    reuses the Git-declared aggregate source size for the final
+    aggregate-including-embedded-manifest bound check, rather than
+    recomputing it from anything else."""
     content_by_path: dict[str, bytes] = {}
     aggregate_declared_size = 0
     for entry in entries:
@@ -416,7 +453,7 @@ def _fetch_all_blobs(
         content_by_path[entry.path] = _read_blob(
             entry.blob_sha, repo_root=repo_root, runner=runner
         )
-    return content_by_path
+    return content_by_path, aggregate_declared_size
 
 
 def _compute_alembic_heads(content_by_path: dict[str, bytes]) -> list[str]:
@@ -494,10 +531,10 @@ def _create_exclusive(
 
     try:
         created_stat = os.fstat(fd)
-    except OSError:
+    except OSError as exc:
         with contextlib.suppress(OSError):
             os.close(fd)
-        raise
+        raise OutputIdentityUnavailableError(output_dir / basename) from exc
 
     try:
         fh = os.fdopen(fd, "wb")
@@ -677,8 +714,38 @@ def build_release(
         f"{'y' if len(entries) == 1 else 'ies'} found, no unsafe shapes",
     )
 
+    # Resource-bound precheck 1/3 (PR #56 final resource-safety corrective
+    # pass): the final archive member count is already fully knowable from
+    # the tree listing alone (every entry becomes one member, plus the one
+    # mandatory embedded manifest) — checked here, before fetching a single
+    # blob's content, so a selected commit whose allowlisted tree alone
+    # already exceeds the verifier's own accepted member count can never
+    # cause thousands of blob fetches for an artifact that would be
+    # rejected by verify-release regardless.
+    final_member_count = len(entries) + 1  # + mandatory embedded release_manifest.json
+    if final_member_count > archive_safety.MAX_ARCHIVE_MEMBER_COUNT:
+        builder.add(
+            component="member_count_bound",
+            status=FindingStatus.FAIL,
+            code="MEMBER_COUNT_EXCEEDS_BOUND",
+            message=_bounded(
+                f"final archive member count {final_member_count} (selected source entries "
+                "plus the mandatory embedded manifest) exceeds the accepted bound of "
+                f"{archive_safety.MAX_ARCHIVE_MEMBER_COUNT}"
+            ),
+        )
+        return builder.build()
+    builder.add(
+        component="member_count_bound",
+        status=FindingStatus.OK,
+        code="MEMBER_COUNT_WITHIN_BOUND",
+        message=f"final archive member count {final_member_count} is within the accepted bound",
+    )
+
     try:
-        content_by_path = _fetch_all_blobs(entries, repo_root=repo_root, runner=run_git)
+        content_by_path, source_aggregate_declared_size = _fetch_all_blobs(
+            entries, repo_root=repo_root, runner=run_git
+        )
     except GitBlobTooLargeError as exc:
         builder.add(
             component="blob_content_fetch",
@@ -800,6 +867,36 @@ def build_release(
         message="release_version and release_id are safe filesystem path components",
     )
 
+    # Resource-bound precheck 2/3: with release_id now known, every final
+    # archive member name (the release-id-prefixed source paths plus the
+    # mandatory embedded manifest name) is fully constructible — validated
+    # here, before tar construction, using the FINAL name including the
+    # release-id prefix, not just the raw Git path.
+    final_member_names = [f"{release_id}/{entry.path}" for entry in entries]
+    final_member_names.append(f"{release_id}/{INTERNAL_MANIFEST_MEMBER_NAME}")
+    too_long_names = [
+        name for name in final_member_names if len(name) > archive_safety.MAX_MEMBER_NAME_LENGTH
+    ]
+    if too_long_names:
+        builder.add(
+            component="member_name_length_bound",
+            status=FindingStatus.FAIL,
+            code="MEMBER_NAME_LENGTH_EXCEEDS_BOUND",
+            message=_bounded(
+                f"{len(too_long_names)} final archive member name(s) exceed the accepted "
+                f"bound of {archive_safety.MAX_MEMBER_NAME_LENGTH} characters, e.g. "
+                f"{too_long_names[0]!r} ({len(too_long_names[0])} characters)"
+            ),
+        )
+        return builder.build()
+    builder.add(
+        component="member_name_length_bound",
+        status=FindingStatus.OK,
+        code="MEMBER_NAME_LENGTH_WITHIN_BOUND",
+        message=f"all {len(final_member_names)} final archive member names are within "
+        "the accepted bound",
+    )
+
     artifact_name = f"{release_id}.tar.gz"
     manifest_name = f"{release_id}.release-manifest.json"
     sums_name = "SHA256SUMS"
@@ -852,6 +949,33 @@ def build_release(
     )
 
     manifest_bytes = manifest.model_dump_json().encode("utf-8")
+
+    # Resource-bound precheck 3/3: the final aggregate uncompressed size is
+    # the selected source blobs (already Git-declared-size-checked as they
+    # were fetched — reused here rather than recomputed) PLUS the embedded
+    # manifest's own bytes, now that the manifest is fully built. Checked
+    # before tar construction — never only the source blobs alone.
+    aggregate_size_with_manifest = source_aggregate_declared_size + len(manifest_bytes)
+    if aggregate_size_with_manifest > archive_safety.MAX_AGGREGATE_UNCOMPRESSED_SIZE:
+        builder.add(
+            component="aggregate_size_bound",
+            status=FindingStatus.FAIL,
+            code="AGGREGATE_SIZE_EXCEEDS_BOUND",
+            message=_bounded(
+                f"aggregate uncompressed size {aggregate_size_with_manifest} bytes (selected "
+                "source blobs plus the embedded release_manifest.json) exceeds the accepted "
+                f"bound of {archive_safety.MAX_AGGREGATE_UNCOMPRESSED_SIZE} bytes"
+            ),
+        )
+        return builder.build()
+    builder.add(
+        component="aggregate_size_bound",
+        status=FindingStatus.OK,
+        code="AGGREGATE_SIZE_WITHIN_BOUND",
+        message=f"aggregate uncompressed size {aggregate_size_with_manifest} bytes is within "
+        "the accepted bound",
+    )
+
     tar_members = [(f"{release_id}/{path}", content) for path, content in content_by_path.items()]
     tar_members.append((f"{release_id}/{INTERNAL_MANIFEST_MEMBER_NAME}", manifest_bytes))
     artifact_bytes = _build_tar_gz_bytes(tar_members)
@@ -933,6 +1057,19 @@ def build_release(
             status=FindingStatus.FAIL,
             code=exc.code,
             message=str(exc),
+        )
+        return builder.build()
+    except OutputIdentityUnavailableError as exc:
+        # Cleans up only files this invocation ALREADY identity-checked
+        # and tracked in `created` — the file that triggered this
+        # exception was never appended to `created` (its identity could
+        # never be established) and is deliberately left untouched.
+        _cleanup_all()
+        builder.add(
+            component="output_bundle_write",
+            status=FindingStatus.FAIL,
+            code="OUTPUT_IDENTITY_UNAVAILABLE",
+            message=safe_exception_text(exc),
         )
         return builder.build()
     except OSError as exc:

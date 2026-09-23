@@ -344,6 +344,20 @@ by construction — proven by
 trusted, already-running working tree — not an arbitrary selected
 commit.
 
+The static graph is also proven acyclic (PR #56 final resource-safety
+corrective pass): `compute_static_alembic_heads` runs a deterministic
+white/gray/black DFS over the parsed `down_revision` edges
+(`_detect_down_revision_cycle`) before computing heads. Without this, a
+cyclic pair (`A.down_revision = B`, `B.down_revision = A`) is invisible
+to a plain "revisions not referenced as a parent" computation — both ends
+of the cycle are mutually "referenced" and simply vanish from the result,
+while an entirely independent, valid branch's head is still reported as
+if nothing were wrong. Real Alembic rejects a cyclic revision graph
+outright; this reproduces that rejection (self-cycle, two-node cycle, or
+longer, even alongside an independent valid branch) purely over
+already-parsed static metadata — no migration code is executed to detect
+it, exactly like head computation itself.
+
 **Archive layout** — a single top-level root, `<release_id>/`:
 
 ```
@@ -420,15 +434,50 @@ handle — the still-owned raw descriptor is closed directly (a redundant-
 close `OSError` is suppressed) before the existing identity-checked path
 cleanup runs, and the original exception always propagates unmasked.
 
+One narrower case is deliberately fail-*closed* rather than
+self-cleaning (PR #56 final resource-safety corrective pass): if
+`os.fstat(fd)` itself fails immediately after the `O_CREAT | O_EXCL`
+create succeeds, there is no `(st_dev, st_ino)` identity to check a later
+cleanup against. Rather than guess that the on-disk path is still the
+file this invocation just created — which could delete a concurrent
+actor's replacement at the same basename — the raw fd is still always
+closed, but the created file is left in place for operator inspection,
+reported as `OUTPUT_IDENTITY_UNAVAILABLE`, and no manifest/`SHA256SUMS`
+file is ever written afterward. Every other failure point already holds
+a real `(st_dev, st_ino)` and continues to clean up exactly as before.
+
+**Resource bounds are enforced before construction, not discovered after
+(PR #56 final resource-safety corrective pass).** The same three bounds
+`verify-release` enforces (`archive_safety.MAX_ARCHIVE_MEMBER_COUNT`,
+`MAX_MEMBER_NAME_LENGTH`, `MAX_AGGREGATE_UNCOMPRESSED_SIZE`) are checked
+against values already deterministically knowable *before* the artifact
+is built, so an invalid artifact is never written merely so a post-build
+check can discover a bound violation:
+
+- **member count** — checked immediately after the allowlisted tree
+  listing (`member_count_bound`/`MEMBER_COUNT_EXCEEDS_BOUND`), as the
+  count of selected entries plus the one mandatory embedded manifest,
+  before a single blob's content is fetched;
+- **member name length** — checked once `release_id` is known
+  (`member_name_length_bound`/`MEMBER_NAME_LENGTH_EXCEEDS_BOUND`),
+  against the *final* archive member name (`<release_id>/<path>`), not
+  the raw Git path alone;
+- **aggregate uncompressed size** — checked once the release manifest is
+  built (`aggregate_size_bound`/`AGGREGATE_SIZE_EXCEEDS_BOUND`), as the
+  selected source blobs' Git-declared size (reused from the fetch step)
+  plus the embedded manifest's own bytes — not source blobs alone.
+
 **Self-check before publishing.** Immediately after writing the
-artifact, `build-release` runs the exact same
+artifact, `build-release` still runs the exact same
 `meyar.ops.archive_safety.inspect_archive_members` bounded safety
 inspection `verify-release` performs, and the full artifact is then
 required to pass `verify-release` unmodified — this is the strongest
 acceptance test for this command (see `test_build_release_output_passes_
-verify_release`). A self-check failure removes the artifact file already
-written and fails the build before the manifest/`SHA256SUMS` files are
-ever created.
+verify_release`). This remains defense-in-depth for any bound the
+prechecks above did not already catch (and for unsafe member *shapes*,
+which the prechecks do not evaluate at all). A self-check failure removes
+the artifact file already written and fails the build before the
+manifest/`SHA256SUMS` files are ever created.
 
 **Model/rollback governance stays declarative.** `--rollback-
 compatibility` and `--model-approval-status` are required CLI inputs —

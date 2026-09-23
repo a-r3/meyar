@@ -152,6 +152,50 @@ def _parse_revision_file(path: str, content: bytes) -> _RevisionMeta:
     return _RevisionMeta(path=path, revision=revision_value, down_revisions=down_revisions)
 
 
+def _detect_down_revision_cycle(by_revision: dict[str, _RevisionMeta]) -> None:
+    """Deterministic, non-executing DFS cycle detection over the parsed
+    `down_revision` graph (edge: revision -> each of its parent
+    `down_revision`s). Called only after every `down_revision` reference
+    has already been proven to refer to a revision present in
+    `by_revision`, so this never needs to special-case a dangling
+    reference itself.
+
+    A plain "heads = revisions not referenced as a parent" computation
+    (the prior approach) silently loses a cyclic pair: in `A.down_revision
+    = B` / `B.down_revision = A`, both A and B end up "referenced" by each
+    other and neither is ever considered — the cycle vanishes from the
+    result instead of being reported, and any other independent, valid
+    branch's head is reported as if nothing were wrong. Real Alembic
+    rejects a cyclic revision graph outright; this function reproduces
+    that rejection using a standard white/gray/black DFS coloring, purely
+    over already-parsed static metadata — never executing or importing
+    any selected migration code. Raises for a self-cycle, a two-node
+    cycle, or a longer cycle, even when another independent branch of the
+    graph is perfectly valid; a normal linear/branch/merge graph (merge
+    revisions included, via their tuple/list `down_revision`) never
+    triggers this."""
+    WHITE, GRAY, BLACK = 0, 1, 2
+    color: dict[str, int] = dict.fromkeys(by_revision, WHITE)
+
+    def visit(revision: str, path: list[str]) -> None:
+        color[revision] = GRAY
+        path.append(revision)
+        for parent in by_revision[revision].down_revisions or ():
+            if color[parent] == GRAY:
+                cycle = [*path[path.index(parent) :], parent]
+                raise AlembicStaticMetadataError(
+                    "cyclic down_revision graph detected: " + " -> ".join(cycle)
+                )
+            if color[parent] == WHITE:
+                visit(parent, path)
+        path.pop()
+        color[revision] = BLACK
+
+    for revision in sorted(by_revision):
+        if color[revision] == WHITE:
+            visit(revision, [])
+
+
 def compute_static_alembic_heads(content_by_path: dict[str, bytes]) -> list[str]:
     """Computes Alembic heads for the selected commit's migration set from
     `backend/alembic/versions/*.py` blob content, without ever executing
@@ -161,8 +205,10 @@ def compute_static_alembic_heads(content_by_path: dict[str, bytes]) -> list[str]
     Validates the same graph-integrity properties a release manifest
     needs: at least one revision found; no duplicate `revision` id; every
     non-`None` `down_revision` refers to another revision in the selected
-    set; at least one head remains after removing every revision that is
-    itself referenced as someone else's parent."""
+    set; the `down_revision` graph is acyclic (`_detect_down_revision_cycle`
+    — self-cycles and longer cycles both rejected, even alongside another
+    independent valid branch); at least one head remains after removing
+    every revision that is itself referenced as someone else's parent."""
     version_files = {
         path: content for path, content in content_by_path.items() if _is_versions_file(path)
     }
@@ -193,6 +239,8 @@ def compute_static_alembic_heads(content_by_path: dict[str, bytes]) -> list[str]
                     "revision in the selected migration set"
                 )
             referenced.add(parent)
+
+    _detect_down_revision_cycle(by_revision)
 
     heads = sorted(revision for revision in by_revision if revision not in referenced)
     if not heads:

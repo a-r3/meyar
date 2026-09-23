@@ -457,9 +457,16 @@ def test_member_order_and_metadata_are_normalized(tmp_path: Path) -> None:
         assert m.isfile()
 
 
-def test_archive_bound_exceeded_during_self_check_fails_and_cleans_up(
+def test_archive_bound_exceeded_is_now_caught_by_precheck_before_self_check(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A member-count violation used to only be discovered by the
+    post-build `archive_self_check` pass. As of the PR #56 final
+    resource-safety corrective pass, the same bound is already knowable
+    from the tree listing alone and is caught by the `member_count_bound`
+    precheck instead — before blob fetch or tar construction. The
+    post-build self-check (`inspect_archive_members`) remains in place as
+    defense-in-depth; see section L below for direct precheck coverage."""
     repo = _init_repo(tmp_path)
     _write_fixture_repo_files(repo)
     sha = _commit_all(repo)
@@ -474,7 +481,7 @@ def test_archive_bound_exceeded_during_self_check_fails_and_cleans_up(
         clock=_fixed_clock(FIXED_BUILT_AT),
     )
     assert result.ok is False
-    assert _finding(result, "archive_self_check").code == "ARCHIVE_RESOURCE_BOUND_EXCEEDED"
+    assert _finding(result, "member_count_bound").code == "MEMBER_COUNT_EXCEEDS_BOUND"
     assert list(output_dir.iterdir()) == []
 
 
@@ -1078,3 +1085,423 @@ def test_git_blob_size_bound_enforced_before_content_is_read(
     assert result.ok is False
     assert _finding(result, "blob_content_fetch").code == "GIT_BLOB_TOO_LARGE"
     assert list(output_dir.iterdir()) == []
+
+
+# --- L. resource-bound prechecks (PR #56 final resource-safety corrective pass) --
+
+
+def _final_member_count(tmp_path: Path, repo: Path, sha: str) -> int:
+    """Builds once, unrestricted, to learn the real final archive member
+    count (selected entries + the mandatory embedded manifest) for this
+    exact fixture/commit — used as ground truth instead of a hand-counted
+    literal, which would silently drift if the fixture repo ever changes."""
+    baseline_dir = tmp_path / "baseline_out_count"
+    baseline_dir.mkdir()
+    baseline = build_release(
+        _default_request(source_sha=sha, output_dir=baseline_dir),
+        invocation_cwd=repo,
+        clock=_fixed_clock(FIXED_BUILT_AT),
+    )
+    assert baseline.ok is True, baseline.model_dump_json()
+    artifact = next(baseline_dir.glob("*.tar.gz"))
+    with tarfile.open(artifact, mode="r:gz") as tar:
+        return len(tar.getnames())
+
+
+def test_member_count_bound_exact_limit_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path)
+    _write_fixture_repo_files(repo, include_disallowed=False)
+    sha = _commit_all(repo)
+    limit = _final_member_count(tmp_path, repo, sha)
+    monkeypatch.setattr("meyar.ops.archive_safety.MAX_ARCHIVE_MEMBER_COUNT", limit)
+
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    result = build_release(
+        _default_request(source_sha=sha, output_dir=output_dir),
+        invocation_cwd=repo,
+        clock=_fixed_clock(FIXED_BUILT_AT),
+    )
+    assert result.ok is True, result.model_dump_json()
+    assert _finding(result, "member_count_bound").code == "MEMBER_COUNT_WITHIN_BOUND"
+
+
+def test_member_count_bound_one_over_limit_fails_before_blob_fetch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path)
+    _write_fixture_repo_files(repo, include_disallowed=False)
+    sha = _commit_all(repo)
+    limit = _final_member_count(tmp_path, repo, sha)
+    monkeypatch.setattr("meyar.ops.archive_safety.MAX_ARCHIVE_MEMBER_COUNT", limit - 1)
+
+    def _must_not_fetch(*args: object, **kwargs: object) -> None:
+        raise AssertionError(
+            "blob content must never be fetched once member count already exceeds bound"
+        )
+
+    monkeypatch.setattr("meyar.ops.build_release._fetch_all_blobs", _must_not_fetch)
+
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    result = build_release(
+        _default_request(source_sha=sha, output_dir=output_dir),
+        invocation_cwd=repo,
+        clock=_fixed_clock(FIXED_BUILT_AT),
+    )
+    assert result.ok is False
+    assert _finding(result, "member_count_bound").code == "MEMBER_COUNT_EXCEEDS_BOUND"
+    assert list(output_dir.iterdir()) == []
+
+
+def _final_member_name_lengths(tmp_path: Path, repo: Path, sha: str) -> list[int]:
+    baseline_dir = tmp_path / "baseline_out_names"
+    baseline_dir.mkdir()
+    baseline = build_release(
+        _default_request(source_sha=sha, output_dir=baseline_dir),
+        invocation_cwd=repo,
+        clock=_fixed_clock(FIXED_BUILT_AT),
+    )
+    assert baseline.ok is True, baseline.model_dump_json()
+    artifact = next(baseline_dir.glob("*.tar.gz"))
+    with tarfile.open(artifact, mode="r:gz") as tar:
+        return [len(name) for name in tar.getnames()]
+
+
+def test_member_name_length_bound_exact_limit_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path)
+    _write_fixture_repo_files(repo, include_disallowed=False)
+    sha = _commit_all(repo)
+    max_len = max(_final_member_name_lengths(tmp_path, repo, sha))
+    monkeypatch.setattr("meyar.ops.archive_safety.MAX_MEMBER_NAME_LENGTH", max_len)
+
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    result = build_release(
+        _default_request(source_sha=sha, output_dir=output_dir),
+        invocation_cwd=repo,
+        clock=_fixed_clock(FIXED_BUILT_AT),
+    )
+    assert result.ok is True, result.model_dump_json()
+    assert _finding(result, "member_name_length_bound").code == "MEMBER_NAME_LENGTH_WITHIN_BOUND"
+
+
+def test_member_name_length_bound_one_over_limit_fails_before_tar_construction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path)
+    _write_fixture_repo_files(repo, include_disallowed=False)
+    sha = _commit_all(repo)
+    max_len = max(_final_member_name_lengths(tmp_path, repo, sha))
+    monkeypatch.setattr("meyar.ops.archive_safety.MAX_MEMBER_NAME_LENGTH", max_len - 1)
+
+    def _must_not_build_tar(*args: object, **kwargs: object) -> None:
+        raise AssertionError(
+            "tar construction must never run once a final member name already exceeds bound"
+        )
+
+    monkeypatch.setattr("meyar.ops.build_release._build_tar_gz_bytes", _must_not_build_tar)
+
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    result = build_release(
+        _default_request(source_sha=sha, output_dir=output_dir),
+        invocation_cwd=repo,
+        clock=_fixed_clock(FIXED_BUILT_AT),
+    )
+    assert result.ok is False
+    assert _finding(result, "member_name_length_bound").code == "MEMBER_NAME_LENGTH_EXCEEDS_BOUND"
+    assert list(output_dir.iterdir()) == []
+
+
+def _fixture_source_bytes_total(repo: Path) -> int:
+    """Sums the real on-disk byte size of every file under the five
+    allowlisted pathspecs — the selected commit is a clean commit of these
+    exact files, so a Git blob's declared/actual size always matches the
+    working-tree file size at commit time."""
+    total = 0
+    for rel_dir in ("backend/src/meyar", "backend/alembic"):
+        for path in (repo / rel_dir).rglob("*"):
+            if path.is_file():
+                total += path.stat().st_size
+    for rel_file in ("backend/pyproject.toml", "backend/uv.lock", "backend/alembic.ini"):
+        total += (repo / rel_file).stat().st_size
+    return total
+
+
+def _final_aggregate_source_bytes_and_manifest_len(
+    tmp_path: Path, repo: Path, sha: str
+) -> tuple[int, int]:
+    baseline_dir = tmp_path / "baseline_out_agg"
+    baseline_dir.mkdir()
+    baseline = build_release(
+        _default_request(source_sha=sha, output_dir=baseline_dir),
+        invocation_cwd=repo,
+        clock=_fixed_clock(FIXED_BUILT_AT),
+    )
+    assert baseline.ok is True, baseline.model_dump_json()
+    manifest_path = next(baseline_dir.glob("*.release-manifest.json"))
+    manifest_len = manifest_path.stat().st_size
+    source_bytes = _fixture_source_bytes_total(repo)
+    return source_bytes, manifest_len
+
+
+def test_aggregate_size_bound_at_limit_including_manifest_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path)
+    _write_fixture_repo_files(repo, include_disallowed=False)
+    sha = _commit_all(repo)
+    source_bytes, manifest_len = _final_aggregate_source_bytes_and_manifest_len(
+        tmp_path, repo, sha
+    )
+    monkeypatch.setattr(
+        "meyar.ops.archive_safety.MAX_AGGREGATE_UNCOMPRESSED_SIZE", source_bytes + manifest_len
+    )
+
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    result = build_release(
+        _default_request(source_sha=sha, output_dir=output_dir),
+        invocation_cwd=repo,
+        clock=_fixed_clock(FIXED_BUILT_AT),
+    )
+    assert result.ok is True, result.model_dump_json()
+    assert _finding(result, "aggregate_size_bound").code == "AGGREGATE_SIZE_WITHIN_BOUND"
+
+
+def test_aggregate_size_with_manifest_exceeds_limit_fails_before_tar_construction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Source blobs alone fit comfortably under the bound (the per-blob
+    fetch-time check never trips), but adding the mandatory embedded
+    manifest's own bytes pushes the aggregate just over — proving the
+    final aggregate check accounts for the embedded manifest, not only
+    source blob content."""
+    repo = _init_repo(tmp_path)
+    _write_fixture_repo_files(repo, include_disallowed=False)
+    sha = _commit_all(repo)
+    source_bytes, manifest_len = _final_aggregate_source_bytes_and_manifest_len(
+        tmp_path, repo, sha
+    )
+    monkeypatch.setattr(
+        "meyar.ops.archive_safety.MAX_AGGREGATE_UNCOMPRESSED_SIZE",
+        source_bytes + manifest_len - 1,
+    )
+
+    def _must_not_build_tar(*args: object, **kwargs: object) -> None:
+        raise AssertionError(
+            "tar construction must never run once the aggregate (including the embedded "
+            "manifest) already exceeds bound"
+        )
+
+    monkeypatch.setattr("meyar.ops.build_release._build_tar_gz_bytes", _must_not_build_tar)
+
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    result = build_release(
+        _default_request(source_sha=sha, output_dir=output_dir),
+        invocation_cwd=repo,
+        clock=_fixed_clock(FIXED_BUILT_AT),
+    )
+    assert result.ok is False
+    assert _finding(result, "aggregate_size_bound").code == "AGGREGATE_SIZE_EXCEEDS_BOUND"
+    assert list(output_dir.iterdir()) == []
+
+
+# --- M. fstat/identity-acquisition failure (PR #56 final resource-safety corrective) --
+
+
+def test_create_exclusive_fstat_failure_closes_fd_and_leaves_target_for_inspection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`os.fstat(fd)` itself failing immediately after a successful
+    `O_CREAT | O_EXCL` create is a rare infrastructure failure where this
+    invocation can never safely identity-check the file it just created
+    (no `(st_dev, st_ino)` to compare against). Fail-closed by design: the
+    raw fd is always closed, but the created path is deliberately left
+    untouched rather than guessed-and-unlinked, which could otherwise
+    delete a concurrent actor's replacement file at the same basename."""
+    from meyar.ops.build_release import OutputIdentityUnavailableError
+
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    dir_fd = os.open(str(output_dir), os.O_RDONLY | os.O_DIRECTORY)
+    opened_fds: list[int] = []
+
+    def _raising_fstat(fd, *args, **kwargs):  # noqa: ANN001, ARG001
+        opened_fds.append(fd)
+        raise OSError("simulated fstat failure")
+
+    monkeypatch.setattr(os, "fstat", _raising_fstat)
+    try:
+        with pytest.raises(OutputIdentityUnavailableError):
+            _create_exclusive(
+                dir_fd=dir_fd, basename="target.txt", data=b"data", output_dir=output_dir
+            )
+    finally:
+        monkeypatch.undo()
+
+    assert opened_fds, "os.fstat should have been invoked exactly once"
+    leaked_fd = opened_fds[0]
+    # The raw fd must have been explicitly closed by _create_exclusive
+    # itself: operating on it again must fail with EBADF, not succeed.
+    with pytest.raises(OSError):
+        os.fstat(leaked_fd)
+    # Deliberately fail-closed: the created file is left in place, never
+    # guessed-and-deleted, since no (st_dev, st_ino) identity was ever
+    # established for it.
+    assert (output_dir / "target.txt").exists()
+    os.close(dir_fd)
+
+
+def test_build_release_fstat_failure_on_artifact_create_is_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Full build_release() integration: an os.fstat() failure on the
+    FIRST release-bundle file (the artifact) must fail the whole build
+    truthfully (`OUTPUT_IDENTITY_UNAVAILABLE`), close the raw fd, leave the
+    unverifiable artifact file in place for operator inspection, and never
+    publish a manifest or SHA256SUMS alongside it."""
+    repo = _init_repo(tmp_path)
+    _write_fixture_repo_files(repo)
+    sha = _commit_all(repo)
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+
+    real_fstat = os.fstat
+    call_count = {"n": 0}
+
+    def _raise_once(fd, *args, **kwargs):  # noqa: ANN001
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise OSError("simulated fstat failure")
+        return real_fstat(fd, *args, **kwargs)
+
+    monkeypatch.setattr(os, "fstat", _raise_once)
+
+    result = build_release(
+        _default_request(source_sha=sha, output_dir=output_dir),
+        invocation_cwd=repo,
+        clock=_fixed_clock(FIXED_BUILT_AT),
+    )
+    assert result.ok is False
+    assert _finding(result, "output_bundle_write").code == "OUTPUT_IDENTITY_UNAVAILABLE"
+
+    remaining = list(output_dir.iterdir())
+    assert len(remaining) == 1, "exactly the unverifiable artifact file, left for inspection"
+    assert remaining[0].suffix == ".gz"
+
+
+# --- N. static Alembic down_revision cycle detection (PR #56 final resource-safety) --
+
+
+def test_alembic_self_cycle_down_revision_rejected(tmp_path: Path) -> None:
+    """A migration whose own down_revision points at itself is an invalid
+    cycle — real Alembic rejects this; the static graph check must too,
+    never silently treating it as a lone missing-parent/no-head case."""
+    repo = _init_repo(tmp_path)
+    _write_fixture_repo_files(repo)
+    (repo / "backend" / "alembic" / "versions" / "0001_initial.py").write_text(
+        _migration_script("selfrev", "selfrev")
+    )
+    sha = _commit_all(repo)
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    result = build_release(
+        _default_request(source_sha=sha, output_dir=output_dir), invocation_cwd=repo
+    )
+    assert result.ok is False
+    assert _finding(result, "alembic_heads").code == "ALEMBIC_STATIC_METADATA_INVALID"
+    assert list(output_dir.iterdir()) == []
+
+
+def test_alembic_two_node_cycle_with_independent_valid_branch_rejected(tmp_path: Path) -> None:
+    """A <-> B form an invalid cycle while an entirely independent branch C
+    is perfectly valid on its own. Without cycle detection, a plain
+    "not referenced as a parent" computation would silently drop A and B
+    from the heads list (each references the other) while still reporting
+    C as a head, as if nothing were wrong — this must instead be a hard
+    failure."""
+    repo = _init_repo(tmp_path)
+    _write_fixture_repo_files(repo)
+    (repo / "backend" / "alembic" / "versions" / "0001_initial.py").write_text(
+        _migration_script("a_rev", "b_rev")
+    )
+    (repo / "backend" / "alembic" / "versions" / "0002_b.py").write_text(
+        _migration_script("b_rev", "a_rev")
+    )
+    (repo / "backend" / "alembic" / "versions" / "0003_c.py").write_text(
+        _migration_script("c_rev", None)
+    )
+    sha = _commit_all(repo)
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    result = build_release(
+        _default_request(source_sha=sha, output_dir=output_dir), invocation_cwd=repo
+    )
+    assert result.ok is False
+    assert _finding(result, "alembic_heads").code == "ALEMBIC_STATIC_METADATA_INVALID"
+    assert list(output_dir.iterdir()) == []
+
+
+def test_alembic_longer_cycle_rejected(tmp_path: Path) -> None:
+    """A three-node cycle (A -> B -> C -> A) is rejected exactly like a
+    two-node cycle."""
+    repo = _init_repo(tmp_path)
+    _write_fixture_repo_files(repo)
+    (repo / "backend" / "alembic" / "versions" / "0001_initial.py").write_text(
+        _migration_script("a_rev", "c_rev")
+    )
+    (repo / "backend" / "alembic" / "versions" / "0002_b.py").write_text(
+        _migration_script("b_rev", "a_rev")
+    )
+    (repo / "backend" / "alembic" / "versions" / "0003_c.py").write_text(
+        _migration_script("c_rev", "b_rev")
+    )
+    sha = _commit_all(repo)
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    result = build_release(
+        _default_request(source_sha=sha, output_dir=output_dir), invocation_cwd=repo
+    )
+    assert result.ok is False
+    assert _finding(result, "alembic_heads").code == "ALEMBIC_STATIC_METADATA_INVALID"
+    assert list(output_dir.iterdir()) == []
+
+
+def test_alembic_normal_branch_and_merge_graph_still_succeeds(tmp_path: Path) -> None:
+    """A legitimate branch-then-merge graph (two branches from a common
+    root, joined by a merge revision with a tuple down_revision) must
+    still compute a single correct head — proving cycle detection doesn't
+    false-positive on a normal DAG shape."""
+    repo = _init_repo(tmp_path)
+    _write_fixture_repo_files(repo)  # 0001_initial: revision=0001initial, down_revision=None
+    (repo / "backend" / "alembic" / "versions" / "0002_branch_a.py").write_text(
+        _migration_script("branch_a", "0001initial")
+    )
+    (repo / "backend" / "alembic" / "versions" / "0003_branch_b.py").write_text(
+        _migration_script("branch_b", "0001initial")
+    )
+    (repo / "backend" / "alembic" / "versions" / "0004_merge.py").write_text(
+        '"""fixture merge migration"""\n'
+        "revision = 'merge_rev'\n"
+        "down_revision = ('branch_a', 'branch_b')\n"
+        "branch_labels = None\ndepends_on = None\n"
+    )
+    sha = _commit_all(repo)
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    result = build_release(
+        _default_request(source_sha=sha, output_dir=output_dir),
+        invocation_cwd=repo,
+        clock=_fixed_clock(FIXED_BUILT_AT),
+    )
+    assert result.ok is True, result.model_dump_json()
+    manifest_path = next(output_dir.glob("*.release-manifest.json"))
+    manifest = ReleaseManifest.model_validate_json(manifest_path.read_text())
+    assert manifest.alembic_heads == ["merge_rev"]

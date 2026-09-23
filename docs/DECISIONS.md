@@ -5494,3 +5494,83 @@ failure handling, 1 for the blob-size bound); the full backend suite
 (1,883 tests), `ruff`, `mypy`, and `alembic heads` all pass unchanged.
 PR #56 remains open for re-audit; issue #36 and issue #46 remain
 untouched and unstarted.
+
+**Final resource-safety corrective pass (independent re-audit, same PR
+#56 branch, 2026-09-24).** A second independent audit of the corrected
+diff found three narrower remaining gaps, fixed on the same branch
+without broadening PR3's scope:
+
+1. **Only the selected-blob aggregate size was pre-checked; member count
+   and final member-name length were only ever discovered by the
+   post-build self-check.** The builder could still construct and write a
+   full artifact it already knew, deterministically, the existing
+   verifier (`archive_safety.MAX_ARCHIVE_MEMBER_COUNT`/
+   `MAX_MEMBER_NAME_LENGTH`) would reject. Fixed with three prechecks, run
+   as early as the needed inputs allow and always before
+   `_build_tar_gz_bytes`: **member count**
+   (`member_count_bound`/`MEMBER_COUNT_EXCEEDS_BOUND`) — selected entries
+   plus the one mandatory embedded manifest, checked immediately after the
+   allowlisted tree listing and before a single blob is fetched; **member
+   name length** (`member_name_length_bound`/
+   `MEMBER_NAME_LENGTH_EXCEEDS_BOUND`) — the *final* `<release_id>/<path>`
+   name, checked once `release_id` is known; **aggregate uncompressed
+   size** (`aggregate_size_bound`/`AGGREGATE_SIZE_EXCEEDS_BOUND`) —
+   selected source blobs' Git-declared size (`_fetch_all_blobs` now
+   returns this total for reuse, rather than it being recomputed) plus the
+   embedded manifest's own bytes, checked once the manifest is built. The
+   post-build `inspect_archive_members` self-check remains as
+   defense-in-depth; no verifier bound was weakened.
+
+2. **`_create_exclusive`'s `os.fstat(fd)` failure path left an untracked
+   created file.** If `os.fstat(fd)` itself failed right after a
+   successful `O_CREAT | O_EXCL` create, the raw fd was correctly closed,
+   but the on-disk path was never identity-checked-cleaned (no
+   `(st_dev, st_ino)` was ever captured) and `_CreatedFile` was never
+   returned, so the outer `build_release` cleanup never learned about it.
+   The narrowest defensible fix was chosen: fail-**closed**, not
+   guess-and-delete. A new `OutputIdentityUnavailableError` is raised;
+   `build_release` reports it as `OUTPUT_IDENTITY_UNAVAILABLE`, cleans up
+   only any *other* already-identity-tracked created files via the
+   existing `_cleanup_all()`, and deliberately leaves the
+   identity-unverifiable file in place for operator inspection rather than
+   risk deleting a concurrent actor's replacement at the same basename.
+   Every other `_create_exclusive` failure point (post-`fstat`) already
+   holds `created_stat` and continues to clean up exactly as before — this
+   changes behavior at exactly one narrow point, not the module's general
+   cleanup discipline.
+
+3. **Head computation over the static `down_revision` graph did not prove
+   acyclicity.** "Heads = revisions not referenced as a parent" silently
+   *loses* a cyclic pair (`A.down_revision = B`, `B.down_revision = A`) —
+   both ends are mutually "referenced" and simply vanish from the result,
+   while an independent, valid branch's head is still reported as if
+   nothing were wrong; real Alembic rejects a cyclic graph outright. Fixed
+   with `alembic_static_metadata._detect_down_revision_cycle`, a
+   deterministic white/gray/black DFS over the already-parsed
+   `down_revision` edges, run after parent-reference validation and before
+   head computation — still zero migration-code execution/import. Rejects
+   a self-cycle, a two-node cycle, and a longer cycle, even alongside an
+   independent valid branch; a normal linear/branch/merge graph (including
+   tuple/list `down_revision` merge revisions) is unaffected.
+
+One existing test (`test_archive_bound_exceeded_during_self_check_fails_
+and_cleans_up`) was updated in place rather than left to assert stale
+behavior: the same `MAX_ARCHIVE_MEMBER_COUNT` scenario it exercised is now
+caught by the `member_count_bound` precheck, not the post-build
+self-check, so its expected component/code changed accordingly (renamed
+`test_archive_bound_exceeded_is_now_caught_by_precheck_before_self_
+check`). 12 new regression tests were added to `test_ops_build_release.py`
+(6 for the three resource-bound prechecks — one at-limit-succeeds and one
+one-over-fails-before-construction test per bound; 2 for the
+`os.fstat` identity-unavailable fail-closed behavior, one direct unit
+test and one full `build_release()` integration test; 4 for Alembic
+`down_revision` cycle detection — self-cycle, two-node cycle alongside an
+independent valid branch, a longer cycle, and a normal branch/merge graph
+proving no false positive). Full gate: `ruff check .` clean, `mypy src`
+clean (163 source files), `alembic heads` unchanged (one real head,
+non-executing static parse matches), `scripts/scan-tracked-tree.sh`
+clean, `git diff --check` clean, focused `test_ops_build_release.py` +
+`test_ops_cli.py` + `test_ops_no_exfiltration.py` (81 tests) green, full
+backend suite (1,895 tests) green. PR #56 remains open for re-audit;
+issue #36 and issue #46 remain untouched and unstarted; no merge, no
+force push, no history rewrite performed.
