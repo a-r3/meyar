@@ -1,6 +1,50 @@
 # MEYAR — Status
 
 ## Current phase
+
+**PR #42 (M8 Slice 4 — Agent Product UX & JD Matching, issue #33) is
+MERGED — squash SHA `584eb3584f10abf13db03046d32f85041b4df2ab` on `main`.**
+Issue #33 is CLOSED. PR #42 carried the full issue #44 AZ/EN
+generalization-hardening corrective series (D-042 through D-065,
+including the D-061/D-062/D-063 passes narrated below plus two later
+independent-audit passes, D-064 and D-065, recorded in
+`docs/DECISIONS.md`) to acceptance and merge. **Issue #44 is CLOSED.**
+Post-merge, `main` at that SHA carries a clean quality gate and a clean
+`scripts/scan-tracked-tree.sh`. HR UI Productization & Presentation
+Readiness (issue #27, PR #29, M7) is likewise merged/accepted — see the
+correction below in this same section.
+
+**Current active engineering phase: issue #35 — Agentless Mac Deployment
+Readiness (M9).** Tested, executable (not merely documented)
+provisioning/configuration/PostgreSQL-pgvector/migration/Ollama-and-model-
+setup/service-lifecycle/healthcheck/backup-restore/update-rollback/
+diagnostics tooling, with no Claude Code/Codex/AI-coding-agent dependency
+on the target deployment host.
+
+**Next phase: issue #36 — Real Target-Mac Model Selection & Benchmark
+(M9).** Executes `backend/scripts/target_mac_benchmark.py` on the actual
+confirmed reference hardware (Mac mini M4 Pro, 12-core CPU/16-core
+GPU/24GB unified memory/512GB SSD) once issue #35's tooling is in place.
+**This benchmark has not yet been executed on real target hardware.**
+Issue #20 (Slice 13 — Security + Official Definition-of-Done Acceptance)
+and milestone **M5 remain OPEN** until that real-hardware benchmark and
+the resulting production-model decision are complete; #35 and #36 extend
+M9 and do not supersede or close M5/#20.
+
+**Other open/backlog work:** issue #45 (API-first agent/application
+contract completion, M8) and issue #46 (pre-deployment runtime/ingestion/
+recovery hardening, M9) remain OPEN. Issues #49 (server-owned search
+result-context and conversational follow-ups) and #50 (evidence-backed
+candidate Q&A and deterministic comparison, depends on #49) are
+post-presentation capability-backlog items — **planned, not
+implemented.**
+
+The detailed narrative immediately below (the D-055 through D-063 passes,
+and the earlier M7 HR UI productization detail) is retained as historical
+decision context. It was written while that work was still local/
+pre-merge; both lines of work were subsequently accepted and merged, per
+the correction above.
+
 **Issue #44 AZ/EN generalization hardening has an independent-audit corrective
 implementation locally on `feat/agent-product-ux-jd-matching` (D-061/D-062), not
 pushed or merged.** D-055's
@@ -32,7 +76,9 @@ subjects; explicit presence-only domain experience uses the evaluator's
 existing optional-duration contract; context-only modality changes resolve
 only a unique source bucket; duration/top-K search executes deterministically;
 and wrong-mode guidance suppresses incompatible review copy.
-PR #42 remains NOT accepted.
+(This pass was local/pre-merge at the time of writing; it was later
+accepted and merged as part of PR #42 — see the current-status
+correction at the top of this section.)
 
 **Issue #44 final-audit parser correction (D-063) is implemented locally on
 the required independent-audit base.** Passport-holder/national eligibility
@@ -121,7 +167,9 @@ with a self-hosted vanilla-JS presentation enhancement plus a matching
 server-rendered initial/re-rendered state, so the control is disabled
 and cleared for every kind but EXPERIENCE with or without JavaScript;
 server-side validation is unchanged and remains authoritative; see
-D-029. PR #29 still **NOT merged** — awaiting owner re-inspection.
+D-029. PR #29 was subsequently **MERGED** at squash SHA `1f8bd12`
+(2026-09-01), closing issue #27; the HR UI productization/presentation-
+readiness pass described above is accepted.
 
 **Product-direction pivot recorded (2026-09-01).** Following an
 owner-requested independent full product/architecture audit, MEYAR adopts a
@@ -891,9 +939,11 @@ no check that the requirement was ever actually in the JD text) and an
 independently-verified explanation of the 850/846/848 historical
 test-count question (822 → 838 → 846 → 846 → 848 → 851, zero test
 removals at any commit in this branch's lineage; no 850 anywhere in this
-repository's git/reflog/PR history) — and still awaiting owner re-review
-before merge — not merged, not self-accepted per the task's own
-instruction.** D-045 fixes a genuine root-cause bug (a search/tool-result
+repository's git/reflog/PR history) — and, at the time of that pass, still
+awaiting owner re-review before merge. PR #42 was subsequently, after the
+further corrective passes recorded below (through D-065), accepted and
+**MERGED** at squash SHA `584eb3584f10abf13db03046d32f85041b4df2ab` — see
+"Current phase" above.** D-045 fixes a genuine root-cause bug (a search/tool-result
 turn's live headline and its persisted history text were two
 independently computed values — see D-045 item 1), a real string-
 duplication bug in education-title formatting, and search evidence that
@@ -1017,13 +1067,15 @@ presented as unavailable without rewriting history. The safe-but-product-
 degrading whole-profile failure behavior is unchanged. D-049 gates:
 focused suite 186 passed; `ruff` clean; `mypy src` clean (138 files); full
 `pytest` 910 passed; Alembic remains at `a1c5e9f2b6d3`; tracked-tree scan
-clean. PR #42 remains open and not accepted; nothing was pushed or merged.
-See D-049.
+clean. At the time of this pass PR #42 remained open and not accepted;
+nothing had yet been pushed or merged. See D-049.
 
 The independent re-audit at `7b748f4` disproved complete closure. D-050
 records the corrective canonical-context, current-state, period-attribution,
 embedding, identity-token, history-version and fixture-integrity changes.
-PR #42 remains not accepted; this work is local only, with no push or merge.
+At the time of this pass PR #42 remained not accepted, local only, with no
+push or merge. (Both D-049 and D-050 predate the eventual PR #42 merge —
+see "Current phase" above.)
 
 **M8 Slice 3 — Evidence Capability Completion (#32)**: **MERGED as PR #41
 (`8c1782f`, squash); issue #32 closed.** Closes the D-027-identified
@@ -1083,8 +1135,8 @@ product-Slice work before the M8 pivot.
 demo bootstrap — **MERGED as PR #26 at squash SHA `a539e34`** (see D-022).
 
 **Chore (issue #27, not a Slice, M7):** HR UI productization and
-presentation readiness, on `feat/hr-ui-productization`, PR #29 open,
-**pending owner re-inspection — not merged.**
+presentation readiness, on `feat/hr-ui-productization` —
+**MERGED as PR #29 at squash SHA `1f8bd12`; issue #27 closed.**
 Following owner visual inspection of the running local `/ui/*` surfaces,
 reworked navigation/copy into HR language, removed the manual
 evaluation-date inputs (current date now injected explicitly at the UI
@@ -1259,29 +1311,37 @@ left open pending explicit owner milestone-closure approval** — see
 
 ## Blockers
 **Mac Mini benchmark execution** — the sole remaining mandatory blocker to
-MVP closure. Target hardware is now owner-confirmed (Mac mini M4 Pro,
-12-core CPU/16-core GPU/24GB unified memory/512GB SSD — reference, not
-lock-in), and the benchmark harness is built and dry-run smoke-tested, but
-it has not been executed on the actual confirmed hardware — this also
-blocks approving a final production LLM/embedding model (D-014). Other
-previously-open items: document encryption-at-rest remains a deployment
-responsibility, not an application feature, per `docs/SECURITY_PRIVACY.md`
-(unchanged); D-009 Ollama upgrade needs root (unchanged, non-blocking). Git
-remote is connected but is a personal/temporary one (D-012) — official
-bank-owned remote still pending, migration keeps full history when it
-arrives (organizational, non-blocking for MVP).
+MVP closure, now sequenced behind issue #35 (Agentless Mac Deployment
+Readiness, the current active phase): issue #35's tooling lands first, then
+issue #36 executes the benchmark. Target hardware is owner-confirmed (Mac
+mini M4 Pro, 12-core CPU/16-core GPU/24GB unified memory/512GB SSD —
+reference, not lock-in), and the benchmark harness is built and dry-run
+smoke-tested, but it has not been executed on the actual confirmed hardware
+— this also blocks approving a final production LLM/embedding model
+(D-014). Other previously-open items: document encryption-at-rest remains a
+deployment responsibility, not an application feature, per
+`docs/SECURITY_PRIVACY.md` (unchanged); D-009 Ollama upgrade needs root
+(unchanged, non-blocking). Git remote is connected but is a
+personal/temporary one (D-012) — official bank-owned remote still pending,
+migration keeps full history when it arrives (organizational, non-blocking
+for MVP).
 
 ## Next action
-1. **Mac Mini benchmark execution** (issue #20, **M5**) — the sole
-   remaining mandatory blocker to MVP closure: run
-   `backend/scripts/target_mac_benchmark.py` on the actual confirmed
-   target hardware and record a production model decision. M5/issue #20
-   must not close until this moves to DONE.
-2. **M6 closure decision** — issue #23 is closed and M6 has no remaining
+1. **Issue #35 — Agentless Mac Deployment Readiness (M9, current active
+   phase).** Complete tested, executable provisioning/configuration/
+   migration/Ollama-setup/service-lifecycle/healthcheck/backup-restore/
+   update-rollback/diagnostics tooling, with no Claude Code/Codex/AI-coding-
+   agent dependency on the target deployment host.
+2. **Issue #36 — Real Target-Mac Model Selection & Benchmark (M9, next,
+   depends on #35).** Run `backend/scripts/target_mac_benchmark.py` on the
+   actual confirmed target hardware and record a production model decision.
+   M5/issue #20 must not close until this moves to DONE — #35/#36 do not
+   supersede or close M5/#20.
+3. **M6 closure decision** — issue #23 is closed and M6 has no remaining
    open issues; closing the milestone itself requires an explicit owner
    decision (never invented automatically — see
    `.claude/rules/git-workflow.md`).
-3. **Git Infrastructure** — remote connected (`a-r3/meyar`, private,
+4. **Git Infrastructure** — remote connected (`a-r3/meyar`, private,
    temporary — D-012); governance merged (`16929fd`). May later migrate
    to an official bank-owned remote (history preserved).
 
@@ -1302,9 +1362,9 @@ due date because the official timeline has not been supplied.
 | M4 — Internal Product Interface & API | Slices 11–12 | CLOSED — Slice 11 merged (PR #17, issue #16 closed); Slice 12 merged (PR #19 at `93fa567`, issue #18 closed) |
 | M5 — Security, Target-Mac Validation & MVP Acceptance | Slice 13 + target-Mac benchmark | OPEN — issue #20 open; PR #22 merged at `a709ce1` implementing Pass 1 (original CV, no-exfiltration, backup/restore, audit guard, multilingual evidence) with `Refs #20`; Mac Mini benchmark execution on the now owner-confirmed target hardware remains the sole open mandatory gate |
 | M6 — Operational CV Intake & Reconciliation | Slice 14 | CLOSED — Slice 14 merged (PR #24 at `f6e31ff`), issue #23 closed; owner-approved closure |
-| M7 — HR UI & Presentation Readiness | HR UI productization (chore, issue #27) | OPEN — branch `feat/hr-ui-productization`, PR #29 open, pending final owner visual check; Job lifecycle implemented; see D-023 through D-029 |
-| M8 — Bounded Local-AI HR Agent Platform | Slices 1–5 (issues #30–#34) | OPEN — Slice 1 (#30), Slice 2 (#31), Slice 3 (#32) merged (PR #41 at `8c1782f`); Slice 4 (#33) factual-authority corrections are recorded through D-053 (issue #44), branch `feat/agent-product-ux-jd-matching`; PR #42 remains open and not accepted, awaiting owner re-review before merge |
-| M9 — Deployment, Benchmark & Integration Readiness | Slices 6–8 (issues #35–#37) | OPEN — created 2026-09-01 per D-030/D-031/D-032; no implementation started; does not supersede or close M5/#20 |
+| M7 — HR UI & Presentation Readiness | HR UI productization (chore, issue #27) | OPEN (milestone not yet explicitly closed by owner) — PR #29 MERGED at `1f8bd12`, closing issue #27; Job lifecycle implemented; see D-023 through D-029 |
+| M8 — Bounded Local-AI HR Agent Platform | Slices 1–5 (issues #30–#34) | OPEN — Slice 1 (#30), Slice 2 (#31), Slice 3 (#32) merged (PR #41 at `8c1782f`); Slice 4 (#33) MERGED as PR #42 at `584eb35`, closing issue #33 and, via its full D-042–D-065 corrective series, issue #44; Slice 5 — Confirmed Actions Framework (issue #34) remains OPEN, not started |
+| M9 — Deployment, Benchmark & Integration Readiness | Slices 6–8 (issues #35–#37) | OPEN — created 2026-09-01 per D-030/D-031/D-032; issue #35 (Agentless Mac Deployment Readiness) is the current active engineering phase, implementation in progress; issue #36 (Real Target-Mac Model Selection & Benchmark) is next, not yet started; does not supersede or close M5/#20 |
 
 ## Official requirement gap matrix
 
