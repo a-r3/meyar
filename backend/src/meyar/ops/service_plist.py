@@ -176,26 +176,81 @@ class ServiceRenderOutputExistsError(Exception):
         super().__init__(f"output path already exists: {path}")
 
 
+# `service-render` is render-only — never installation (see module
+# docstring). This is the one output-path boundary this PR enforces: the
+# privileged LaunchDaemon installation directory itself. It is not a
+# general symlink/containment policy for plist *field* values (those stay
+# lexical-only, see `validate_absolute_path`).
+_PRIVILEGED_LAUNCHDAEMONS_DIR = "/Library/LaunchDaemons"
+
+
+class ServiceRenderOutputPathPrivilegedError(Exception):
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        super().__init__(
+            f"output path must not be inside {_PRIVILEGED_LAUNCHDAEMONS_DIR}: {path}"
+        )
+
+
+def _reject_privileged_output_path(output_path: Path) -> None:
+    """Rejects, before any filesystem write, an output path whose
+    lexically normalized absolute destination is the privileged
+    LaunchDaemon installation directory or a descendant of it.
+    Normalization (`os.path.abspath`, itself lexical `normpath`) collapses
+    a `..` traversal component without resolving any symlink — the same
+    lexical-only discipline as every other path check in this module."""
+    normalized = os.path.abspath(str(output_path))
+    if normalized == _PRIVILEGED_LAUNCHDAEMONS_DIR or normalized.startswith(
+        _PRIVILEGED_LAUNCHDAEMONS_DIR + os.sep
+    ):
+        raise ServiceRenderOutputPathPrivilegedError(output_path)
+
+
+def _unlink_if_same_file(path: Path, expected_stat: os.stat_result) -> None:
+    """Cleanup after a write/close failure must remove only the exact
+    file this invocation created via `O_CREAT | O_EXCL` — never a
+    replacement pathname a concurrent actor swapped in afterward.
+    `os.lstat` (no symlink follow) is compared by `(st_dev, st_ino)`
+    against the identity captured immediately after `os.open()`; the
+    pathname is left untouched on any mismatch, and a failure to stat it
+    (e.g. it no longer exists) is not itself an error."""
+    with contextlib.suppress(OSError):
+        current_stat = os.lstat(path)
+        if (current_stat.st_dev, current_stat.st_ino) == (
+            expected_stat.st_dev,
+            expected_stat.st_ino,
+        ):
+            path.unlink()
+
+
 def render_service_plist_to_file(spec: ServiceSpec, output_path: Path) -> None:
     """Writes the rendered plist to `output_path`. Validation happens
-    first (via `render_service_plist`), so invalid input never creates or
-    touches the output file. The file is created with `O_CREAT | O_EXCL`
-    so an existing path is never silently overwritten — this is an
-    atomic create-exclusive check, not a `Path.exists()` pre-check, so
-    there is no TOCTOU race with a concurrent writer. Any failure during
-    the write removes the partial file it created, leaving no partial
-    file behind."""
+    first (via `render_service_plist`, then the privileged-output-path
+    check), so invalid input never creates or touches the output file.
+    The file is created with `O_CREAT | O_EXCL` so an existing path is
+    never silently overwritten — this is an atomic create-exclusive
+    check, not a `Path.exists()` pre-check, so there is no TOCTOU race
+    with a concurrent writer. Any failure during the write removes the
+    partial file it created (identity-checked, never a replacement),
+    leaving no partial file behind and no leaked descriptor."""
     data = render_service_plist(spec)
+    _reject_privileged_output_path(output_path)
     try:
         fd = os.open(str(output_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
     except FileExistsError:
         raise ServiceRenderOutputExistsError(output_path) from None
+    created_stat = os.fstat(fd)
     try:
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(data)
+        fh = os.fdopen(fd, "wb")
     except BaseException:
         with contextlib.suppress(OSError):
-            output_path.unlink()
+            os.close(fd)
+        raise
+    try:
+        with fh:
+            fh.write(data)
+    except BaseException:
+        _unlink_if_same_file(output_path, created_stat)
         raise
 
 
@@ -216,6 +271,14 @@ def run_service_render(spec: ServiceSpec, output_path: Path) -> OpsResult:
             component="output_path",
             status=FindingStatus.FAIL,
             code="OUTPUT_PATH_EXISTS",
+            message=safe_exception_text(exc),
+        )
+        return builder.build()
+    except ServiceRenderOutputPathPrivilegedError as exc:
+        builder.add(
+            component="output_path",
+            status=FindingStatus.FAIL,
+            code="OUTPUT_PATH_PRIVILEGED_LOCATION",
             message=safe_exception_text(exc),
         )
         return builder.build()

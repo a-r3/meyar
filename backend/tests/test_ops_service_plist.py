@@ -5,6 +5,7 @@ malformed/tampered plist rejection. See docs/MEYAR_OPS.md."""
 
 from __future__ import annotations
 
+import os
 import plistlib
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from meyar.ops.service_plist import (
     REQUIRED_HOST,
     REQUIRED_PLIST_KEYS,
     ServiceRenderOutputExistsError,
+    ServiceRenderOutputPathPrivilegedError,
     ServiceSpec,
     render_service_plist,
     render_service_plist_to_file,
@@ -437,3 +439,122 @@ def test_verify_service_plist_malformed_program_arguments_skips_dependent_checks
     assert codes["executable_path"] == FindingStatus.SKIPPED
     assert codes["host"] == FindingStatus.SKIPPED
     assert codes["port"] == FindingStatus.SKIPPED
+
+
+# --- 16. service-render never writes into /Library/LaunchDaemons ------------
+
+
+def test_render_to_file_rejects_direct_launchdaemons_output_path() -> None:
+    output = Path("/Library/LaunchDaemons/com.meyar.plist")
+    with pytest.raises(ServiceRenderOutputPathPrivilegedError):
+        render_service_plist_to_file(_valid_spec(), output)
+
+
+def test_render_to_file_rejects_launchdaemons_output_path_via_dot_dot_traversal() -> None:
+    # Lexically normalizes to exactly /Library/LaunchDaemons/com.meyar.plist.
+    output = Path("/Library/LaunchDaemons/../LaunchDaemons/com.meyar.plist")
+    with pytest.raises(ServiceRenderOutputPathPrivilegedError):
+        render_service_plist_to_file(_valid_spec(), output)
+
+
+def test_render_to_file_privileged_rejection_never_calls_os_open(monkeypatch) -> None:
+    import meyar.ops.service_plist as service_plist_module
+
+    def _fail_if_called(*args: object, **kwargs: object) -> int:
+        raise AssertionError("os.open must not be called when the output path is rejected")
+
+    monkeypatch.setattr(service_plist_module.os, "open", _fail_if_called)
+
+    with pytest.raises(ServiceRenderOutputPathPrivilegedError):
+        render_service_plist_to_file(
+            _valid_spec(), Path("/Library/LaunchDaemons/com.meyar.plist")
+        )
+
+
+def test_render_to_file_ordinary_staging_output_still_succeeds(tmp_path: Path) -> None:
+    output = tmp_path / "staging" / "com.meyar.plist"
+    output.parent.mkdir()
+    render_service_plist_to_file(_valid_spec(), output)
+    assert output.exists()
+
+
+def test_run_service_render_reports_privileged_output_path_as_fail() -> None:
+    result = run_service_render(_valid_spec(), Path("/Library/LaunchDaemons/com.meyar.plist"))
+    assert result.ok is False
+    assert result.findings[0].code == "OUTPUT_PATH_PRIVILEGED_LOCATION"
+
+
+# --- 17. inode-safe cleanup after write/close failure ------------------------
+
+
+def test_render_to_file_cleans_up_partial_output_after_write_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import meyar.ops.service_plist as service_plist_module
+
+    output = tmp_path / "meyar.plist"
+    real_fdopen = os.fdopen
+
+    class _ExplodingFile:
+        def __init__(self, fh: object) -> None:
+            self._fh = fh
+
+        def __enter__(self) -> _ExplodingFile:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+            self._fh.close()  # type: ignore[attr-defined]
+            return False
+
+        def write(self, data: bytes) -> int:
+            raise OSError("simulated write failure")
+
+    def _fake_fdopen(fd: int, mode: str) -> _ExplodingFile:
+        return _ExplodingFile(real_fdopen(fd, mode))
+
+    monkeypatch.setattr(service_plist_module.os, "fdopen", _fake_fdopen)
+
+    with pytest.raises(OSError, match="simulated write failure"):
+        render_service_plist_to_file(_valid_spec(), output)
+
+    assert not output.exists()
+
+
+def test_render_to_file_cleanup_does_not_delete_replacement_file(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Regression for the TOCTOU cleanup race: cleanup must identity-check
+    the pathname (inode) before unlinking, so it never deletes a file a
+    concurrent actor swapped into this pathname after this invocation's
+    `os.open()` but before its write/close failure completes."""
+    import meyar.ops.service_plist as service_plist_module
+
+    output = tmp_path / "meyar.plist"
+    sentinel_content = b"sentinel-must-survive-cleanup"
+    real_fdopen = os.fdopen
+
+    class _RacingFile:
+        def __init__(self, fh: object) -> None:
+            self._fh = fh
+
+        def __enter__(self) -> _RacingFile:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+            self._fh.close()  # type: ignore[attr-defined]
+            return False
+
+        def write(self, data: bytes) -> int:
+            output.unlink()
+            output.write_bytes(sentinel_content)
+            raise OSError("simulated write failure after concurrent pathname replacement")
+
+    def _fake_fdopen(fd: int, mode: str) -> _RacingFile:
+        return _RacingFile(real_fdopen(fd, mode))
+
+    monkeypatch.setattr(service_plist_module.os, "fdopen", _fake_fdopen)
+
+    with pytest.raises(OSError, match="simulated write failure after concurrent"):
+        render_service_plist_to_file(_valid_spec(), output)
+
+    assert output.read_bytes() == sentinel_content

@@ -275,7 +275,7 @@ Every command prints exactly one JSON object to stdout:
 }
 ```
 
-`ok` is defined uniformly across all four commands: `true` iff no
+`ok` is defined uniformly across all `meyar-ops` commands: `true` iff no
 `Finding` has `status: FAIL`. `WARN`/`SKIPPED` findings are reported but
 never flip `ok`. Every component's finding is always present in the list
 — nothing is ever dropped because an earlier component failed.
@@ -285,7 +285,7 @@ never flip `ok`. Every component's finding is always present in the list
 | Code | Meaning |
 |---|---|
 | 0 | `SUCCESS` — `ok: true` |
-| 1 | `CHECK_FAILURE` — the command ran to completion but `ok: false` (a preflight/readiness/verify-release check failed) |
+| 1 | `CHECK_FAILURE` — the command ran to completion but `ok: false` (a preflight/readiness/verify-release/service-render/service-verify/service-status check failed) |
 | 2 | `INVALID_INVOCATION` — bad/missing CLI arguments (argparse's own exit code) |
 | 3 | `INFRASTRUCTURE_FAILURE` — an uncaught exception at the CLI boundary; still prints a valid `OpsResult` JSON object (never a bare traceback) |
 
