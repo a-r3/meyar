@@ -12,7 +12,14 @@ length, aggregate declared size), and the two specific members this
 module reads by name (the embedded release manifest and `backend/
 uv.lock`) each have their own declared-size bound checked *before* any
 byte is read, so a lying/oversized header can never force an unbounded
-in-memory read.
+in-memory read. The two external sidecar files (the release manifest
+and `SHA256SUMS`, both operator/attacker-controlled) are bounded the
+same way in spirit but by a different mechanism, since they have no tar
+header to pre-check: `_read_bounded_from_stream` never issues a read for
+more than the configured limit + 1 bytes, so the bound is enforced by
+the read call itself, not by a `stat()` taken beforehand — a `stat()`
+result can be stale (TOCTOU) by the time the read happens, and a plain
+`Path.read_text()` has no bound of its own once opened.
 """
 
 from __future__ import annotations
@@ -21,6 +28,7 @@ import hashlib
 import tarfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import IO
 
 from pydantic import ValidationError
 
@@ -44,18 +52,62 @@ _MAX_EMBEDDED_MANIFEST_SIZE = 1 * 1024 * 1024
 _MAX_UV_LOCK_SIZE = 16 * 1024 * 1024
 
 # The two external sidecar files (release manifest, SHA256SUMS) are both
-# operator/attacker-controlled inputs read via `Path.read_text()`, which
-# allocates the full file as one in-memory string — unlike the artifact
-# and archive-member reads elsewhere in this module, that call has no
-# built-in bound. Stat the file and fail before that read, rather than
-# trusting its declared size. Both are expected to be a few KB; 1 MiB is
-# generous headroom.
+# operator/attacker-controlled inputs. A plain `Path.read_text()` has no
+# bound of its own and allocates the full file as one in-memory string.
+# A preceding `stat()` is not a substitute for a bound: it is a TOCTOU
+# check only — the file, or a symlink target, can change between the
+# `stat()` and the read — so the bound below is enforced by the read
+# call itself (see `_read_bounded_from_stream`), never by a size seen
+# beforehand. Both files are expected to be a few KB; 1 MiB is generous
+# headroom.
 _MAX_EXTERNAL_MANIFEST_SIZE = 1 * 1024 * 1024
 _MAX_SHA256SUMS_SIZE = 1 * 1024 * 1024
 
 
 def _bounded(text: str, limit: int = _MAX_FINDING_TEXT) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+class _SidecarReadTooLarge(Exception):
+    """Raised when a sidecar stream yields more than the configured
+    limit. Enforced by the read call itself: `_read_bounded_from_stream`
+    never requests more than `limit + 1` bytes from the underlying
+    stream, so this fires as soon as that single bounded read observes
+    more bytes than the limit allows — regardless of the stream's true
+    size or what any earlier `stat()` reported."""
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(f"exceeded bound of {limit} bytes")
+        self.limit = limit
+
+
+def _read_bounded_from_stream(fh: IO[bytes], limit: int) -> bytes:
+    """Reads at most `limit + 1` bytes from an already-open binary
+    stream and raises `_SidecarReadTooLarge` if that many were observed.
+    This is the actual security boundary: it never issues a read call
+    for more than `limit + 1` bytes, so a stream that is arbitrarily
+    larger than `limit` (whether because it grew after a `stat()`, or a
+    `stat()` was never performed at all) is rejected the moment this one
+    bounded read comes back oversized — the rest of the stream is never
+    touched."""
+    data = fh.read(limit + 1)
+    if len(data) > limit:
+        raise _SidecarReadTooLarge(limit)
+    return data
+
+
+def _read_bounded_text(path: Path, limit: int) -> str:
+    """Opens `path` and reads/decodes at most `limit` bytes of UTF-8
+    text, via `_read_bounded_from_stream`. Raises `OSError` for an I/O
+    failure or invalid UTF-8 (so callers can treat every unreadable-
+    content case identically) and `_SidecarReadTooLarge` when the bound
+    is exceeded."""
+    with path.open("rb") as fh:
+        data = _read_bounded_from_stream(fh, limit)
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise OSError(f"could not decode as UTF-8: {exc}") from exc
 
 
 @dataclass(frozen=True)
@@ -135,28 +187,17 @@ def _check_manifest_schema(
     builder: OpsResultBuilder, manifest_path: Path
 ) -> ReleaseManifest | None:
     try:
-        size = manifest_path.stat().st_size
-    except OSError as exc:
-        builder.add(
-            component="manifest_schema",
-            status=FindingStatus.FAIL,
-            code="MANIFEST_UNREADABLE",
-            message=_bounded(f"could not read release manifest: {safe_exception_text(exc)}"),
-        )
-        return None
-    if size > _MAX_EXTERNAL_MANIFEST_SIZE:
+        raw = _read_bounded_text(manifest_path, _MAX_EXTERNAL_MANIFEST_SIZE)
+    except _SidecarReadTooLarge:
         builder.add(
             component="manifest_schema",
             status=FindingStatus.FAIL,
             code="MANIFEST_TOO_LARGE",
             message=_bounded(
-                f"release manifest size {size} exceeds bound of "
-                f"{_MAX_EXTERNAL_MANIFEST_SIZE} bytes"
+                f"release manifest exceeds bound of {_MAX_EXTERNAL_MANIFEST_SIZE} bytes"
             ),
         )
         return None
-    try:
-        raw = manifest_path.read_text()
     except OSError as exc:
         builder.add(
             component="manifest_schema",
@@ -259,27 +300,15 @@ def _check_sha256sums_format(
     builder: OpsResultBuilder, sha256sums_path: Path
 ) -> ParsedChecksums | None:
     try:
-        size = sha256sums_path.stat().st_size
-    except OSError as exc:
-        builder.add(
-            component="sha256sums_format",
-            status=FindingStatus.FAIL,
-            code="SHA256SUMS_UNREADABLE",
-            message=_bounded(f"could not read SHA256SUMS: {safe_exception_text(exc)}"),
-        )
-        return None
-    if size > _MAX_SHA256SUMS_SIZE:
+        text = _read_bounded_text(sha256sums_path, _MAX_SHA256SUMS_SIZE)
+    except _SidecarReadTooLarge:
         builder.add(
             component="sha256sums_format",
             status=FindingStatus.FAIL,
             code="SHA256SUMS_TOO_LARGE",
-            message=_bounded(
-                f"SHA256SUMS size {size} exceeds bound of {_MAX_SHA256SUMS_SIZE} bytes"
-            ),
+            message=_bounded(f"SHA256SUMS exceeds bound of {_MAX_SHA256SUMS_SIZE} bytes"),
         )
         return None
-    try:
-        text = sha256sums_path.read_text()
     except OSError as exc:
         builder.add(
             component="sha256sums_format",

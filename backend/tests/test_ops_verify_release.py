@@ -17,6 +17,9 @@ from meyar.ops.verify_release import (
     _MAX_EXTERNAL_MANIFEST_SIZE,
     _MAX_SHA256SUMS_SIZE,
     _MAX_UV_LOCK_SIZE,
+    _read_bounded_from_stream,
+    _read_bounded_text,
+    _SidecarReadTooLarge,
     parse_sha256sums,
     verify_release,
 )
@@ -769,3 +772,182 @@ def test_command_never_extracts_to_disk(tmp_path: Path, monkeypatch) -> None:
         manifest_path=manifest_path, sha256sums_path=sums_path, artifact_path=artifact_path
     )
     assert result.ok is True
+
+
+# ---------------------------------------------------------------------
+# Corrective review (PR #52 follow-up) — the external release manifest
+# and SHA256SUMS sidecar reads must be bounded by the read call itself,
+# not by a `stat()` taken beforehand. A `stat()` is a TOCTOU check only:
+# the file (or a symlink target) can change between the `stat()` and the
+# read, and a plain `Path.read_text()` has no bound of its own once
+# opened. These tests prove the bound holds for a stream that is far
+# larger than the limit and was never stat-checked at all.
+# ---------------------------------------------------------------------
+
+
+class _GrowingStream:
+    """A minimal binary-stream stand-in for a sidecar file that is far
+    larger than any sane limit — the deterministic, platform-independent
+    proxy for "the file grew (or a symlink target changed) after
+    whatever size check ran, or no size check ever ran at all". Records
+    every size requested via `read(n)` so a test can assert the caller
+    never asks for more than `limit + 1` bytes, i.e. never performs an
+    unbounded read no matter how large the underlying stream actually
+    is."""
+
+    def __init__(self, total_size: int) -> None:
+        self._remaining = total_size
+        self.requested_sizes: list[int] = []
+
+    def __enter__(self) -> "_GrowingStream":
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        return None
+
+    def read(self, size: int = -1) -> bytes:
+        assert size is not None and size >= 0, "must never issue an unbounded read() call"
+        self.requested_sizes.append(size)
+        take = min(size, self._remaining)
+        self._remaining -= take
+        return b"x" * take
+
+
+def test_bounded_stream_read_rejects_stream_far_larger_than_limit() -> None:
+    """A stream vastly larger than the limit is rejected, and the helper
+    never requests more than `limit + 1` bytes from it — proving the
+    bound is enforced by the read call itself, not by the stream's true
+    (much larger) size."""
+    limit = 1024
+    stream = _GrowingStream(total_size=50 * limit)
+
+    with pytest.raises(_SidecarReadTooLarge):
+        _read_bounded_from_stream(stream, limit)
+
+    assert stream.requested_sizes == [limit + 1]
+
+
+def test_bounded_stream_read_accepts_stream_at_exactly_the_limit() -> None:
+    limit = 1024
+    stream = _GrowingStream(total_size=limit)
+
+    data = _read_bounded_from_stream(stream, limit)
+
+    assert len(data) == limit
+    assert stream.requested_sizes == [limit + 1]
+
+
+def test_bounded_stream_read_accepts_stream_one_byte_under_the_limit() -> None:
+    limit = 1024
+    stream = _GrowingStream(total_size=limit - 1)
+
+    data = _read_bounded_from_stream(stream, limit)
+
+    assert len(data) == limit - 1
+
+
+def test_bounded_text_read_rejects_real_file_without_reading_it_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end through `_read_bounded_text` against a real file on
+    disk: even though the file is dramatically larger than the limit,
+    the underlying `read()` call is never asked for more than
+    `limit + 1` bytes."""
+    limit = 1024
+    huge_path = tmp_path / "huge_sidecar"
+    huge_path.write_bytes(b"y" * (limit * 100))
+
+    real_open = Path.open
+    observed_sizes: list[int] = []
+
+    def _tracking_open(self: Path, *args: object, **kwargs: object) -> object:
+        fh = real_open(self, *args, **kwargs)
+        real_read = fh.read
+
+        def _tracking_read(size: int = -1) -> bytes:
+            observed_sizes.append(size)
+            return real_read(size)
+
+        fh.read = _tracking_read  # type: ignore[method-assign]
+        return fh
+
+    monkeypatch.setattr(Path, "open", _tracking_open)
+
+    with pytest.raises(_SidecarReadTooLarge):
+        _read_bounded_text(huge_path, limit)
+
+    assert observed_sizes == [limit + 1]
+
+
+def test_bounded_text_read_decodes_valid_utf8_within_limit(tmp_path: Path) -> None:
+    path = tmp_path / "small.txt"
+    path.write_text("hello sidecar")
+
+    assert _read_bounded_text(path, limit=1024) == "hello sidecar"
+
+
+def test_bounded_text_read_rejects_invalid_utf8_as_os_error(tmp_path: Path) -> None:
+    path = tmp_path / "bad.bin"
+    path.write_bytes(b"\xff\xfe\x00invalid")
+
+    with pytest.raises(OSError):
+        _read_bounded_text(path, limit=1024)
+
+
+def test_manifest_schema_rejects_stream_that_appeared_small_before_the_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Simulates the exact TOCTOU race the corrective fix closes: the
+    manifest path is tiny on disk (so a `stat()`, if one were still
+    taken, would report it as well within bounds), but the stream
+    `verify_release` actually reads from it yields far more than the
+    limit. It must be rejected by the bounded read itself."""
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_bytes(b"{")  # tiny on disk
+
+    real_open = Path.open
+
+    def _swap_for_growing_stream(self: Path, *args: object, **kwargs: object) -> object:
+        if self == manifest_path and args[:1] == ("rb",):
+            return _GrowingStream(total_size=_MAX_EXTERNAL_MANIFEST_SIZE * 10)
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", _swap_for_growing_stream)
+
+    artifact_path = _build_artifact(tmp_path)
+    sums_path = _write_sha256sums(tmp_path, artifact_path, manifest_path=None)
+
+    result = verify_release(
+        manifest_path=manifest_path, sha256sums_path=sums_path, artifact_path=artifact_path
+    )
+
+    assert result.ok is False
+    by_component = {f.component: f for f in result.findings}
+    assert by_component["manifest_schema"].code == "MANIFEST_TOO_LARGE"
+
+
+def test_sha256sums_format_rejects_stream_that_appeared_small_before_the_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path)
+    artifact_path = _build_artifact(tmp_path)
+    sums_path = tmp_path / "SHA256SUMS"
+    sums_path.write_bytes(b"#")  # tiny on disk
+
+    real_open = Path.open
+
+    def _swap_for_growing_stream(self: Path, *args: object, **kwargs: object) -> object:
+        if self == sums_path and args[:1] == ("rb",):
+            return _GrowingStream(total_size=_MAX_SHA256SUMS_SIZE * 10)
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", _swap_for_growing_stream)
+
+    result = verify_release(
+        manifest_path=manifest_path, sha256sums_path=sums_path, artifact_path=artifact_path
+    )
+
+    assert result.ok is False
+    by_component = {f.component: f for f in result.findings}
+    assert by_component["sha256sums_format"].code == "SHA256SUMS_TOO_LARGE"
