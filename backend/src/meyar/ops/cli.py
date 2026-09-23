@@ -14,9 +14,12 @@ import argparse
 import asyncio
 from pathlib import Path
 
+from meyar.ops.build_release import BuildReleaseRequest, build_release
+from meyar.ops.model_manifest import ModelApprovalStatus
 from meyar.ops.preflight import run_preflight
 from meyar.ops.readiness import run_readiness
 from meyar.ops.redact import safe_exception_text
+from meyar.ops.release_manifest import RollbackCompatibility
 from meyar.ops.result import (
     FindingStatus,
     OpsExitCode,
@@ -79,6 +82,26 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     status_plist_parser.add_argument("--label", type=str, required=True)
 
+    build_release_parser = sub.add_parser(
+        "build-release",
+        help="Build an immutable application release artifact from an exact Git commit.",
+    )
+    build_release_parser.add_argument("--source-sha", type=str, required=True)
+    build_release_parser.add_argument("--output-dir", type=Path, required=True)
+    build_release_parser.add_argument(
+        "--rollback-compatibility",
+        type=str,
+        required=True,
+        choices=[member.value for member in RollbackCompatibility],
+    )
+    build_release_parser.add_argument("--model-manifest-reference", type=str, required=True)
+    build_release_parser.add_argument(
+        "--model-approval-status",
+        type=str,
+        required=True,
+        choices=[member.value for member in ModelApprovalStatus],
+    )
+
     return parser
 
 
@@ -111,6 +134,16 @@ def _run_command(args: argparse.Namespace) -> OpsResult:
         return verify_service_plist(args.plist, expected_label=args.expected_label)
     if args.command == "service-status":
         return run_service_status(label=args.label)
+    if args.command == "build-release":
+        return build_release(
+            BuildReleaseRequest(
+                source_sha=args.source_sha,
+                output_dir=args.output_dir,
+                rollback_compatibility=RollbackCompatibility(args.rollback_compatibility),
+                model_manifest_reference=args.model_manifest_reference,
+                model_approval_status=ModelApprovalStatus(args.model_approval_status),
+            )
+        )
     raise AssertionError(f"unreachable: unknown command {args.command!r}")  # argparse enforces this
 
 

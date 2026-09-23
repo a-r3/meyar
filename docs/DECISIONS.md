@@ -5267,3 +5267,310 @@ writing to `/Library/LaunchDaemons`, `launchctl bootstrap`/`bootout`/
 lifecycle, release-artifact build/install/update/rollback, HTTP `/ready`
 (#46), issue #46 runtime hardening, issue #36 benchmark/model selection,
 production-model approval, HTTPS/reverse-proxy/PKI topology.
+
+## D-068 — Immutable application release artifact builder: `build-release` (issue #35 PR3)
+
+**Date:** 2026-09-24. **Status:** Local implementation on
+`feat/release-artifact-builder`, branched from accepted `main`
+`233af33debe47731a2665afd4eccabf2fd5523a0`; PR not yet merged.
+
+**Scope.** Third bounded PR for issue #35 (Slice 6 — Agentless Mac
+Deployment Readiness, M9), following PR1 (#52, D-066) and PR2 (#54,
+D-067). Adds one `meyar-ops` command — `build-release` — that builds an
+immutable, verifiable MEYAR **application** release artifact from an
+exact Git commit. Full detail: `docs/MEYAR_OPS.md`.
+
+**Application release artifact vs. complete deployment bundle — read
+this distinction before treating this PR as "deployment done."** The
+artifact this PR produces contains MEYAR application source
+(`backend/src/meyar/**`), migration code (`backend/alembic.ini` +
+`backend/alembic/**`), `backend/pyproject.toml`/`backend/uv.lock`, and
+release identity/integrity metadata (`ReleaseManifest`). It does **not**
+contain a Python runtime, the `uv` executable, third-party wheels or an
+offline wheelhouse, Ollama, models, or PostgreSQL, and it defines no host
+install layout, extraction mechanism, or activation/service-lifecycle
+action. A later #35 slice must deliver the accepted offline/pinned
+Apple-Silicon runtime/dependency provisioning mechanism, and a further
+slice the install-layout/activation contract, before this line of work is
+a complete offline bank-Mac deployment bundle. Issue #35 remains OPEN
+after this PR.
+
+**Exact Git commit provenance — the whole point of this PR.** Every byte
+of the produced artifact, and every source-derived `ReleaseManifest`
+field, is read from the selected commit's Git tree object via fixed-argv
+Git plumbing (`git rev-parse --show-toplevel`, `git cat-file -e
+<sha>^{commit}`, `git ls-tree -r -z --full-tree`, `git cat-file -p
+<blob-sha>` — `meyar.ops.build_release.default_git_runner`, always
+`subprocess.run` with a fixed argv, never `shell=True`, never a shell
+command string) — never from the mutable working tree. A dirty/modified
+tracked file and an untracked file living under an allowed-looking source
+directory both provably do not affect the artifact
+(`test_dirty_tracked_file_modification_does_not_affect_artifact`,
+`test_untracked_allowlist_shaped_file_does_not_enter_artifact`). A short,
+non-hex, nonexistent, or non-commit (blob/tree) `--source-sha` is
+rejected as a truthful `FAIL` finding — never silently defaulted to
+`HEAD`. `git archive` was deliberately not used as the sole mechanism:
+per the issue's own guidance, MEYAR code (not a shelled-out archive
+command) constructs the final member allowlist and metadata contract so
+both remain explicit and independently testable; Git plumbing here is
+used only as the exact-commit content-retrieval primitive.
+
+**Allowlist-driven, not "tar everything and exclude bad things."**
+Exactly five pathspecs are ever passed to Git
+(`meyar.ops.build_release.ALLOWED_PATHSPECS`): `backend/src/meyar`,
+`backend/pyproject.toml`, `backend/uv.lock`, `backend/alembic.ini`,
+`backend/alembic`. `backend/tests/`, `backend/scripts/`, `.env`, `.git/`,
+real CVs/customer data, caches, and repository-level developer-agent
+metadata are never in that pathspec list, so they never enter the
+picture regardless of what else exists at the selected commit. Every
+listed tree entry is independently re-checked for shape: a Git symlink
+entry (`mode 120000`) or a submodule entry (object type `commit`) aborts
+the whole build (`UNSAFE_GIT_TREE_ENTRY`) before any byte is written,
+and a lexical `..`/absolute-path escape is rejected the same way as
+defense-in-depth, even though Git's own pathspec resolution would not
+normally produce one.
+
+**Alembic heads are computed from the selected commit's own migration
+tree, reusing existing code unmodified.** `build_release` materializes
+only the selected commit's `backend/alembic.ini` + `backend/alembic/**`
+blobs into a throwaway temp directory (Alembic's `%(here)s` token in
+`script_location` resolves relative to the ini file's own directory, so
+this works from any temp location) and calls the existing
+`meyar.ops.alembic_introspect.get_code_alembic_heads` against it — the
+same head-computation `status`/`readiness` already use, never
+reimplemented, and never pointed at the working tree's copies.
+
+**Archive layout: a single top-level `<release_id>/` root, embedded
+manifest mandatory.** `release_manifest.json` sits at the archive root
+alongside `backend/`; the embedded manifest is mandatory for a
+`build-release`-produced artifact, while `verify-release`'s own
+compatibility semantics for a missing embedded manifest (`SKIPPED`, for
+other/legacy artifacts) are deliberately left unchanged.
+
+**Deterministic content selection; explicitly NOT byte-for-byte
+reproducibility.** The exact same `--source-sha` always yields the exact
+same allowlisted file set and bytes, and archive-internal metadata is
+normalized independent of build time — fixed lexical member order, fixed
+`uid=0`/`gid=0`/empty `uname`/`gname`/mode `0o644`/`mtime=0` on every
+member, and a normalized gzip wrapper (fixed header `mtime`, no embedded
+filename). `built_at` is, on purpose, a real build timestamp — two builds
+of the same commit at different real times legitimately differ in
+`built_at` and therefore in the embedded/external manifest bytes and both
+checksums (proven by
+`test_two_real_time_builds_of_the_same_commit_differ_in_built_at`, and a
+fixed-clock-injected test proves the deterministic-content-selection half
+separately). `ReleaseManifest`'s existing embedded/external full-equality
+contract is unchanged; this PR does not change `manifest_schema_version`
+or equality semantics to chase byte identity.
+
+**Output-write safety mirrors the accepted `service-render` pattern
+(D-067).** Each of the three release-bundle files
+(`<release_id>.tar.gz`, `<release_id>.release-manifest.json`,
+`SHA256SUMS`) is created with `os.O_CREAT | os.O_EXCL` relative to a
+dir-fd anchored to `--output-dir` — never a `Path.exists()` pre-check, so
+no overwrite race. An existing target aborts the build
+(`OUTPUT_TARGET_EXISTS`) before anything is replaced and is never
+touched. A failure after one or more of the three files has already been
+created removes only the file(s) *this invocation itself created*,
+identity-checked via `(st_dev, st_ino)` — mirroring
+`service_plist._unlink_if_same_file` — never a pre-existing file and
+never a file a concurrent actor has since swapped in at the same path
+(unit-proved directly against the low-level helper via `os.replace`,
+independent of any timing assumption about inode reuse). `--output-dir`
+must already exist and be a directory; no parent directory tree is ever
+created.
+
+**Self-check before publishing — the produced artifact must pass
+`verify-release` unmodified.** Immediately after writing the artifact,
+`build-release` runs the exact same `meyar.ops.archive_safety
+.inspect_archive_members` bounded safety inspection `verify-release`
+performs; a violation or resource-bound excess removes the just-written
+artifact and fails the build before the manifest/`SHA256SUMS` files are
+ever created. `verify-release` itself is unmodified by this PR — the
+strongest acceptance test
+(`test_build_release_output_passes_verify_release`) round-trips a built
+release bundle through the real, unmodified `verify_release()` and
+asserts `ok=True` with zero `FAIL` findings.
+
+**Model/rollback governance stays declarative — no new production
+approval.** `--rollback-compatibility` and `--model-approval-status` are
+required CLI inputs; the builder records whichever enum value is
+supplied and performs no rollback/backup/restore/Alembic-downgrade
+action, no benchmark, and no approval inference. This PR ships no
+`ModelManifest`/`ReleaseManifest` fixture or example marked
+`PRODUCTION_APPROVED`, invents no target-Mac benchmark reference, and
+does not change issue #36 governance. There is no `--release-version`
+CLI override — the release-version authority remains the selected
+commit's `backend/pyproject.toml` `[project].version`, matching D-066's
+existing `compute_release_id` contract unchanged.
+
+**Real macOS/Apple-Silicon acceptance remains UNCONFIRMED by this PR.**
+`test_ops_build_release.py` and the extended `test_ops_cli.py`/
+`test_ops_no_exfiltration.py` tests all run and pass on Linux only,
+against real throwaway Git repositories created under `tmp_path` (never
+synthetic in-memory tar fixtures alone, and never real MEYAR repository
+history) — the one CLI success test that exercises this actual
+repository does so read-only, against its own real HEAD commit, and
+writes only into a pytest `tmp_path`. No claim is made about build
+performance or behavior on Apple Silicon.
+
+**Explicit deferrals (same as the issue's own "DO NOT implement" list):**
+offline Python runtime/`uv`/wheelhouse provisioning, host install layout,
+install/activation, service lifecycle, update/rollback orchestration,
+issue #36 benchmark/model selection, production-model approval, issue
+#46 runtime hardening, HTTPS/reverse-proxy/PKI topology.
+
+**Corrective update (PR #56 acceptance pass, 2026-09-24).** An
+independent acceptance audit of the PR3 diff above found three blockers
+in `build_release`'s selected-commit handling, fixed on the same branch
+without broadening PR3's scope:
+
+1. **Selected migration Python was executed, not just read.** The
+   original Alembic-heads step (described two sections up) materialized
+   the selected commit's `backend/alembic.ini` + `backend/alembic/**`
+   blobs into a temp directory and called the real, unmodified
+   `alembic_introspect.get_code_alembic_heads`, which loads every
+   migration `.py` file as a Python module via Alembic's own
+   `ScriptDirectory` — executing its top-level code. That is correct for
+   `status`/`readiness`, which point it at the trusted, already-running
+   working tree, but wrong for `build-release`, whose whole contract is
+   to READ an arbitrary selected commit's metadata, never EXECUTE it.
+   Fixed by a new module, `meyar.ops.alembic_static_metadata`, that
+   parses each `backend/alembic/versions/*.py` blob with `ast` and
+   extracts only the static `revision`/`down_revision` literal
+   assignments (via `ast.literal_eval`, which rejects calls, attribute
+   lookups, name references, f-strings, and computed expressions) to
+   derive heads from the resulting revision graph — no `exec`, `eval`,
+   `importlib`, `runpy`, or Python subprocess involved anywhere.
+   `get_code_alembic_heads` itself is unchanged and remains correctly
+   used by `status`/`readiness`/`preflight`.
+   Proven by `test_malicious_migration_top_level_side_effect_is_never_
+   executed`, which ships a migration file whose import-time side effect
+   would write a sentinel file — the build succeeds (its static metadata
+   is valid) and the sentinel is never created.
+
+2. **`release_version` (attacker-controlled selected-commit content) had
+   no filesystem-safety validation before reaching output filenames.**
+   `release_version` comes from the selected commit's `pyproject.toml`,
+   which is not more trustworthy than any other blob at an operator-
+   selected commit; `release_id`/output basenames were built from it and
+   passed straight to `os.open(..., dir_fd=output_dir_fd)` with no check
+   for `/`, `\`, control characters, or `.`/`..`. Fixed with a build-
+   release-specific validator, `_validate_filesystem_safe_component`,
+   applied to both `release_version` and the derived `release_id` before
+   either can reach an output filename or archive member root; an unsafe
+   value fails the build truthfully (`RELEASE_VERSION_UNSAFE`/
+   `RELEASE_ID_UNSAFE`) rather than being silently normalized.
+   `compute_release_id()`'s own semantics and `ReleaseManifest`'s
+   existing length constraints are unchanged.
+
+3. **`_create_exclusive`'s raw fd could leak if `os.fdopen()` itself
+   failed.** The original code took no explicit ownership stance on the
+   fd returned by `os.open()` before it was wrapped by `os.fdopen()`; a
+   failure in `os.fdopen()` itself (before ownership transfer to the
+   resulting file object) left the raw fd unclosed. Fixed by explicit
+   ownership discipline: `_create_exclusive` owns the raw fd until
+   `os.fdopen()` succeeds, closes it directly (suppressing a possible
+   redundant-close `OSError`) on any failure up to and including
+   `os.fdopen()` itself, and only then runs the existing identity-checked
+   path cleanup — never masking the original exception.
+
+**Resource-safety review (same pass).** Selected-commit blob content was
+read via `git cat-file -p` (`subprocess.run(capture_output=True)`, which
+buffers all of stdout) with no bound of its own — a pathologically large
+allowlisted blob could be fully read into memory before the existing
+archive self-check ever ran. Fixed with the smallest defensible
+check: `git cat-file -s <blob-sha>` reads each blob's declared size
+first, and a running aggregate is compared against the already-accepted
+`archive_safety.MAX_AGGREGATE_UNCOMPRESSED_SIZE` bound before that blob's
+content is fetched — so the check happens strictly before the
+oversized/aggregate-exceeding blob's bytes are ever requested from Git.
+No existing verifier bound was weakened.
+
+All three fixes and the resource-safety addition ship with focused
+regression tests in `test_ops_build_release.py` (16 new tests: 7 for
+non-execution, 5 for release-identity path safety, 3 for fd-ownership
+failure handling, 1 for the blob-size bound); the full backend suite
+(1,883 tests), `ruff`, `mypy`, and `alembic heads` all pass unchanged.
+PR #56 remains open for re-audit; issue #36 and issue #46 remain
+untouched and unstarted.
+
+**Final resource-safety corrective pass (independent re-audit, same PR
+#56 branch, 2026-09-24).** A second independent audit of the corrected
+diff found three narrower remaining gaps, fixed on the same branch
+without broadening PR3's scope:
+
+1. **Only the selected-blob aggregate size was pre-checked; member count
+   and final member-name length were only ever discovered by the
+   post-build self-check.** The builder could still construct and write a
+   full artifact it already knew, deterministically, the existing
+   verifier (`archive_safety.MAX_ARCHIVE_MEMBER_COUNT`/
+   `MAX_MEMBER_NAME_LENGTH`) would reject. Fixed with three prechecks, run
+   as early as the needed inputs allow and always before
+   `_build_tar_gz_bytes`: **member count**
+   (`member_count_bound`/`MEMBER_COUNT_EXCEEDS_BOUND`) — selected entries
+   plus the one mandatory embedded manifest, checked immediately after the
+   allowlisted tree listing and before a single blob is fetched; **member
+   name length** (`member_name_length_bound`/
+   `MEMBER_NAME_LENGTH_EXCEEDS_BOUND`) — the *final* `<release_id>/<path>`
+   name, checked once `release_id` is known; **aggregate uncompressed
+   size** (`aggregate_size_bound`/`AGGREGATE_SIZE_EXCEEDS_BOUND`) —
+   selected source blobs' Git-declared size (`_fetch_all_blobs` now
+   returns this total for reuse, rather than it being recomputed) plus the
+   embedded manifest's own bytes, checked once the manifest is built. The
+   post-build `inspect_archive_members` self-check remains as
+   defense-in-depth; no verifier bound was weakened.
+
+2. **`_create_exclusive`'s `os.fstat(fd)` failure path left an untracked
+   created file.** If `os.fstat(fd)` itself failed right after a
+   successful `O_CREAT | O_EXCL` create, the raw fd was correctly closed,
+   but the on-disk path was never identity-checked-cleaned (no
+   `(st_dev, st_ino)` was ever captured) and `_CreatedFile` was never
+   returned, so the outer `build_release` cleanup never learned about it.
+   The narrowest defensible fix was chosen: fail-**closed**, not
+   guess-and-delete. A new `OutputIdentityUnavailableError` is raised;
+   `build_release` reports it as `OUTPUT_IDENTITY_UNAVAILABLE`, cleans up
+   only any *other* already-identity-tracked created files via the
+   existing `_cleanup_all()`, and deliberately leaves the
+   identity-unverifiable file in place for operator inspection rather than
+   risk deleting a concurrent actor's replacement at the same basename.
+   Every other `_create_exclusive` failure point (post-`fstat`) already
+   holds `created_stat` and continues to clean up exactly as before — this
+   changes behavior at exactly one narrow point, not the module's general
+   cleanup discipline.
+
+3. **Head computation over the static `down_revision` graph did not prove
+   acyclicity.** "Heads = revisions not referenced as a parent" silently
+   *loses* a cyclic pair (`A.down_revision = B`, `B.down_revision = A`) —
+   both ends are mutually "referenced" and simply vanish from the result,
+   while an independent, valid branch's head is still reported as if
+   nothing were wrong; real Alembic rejects a cyclic graph outright. Fixed
+   with `alembic_static_metadata._detect_down_revision_cycle`, a
+   deterministic white/gray/black DFS over the already-parsed
+   `down_revision` edges, run after parent-reference validation and before
+   head computation — still zero migration-code execution/import. Rejects
+   a self-cycle, a two-node cycle, and a longer cycle, even alongside an
+   independent valid branch; a normal linear/branch/merge graph (including
+   tuple/list `down_revision` merge revisions) is unaffected.
+
+One existing test (`test_archive_bound_exceeded_during_self_check_fails_
+and_cleans_up`) was updated in place rather than left to assert stale
+behavior: the same `MAX_ARCHIVE_MEMBER_COUNT` scenario it exercised is now
+caught by the `member_count_bound` precheck, not the post-build
+self-check, so its expected component/code changed accordingly (renamed
+`test_archive_bound_exceeded_is_now_caught_by_precheck_before_self_
+check`). 12 new regression tests were added to `test_ops_build_release.py`
+(6 for the three resource-bound prechecks — one at-limit-succeeds and one
+one-over-fails-before-construction test per bound; 2 for the
+`os.fstat` identity-unavailable fail-closed behavior, one direct unit
+test and one full `build_release()` integration test; 4 for Alembic
+`down_revision` cycle detection — self-cycle, two-node cycle alongside an
+independent valid branch, a longer cycle, and a normal branch/merge graph
+proving no false positive). Full gate: `ruff check .` clean, `mypy src`
+clean (163 source files), `alembic heads` unchanged (one real head,
+non-executing static parse matches), `scripts/scan-tracked-tree.sh`
+clean, `git diff --check` clean, focused `test_ops_build_release.py` +
+`test_ops_cli.py` + `test_ops_no_exfiltration.py` (81 tests) green, full
+backend suite (1,895 tests) green. PR #56 remains open for re-audit;
+issue #36 and issue #46 remain untouched and unstarted; no merge, no
+force push, no history rewrite performed.

@@ -80,6 +80,25 @@ class ReleaseManifest(BaseModel):
         return value
 
 
+def parse_project_metadata(text: str) -> tuple[str, str]:
+    """Returns `([project].version, [project].requires-python)` parsed
+    from already-read `pyproject.toml` text — used by `build_release`
+    (commit-blob-based, PR3), which needs both fields and must fail if
+    either is absent. Deliberately NOT used by `read_project_version`
+    below (disk-based, PR1), which only ever required `version` — sharing
+    this stricter helper there would silently tighten its existing,
+    already-tested contract."""
+    data = tomllib.loads(text)
+    project = data.get("project", {})
+    version = project.get("version")
+    if not isinstance(version, str) or not version:
+        raise ValueError("pyproject.toml has no [project].version")
+    requires_python = project.get("requires-python")
+    if not isinstance(requires_python, str) or not requires_python:
+        raise ValueError("pyproject.toml has no [project].requires-python")
+    return version, requires_python
+
+
 def read_project_version(pyproject_path: Path) -> str:
     data = tomllib.loads(pyproject_path.read_text())
     version = data.get("project", {}).get("version")
