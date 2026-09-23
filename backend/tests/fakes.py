@@ -3,7 +3,13 @@ real running LLM or embedding model — see Slice 4 spec §21."""
 
 from typing import Any
 
-from meyar.agent.schemas import AgentDecision, GroundedFact, GroundedSelection
+from meyar.agent.schemas import (
+    AgentDecision,
+    GroundedFact,
+    GroundedSelection,
+    JDCriteriaDraft,
+    RequirementSpan,
+)
 from meyar.embedding.provider import EmbeddingProviderError, EmbeddingResult
 from meyar.extraction.view import ProfessionalDocumentView
 from meyar.llm.provider import LLMProviderError, LLMResultProvenance
@@ -35,6 +41,9 @@ class FakeLLMProvider:
         grounded_selection: GroundedSelection | None = None,
         grounded_error: LLMProviderError | None = None,
         grounded_fail_first_n_calls: int = 0,
+        jd_draft: JDCriteriaDraft | None = None,
+        jd_draft_error: LLMProviderError | None = None,
+        jd_draft_fail_first_n_calls: int = 0,
     ) -> None:
         self._extraction = extraction
         self._identity_extraction = identity_extraction
@@ -56,6 +65,12 @@ class FakeLLMProvider:
         self.grounded_call_count = 0
         self.last_grounded_question: str | None = None
         self.last_grounded_facts: list[GroundedFact] | None = None
+        self._jd_draft = jd_draft
+        self._jd_draft_error = jd_draft_error
+        self._jd_draft_fail_first_n_calls = jd_draft_fail_first_n_calls
+        self.jd_draft_call_count = 0
+        self.last_jd_text: str | None = None
+        self.last_requirement_spans: list[RequirementSpan] | None = None
 
     async def extract_candidate_profile(
         self, view: ProfessionalDocumentView
@@ -171,6 +186,30 @@ class FakeLLMProvider:
             model_revision=self.model_revision,
         )
         return self._grounded_selection, provenance
+
+    async def draft_job_criteria(
+        self,
+        jd_text: str,
+        *,
+        requirement_spans: list[RequirementSpan],
+        repair: bool = False,
+    ) -> tuple[JDCriteriaDraft, LLMResultProvenance]:
+        self.jd_draft_call_count += 1
+        self.last_jd_text = jd_text
+        self.last_requirement_spans = requirement_spans
+        if self.jd_draft_call_count <= self._jd_draft_fail_first_n_calls:
+            from meyar.llm.provider import ModelSchemaInvalidError
+
+            raise ModelSchemaInvalidError("Simulated schema-invalid JD-draft output.")
+        if self._jd_draft_error is not None:
+            raise self._jd_draft_error
+        assert self._jd_draft is not None
+        provenance = self._planner_provenance or LLMResultProvenance(
+            provider=self.provider_name,
+            model_name=self.model_name,
+            model_revision=self.model_revision,
+        )
+        return self._jd_draft, provenance
 
 
 class FakeEmbeddingProvider:

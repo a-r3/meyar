@@ -72,7 +72,7 @@ async def test_evaluate_cli_requires_date_and_prints_safe_score_provenance(
     output = capsys.readouterr().out
     assert "Score: 100.00" in output
     assert "Fit band: STRONG_MATCH" in output
-    assert "Evaluation policy: meyar-policy-v1" in output
+    assert "Evaluation policy: meyar-policy-v2" in output
     assert "Scoring policy: meyar-score-v1" in output
     assert "As-of date: 2026-01-01" in output
     assert str(profile.id) in output

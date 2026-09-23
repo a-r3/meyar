@@ -349,10 +349,9 @@ def precheck_natural_language_request(text: str) -> None:
         )
 
     reasons: list[PlannerReasonCode] = []
-    if _skill_duration_is_unsupported(text):
-        reasons.append(PlannerReasonCode.SKILL_SPECIFIC_EXPERIENCE_DURATION_UNSUPPORTED)
-    if _matches_any(text, _LANGUAGE_PROFICIENCY_PATTERNS):
-        reasons.append(PlannerReasonCode.LANGUAGE_PROFICIENCY_UNSUPPORTED)
+    # Skill duration and language proficiency are supported through the
+    # shared source-bound semantic layer.  They used to be rejected here
+    # because the older flat RequiredFilters schema could not represent them.
     if _matches_any(text, _IDENTITY_PATTERNS):
         reasons.append(PlannerReasonCode.IDENTITY_SEARCH_UNSUPPORTED)
     if _has_custom_search_weighting(text):
@@ -543,6 +542,9 @@ def _has_structured_filters(draft: PlannerDraft) -> bool:
                 filters.languages,
                 filters.education,
                 filters.min_total_experience_years is not None,
+                filters.skill_experience,
+                filters.domain_experience,
+                filters.language_levels,
             )
         ):
             return True
@@ -726,6 +728,24 @@ def convert_planner_draft(
 ) -> CandidateSearchRequest:
     """Pure draft + trusted context -> validated Slice 8 request."""
     precheck_natural_language_request(natural_language_request)
+    # Complex filters are executable only when produced by the shared
+    # source-occurrence semantic boundary in planner_service.  A free model
+    # draft cannot bypass that authority merely because the schema can now
+    # represent the evaluator's capability.
+    if any(
+        (
+            draft.required_filters.skill_experience,
+            draft.required_filters.domain_experience,
+            draft.required_filters.language_levels,
+            draft.preferred_filters.skill_experience,
+            draft.preferred_filters.domain_experience,
+            draft.preferred_filters.language_levels,
+        )
+    ):
+        raise PlannerPolicyError(
+            PlannerOutcome.VALIDATION_FAILURE,
+            PlannerReasonCode.STRUCTURED_FILTER_NOT_SUPPORTED_BY_REQUEST,
+        )
     if draft.unsupported_reason_codes:
         # The model itself declined this interpretation — tag it so the
         # presentation layer can tell this apart from a deterministic
@@ -782,6 +802,15 @@ def build_interpretation_summary(
         output: list[str] = []
         for category in ("skills", "certifications", "languages", "education"):
             output.extend(f"{prefix}.{category}:{value}" for value in getattr(filters, category))
+        for category in ("skill_experience", "domain_experience"):
+            output.extend(
+                f"{prefix}.{category}:{item.value}:{item.min_years}"
+                for item in getattr(filters, category)
+            )
+        output.extend(
+            f"{prefix}.language_levels:{item.value}:{item.required_level}"
+            for item in filters.language_levels
+        )
         years = filters.min_total_experience_years
         if years is not None:
             output.append(f"{prefix}.min_total_experience_years:{years}")
@@ -900,9 +929,7 @@ def _parse_single_deterministic_clause(clause: str) -> PlannerDraft | None:
         match = _DET_TOTAL_EXPERIENCE_REVERSED_PATTERN.match(clause)
     if match:
         years = float(match.group("years").replace(",", "."))
-        return PlannerDraft(
-            required_filters=RequiredFilters(min_total_experience_years=years)
-        )
+        return PlannerDraft(required_filters=RequiredFilters(min_total_experience_years=years))
 
     match = _DET_LANGUAGE_PATTERN.match(clause)
     if match:
@@ -913,9 +940,7 @@ def _parse_single_deterministic_clause(clause: str) -> PlannerDraft | None:
 
     match = _DET_CERT_PATTERN.match(clause)
     if match:
-        return PlannerDraft(
-            required_filters=RequiredFilters(certifications=[match.group("term")])
-        )
+        return PlannerDraft(required_filters=RequiredFilters(certifications=[match.group("term")]))
 
     match = _DET_SKILL_PATTERN.match(clause)
     if match:

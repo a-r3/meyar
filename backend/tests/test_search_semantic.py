@@ -5,7 +5,12 @@ import uuid
 
 import pytest
 from fakes import FakeEmbeddingProvider
-from search_helpers import seed_candidate_with_profile, seed_embedding, seed_next_profile_version
+from search_helpers import (
+    seed_candidate_with_profile,
+    seed_embedding,
+    seed_next_profile_version,
+    synthetic_evidence,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.embedding.provider import EmbeddingUnavailableError
@@ -18,7 +23,7 @@ _EVIDENCE = [{"page": 1, "block_index": 0, "quote": "synthetic evidence"}]
 
 def _profile(skill: str = "Python") -> dict:
     return {
-        "skills": [{"name": skill, "category": None, "evidence": _EVIDENCE}],
+        "skills": [{"name": skill, "category": None, "evidence": synthetic_evidence(skill)}],
         "employment_history": [],
         "education": [],
         "certifications": [],

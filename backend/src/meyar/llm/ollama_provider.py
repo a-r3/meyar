@@ -7,15 +7,23 @@ from pydantic import ValidationError
 from meyar.agent.prompts import (
     AGENT_SYSTEM_PROMPT,
     GROUNDED_SELECTION_SYSTEM_PROMPT,
+    JD_CRITERIA_DRAFT_SYSTEM_PROMPT,
     build_agent_user_prompt,
     build_grounded_selection_user_prompt,
+    build_jd_criteria_draft_user_prompt,
 )
-from meyar.agent.schemas import AgentDecision, GroundedFact, GroundedSelection
+from meyar.agent.schemas import (
+    AgentDecision,
+    GroundedFact,
+    GroundedSelection,
+    JDCriteriaDraft,
+    RequirementSpan,
+)
 from meyar.extraction.identity_prompts import IDENTITY_SYSTEM_PROMPT
 from meyar.extraction.prompts import SYSTEM_PROMPT, build_user_prompt
 from meyar.extraction.view import ProfessionalDocumentView
 from meyar.llm.concurrency import get_inference_semaphore
-from meyar.llm.loopback import require_loopback_url
+from meyar.llm.loopback import build_local_only_async_client, require_loopback_url
 from meyar.llm.provider import (
     LLMResultProvenance,
     ModelSchemaInvalidError,
@@ -58,7 +66,9 @@ class OllamaLLMProvider:
 
     async def health(self) -> dict:
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            async with build_local_only_async_client(
+                timeout=5.0, transport=self._transport
+            ) as client:
                 resp = await client.get(f"{self._base_url}/api/tags")
                 resp.raise_for_status()
                 tags = [m.get("name") for m in resp.json().get("models", [])]
@@ -170,12 +180,39 @@ class OllamaLLMProvider:
             ) from exc
         return selection, provenance
 
+    async def draft_job_criteria(
+        self,
+        jd_text: str,
+        *,
+        requirement_spans: list[RequirementSpan],
+        repair: bool = False,
+    ) -> tuple[JDCriteriaDraft, LLMResultProvenance]:
+        content, provenance = await self._chat(
+            system_prompt=JD_CRITERIA_DRAFT_SYSTEM_PROMPT,
+            user_prompt=build_jd_criteria_draft_user_prompt(
+                jd_text=jd_text, requirement_spans=requirement_spans, repair=repair
+            ),
+            # Some supported Ollama/model combinations cannot compile this
+            # schema and return HTTP 500 before inference. JSON mode still
+            # requires real local inference; strict Pydantic validation and
+            # the bounded repair attempt remain the application boundary.
+            schema="json",
+            think=False,
+        )
+        try:
+            draft = JDCriteriaDraft.model_validate(json.loads(content))
+        except (json.JSONDecodeError, ValidationError) as exc:
+            raise ModelSchemaInvalidError(
+                "Model output failed JDCriteriaDraft structured-schema validation."
+            ) from exc
+        return draft, provenance
+
     async def _chat(
         self,
         *,
         system_prompt: str,
         user_prompt: str,
-        schema: dict,
+        schema: dict | str,
         think: bool | None = None,
     ) -> tuple[str, LLMResultProvenance]:
         payload: dict[str, Any] = {
@@ -189,7 +226,8 @@ class OllamaLLMProvider:
             "options": {"temperature": 0.0},
         }
         # think is omitted (Ollama/model default) unless a call site opts in
-        # explicitly — see decide_agent_action/select_grounded_facts (D-039).
+        # explicitly — see decide_agent_action/select_grounded_facts/
+        # draft_job_criteria, the agent module's own call sites (D-039/D-042).
         # Every other call site (extraction, identity, planner) must keep
         # its exact pre-D-039 request shape: accepted, previously-verified
         # AI behavior outside Slice 2's scope, never altered as a side
@@ -199,7 +237,7 @@ class OllamaLLMProvider:
         semaphore = get_inference_semaphore(self._max_concurrency)
         try:
             async with semaphore:
-                async with httpx.AsyncClient(
+                async with build_local_only_async_client(
                     timeout=self._timeout_seconds, transport=self._transport
                 ) as client:
                     resp = await client.post(f"{self._base_url}/api/chat", json=payload)

@@ -10,6 +10,7 @@ from search_helpers import (
     DEFAULT_AS_OF_DATE,
     seed_candidate_with_profile,
     seed_next_profile_version,
+    synthetic_evidence,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -36,7 +37,9 @@ def _profile(
     employment: list[dict] | None = None,
 ) -> dict:
     return {
-        "skills": [{"name": s, "category": None, "evidence": _evidence()} for s in (skills or [])],
+        "skills": [
+            {"name": s, "category": None, "evidence": synthetic_evidence(s)} for s in (skills or [])
+        ],
         "employment_history": employment or [],
         "education": [
             {
@@ -44,16 +47,16 @@ def _profile(
                 "degree": degree,
                 "field_of_study": field,
                 "date": None,
-                "evidence": _evidence(),
+                "evidence": synthetic_evidence("Synthetic University", degree, field),
             }
             for degree, field in (education or [])
         ],
         "certifications": [
-            {"name": c, "issuer": None, "date": None, "evidence": _evidence()}
+            {"name": c, "issuer": None, "date": None, "evidence": synthetic_evidence(c)}
             for c in (certifications or [])
         ],
         "languages": [
-            {"language": lang, "proficiency": level, "evidence": _evidence()}
+            {"language": lang, "proficiency": level, "evidence": synthetic_evidence(lang, level)}
             for lang, level in (languages or [])
         ],
         "projects": [],
@@ -67,7 +70,9 @@ def _employment(title: str, start: str, end: str | None, *, is_current: bool = F
         "start_date": start,
         "end_date": end,
         "is_current": is_current,
-        "evidence": _evidence(),
+        "evidence": synthetic_evidence(
+            title, "Synthetic Co", start, end, "present" if is_current else None
+        ),
     }
 
 

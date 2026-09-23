@@ -15,10 +15,14 @@ touch or reinterpret the evaluation engine's own UNKNOWN semantics."""
 
 import re
 from dataclasses import dataclass, field
+from datetime import date
 
+from meyar.evaluation.evaluators import evaluate_criterion
 from meyar.evaluation.experience import ranges_overlap
 from meyar.evaluation.normalization import normalize_skill_name, normalize_text
 from meyar.schemas.candidate_profile import CandidateProfileExtraction
+from meyar.schemas.criteria import CriterionIn, CriterionKind, CriterionType
+from meyar.schemas.evaluation import CRITERION_STATUS_MATCH
 from meyar.search.schemas import (
     PreferredFilterMatch,
     PreferredFilters,
@@ -33,9 +37,7 @@ _YEAR_RE = re.compile(r"(19|20)\d{2}")
 _PRESENT_RE = re.compile(r"present|current|now|ongoing", re.IGNORECASE)
 
 
-def _parse_year_deterministic(
-    text: str | None, *, is_current: bool, as_of_year: int
-) -> int | None:
+def _parse_year_deterministic(text: str | None, *, is_current: bool, as_of_year: int) -> int | None:
     if is_current:
         return as_of_year
     if not text:
@@ -62,7 +64,8 @@ def compute_total_experience_years(
             entry.get("start_date"), is_current=False, as_of_year=as_of_year
         )
         end_year = _parse_year_deterministic(
-            entry.get("end_date"), is_current=bool(entry.get("is_current", False)),
+            entry.get("end_date"),
+            is_current=bool(entry.get("is_current", False)),
             as_of_year=as_of_year,
         )
         if start_year is None or end_year is None:
@@ -118,11 +121,40 @@ class PreferredFilterEvaluation:
     matches: list[PreferredFilterMatch] = field(default_factory=list)
 
 
+def _typed_filter_matches(
+    profile: CandidateProfileExtraction,
+    *,
+    kind: CriterionKind,
+    value: str,
+    min_years: float | None = None,
+    required_level: str | None = None,
+    as_of_date: date | None,
+) -> bool:
+    criterion = CriterionIn(
+        id="search_filter",
+        kind=kind,
+        type=CriterionType.MUST_HAVE,
+        label=value,
+        value=value,
+        min_years=min_years,
+        required_level=required_level,
+    )
+    result = evaluate_criterion(
+        criterion,
+        profile,
+        # Non-date-aware evaluators ignore this value. Duration filters are
+        # schema-gated to carry the caller's real as_of_date.
+        evaluation_as_of_date=as_of_date or date(1970, 1, 1),
+    )
+    return result.status == CRITERION_STATUS_MATCH
+
+
 def evaluate_required_filters(
     profile: CandidateProfileExtraction,
     filters: RequiredFilters,
     *,
     as_of_year: int | None,
+    as_of_date: date | None = None,
 ) -> RequiredFilterEvaluation:
     """Hard eligibility gate: ALL configured required filters must be
     satisfied or the candidate is excluded entirely — semantic
@@ -149,6 +181,32 @@ def evaluate_required_filters(
             return RequiredFilterEvaluation(satisfied=False)
         matches.append(RequiredFilterMatch(category="education", value=education))
 
+    for language_item in filters.language_levels:
+        if not _typed_filter_matches(
+            profile,
+            kind=CriterionKind.LANGUAGE,
+            value=language_item.value,
+            required_level=language_item.required_level,
+            as_of_date=as_of_date,
+        ):
+            return RequiredFilterEvaluation(satisfied=False)
+        matches.append(RequiredFilterMatch(category="language_level", value=language_item.value))
+
+    for category, kind, items in (
+        ("skill_experience", CriterionKind.SKILL_EXPERIENCE, filters.skill_experience),
+        ("domain_experience", CriterionKind.DOMAIN_EXPERIENCE, filters.domain_experience),
+    ):
+        for duration_item in items:
+            if not _typed_filter_matches(
+                profile,
+                kind=kind,
+                value=duration_item.value,
+                min_years=duration_item.min_years,
+                as_of_date=as_of_date,
+            ):
+                return RequiredFilterEvaluation(satisfied=False)
+            matches.append(RequiredFilterMatch(category=category, value=duration_item.value))
+
     if filters.min_total_experience_years is not None:
         if as_of_year is None:
             return RequiredFilterEvaluation(satisfied=False)
@@ -172,6 +230,7 @@ def evaluate_preferred_filters(
     filters: PreferredFilters,
     *,
     as_of_year: int | None,
+    as_of_date: date | None = None,
 ) -> PreferredFilterEvaluation:
     """structured_score = matched preferred criteria / total configured
     preferred criteria, bounded [0, 1]. If no preferred criteria are
@@ -204,6 +263,36 @@ def evaluate_preferred_filters(
         if _education_present(profile, education):
             matched += 1
             matches.append(PreferredFilterMatch(category="education", value=education))
+
+    for language_item in filters.language_levels:
+        total += 1
+        if _typed_filter_matches(
+            profile,
+            kind=CriterionKind.LANGUAGE,
+            value=language_item.value,
+            required_level=language_item.required_level,
+            as_of_date=as_of_date,
+        ):
+            matched += 1
+            matches.append(
+                PreferredFilterMatch(category="language_level", value=language_item.value)
+            )
+
+    for category, kind, items in (
+        ("skill_experience", CriterionKind.SKILL_EXPERIENCE, filters.skill_experience),
+        ("domain_experience", CriterionKind.DOMAIN_EXPERIENCE, filters.domain_experience),
+    ):
+        for duration_item in items:
+            total += 1
+            if _typed_filter_matches(
+                profile,
+                kind=kind,
+                value=duration_item.value,
+                min_years=duration_item.min_years,
+                as_of_date=as_of_date,
+            ):
+                matched += 1
+                matches.append(PreferredFilterMatch(category=category, value=duration_item.value))
 
     if filters.min_total_experience_years is not None:
         total += 1

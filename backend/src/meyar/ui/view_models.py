@@ -145,6 +145,7 @@ class ScoreContributionView(BaseModel):
     factor: str
     weighted_points: str
     reason_code: str
+    explanation: str
     manual_review_required: bool
     evidence: list[EvidenceLocationView]
 
@@ -179,18 +180,80 @@ class AgentEvidenceView(BaseModel):
     matches: list[AgentEvidenceMatchView] = Field(default_factory=list)
 
 
+class CriterionRowView(BaseModel):
+    """One already-validated draft/manual criterion row, presentation-ready
+    — ``kind_label`` is the HR-facing text (meyar.ui.presentation.
+    CRITERION_KIND_LABELS), never the raw CriterionKind enum value."""
+
+    kind: str
+    kind_label: str
+    requirement: str
+    min_years: str
+    required_level: str
+    weight: str
+    span_id: str | None = None
+
+
+class AgentJobDraftReviewView(BaseModel):
+    span_id: str | None = None
+    requirement: str
+    subject: str | None = None
+    kind_label: str | None = None
+    min_years: str = ""
+    required_level: str = ""
+    allowed_types: list[str] = Field(default_factory=list)
+
+
+class AgentJobDraftView(BaseModel):
+    title: str | None
+    draft_id: uuid.UUID
+    requested_result_limit: int | None = None
+    result_limit: int
+    result_limit_was_bounded: bool = False
+    must_have_rows: list[CriterionRowView] = Field(default_factory=list)
+    preferred_rows: list[CriterionRowView] = Field(default_factory=list)
+    # Non-sensitive requirements the deterministic validator could not turn
+    # into a real criterion — disclosed verbatim (never silently dropped),
+    # split by section so each renders under its own heading. See PR #42
+    # owner correction (issue #33).
+    unsupported_must_have: list[str] = Field(default_factory=list)
+    unsupported_preferred: list[str] = Field(default_factory=list)
+    # Source requirements that were omitted or whose material fields could
+    # not be deterministically attributed. Visible, but never scorable.
+    needs_review: list[AgentJobDraftReviewView] = Field(default_factory=list)
+    requires_resolution: bool = False
+    # Count only — a prohibited/sensitive-attribute match's own text must
+    # never be redisplayed (docs/SECURITY_PRIVACY.md).
+    prohibited_count: int = 0
+    # Count only — a requirement that failed the deterministic JD-text
+    # grounding check (D-046) was never confirmed to actually be in HR's
+    # JD, so its own text must never be redisplayed either (that would
+    # itself misattribute invented content to the source document).
+    ungrounded_count: int = 0
+    unsupported_language: bool = False
+    result_limit_needs_review: bool = False
+    wrong_mode_guidance: bool = False
+
+
 class AgentToolResultView(BaseModel):
     tool_name: str
     search_outcome: PlannerOutcomeView | None = None
     search_results: list[CandidateSearchResultView] = Field(default_factory=list)
     profile: AgentCandidateProfileView | None = None
     evidence: AgentEvidenceView | None = None
+    job_draft: AgentJobDraftView | None = None
     not_found_ref: int | None = None
 
 
 class AgentTurnView(BaseModel):
     outcome: str
     message: str | None
+    # A single, deterministic, HR-facing leading sentence for this turn —
+    # computed once server-side (meyar.ui.service.build_agent_turn_view) so
+    # the template never has to choose between multiple overlapping status
+    # banners (D-030 conversational-UX requirement: one meaningful message
+    # first, cards/evidence second, no redundant success/status text).
+    headline: str | None = None
     tool_results: list[AgentToolResultView] = Field(default_factory=list)
 
 

@@ -65,7 +65,9 @@ async def _seed_document(db_session: AsyncSession, tenant_id: uuid.UUID):
             "pages": [
                 {
                     "page": 1,
-                    "blocks": [{"index": 0, "text": "Jane Synthetic Doe, jane@example.com"}],
+                    "blocks": [
+                        {"index": 0, "text": "Jane Synthetic Doe, jane@example.com. Python"}
+                    ],
                 }
             ]
         },
@@ -138,7 +140,13 @@ async def test_cli_embed_candidate_happy_path_then_reused(
         model_metadata={},
         status="COMPLETED",
         profile_content={
-            "skills": [{"name": "Python", "category": None}],
+            "skills": [
+                {
+                    "name": "Python",
+                    "category": None,
+                    "evidence": [{"page": 1, "block_index": 0, "quote": "Python"}],
+                }
+            ],
             "employment_history": [],
             "education": [],
             "certifications": [],

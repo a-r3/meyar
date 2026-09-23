@@ -13,6 +13,10 @@ async def create_criteria_version(
     job_id: uuid.UUID,
     criteria: list[dict],
     created_by_api_key_id: uuid.UUID | None,
+    unsupported_requirements: list[str] | None = None,
+    needs_review_requirements: list[str] | None = None,
+    result_limit: int = 20,
+    eligible_only: bool = False,
 ) -> JobCriteriaVersion:
     """Insert a new immutable criteria version for job_id. Never updates an
     existing version row. Caller must have already verified job_id belongs
@@ -31,6 +35,10 @@ async def create_criteria_version(
         job_id=job_id,
         version_number=next_version,
         criteria=criteria,
+        unsupported_requirements=unsupported_requirements or [],
+        needs_review_requirements=needs_review_requirements or [],
+        result_limit=result_limit,
+        eligible_only=eligible_only,
         created_by_api_key_id=created_by_api_key_id,
     )
     db.add(version)

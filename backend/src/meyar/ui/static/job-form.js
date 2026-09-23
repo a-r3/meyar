@@ -8,16 +8,18 @@
  * stale value typed before switching kind is never submitted.
  */
 (function () {
-  var EXPERIENCE = "EXPERIENCE";
-  var APPLICABLE_PLACEHOLDER = "Minimum müddət (il)";
-  var NOT_APPLICABLE_PLACEHOLDER = "Tətbiq olunmur";
+  var EXPERIENCE_KINDS = ["EXPERIENCE", "SKILL_EXPERIENCE", "DOMAIN_EXPERIENCE"];
+  var LANGUAGE = "LANGUAGE";
+  var APPLICABLE_PLACEHOLDER = "il";
+  var NOT_APPLICABLE_PLACEHOLDER = "—";
 
   function syncRow(select) {
     var row = select.closest("tr");
     if (!row) return;
     var yearsInput = row.querySelector(".js-min-years");
     if (!yearsInput) return;
-    var isExperience = select.value === EXPERIENCE;
+    var levelInput = row.querySelector(".js-required-level");
+    var isExperience = EXPERIENCE_KINDS.indexOf(select.value) !== -1;
     yearsInput.disabled = !isExperience;
     yearsInput.placeholder = isExperience
       ? APPLICABLE_PLACEHOLDER
@@ -27,6 +29,17 @@
       yearsInput.setAttribute("aria-disabled", "true");
     } else {
       yearsInput.removeAttribute("aria-disabled");
+    }
+    if (levelInput) {
+      var isLanguage = select.value === LANGUAGE;
+      levelInput.disabled = !isLanguage;
+      levelInput.placeholder = isLanguage ? "Məs. B2" : NOT_APPLICABLE_PLACEHOLDER;
+      if (!isLanguage) {
+        levelInput.value = "";
+        levelInput.setAttribute("aria-disabled", "true");
+      } else {
+        levelInput.removeAttribute("aria-disabled");
+      }
     }
   }
 

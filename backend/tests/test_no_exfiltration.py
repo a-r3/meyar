@@ -4,13 +4,18 @@ Layered proof that candidate-content workflows never contact a public
 network service:
 
 1. Static inventory (verified during Slice 13 preparation, restated
-   here as an executable check): there are three `httpx.AsyncClient`
-   construction sites in `src/meyar` — `OllamaLLMProvider.health`,
-   `OllamaLLMProvider._chat`, and `OllamaEmbeddingProvider.embed` — all
-   loopback-gated via `require_loopback_url` at construction time (see
-   `test_ollama_provider_rejects_non_loopback_url` /
-   `test_ollama_embedding_provider_rejects_non_loopback_url`, already
-   covered elsewhere).
+   here as an executable check): there are three call sites that build a
+   local-only HTTP client in `src/meyar` — `OllamaLLMProvider.health`,
+   `OllamaLLMProvider._chat`, and `OllamaEmbeddingProvider.embed` — and
+   all three (a) are loopback-gated via `require_loopback_url` at
+   construction time (see `test_ollama_provider_rejects_non_loopback_url`
+   / `test_ollama_embedding_provider_rejects_non_loopback_url`, already
+   covered elsewhere) and (b) go through the single shared
+   `meyar.llm.loopback.build_local_only_async_client` boundary, which is
+   the only place `httpx.AsyncClient` is ever constructed for Ollama
+   traffic — see `test_ollama_transport_proxy_isolation.py` for proof
+   that this boundary also disables environment-derived proxy routing
+   (trust_env=False), independent of this module's logical-URL check.
 2. This module adds the missing layer: a deterministic runtime guard
    that patches `httpx.AsyncClient.send` — the single dispatch point
    every httpx request goes through regardless of transport — so any

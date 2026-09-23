@@ -19,7 +19,10 @@ import json
 import uuid
 
 import httpx
+import pytest
+from pydantic import ValidationError
 
+from meyar.config import Settings
 from meyar.extraction.view import ModelInputBlock, ProfessionalDocumentView
 from meyar.llm.ollama_provider import OllamaLLMProvider
 
@@ -29,6 +32,11 @@ def _view() -> ProfessionalDocumentView:
         canonical_document_id=uuid.uuid4(),
         blocks=[ModelInputBlock(page=1, block_index=0, text="Skills: Python")],
     )
+
+
+def test_request_serving_settings_reject_fake_llm_provider() -> None:
+    with pytest.raises(ValidationError):
+        Settings(llm_provider="fake")  # type: ignore[arg-type]
 
 
 async def test_agent_decision_request_disables_thinking() -> None:
@@ -90,6 +98,60 @@ async def test_grounded_selection_request_disables_thinking() -> None:
     )
 
     assert captured["think"] is False
+
+
+async def test_jd_drafting_uses_real_ollama_json_mode_not_fake_fallback() -> None:
+    from meyar.agent.schemas import RequirementSpan
+
+    captured: dict = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "model": "qwen3:1.7b",
+                "message": {
+                    "content": json.dumps(
+                        {
+                            "title": "Backend",
+                            "must_have": [
+                                {
+                                    "span_id": "req-0001",
+                                    "kind": "SKILL_EXPERIENCE",
+                                    "requirement": "Python",
+                                    "min_years": 5,
+                                }
+                            ],
+                            "preferred": [],
+                        }
+                    )
+                },
+            },
+        )
+
+    provider = OllamaLLMProvider(
+        base_url="http://127.0.0.1:11434",
+        model="qwen3:1.7b",
+        timeout_seconds=2,
+        transport=httpx.MockTransport(handler),
+    )
+    draft, provenance = await provider.draft_job_criteria(
+        "Minimum 5 il Python",
+        requirement_spans=[
+            RequirementSpan(
+                span_id="req-0001",
+                start_offset=0,
+                end_offset=19,
+                text="Minimum 5 il Python",
+                normalized="minimum 5 il python",
+            )
+        ],
+    )
+    assert captured["format"] == "json"
+    assert captured["think"] is False
+    assert draft.must_have[0].kind == "SKILL_EXPERIENCE"
+    assert provenance.provider == "ollama"
 
 
 async def test_profile_extraction_request_omits_thinking_field_entirely() -> None:

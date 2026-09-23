@@ -1,4 +1,5 @@
 from meyar.models.agent_conversation import AgentConversation
+from meyar.models.agent_draft_confirmation import AgentDraftConfirmation
 from meyar.models.api_key import ApiKey
 from meyar.models.audit_event import AuditEvent
 from meyar.models.browser_session import BrowserSession
@@ -19,6 +20,7 @@ from meyar.models.user import User
 
 __all__ = [
     "AgentConversation",
+    "AgentDraftConfirmation",
     "ApiKey",
     "AuditEvent",
     "BrowserSession",

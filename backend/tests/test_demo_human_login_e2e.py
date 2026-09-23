@@ -22,6 +22,7 @@ repository/hashing functions — using meyar.services.demo_seed_service
 directly (the same safe hook the CLI itself calls), never parsing
 secrets out of captured terminal output."""
 
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -63,6 +64,7 @@ async def _seed(db_session: AsyncSession, tmp_path: Path):
         max_profile_input_chars=MAX_INPUT_CHARS,
         max_identity_input_chars=MAX_INPUT_CHARS,
         max_embedding_input_chars=MAX_INPUT_CHARS,
+        evaluation_as_of_date=date(2026, 1, 1),
     )
 
 
@@ -85,7 +87,7 @@ async def test_freshly_seeded_demo_credential_logs_in_over_real_http(
         follow_redirects=False,
     )
     assert response.status_code == 303
-    assert response.headers["location"] == "/ui"
+    assert response.headers["location"] == "/ui/agent"
     assert response.cookies.get("meyar_ui_session") is not None
 
     library = await client.get("/ui/library")
@@ -120,7 +122,7 @@ async def test_password_is_verified_exactly_not_normalized(
         follow_redirects=False,
     )
     assert exact.status_code == 303
-    assert exact.headers["location"] == "/ui"
+    assert exact.headers["location"] == "/ui/agent"
 
     for corrupted in (
         exact_password.strip(),
@@ -247,7 +249,7 @@ async def test_reset_then_reseed_cycle_produces_a_working_login(
         follow_redirects=False,
     )
     assert response.status_code == 303
-    assert response.headers["location"] == "/ui"
+    assert response.headers["location"] == "/ui/agent"
 
 
 async def test_no_plaintext_password_persisted_and_no_credential_in_audit(

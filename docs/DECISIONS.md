@@ -3312,3 +3312,1702 @@ presence check — closing that would require semantic judgment. This is
 now the smallest remaining gap after three correctness passes, and it is
 inherent to any purely deterministic, non-LLM text-matching approach, not
 a shortcut taken in this fix.
+
+## D-042 — Slice 4 (issue #33): agent-first product UX + JD → criteria
+drafting, and two real-Ollama findings
+
+**Date:** 2026-09-02
+**Decision:** Implements M8 Slice 4 (issue #33, per D-030/D-031/D-032) on
+`feat/agent-product-ux-jd-matching` from synced `main` (`8c1782f`).
+
+1. **MEYAR AI is now the primary post-login HR surface.** Top-level nav is
+   `MEYAR AI | Namizədlər | Çıxış`; classic NL search (`/ui`) and
+   Vacancies (`/ui/jobs`) remain fully reachable via a de-emphasized
+   secondary nav line ("Digər alətlər") rather than being removed, per
+   D-032 point 2. Human login (`_finalize_human_login`) now redirects to
+   `/ui/agent` instead of `/ui` — the only behavior change to the login
+   flow itself; six existing redirect-target test assertions updated
+   accordingly.
+2. **Conversation UX consolidation.** A new `AgentTurnView.headline`
+   (`meyar.ui.service._agent_turn_headline`), computed once server-side,
+   replaces the previous two-tier "generic outcome banner" +
+   "tool-specific outcome banner" stack — one meaningful assistant message
+   first, supporting cards/evidence second, no duplicated success/status
+   text. A non-executable search outcome's own explanation still IS that
+   headline (not redundant — it is the only informative content in that
+   case). New `POST /ui/agent/reset` ("Yeni söhbət") clears this browser
+   session's own `AgentConversation` (turns + `last_search_candidate_ids`)
+   via a new `meyar.services.agent_conversation_repo.reset_conversation`
+   — tenant/session-scoped exactly like every other conversation call
+   site, never touches another session/tenant.
+3. **Candidate presentation:** the semantic-similarity pill (previously
+   unconditional "Uyğunluq %" on `/ui/search`, and already mode-gated but
+   identically labeled on `/ui/agent`) is relabeled "Semantik yaxınlıq %"
+   on both surfaces and now consistently hidden outside SEMANTIC_ONLY/
+   HYBRID search modes — a plain structured/discovery result never shows
+   a percentage that could read as a compatibility score. The real 0–100
+   deterministic score stays exactly where it already correctly lived
+   (`ranking_results.html`, `rank_candidates_for_job` only) — unchanged.
+4. **JD → structured criteria draft → human review → deterministic rank.**
+   New `AgentActionType.DRAFT_JOB_CRITERIA`: the model signals only that
+   the message is a JD (no argument on `AgentDecision` itself — the
+   server uses the user's own already-known message text as the JD input
+   for a second, narrower LLM call, `LLMProvider.draft_job_criteria`,
+   deliberately never asking the model to reproduce the JD inside its own
+   output schema — the D-035 Ollama `maxLength`-in-output-schema failure
+   mode this avoids). The model drafts a `JDCriteriaDraft` (title +
+   bounded must-have/preferred lists, restricted to the same five
+   `CriterionKind`s the manual form already offers); every item is
+   re-validated into a real `CriterionIn` server-side (same schema +
+   prohibited-attribute denylist as the manual form/REST API — D-031
+   point 4, no exception), and any item that fails is silently dropped
+   (never shown, `dropped_count` surfaced) rather than weakened. The
+   result renders as an editable review form (shared Jinja macro,
+   `_criteria_rows.html`, extracted out of `job_new.html` so both surfaces
+   render criteria rows identically) that posts through the EXISTING,
+   unchanged `POST /ui/jobs` — nothing is persisted by drafting alone.
+   Ranking after creation reuses the existing `/ui/jobs` "Namizədləri
+   sırala" action unchanged: no manual evaluation-date input, today's date
+   injected at the UI boundary exactly as `/ui/search` already does, and
+   the effective evaluation date is already displayed on
+   `ranking_results.html`. No new vacancy-CRUD surface area; `Job`/
+   `JobCriteriaVersion`/scoring untouched. `AgentTurnOutcome.
+   JOB_DRAFT_FAILED` (bounded retry, then this outcome with empty
+   `tool_results`) covers the drafting call itself never producing a
+   usable result — mirrors the existing AGENT_PROVIDER_FAILURE/
+   MALFORMED_MODEL_OUTPUT precedent (D-036).
+5. **D-031 sunset condition NOT acted on this slice.** Issue #33/D-031
+   point 3 makes the fast-path sunset an owner-evaluated decision, not
+   automatic. This slice implements the agent-first JD/criteria flow the
+   sunset evaluation depends on but does not itself judge "accepted
+   functional parity" — that determination is left to the owner's UI
+   review (see the accompanying `## HUMAN ACTION REQUIRED`); D-026's fast
+   path is untouched.
+6. **Two real findings from live-Ollama acceptance testing** (qwen3:1.7b,
+   the same integration-verified model as D-039/D-040), matching the
+   established Slice 2 pattern (D-035 through D-040) of bugs no
+   `FakeLLMProvider`-based test can surface:
+   - **Prompt-leak defect (real, fixed structurally).** The model can
+     copy one of `AGENT_SYSTEM_PROMPT`'s own English instructional
+     sentences verbatim into `AgentDecision.message` for CLARIFY/
+     FINAL_ANSWER, instead of authoring real content — a raw
+     planner-internals leak into HR-facing text that D-035's "the
+     model's message is safe to show verbatim" boundary did not
+     anticipate. Fixed with `meyar.agent.service._looks_like_prompt_leak`
+     — an exact/near-exact containment check against the fixed prompt
+     text (not a fuzzy heuristic) — treated exactly like schema-invalid
+     output: bounded retry (`MAX_DECISION_ATTEMPTS`), then the existing
+     deterministic `MALFORMED_MODEL_OUTPUT` fallback. Reproduced live
+     post-fix: the guard correctly rejected a repeat leak and rendered
+     only the safe fallback text, never the leaked sentence. Two new
+     regression tests (`test_prompt_leaking_clarify_message_is_rejected_
+     and_retried`, `test_prompt_leak_persisting_through_every_retry_
+     falls_back_safely`).
+   - **Known, documented model-quality limitation (not fixed further this
+     slice).** `AGENT_PROMPT_VERSION` was bumped to
+     `agent-orchestrator-prompt-v3` (DRAFT_JOB_CRITERIA added, then its
+     disambiguation against SEARCH_CANDIDATES sharpened once) after live
+     testing showed qwen3:1.7b sometimes still routes a raw pasted JD to
+     SEARCH_CANDIDATES instead of DRAFT_JOB_CRITERIA when the message
+     carries no explicit trigger verb — the same class of small-local-
+     model intent-classification limitation the project already documents
+     honestly elsewhere (D-025's "AI tələbi tam anlaya bilmədi" framing).
+     Both branches remain fully safe regardless of which the model picks:
+     a misrouted JD either fails its own search-planner call (typed
+     `PLANNER_PROVIDER_FAILURE`/`MODEL_TIMEOUT`, never a fabricated
+     result) or, when routed correctly, drafts and validates exactly as
+     designed — confirmed live for both outcomes. HR can reliably reach
+     DRAFT_JOB_CRITERIA today with an explicit lead-in (e.g. "Bu elan
+     üçün kriteriyalar hazırla: ..."); further routing-accuracy tuning
+     (a bigger model, or — if ever justified by a DECISIONS.md entry — a
+     bounded deterministic pre-classifier) is deferred, not silently
+     attempted, per this slice's bounded-cycle scope.
+
+**Why:** Issue #33 requires MEYAR AI to become the primary HR surface with
+a bounded JD → draft → confirm → deterministic-rank flow, while explicitly
+prohibiting new vacancy-CRUD growth, any LLM scoring authority, and
+manual evaluation-date input — this decision records the concrete design
+(schema shape, validation boundary, reuse of existing job/ranking
+services) and the two real defects/limitations only live-model testing
+could surface, consistent with the Slice 2 precedent of documenting such
+findings rather than only the intended design.
+
+**Reversibility:** Fully additive at the schema/service layer (`agent/
+schemas.py`, new tool result/outcome variants) — no migration, no change
+to `Job`/`JobCriteriaVersion`/scoring/evaluation. `meyar.core.text.
+slugify_criterion_label` is a pure extraction of previously-private
+`meyar.ui.service._slugify_criterion_label` logic (same behavior, now
+shared with `meyar.agent.service`). The login-redirect and nav changes
+are template/route-level and trivially reversible. `_looks_like_prompt_
+leak` is a narrow, additive guard around one existing decision-fetch
+loop.
+
+## D-043 — PR #42 owner correction (issue #33): deterministic JD intent,
+no-silent-drop disclosure, and Vacancies discovery removed from normal HR UI
+
+**Date:** 2026-09-02
+**Decision:** Owner UI review of PR #42 (D-042) found two product blockers
+and one navigation/exposure correction before merge; all three are
+resolved on the same `feat/agent-product-ux-jd-matching` branch, no new
+branch:
+
+1. **Deterministic JD entry — no prompt magic.** D-042 point 6 documented
+   that qwen3:1.7b sometimes fails to route an implicit (no explicit
+   lead-in) pasted JD to `DRAFT_JOB_CRITERIA`. Rather than expanding the
+   frozen regex/NL planner, `/ui/agent` (`meyar.ui.router.agent_turn`)
+   gained one new optional `Form` field, `intent`; the "JD-dən meyar
+   hazırla" button submits the fixed literal `intent=draft_job_criteria`.
+   `run_agent_turn` (`meyar.agent.service`) gained a matching
+   `explicit_action: AgentActionType | None` parameter: when set, the
+   very first decision of the turn is constructed directly
+   (`AgentDecision(action=explicit_action)`) and `llm.decide_agent_action`
+   is never called for that turn — no model call, no routing ambiguity,
+   no dependence on the small model inferring intent from arbitrary text.
+   Only `DRAFT_JOB_CRITERIA` is accepted; any other value raises
+   `ValueError` defensively (the caller is `meyar.ui.router`, never a
+   client-supplied action). Normal conversational routing (no `intent`
+   field) is completely unchanged — this is a second, parallel entry
+   point, not a modification of the existing planner/routing prompt.
+2. **No silent drop of JD requirements.** `AgentJobDraftToolResult.
+   dropped_count` (a single opaque integer) is replaced by two typed
+   signals in `meyar.agent.schemas`: `unsupported: list[
+   UnsupportedJDCriterionItem]` (a non-sensitive requirement `CriterionIn`
+   could not represent — e.g. an `EXPERIENCE` item the JD gave no
+   derivable duration for — carries the requirement's own, already-
+   confirmed-non-sensitive text) and `prohibited_count: int` (a
+   sensitive/denylist match — count only, the matched text is never
+   redisplayed, unchanged from the existing denylist discipline).
+   `meyar.agent.service._build_criterion_from_draft_item` distinguishes
+   the two by inspecting the `pydantic.ValidationError` `CriterionIn(...)`
+   raises: `ProhibitedCriterionError` (itself a `ValueError` subclass
+   raised inside a `model_validator`) is always re-wrapped by pydantic
+   before it reaches the caller — verified empirically against pydantic
+   2.11 — so the original exception is recovered from each error's own
+   `ctx["error"]`, not caught directly. The review form
+   (`meyar.ui.templates.agent.html`) renders `unsupported` rows as a
+   visible, non-submittable notice under each section ("bu tələb
+   avtomatik qiymətləndirməyə daxil edilmədi — sistem hazırda
+   dəstəkləmir") and a separate, generic `prohibited_count` notice —
+   neither ever becomes a `must_*`/`pref_*` form field, so neither can be
+   persisted by submitting the form. `_agent_turn_headline`
+   (`meyar.ui.service`) surfaces the same two safe counts in the one-line
+   summary.
+3. **Vacancies is no longer a normal HR navigation/secondary-tool
+   destination.** Removed from `base.html`'s secondary nav line and from
+   `home.html`'s quick-links feature card — the normal HR product surface
+   is exactly `MEYAR AI | Namizədlər | Çıxış` plus classic search
+   (unchanged, still secondary). `Job`/`JobCriteriaVersion`, `/ui/jobs`,
+   `/ui/jobs/new`, and the manual creation/archive/rank routes are
+   NOT deleted and NOT reduced in capability — they remain reachable by
+   direct URL as backend/supporting capability, per D-032's original
+   "backend stays, UI prominence changes" framing, now carried one step
+   further. Confirming the agent's JD-drafted review
+   (`POST /ui/jobs` with the review form's own hidden `from_agent_draft=1`
+   field, set only by `agent.html`, never by the unchanged manual
+   `job_new.html` form) still creates the `Job`/`JobCriteriaVersion`
+   through the exact same `create_job`/`create_criteria_version` calls,
+   but then renders straight into that criteria version's ranking result
+   (the new shared `meyar.ui.router._render_job_ranking`, factored out of
+   the existing manual "Namizədləri sırala" `rank_job` handler — same
+   `rank_candidates_for_job` call, no new scoring authority) instead of
+   redirecting to the de-emphasized `/ui/jobs` list. The manual
+   `/ui/jobs/new` → `POST /ui/jobs` path is completely unchanged (no
+   `from_agent_draft` field, so it still redirects to `/ui/jobs`).
+   `create_job_route`'s declared required scopes grew to include
+   `jobs:read`/`candidates:read`/`evaluations:write` alongside the
+   existing `jobs:write` so it may call the ranking service inline; every
+   HR role already holds all of these together
+   (`meyar.core.roles._FULL_HR_PERMISSIONS` is deliberately flat with no
+   partial-permission tier yet), so this is a declared-intent widening,
+   not a functional access change.
+
+**Why:** The owner's PR #42 review explicitly blocked merge on exactly
+these two product defects (unreliable JD routing requiring "prompt
+magic"; silent loss of JD requirements the deterministic schema could not
+represent) plus a UX-consistency instruction (Vacancies must not read as
+a normal HR destination once MEYAR AI is the primary surface) — this
+entry records the concrete fix for all three so the next owner pass has
+one coherent decision record rather than three untracked edits.
+
+**Reversibility:** Fully additive/route-level. `explicit_action` is an
+optional parameter with a `None` default — every existing caller
+(`_run` in tests, any future caller) is unaffected unless it opts in.
+`AgentJobDraftToolResult.dropped_count` is removed (not deprecated) since
+PR #42 was never merged — no external consumer exists yet. The nav/home
+template edits are two-line removals, trivially reversible. The
+`from_agent_draft`-gated ranking redirect only changes behavior for
+requests carrying that exact hidden field; the manual creation flow's
+tests (`tests/test_ui_job_creation.py`) pass unchanged.
+
+## D-044 — PR #42 owner UX re-review (issue #33): chat hierarchy, unified
+composer, HR-facing copy, evidence dedup, deterministic headlines, nav trim
+
+**Date:** 2026-09-03
+**Decision:** A second owner UI pass on PR #42 found the product still
+"feels like a developer form" despite D-043's functional corrections.
+Presentation-only fixes, same branch, no agent/scoring/security
+architecture change:
+
+1. **Chat hierarchy.** `meyar.ui.router.agent_workspace`/`agent_turn` now
+   pass `history_turns` (all PRIOR turns, plain text bubbles) and
+   `latest_user_message` (the just-submitted text) separately from
+   `latest` (the rich `AgentTurnView`). `agent.html` renders one
+   unified `<ol>`: history bubbles, then the just-submitted user message,
+   then the assistant's headline AND its cards in the SAME `<li>` —
+   the composer renders only after all of that, never sandwiched between
+   a turn's own text and its results. A turn's own `(user, assistant)`
+   pair is spliced out of `history_turns` (`all_turns[:-2]`) exactly when
+   `run_agent_turn` actually persisted one (the `try` succeeded); on the
+   provider-failure path nothing was persisted, so `history_turns` stays
+   the untouched full list and `latest_user_message` is the raw submitted
+   `message` (previously lost entirely on that path — now shown, same
+   hierarchy, still safe/generic assistant text). Net effect: the
+   previous architecture's live turn was ALWAYS duplicated (once as a
+   plain history bubble, once again in a separate outcome banner) —
+   `test_user_message_and_model_message_are_html_escaped_in_render` is
+   updated from asserting the payload appears 3× to 2× to reflect this
+   deduplication.
+2. **One AI composer.** The two-submit-button form is replaced by one
+   `<select name="intent">` (values `""` / `draft_job_criteria`, labels
+   "Adi söhbət" / "Vakansiya elanını analiz et") plus one `Göndər`
+   button — `meyar.ui.router.agent_turn`'s existing `intent` handling is
+   unchanged (still the only source of `explicit_action`, still never
+   inferred from routing). The textarea's `required` attribute is
+   removed; a new `meyar.ui.static.agent-composer.js` (same progressive-
+   enhancement pattern as the existing `job-form.js`) disables the send
+   button while the message is empty/whitespace-only, so an empty
+   submission never triggers the browser's own native-language "Please
+   fill out this field" popup — the server's existing generic
+   `Form(min_length=1)` → "Forma məlumatlarını yoxlayın." error page
+   remains the authoritative fallback if JS is unavailable.
+3. **HR-facing copy.** `meyar.ui.service._format_filter_match_label`
+   replaces `f"{item.category}: {item.value}"` (literally
+   `"skill: Python"`) for `required_matches`/`preferred_matches` — every
+   category except `min_total_experience_years` now renders as just the
+   already-self-descriptive value; the experience category gets a
+   `"{value} il təcrübə"` unit suffix. `GET_CANDIDATE_EVIDENCE` match
+   headings change from `"{category_label}: {title}"` to `"Uyğun gələn
+   tələb: {title} ({category_label})"` (category demoted to parenthetical
+   meta, mirroring `ranking_results.html`'s existing
+   `label <span class="meta">(kind)</span>` convention).
+4. **Evidence dedup + citation text.** `meyar.ui.service._evidence_views`
+   now deduplicates by `(page, quote)` before truncating to `maximum` — a
+   candidate whose CV evidence is cited by several extracted facts no
+   longer shows the identical quote repeated. A new shared macro
+   (`meyar.ui.templates._evidence_list.evidence_items`) renders every
+   evidence list as `"CV, səhifə {page} — "{quote}""` — never `"Səhifə
+   {page}, blok {block_index}"` — reused by `agent.html`,
+   `search_results.html`, and `candidate_detail.html` so all three
+   surfaces read identically; `block_index` stays on
+   `EvidenceLocationView` for internal provenance, it is simply never
+   the thing HR reads.
+5. **Deterministic headline copy.** `meyar.ui.service._agent_turn_headline`
+   gains three improvements, all still server-authored from already-
+   computed, non-model data (no new LLM call): SEARCH_CANDIDATES now
+   reads `"{top matched requirement} tələbinə uyğun {count} namizəd
+   tapdım."` (built from the top result's own `required_matches`/
+   `preferred_matches`, item 3's HR phrasing) with a distinct zero-result
+   sentence ("Bu tələbə uyğun namizəd tapılmadı.") instead of "0 namizəd
+   tapıldı."; GET_CANDIDATE_PROFILE reads `"{full_name} üçün profil
+   məlumatları aşağıdadır."`; GET_CANDIDATE_EVIDENCE reads `"{full_name}
+   üzrə {topic} sübutlar aşağıdadır."` when matches exist, or an explicit
+   `"{full_name} üzrə bu mövzuda profildə açıq sübut yoxdur."` when they
+   don't — replacing the previous generic "Nəticələr aşağıdadır." filler
+   for these two tool types entirely (they had no dedicated branch
+   before, only the outcome fallback).
+6. **Navigation trimmed further.** `base.html`'s secondary nav
+   (`Klassik axtarış`, the only entry left after D-043 removed
+   Vakansiyalar) is removed outright — normal HR navigation/discovery is
+   now exactly `MEYAR AI | Namizədlər | Çıxış`. The brand/logo link and
+   `error.html`'s "Əsas səhifə" link now point at `/ui/agent` (was `/ui`)
+   so no page's own chrome quietly re-offers classic search as "home."
+   `/ui` itself is untouched and still fully reachable by direct URL
+   (D-032/D-043's "backend/supporting capability stays" framing, applied
+   one step further) — `search_results.html`/`search_clarification.html`'s
+   own in-page "new query" links, which loop within that already-de-
+   emphasized surface rather than re-introducing discovery, are
+   unchanged.
+7. **JD confirmation copy.** The review form's submit button on
+   `agent.html` reads "Tələbləri təsdiqlə və namizədləri sırala" instead
+   of "Vakansiyanı yarat" — the vacancy-CRUD framing is gone from the
+   one HR-facing verb in the agent flow, while `POST /ui/jobs` and the
+   `Job`/`JobCriteriaVersion` persistence it drives (D-043) are
+   byte-for-byte unchanged; the manual `job_new.html` form keeps its own
+   "Vakansiya yarat" copy, since that page is explicitly the
+   backend/supporting surface, not the primary HR product concept.
+
+Verified against the real local `qwen3:1.7b` (not only `FakeLLMProvider`
+fixtures): a live browser session (Chromium via the Claude-in-Chrome
+extension) logged in as the seeded demo HR user, submitted a plain-
+language search and a JD-analysis-mode message, and visually confirmed
+items 1/3/4/5 together in one screenshot — the just-submitted user
+message, the deterministic "Python tələbinə uyğun 1 namizəd tapdım."
+headline, the "Məcburi uyğunluqlar: Python" line (no "skill:" prefix),
+and three deduplicated "CV, səhifə 1 — "..."" evidence citations, all in
+one turn block immediately above the composer. A second live JD-analysis
+call surfaced a genuine `qwen3:1.7b`-drafted EXPERIENCE item with no
+derivable duration, independently confirming the D-043 unsupported-item
+disclosure path end-to-end with real (not fixture-forced) model output,
+rendered under the new "Tələbləri təsdiqlə və namizədləri sırala" button.
+
+**Why:** The owner's second UI pass explicitly accepted the D-043
+architecture/backend behavior and scoped this pass to presentation only:
+chat hierarchy, composer unification, HR language, evidence readability,
+headline quality, and navigation — with an explicit "do not add new
+functionality, do not change scoring/planner/evidence authority/auth/
+tenant rules/persistence" boundary, which every change above respects
+(no new tool, no new persisted field, no new route beyond the existing
+`intent` value already wired in D-043).
+
+**Reversibility:** Template/presentation-layer and one new pure
+formatting/dedup function each in `meyar.ui.service` — no schema, no
+migration, no change to `AgentTurnResult`/`AgentToolResult`/persistence.
+`agent-composer.js` is additive and inert if the browser blocks
+JavaScript (the button just stays enabled, falling back to existing
+server-side validation). The nav/brand-link changes are single-line
+template edits.
+
+## D-045 — PR #42 owner UX correction pass 3 (issue #33): turn-render
+consistency, grounded-copy dedup, requirement-attributable evidence,
+composer/criteria/ranking presentation, unsupported-requirement contract
+
+**Date:** 2026-09-05
+**Decision:** A third owner UI pass on PR #42, scoped to nine verified
+issues, no agent/scoring/security architecture change:
+
+1. **Turn-render consistency (root cause + fix).** The live turn's
+   headline (`meyar.ui.service._agent_turn_headline`, D-044 item 5) and
+   the value `meyar.agent.service._finish_turn` persisted for that same
+   turn (`result.message`, the raw model framing — empty for a plain
+   tool-result turn) were two independently computed values. A later
+   history re-render (`agent_turn_outcome_message`) then fell back to
+   the generic per-outcome table instead of reproducing the richer live
+   headline. Fixed by making the persisted text and the rendered
+   headline the same value: `meyar.services.agent_conversation_repo.
+   sync_last_turn_display_text` overwrites the just-persisted assistant
+   turn's `text` with `latest.headline` right after
+   `build_agent_turn_view` computes it, in `meyar.ui.router.agent_turn`.
+   D-036's original blank-bubble guard is untouched (the overwrite is a
+   no-op when there is no headline).
+2. **Grounded-copy dedup + duration precision.** A new shared
+   `meyar.core.text.combine_degree_and_field` joins an education item's
+   degree/field_of_study without repeating a field_of_study already
+   contained in degree (fixes "BSc Data Science Data Science" wherever
+   an education title is built: `meyar.ui.service._facts` — candidate
+   detail and the agent's GET_CANDIDATE_PROFILE view — and
+   `meyar.agent.service._PROFILE_FACT_CATEGORIES`/`_EVIDENCE_CATEGORIES`
+   — grounded-answer facts and evidence-topic matching). The
+   `GroundedCaveat.DURATION_NOT_PROVEN` sentence changes from "Mövcud
+   sübut konkret müddəti göstərmir." to "Mövcud sübut bu mövzu üzrə
+   konkret təcrübə müddətini əsaslandırmır." — explicitly scoped to the
+   asked-about topic/skill, so it never reads as "no dated evidence
+   exists at all" when a dated employment fact is cited in the same
+   message.
+3. **Requirement-attributable search evidence.** `meyar.ui.service.
+   build_search_result_views` previously flattened evidence from every
+   profile category (skills, employment, education, certifications,
+   languages, projects) regardless of which requirement matched — a
+   Python-only skill match could show unrelated education/employment
+   snippets as if they proved Python. A new
+   `_requirement_attributable_evidence` restricts evidence to the
+   profile entries that actually caused each `RequiredFilterMatch`/
+   `PreferredFilterMatch` (skill/certification/language/education matched
+   by the same case/diacritic-fold comparison `meyar.search.structured`
+   itself uses; `min_total_experience_years` — a genuine aggregate — is
+   attributed to every employment_history entry, never a different
+   category). Applies identically to classic `/ui/search` and the
+   agent's SEARCH_CANDIDATES tool result (both call the same function).
+4. **Composer productization.** `agent.html`'s composer is restyled from
+   a large full-width textarea + full-width native `<select>` + detached
+   button into one visually merged, rounded, chat-style input
+   (`.composer`/`.composer-toolbar` in `styles.css`): a compact pill
+   mode-select and a circular send button share one bordered container
+   with the textarea. The JD mode stays the same explicit
+   `<select name="intent">` (values `""`/`draft_job_criteria`) — no
+   prompt-detection/heuristic routing was added; only presentation
+   changed.
+5. **JD criteria review noise reduction.** `_criteria_rows.html`'s
+   duration column shows a muted "—" instead of a "Tətbiq olunmur"
+   disabled-input placeholder repeated on every non-EXPERIENCE row (and
+   "il" instead of "Minimum müddət (il)" when applicable — same for
+   `job-form.js`'s client-side toggle); the requirement-text column is
+   now the dominant column (`table-layout: fixed`, 46% width); weight
+   (`Əhəmiyyət`) is a narrow, small-type, muted column — still fully
+   editable, no longer visually competing with Növ/Tələb. No field name,
+   validation rule, or submitted value changed.
+6. **Unsupported-requirement contract.** Inspected the actual boundary:
+   `meyar.agent.schemas.JDDraftCriterionItem.kind` accepted the full
+   `CriterionKind` enum, so a genuinely out-of-scope, non-sensitive
+   requirement (e.g. relocation willingness, a driving license) had no
+   structural way to be flagged — the model would either omit it or
+   force it into a supported kind. A new `JDDraftCriterionKind` (SKILL/
+   EXPERIENCE/CERTIFICATION/EDUCATION/LANGUAGE/OTHER) — deliberately
+   NOT `CriterionKind` itself, which stays the deterministic evaluator's
+   own persisted scoring vocabulary — is the model's actual output type;
+   `OTHER` routes straight to `DroppedJDCriterionReason.UNSUPPORTED` in
+   `_build_criterion_from_draft_item`, deterministically, never via an
+   incidental `CriterionIn` validation failure. The prompt now instructs
+   the model to use `OTHER` for such requirements rather than omitting
+   or misclassifying them. "Survives confirmation": `agent.html`'s
+   unsupported-requirement disclosure now also renders one hidden
+   `unsupported_must_have`/`unsupported_preferred` input per item;
+   `create_job_route` reads them and threads them into
+   `_render_job_ranking` as `unsupported_requirements`, which
+   `ranking_results.html` renders as a page-level "Məlumat üçün —
+   qiymətləndirməyə daxil edilmir" (informational, not scored) notice —
+   still never validated as a criterion, never persisted to
+   `JobCriteriaVersion`, never touching `ranking`/`results`, so it
+   contributes nothing to score/ranking by construction while no longer
+   vanishing once the drafting turn scrolls past. German
+   language/Power BI remain ordinary supported LANGUAGE/SKILL criteria
+   with unchanged UNKNOWN-when-missing-evidence behavior — untouched by
+   this item.
+7. **Vacancy-admin exposure removed from ranking.** `ranking_results.
+   html`'s `<a class="back-link" href="/ui/jobs">← Vakansiyalar</a>` is
+   removed outright. Primary nav (`base.html`, unchanged since D-043/
+   D-044) remains exactly `MEYAR AI | Namizədlər | Çıxış`. `Job`/
+   `JobCriteriaVersion` backend and every existing route (`/ui/jobs`,
+   `/ui/jobs/{id}/rank`, `POST /ui/jobs`) are untouched and still fully
+   reachable by direct URL/link from elsewhere.
+8. **Ranking reading-hierarchy reorder.** Each candidate card's primary,
+   always-visible content is now: name → overall score pill + fit band
+   (+ MANUAL_REVIEW/INSUFFICIENT_EVIDENCE alert where applicable) → a
+   new `.criterion-status-list` (one row per criterion: HR label + kind,
+   status badge, and — newly rendered, previously absent from this page
+   entirely — that criterion's own evidence via the existing
+   `_evidence_list` macro, or an explicit "no evidence found" sentence
+   for UNKNOWN). Raw weight/uyğunluq-dərəcəsi/bal-töhfəsi numbers move
+   into a renamed, still-collapsed `<details>` ("Hesablama detalları")
+   below that — secondary, not hidden. `ScoreContributionView.evidence`
+   already existed (deterministic per-criterion evidence from the
+   evaluation engine) but was never rendered on this page before.
+   Evaluation date and the UNKNOWN/definitive-mismatch distinction are
+   unchanged.
+9. **Candidate detail.** No template change beyond item 2's shared
+   `_facts()` dedup fix, which already applies here (candidate detail
+   uses the same function). "CV-yə bax" (in-app preview) vs "Originalı
+   yüklə" (true download) stay separately implemented routes; no
+   UUID/parser/index/version internal identifier is rendered as visible
+   page text (only inside `href` attributes, e.g. the candidate/document
+   ids already required for the links to work).
+
+**Why:** Continuing the owner's iterative "fast-track MVP, presentation
+first, no new authority" correction pattern (D-043/D-044) — every fix
+above is either a genuine bug (item 1: two divergent text sources for
+one concept; item 2: a real string-concatenation duplication bug; item
+3: evidence not actually attributable to what it was shown under) or a
+presentation-only change (items 4/5/7/8/9), except item 6, which is a
+deliberately narrow, additive dispatch-layer type (JDDraftCriterionKind)
+that never touches the deterministic evaluator's own `CriterionKind`,
+scoring policy, or `JobCriteriaVersion` schema.
+
+**Reversibility:** No schema/migration change. `JDDraftCriterionKind` is
+a new enum scoped to `meyar.agent.schemas`/`meyar.agent.service` only —
+`CriterionKind` (evaluator/DB-facing) is unchanged. `sync_last_turn_
+display_text` only ever overwrites the `text` field of the just-written
+conversation-JSON turn already being committed in the same request: no
+new column, no new table. `unsupported_requirements` is a request-scoped
+list threaded through one render call, never persisted. Template/CSS/JS
+changes are presentation-only.
+
+## D-046 — PR #42 acceptance blockers: JD requirement grounding, and the
+850/846/848 test-count history
+
+**Date:** 2026-09-05
+**Decision:** Closes the two remaining owner-flagged acceptance blockers
+on PR #42, no new branch, no architecture expansion.
+
+1. **Root cause of the reported "Passing an exam" hallucination.**
+   `LLMProvider.draft_job_criteria`'s prompt (`JD_CRITERIA_DRAFT_SYSTEM_
+   PROMPT`) already instructed "only include a requirement that is
+   actually stated in the text — never invent one," but nothing
+   downstream ever verified that instruction was followed —
+   `meyar.agent.service._build_criterion_from_draft_item` re-validated a
+   drafted item's *shape* (schema/prohibited-attribute denylist) but
+   never its *provenance*. Reproduced live against the real, integration-
+   verified `qwen3:1.7b` (not merely asserted): a short/underspecified
+   JD reliably gets a plausible-sounding but wholly unstated requirement
+   "filled in" from the model's own prior/training knowledge about what a
+   role "typically" requires — e.g. a JD stating only "Namizəd
+   ezamiyyətə getməyə hazır olmalıdır" (travel readiness) for a
+   "Regional Satış Nümayəndəsi" role, with no mention of language or
+   sales experience, reproducibly returned a fabricated "İngilis dili"
+   LANGUAGE requirement and a fabricated "Satış nümayəndəsi təcrübəsi"
+   EXPERIENCE requirement across repeated `temperature=0` calls — the
+   exact same fabrication class the owner observed as "Passing an exam."
+   Critically, this reproduced through **both** disclosure paths: a
+   fabricated item can land as a real, scored `CriterionIn` (the
+   "İngilis dili" case) or — the reported case — as a `JDDraftCriterionKind.
+   OTHER` item, which D-045 routes unconditionally to the HR-visible
+   `unsupported` disclosure ("a real JD requirement the system merely
+   cannot score") with **zero grounding check**. D-045 solved "a real,
+   out-of-scope requirement must not vanish"; it did not address "a
+   requirement must first be confirmed real." The literal historical
+   session that produced "Passing an exam" was not preserved (no chat
+   log, no committed fixture), so the exact string could not be
+   regenerated byte-for-byte — the reproduction above establishes the
+   same failure *class* deterministically and repeatably against the
+   real model, which is what the fix targets.
+2. **Grounding fix.** `meyar.agent.service._is_requirement_grounded_in_
+   jd_text` — a deterministic, local, lexical check (fold_az_ascii +
+   normalize_azerbaijani_case, matching the project's existing
+   Azerbaijani-suffix-tolerant comparison convention) requiring at least
+   half of a drafted requirement's own non-connector words to appear as a
+   substring of the actual JD text HR submitted. `_build_criterion_from_
+   draft_item` now runs this check on **both** remaining disclosure
+   outcomes (a would-be-valid `CriterionIn`, and an `OTHER`/schema-
+   failure item otherwise bound for `unsupported`) — never on the
+   `PROHIBITED` path, which is an unconditional early return, unreordered
+   and unweakened by this change (a doubly-bad item — fabricated *and*
+   sensitive — is still counted `PROHIBITED`, exactly as before). A new
+   `DroppedJDCriterionReason.UNGROUNDED` and `AgentJobDraftToolResult.
+   ungrounded_count` mirror the existing `PROHIBITED`/`prohibited_count`
+   discipline exactly: count-only, the unconfirmed text is never
+   redisplayed (redisplaying it would itself misattribute invented
+   content to HR's own JD — the very defect being fixed), surfaced via
+   the existing headline/template notice pattern
+   (`_agent_turn_headline`, `agent.html`). No new architecture: no new
+   LLM call, no embedding call, no new persisted field —
+   `JobCriteriaVersion`/scoring/ranking untouched. This is a real
+   correctness bug fix (an HR-facing disclosure with no provenance
+   check), not a UX redesign.
+3. **Acceptance invariants held:** supported requirements' semantics are
+   unchanged (grounded items pass through exactly as before — the
+   existing `test_draft_job_criteria_builds_valid_criteria_from_llm_
+   draft`/`AWS`/`Python` fixtures are untouched); genuinely unsupported,
+   non-sensitive, JD-stated requirements remain visible (`test_draft_job_
+   criteria_discloses_unsupported_non_sensitive_item`, `test_draft_job_
+   criteria_other_kind_is_unsupported_never_scored` — both updated only
+   to give their fixture JD text an honest lexical trace of the item
+   being asserted, never to weaken an assertion); unsupported/ungrounded
+   requirements contribute nothing to deterministic scoring (unchanged —
+   neither ever becomes a `CriterionIn`); prohibited/sensitive
+   requirements remain safely blocked (`test_draft_job_criteria_drops_
+   prohibited_attribute_item`, unchanged priority); no LLM-invented
+   requirement can be presented as a JD requirement (new: `test_draft_
+   job_criteria_drops_fabricated_unrelated_requirement`, `test_draft_job_
+   criteria_fabricated_requirement_never_rendered`, plus a direct
+   `test_is_requirement_grounded_in_jd_text_unit` contract test); HR
+   review/edit before persistence is untouched (`POST /ui/jobs` path
+   unmodified); no external AI API introduced (pure string comparison,
+   no network call).
+4. **Known residual limitation, stated honestly (matching the D-042
+   point 6 precedent):** the lexical check compares word-level content,
+   so a fabrication that reuses real JD words in a new, unstated claim
+   (e.g. inferring "Satış nümayəndəsi təcrübəsi" from a JD whose only
+   real content is the job title "Regional Satış Nümayəndəsi") is not
+   caught by this check alone — this is a narrower residual risk than
+   the reported defect (content entirely disconnected from the JD, in
+   the reproduced case even a different language), and HR review before
+   `POST /ui/jobs` persistence remains the final backstop for it, exactly
+   as it already is for every other drafted field.
+5. **The 850/846/848 test-count history.** Every commit in PR #42's
+   actual lineage (`8c1782f` synced-`main` base → `b55bea6` → `a38fc16`
+   (D-043) → `c87178b` (D-044) → `cac333f` (D-045), verified via
+   `git log`/`git reflog` — no rebase, no amend, no dropped commit
+   anywhere in this history) was checked out into a disposable worktree
+   and `pytest --collect-only -q`'d independently: **822 → 838 → 846 →
+   846 → 848** collected tests. A full pairwise node-id diff (not just
+   counts) across all four Slice-4 commits shows **zero test removals at
+   any single transition** — b55bea6→a38fc16 added 8 with 0 removed
+   (matches D-043's own scope), a38fc16→c87178b added/removed 0
+   (D-044 was presentation-only, exactly as its own decision record
+   states), c87178b→cac333f added the 2 D-045 tests with 0 removed. This
+   independently confirms STATUS.md's own existing D-045 note ("848
+   passed, +2 new tests vs D-044's 846, none deleted/weakened"). **No
+   commit, reflog entry, stash entry, or GitHub PR/issue comment/review
+   anywhere in this repository's history produced a count of 850** —
+   `origin/main` is still exactly the `8c1782f` base this branch started
+   from, so there is no other merged work that could account for it
+   either. The number cannot be corroborated from any artifact this
+   investigation could check; it is not treated as evidence of a real
+   regression, since the only verifiable chain is monotonic with zero
+   deletions at every step. Current HEAD (after this decision's own 3
+   new grounding tests) collects **851**.
+6. **Quality gates:** `ruff check .` clean, `uv run mypy src` clean (136
+   files), `uv run pytest -q` — 851 passed, 0 failed, 0 skipped/xfailed
+   (grepped for skip/xfail markers across `tests/` — none exist in this
+   suite), `uv run alembic heads` unchanged (single head, still
+   `a1c5e9f2b6d3` — no migration), `scripts/scan-tracked-tree.sh` clean.
+
+**Why:** Both were explicit, named PR #42 acceptance blockers requiring a
+real root-cause diagnosis, not documentation or reassurance — item 1-4
+because an HR-facing disclosure with no provenance check is a genuine
+production-correctness defect (an invented requirement read as if it
+came from HR's own JD), and item 5 because "no tests were removed in the
+latest diff" was, on its own, an insufficiently verified claim against a
+number the owner had independently recorded.
+
+**Reversibility:** Fully additive. `DroppedJDCriterionReason.UNGROUNDED`/
+`AgentJobDraftToolResult.ungrounded_count`/`AgentJobDraftView.
+ungrounded_count` are new enum member/fields alongside the existing
+`PROHIBITED`/`prohibited_count` ones — no existing field removed or
+renamed. `_is_requirement_grounded_in_jd_text`/`_grounding_tokens` are
+new, narrowly-scoped pure functions in `meyar.agent.service`. Template/
+headline changes are the same additive notice pattern already
+established for `prohibited_count`. No schema/migration change.
+
+## D-047 — Local Ollama transport-egress P0: httpx `trust_env` proxy
+bypass of the loopback boundary
+
+**Date:** 2026-09-05
+**Decision:** Closes an internal-audit-reproduced P0 with the smallest
+security-focused change, no new branch (same task branch as D-046, PR
+#42 not yet accepted/merged), no API/scoring/evidence/agent/UI/migration/
+deployment change.
+
+1. **Root cause.** `require_loopback_url` validates `MEYAR_OLLAMA_BASE_URL`
+   as a logical URL string only. Every `httpx.AsyncClient` constructed for
+   Ollama traffic (`OllamaLLMProvider.health`, `OllamaLLMProvider._chat`,
+   `OllamaEmbeddingProvider.embed`) previously used httpx's default
+   `trust_env=True`. Verified directly against installed httpx 0.28.1
+   internals (`Client.__init__`'s `allow_env_proxies = trust_env and
+   transport is None`, feeding `_get_proxy_map`/`_mounts`): with
+   `trust_env=True` and `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` set in the
+   process environment and `NO_PROXY` absent or not covering `127.0.0.1`,
+   httpx populates `Client._mounts` with a proxy-routed transport that
+   `_transport_for_url` selects **ahead of** the client's own transport —
+   including an explicitly injected one — for a request whose logical URL
+   is still `127.0.0.1`. So a configured loopback endpoint could still be
+   silently re-routed to an attacker-controlled proxy purely by process
+   environment configuration, with no code-level indication. This is a
+   distinct defect from (and sits below) the existing logical-URL
+   loopback check, which cannot detect it — confirmed empirically:
+   `httpx.AsyncClient(timeout=5.0)` under `HTTP_PROXY` set nonempty
+   `_mounts`; `build_local_only_async_client(timeout=5.0)` under the same
+   env has empty `_mounts`.
+2. **Fix.** Added one shared construction boundary,
+   `meyar.llm.loopback.build_local_only_async_client`, used by all three
+   sites above (previously each called `httpx.AsyncClient(...)` directly).
+   It passes `trust_env=False` (disables all environment-derived proxy
+   selection outright — does not depend on `NO_PROXY` being correct) and
+   explicit `follow_redirects=False` (httpx's own default, made explicit
+   so a redirect response can never carry a request outside the
+   boundary). `OllamaLLMProvider.health` previously built its client with
+   no transport-injection support at all (`httpx.AsyncClient(timeout=5.0)`,
+   ignoring `self._transport`); it now passes `self._transport` through
+   like `_chat` already did, both to use the shared boundary and because
+   the audit's regression-test requirement ("health/readiness path if
+   separately constructed") is otherwise untestable without live network.
+   No route, schema, scoring, evidence, agent-behavior, UI, or migration
+   change.
+3. **Regression tests** (`tests/test_ollama_transport_proxy_isolation.py`,
+   18 new tests): assert directly on the constructed `httpx.AsyncClient`'s
+   internal `_trust_env`/`_mounts` state — not merely `request.url.host`,
+   which the audit correctly flagged as insufficient since the original
+   defect sits below that logical-URL layer — under `HTTP_PROXY`/
+   `HTTPS_PROXY`/`ALL_PROXY` individually, with `NO_PROXY` absent (the
+   exact audit scenario) and separately with `NO_PROXY=""`; a negative
+   control proves a naively-constructed `httpx.AsyncClient` is genuinely
+   vulnerable under the same env (mounts non-empty), so the fixed-path
+   assertions are not vacuous. Each of the three call sites (chat, embed,
+   health) is exercised end-to-end through the real provider classes
+   against `httpx.MockTransport`, under proxy env, both proving the fix
+   is actually wired in at every site and that request/response handling
+   is otherwise unchanged. Two redirect tests (one direct on the shared
+   boundary, one through `_chat`) prove a same-origin 302 is surfaced as
+   a failure/response rather than followed to an external `Location`.
+   Two tests prove the pre-existing non-loopback rejection
+   (`require_loopback_url`) still fails closed even under attacker-set
+   proxy env, i.e. the transport fix didn't weaken it.
+4. **Local-only Ollama operating contract** documented in
+   `docs/SECURITY_PRIVACY.md` ("Local-only Ollama operating contract"
+   section and an added threat-model row), explicitly distinguishing the
+   APPLICATION GUARANTEE this fix provides (loopback URL + no env-proxy
+   routing + no cross-boundary redirect, all test-verified here) from the
+   HOST/OLLAMA CONFIGURATION GUARANTEE a future deployment preflight must
+   separately verify (daemon interface binding, cloud-backed-Ollama
+   disabled, approved-model-only, release-managed model digest, host-level
+   egress denial as defense in depth) — none of which this repository's
+   test suite can check. Explicitly marked **NOT VERIFIED** in this
+   development environment; no Mac deployment tooling implemented (out of
+   this task's scope by the audit's own instruction).
+5. **Quality gates:** `ruff check .` clean, `uv run mypy src` clean (136
+   files), `uv run pytest -q` — 869 passed (851 pre-existing + 18 new),
+   0 failed, 0 skipped/xfailed, no test removed or disabled, `uv run
+   alembic heads` unchanged (single head, still `a1c5e9f2b6d3` — no
+   migration), `scripts/scan-tracked-tree.sh` clean.
+
+**Why:** The audit's own required invariant — reject non-loopback
+endpoints, ignore environment-derived proxy configuration, don't depend
+on `NO_PROXY`, don't follow cross-boundary redirects, preserve existing
+timeout/failure semantics and test transport injection — is a direct,
+narrowly-scoped security requirement with a verified reproduction path
+(installed httpx 0.28.1 internals, not a hypothetical), and the smallest
+correct fix is exactly the shared `trust_env=False` construction boundary
+the audit itself named as the expected direction, not a broader redesign.
+
+**Reversibility:** Fully additive/localized. `build_local_only_async_client`
+is a new function in `meyar/llm/loopback.py`; the three existing call
+sites now call it in place of `httpx.AsyncClient(...)` directly, with the
+same `timeout`/`transport` arguments (plus `self._transport` now honored
+in `health`, previously silently dropped) — no signature of any public
+provider method changed, no field added/removed on any schema, no
+migration. `test_no_exfiltration.py`'s docstring was updated to describe
+the now-shared construction boundary (no assertion changed). Nothing
+committed depends on any deployment-side change; the host/daemon
+operating-contract section is documentation only.
+
+## D-048 — Candidate-factuality P0: claim-specific extraction evidence and closed agent text authority
+
+**Date:** 2026-09-13
+**Decision:** Close two audit-reproduced candidate-factuality defects on
+the existing PR #42 task branch. This change does not alter JD grounding,
+duration arithmetic, deterministic scoring policy, the API, or the local
+Ollama-only model boundary.
+
+1. **Accepted-extraction boundary.** A real quote existing in the cited
+   document is necessary but no longer sufficient. Before a professional
+   fact can enter a successful `CandidateProfileVersion`, one of that
+   item's own verified quotes must contain all populated material values
+   of the fact. Skills accept the same curated aliases used by
+   deterministic matching; language proficiency, certification identity,
+   education institution/degree/field/date, and employment
+   role/employer/date/current relationships are checked when populated.
+   The existing skill/domain interval checks remain separate and their
+   arithmetic is unchanged. Failure is `CLAIM_EVIDENCE_UNSUPPORTED`,
+   making the extraction `FAILED`; it cannot become positive search/
+   scoring evidence and is not converted into `NOT_MATCHED`.
+2. **Exact deterministic guarantee and limit.** Attribution uses
+   normalized literal whole-term matching, including Azerbaijani case/
+   diacritic folding and the existing curated skill aliases. A positive
+   skill mention is rejected for explicit English constructions matching
+   `no`, `without`, and enumerated `not required/known/used/possessed/...`
+   forms. This is intentionally not a claim of general entailment,
+   paraphrase resolution, negation scope, or multilingual contradiction
+   detection. Ambiguous/non-literal support fails closed as unverified.
+3. **Agent authority boundary.** `AgentDecision` no longer contains a
+   model-authored `message`. `FINAL_ANSWER`/`CLARIFY` select a closed
+   `AgentResponseCode`, and the server maps it to bounded non-candidate
+   copy. Candidate facts are rendered only from validated, tenant-scoped
+   tool results or server templates over model-selected `GroundedFact`
+   ids. The deterministic evaluator remains the only numeric authority;
+   hiring remains a human decision, represented by fixed server copy.
+4. **History boundary.** Newly persisted assistant turns carry an explicit
+   `SERVER_VALIDATED` text-authority marker. Re-rendering trusts stored
+   assistant text only with that marker; legacy unrestricted text falls
+   back to the deterministic outcome message, so an old model-authored
+   candidate claim cannot reappear after refresh.
+5. **Verification.** The focused extraction/evidence/search/evaluation/
+   agent/UI/prompt suite passes 216 tests. Full gates: `ruff check .`
+   clean, `mypy src` clean (136 source files), `pytest -q` 887 passed with
+   no failures/skips/xfails, one Alembic head (`a1c5e9f2b6d3`), and the
+   tracked-tree scan clean. No test was removed, skipped, xfailed, or
+   weakened.
+
+**Why:** The former evidence check proved only that a quote existed, so
+`Python` plus an `Advanced Excel` quote could be accepted and later
+deterministically match Python. Separately, schema-valid zero-tool
+`FINAL_ANSWER` prose could state invented experience and a hiring
+recommendation, then be rendered and persisted. Both violated the product
+authority model at the point where untrusted model output became accepted
+state or HR-facing text.
+
+**Reversibility:** The extraction checks and shared inverse alias view are
+localized deterministic validation. The agent schema replacement is
+closed and explicit; persisted JSON remains migration-free because legacy
+rows are handled conservatively at render time. No model, external
+service, database column, public route, scoring rule, or UI style changed.
+
+## D-049 — Current factual authority is evidence-valid now, not merely `COMPLETED`
+
+**Date:** 2026-09-14
+**Decision:** Close the remaining issue #44 candidate-factuality P0s on
+the existing PR #42 branch without changing APIs, duration arithmetic,
+JD criterion grounding, or immutable stored provenance.
+
+1. **Central contradiction policy.** The claim-support primitive now
+   applies its deterministic positive-term check to every populated
+   material term, not skills alone. It rejects bounded, explicit English
+   `no`, `without`, nearby `not`, and supported auxiliary-plus-negative
+   verb constructions for skill, language/proficiency, certification,
+   education, employment, project, domain, skill-experience, and
+   domain-experience facts. Existing normalization, skill aliases, domain
+   aliases, verbatim-location checks, and interval rules are reused. This
+   is deliberately lexical and fail-closed, not general entailment.
+2. **Linked employment attribution.** A skill/domain experience item's
+   accepted quote must support its subject and interval as before and,
+   when `employment_index` is present, the referenced employment's
+   material role/employer relationship too. A valid index alone cannot
+   attach a Globex Python period to an Acme role or contribute misleading
+   linked duration/context.
+3. **Current-read authority backstop.** `meyar.services.profile_authority`
+   rebuilds the exact canonical professional view and runs the current
+   evidence validator before a `COMPLETED` profile is consumed. Search,
+   deterministic evaluation (including cached-evaluation reuse), agent
+   profile/evidence tools, library/detail/search/ranking presentation, and
+   evaluation-history presentation use that shared boundary. Unsupported
+   legacy facts are unavailable; they are never translated to
+   `NOT_MATCHED`, and stored profile/evaluation rows are not rewritten.
+4. **Identity value attribution.** `meyar.services.identity_authority`
+   similarly revalidates current identity content for HR presentation.
+   Email must match normalized value, phone must match normalized digits,
+   and all material normalized name tokens must occur in one field-owned
+   accepted quote. Identity remains absent from all suitability inputs.
+5. **Agent display authority.** A model-authored JD title can remain only
+   as editable review data when source-bound to the HR's JD; otherwise it
+   becomes `Vakansiya qaralaması`. The assistant headline is fixed server
+   copy, so title text cannot be persisted as `SERVER_VALIDATED` prose or
+   replayed from history. Raw `evidence_topic` is never returned for
+   display; it selects a validated fact title, and unresolved topics use
+   generic server-owned copy. Inspection found no equivalent remaining
+   `AgentDecision` free-text route to live/persisted assistant prose.
+6. **Known product degradation unchanged.** One unsupported claim still
+   makes the entire extraction version `FAILED`, temporarily withholding
+   otherwise valid facts. This is **SAFE BUT PRODUCT-DEGRADING** and is
+   intentionally left for later issue #44 remediation; no partial-claim
+   persistence/recovery was introduced in this P0 closure.
+7. **Verification.** Focused adversarial/existing-flow suite: 186 passed.
+   Full gates: `ruff check .` clean; `mypy src` clean (138 source files);
+   `pytest -q` 910 passed with no failures/skips/xfails; one Alembic head
+   (`a1c5e9f2b6d3`); tracked-tree scan clean.
+
+**Why:** A stored status described historical processing, not current
+authority. Narrow skill-only contradiction handling, index-only employment
+links, location-only identity evidence, and two model-authored display
+fields each allowed unsupported content to cross that boundary.
+
+**Reversibility:** Two small read-time authority services centralize the
+existing validators; consumer changes are call-site substitutions and
+presentation redaction only. No migration, stored-row mutation, public
+schema change, scoring-policy change, or duration-policy change.
+
+
+## D-050 — Canonical context and durable factual authority (issue #44)
+
+**Date:** 2026-09-14. **Status:** Local corrective implementation; PR #42
+remains not accepted. Supersedes D-049's claim of complete consumer coverage.
+
+**Problem:** The independent audit at `7b748f4` reproduced cropped-quote
+negation bypasses, overbroad negation, unproved current state, split domain
+interval support, wrong employment periods, unauthorized legacy embedding
+input, identity substring manufacture, and replay of older unsafe
+`SERVER_VALIDATED` text. The shared search fixture helper also repaired
+unsupported evidence silently, masking invalid positive fixtures.
+
+**Decision:**
+- Resolve evidence against its canonical page/block and every matching
+  quote occurrence. Claims still need a quoted material term, but contradiction
+  checks include up to 200 normalized source characters on each side.
+  Ambiguous occurrences must all support the claim. English local no/not/without
+  rules use token boundaries and stop at conjunction/clause boundaries;
+  notable/notification and negation of another conjoined subject remain valid.
+- Current state needs a positive marker in the attributed relationship,
+  including when a textual end date triggers the existing duration parser.
+  Ended/negative/closed relationships cannot authorize extending to as-of.
+  Domain subject and all interval fields must share positive evidence;
+  skill/job attribution additionally checks the referenced employment's
+  calendar bounds. Duration arithmetic itself is unchanged.
+- Embedding generation and reuse call the same profile authority as search
+  and evaluation. Folder readiness validates profile and identity; demo
+  readiness uses authorized profiles and completed evaluations.
+- Identity requires complete canonical email tokens, one coherent formatted
+  phone occurrence, and material name tokens with canonical boundaries.
+  Identity remains presentation-only.
+- New assistant display text persists `text_authority_version` equal to
+  `candidate-factuality-v2` alongside `SERVER_VALIDATED`. Only that combination
+  permits verbatim replay. Older/missing versions use fixed outcome copy.
+  This is an additive JSON field, not a database migration or historical
+  backfill; reads never mutate historical provenance.
+- Persistence test helpers preserve supplied claims/evidence exactly.
+  `synthetic_evidence(...)` is an explicit positive-fixture authoring helper,
+  never an automatic repair. Adversarial tests supply independent canonical
+  source and evidence, and exercise actual persisted consumers.
+
+**Limits:** Bounded lexical validation is not NLI. Unenumerated multilingual
+negation, distant context, complex grammatical scope and arbitrary semantic
+paraphrases are not inferred. Ambiguity may reject legitimate claims. One
+unsupported fact still rejects the whole profile: SAFE BUT PRODUCT-DEGRADING.
+No partial-claim persistence, JD binding, API or duration redesign is included.
+
+**Verification:** 59 new regressions; the focused new/identity/legacy-consumer
+suite passed 86 tests. Before correction, the original 37-case reproduction
+had 19 failures and 18 passes. Final `ruff check .` passed; `mypy src` passed
+for 138 source files; `pytest -q` passed 969 tests, with no skips or xfails.
+Alembic retains the single `a1c5e9f2b6d3` head. Tracked-tree scan and diff
+whitespace checks passed. AST comparison confirmed all 204 existing test
+functions in modified test files retain their assertions and decorators.
+An additional probe executed the actual `86d3e3f` parent JD-headline renderer
+and verified its unsafe output is suppressed on current history replay,
+without changing the stored turn. Model/provider tests use synthetic data
+and local fakes; no live model or Target-Mac benchmark was run.
+
+## D-051 — Deterministic factual-authority scope completion (issue #44)
+
+**Date:** 2026-09-14. **Status:** Local corrective implementation; PR #42
+remains open and unaccepted.
+
+**Problem:** An independent audit of `6d12c0c` found five remaining bounded
+scope defects in D-050's token/span validator: `or` unconditionally terminated
+negation before a second coordinated subject; newline normalization erased a
+structural boundary; `not only` was treated as genuine negation; a repeated
+short quote could not distinguish historical negative and later positive
+occurrences; and the phone token grammar allowed a period to join separate
+numeric fragments.
+
+**Decision:**
+- Keep the existing token/span architecture. `or` stays inside a governing
+  `no`/`without`/`not` phrase, while ordinary positive `and`, contrastive
+  `but`/`however`, sentence punctuation, semicolons, and newlines terminate
+  scope. This is a bounded English lexical rule, not general NLP.
+- Treat `not only ... but also ...` as non-negative without exempting ordinary
+  `not` assertions such as `Python is not used`.
+- Preserve newlines during canonical context matching and polarity analysis;
+  flexible whitespace still allows a model quote to bind to the cited source.
+- Retain D-050's fail-closed repeated-occurrence invariant because
+  `EvidenceRef` contains page, block, and quote but no character offset. Every
+  identical occurrence of an ambiguous short quote must agree. A longer unique
+  quote can identify and authorize the later positive occurrence in the same
+  block; the validator never guesses which short occurrence was intended.
+- Define phone support as one complete phone-like lexical occurrence composed
+  of digit groups, optional leading `+`, balanced digit parentheses, spaces,
+  and hyphens. Periods, words, commas, extensions, and additional digits cannot
+  be concatenated into the requested identity. Identity remains presentation-
+  only.
+
+**Scope:** No schema/migration, JD source binding, API, duration arithmetic,
+deployment, scoring, search, agent orchestration, or persistence behavior was
+changed. The shared current-authority boundary automatically applies the
+correction to extraction, embedding, search, evaluation/cache reuse, ranking,
+agent tools, library/detail views, and assistant history presentation.
+
+**Verification:** Direct scope/idiom/boundary/repeated-occurrence/phone tests
+and a database-backed all-consumer quarantine regression were added. The final
+gate counts are recorded in the associated local commit report.
+
+## D-052 — Coordinated-negation and phone-occurrence authority completion (issue #44)
+
+**Date:** 2026-09-15. **Status:** Local corrective implementation; PR #42
+remains open and unaccepted.
+
+**Problem:** The independent audit of `12e218f` found that D-051 treated every
+`and` as a scope boundary, allowing the second member of `no`/`without`/
+`does not use` coordination to become positive authority. `neither ... nor ...`
+had no explicit negative-governor state. The phone occurrence grammar also
+treated two arbitrary numeric fragments separated by a space or hyphen as one
+phone token.
+
+**Decision:**
+- Preserve the token/span and canonical-context architecture. A small lexical
+  state now activates only for `no`, `without`, `neither`, and the supported
+  `do`/`does`/`did not use` construction. While active, `and`, `or`, and `nor`
+  coordinate members; they neither create negative scope in a positive list
+  nor end an existing negative list. Periods, semicolons, independent newlines,
+  `but`, and `however` reset the state.
+- Keep ordinary `not` local to its own coordinated member and retain the
+  existing post-subject `is/was/are/were not` check. `not only ... but also ...`
+  remains explicitly non-negative.
+- Phone attribution now filters complete canonical phone-token matches by
+  shape. A plain uninterrupted digit occurrence is coherent; formatted values
+  require an international/local prefix or at least three groups. Two arbitrary
+  fragments such as `1234 56789` or `1234-56789` cannot be joined, including
+  when a cropped evidence quote omits the canonical `Reference` context.
+
+**Scope:** No schema/migration, JD source binding, API-first work, duration
+redesign, deployment, scoring, ranking, search-planner, or embedding-identity
+feature was introduced. The shared current-authority boundary applies the
+correction to existing consumers only.
+
+**Verification:** The pre-fix focused reproduction failed 12 cases (the second
+`and` member, all `neither`/`nor` members, and both split-number forms). The
+corrected direct matrix passed 79 tests; the broader extraction/identity/
+embedding/search/evaluation/ranking/agent/UI suite passed 362 tests. Full gates:
+Ruff clean; mypy clean for 138 source files; 1032 pytest tests passed with no
+failures, skips, or xfails; Alembic retained the single `a1c5e9f2b6d3` head.
+
+## D-053 — Phone identity requires canonical contact authority (issue #44)
+
+**Date:** 2026-09-15. **Status:** Local corrective implementation; PR #42
+remains open and unaccepted. Supersedes D-052's treatment of every uninterrupted
+digit token as inherently phone-coherent.
+
+**Problem:** The independent audit of `2df8ea9` showed that a model-extracted
+phone value `123456789` was accepted from canonical `Reference`, `Invoice`,
+`Employee ID`, and `Account` occurrences containing those digits. The untrusted
+field name `phone` supplied the only phone meaning; canonical source context did
+not.
+
+**Decision:** Classify each complete numeric occurrence using its canonical
+block, including context outside a cropped evidence quote. Explicit bounded
+non-phone identifier labels (`Reference`/`Ref`, `Invoice`, `Employee ID` or
+number, `ID`, `Account`/`Acct`, and `Code`) reject first. Otherwise phone
+authority requires either conventional syntax (leading `+`, a balanced numeric
+parenthesis group, or at least three space/hyphen-separated digit groups) or a
+directly adjacent bounded phone/contact label (`phone`, `mobile`, `telephone`,
+`tel`, `telefon`, `mobil`, `contact number`, or Azerbaijani `əlaqə nömrəsi`).
+The label is canonical evidence, not the model-produced schema field name.
+
+An uninterrupted bare digit token with no trustworthy contact context now
+fails closed. This can suppress a legitimate unlabeled phone number; that is an
+accepted bounded limitation because canonical provenance cannot distinguish it
+from an arbitrary identifier without guessing. Repeated cropped occurrences
+retain D-050's fail-closed all-occurrences rule.
+
+**Scope:** Shared identity evidence/authority and synthetic regressions only.
+No professional claim/negation semantics, schema/migration, JD source binding,
+API-first work, duration arithmetic, deployment, scoring, ranking, search, or
+stored-row mutation changed. Historical identity rows remain immutable and are
+suppressed on read when they fail the current contract.
+
+**Verification:** Direct positive/negative and cropped-canonical phone matrices,
+plus a database-backed legacy `COMPLETED` identity presentation regression, were
+added. Final gate counts are recorded in the associated local commit report.
+
+## D-054 — JD source-fragment and classification-independent prohibition boundary (issue #44)
+
+**Date:** 2026-09-15. **Status:** Local corrective implementation; PR #42
+remains open and unaccepted.
+
+**Pre-fix reproduction at exact accepted HEAD `8798c6a`:** the production
+`_dispatch_draft_job_criteria` boundary, driven with synthetic model drafts,
+accepted `Python Kubernetes` from `Python required`; accepted `Python` while
+silently discarding model-authored `min_years=20`; exposed `Female` classified
+as `OTHER` as ordinary unsupported (`prohibited_count=0`); converted `5 years
+of Python experience` into general `EXPERIENCE=5` plus bare `Python`; and
+returned no item at all when the model omitted `Candidate must be willing to
+travel`.
+
+**Root causes:** D-046 checked only whether half of a requirement's words
+occurred anywhere in the JD. It had no attributable source fragment, no
+field/kind/modality/number/scope binding, discarded `min_years` for non-general
+experience kinds, entered the `OTHER` branch before the `CriterionIn` denylist,
+and never reconciled source requirements against model output. The review form
+also cannot round-trip `required_level`, `SKILL_EXPERIENCE`, or
+`DOMAIN_EXPERIENCE`, so accepting those drafts would erase or weaken semantics
+at confirmation.
+
+**Decision:**
+- Each `JDDraftCriterionItem` now carries `source_text`. The service locates it
+  inside a bounded source requirement span and validates all material subject
+  and scope tokens in both directions, with only the project's established
+  case/diacritic and bounded Azerbaijani suffix tolerance. Kind cues,
+  MUST_HAVE/PREFERRED modality, numeric values, duration scope, and language
+  level must be attributable to that same fragment. One matching token is
+  never sufficient. Model-authored weights are removed; accepted drafts use
+  the existing deterministic default `1.0`.
+- General `EXPERIENCE` accepts an attributed number only for explicitly total/
+  general experience or a subject-free duration phrase. A named-skill/domain
+  duration cannot become total experience or bare presence. Numbers cannot be
+  borrowed from another source span. No duration arithmetic changed.
+- `find_prohibited_term` runs over the raw JD and every model-produced
+  requirement/source/level before `OTHER` or any other kind branch. Raw
+  prohibited text is represented count-only. The post-confirmation carry-
+  through fields are filtered through the same denylist and never score.
+- Source spans are reconciled after draft validation. Every detected span is
+  accepted/scorable, visible unsupported/unscored, prohibited count-only, or
+  visible needs-human-review. A model omission therefore cannot erase it.
+- The current review form cannot losslessly round-trip language proficiency or
+  skill/domain-duration kinds. Those validly source-bound requirements are
+  kept as source-verbatim unsupported/unscored items instead of being silently
+  persisted as weaker criteria. General numeric experience remains supported.
+  This is compatibility enforcement, not the deferred duration-policy/UI
+  redesign.
+- Drafting still performs no mutation. Only editable accepted/scorable rows
+  reach the existing `POST /ui/jobs` confirmation path and deterministic
+  ranking. Unsupported/review items remain visible before and immediately
+  after confirmation but never enter `JobCriteriaVersion`; prohibited items
+  never render verbatim. HR copy contains no internal reason enum.
+
+**Verification:** 17 focused production-boundary adversarial/positive tests
+plus database-backed agent/UI confirmation coverage pass; the combined agent
+service/UI/source-binding suite passes 105 tests. Full gates: Ruff clean; mypy
+clean for 138 source files; 1060 pytest tests pass with no failures, skips, or xfails; Alembic and
+tracked-tree results are recorded in the final local report. No migration,
+API-first work, deployment work, score arithmetic, candidate factual authority,
+or duration arithmetic changed.
+
+**Bounded limitations:** This is deterministic lexical/structural attribution,
+not NLI. Implicit modality, word-form numbers, complex multi-requirement prose,
+and unrecognized paraphrases may fail closed into human review. A partial
+source quote does not authorize an entire multi-requirement sentence; the
+uncovered source span remains visible for review. These are safe but potentially
+product-degrading P1s, not silent acceptance paths.
+
+## D-055 — Server-owned canonical JD requirement spans supersede model source authority (issue #44)
+
+**Date:** 2026-09-15. **Status:** Local corrective implementation atop exact
+audit HEAD `f4a728c`; PR #42 remains open and unaccepted.
+
+**Reproduced P0:** D-054 still let the model choose the effective authority
+boundary. `_source_span_index` accepted a model substring inside a larger
+source occurrence, while bidirectional prefix/token matching equated distinct
+subjects. Consequently `5 years Python experience required` plus model
+`source_text="Python experience required"` produced scorable bare Python;
+Java/JavaScript, C/C++, and SQL/NoSQL collided; `Banking experience preferred`
+could become plain SKILL; ordinary `sağlamlığı`/`əlilliyi` inflections bypassed
+the raw denylist; and omitted `Python is a plus` had no canonical span to
+reconcile.
+
+**Decision:**
+- The server deterministically segments the raw JD before inference into
+  occurrence-specific `RequirementSpan` objects with a stable per-operation id,
+  start/end offsets, exact original slice, and normalized representation.
+  Conservative sentence/newline/semicolon boundaries are used; a same-sentence
+  conjunction splits only when every side has its own explicit modality.
+  Otherwise the complete clause is retained for human review.
+- The model receives those ids and references `span_id`. Its retained
+  `source_text` is debugging/usability data only. Unknown/missing ids cannot
+  score, a repeated occurrence is reconciled by id rather than first text
+  match, and one occurrence authorizes at most one criterion.
+- Complete-span semantics, not prefix overlap, determine modality, numeric and
+  proficiency qualifiers, general versus skill/domain-qualified experience,
+  and kind compatibility. Complete subject identity is exact after only the
+  accepted deterministic normalization and curated aliases (`py`/Python,
+  `k8s`/Kubernetes, Postgres/PostgreSQL). Distinct subjects such as Java/
+  JavaScript, C/C++, SQL/NoSQL, and Go/Django never authorize one another.
+  Unordered multi-token equivalence is not used.
+- Skill/domain-specific experience and language proficiency remain visible as
+  UNSUPPORTED/UNSCORED when the current review form cannot round-trip them;
+  incompatible/weakened or ambiguous forms are NEEDS_HUMAN_REVIEW. General
+  explicitly total experience remains scorable. Scoring arithmetic and the
+  accepted candidate factual-authority contracts are unchanged.
+- Every canonical material occurrence receives one explicit terminal state:
+  SCORABLE, UNSUPPORTED, PROHIBITED, or NEEDS_HUMAN_REVIEW. Omission therefore
+  cannot delete a requirement. Raw-JD and post-parse prohibition remain
+  independent of model kind. Azerbaijani protected lexeme families add bounded
+  consonant-mutation forms without generic substring matching.
+- The server stores the pending canonical draft only in the authenticated,
+  tenant-scoped conversation. The confirmation form submits `draft_id` and
+  span ids; `POST /ui/jobs` resolves that server authority and accepts only an
+  unchanged subset of its SCORABLE rows. Browser edits/additions/duplicates and
+  replay are rejected. Unsupported/review text is reconstructed from server
+  state, never trusted from hidden fields. Only after this check are the
+  existing Job/CriteriaVersion/ranking services called.
+- HR guidance now says a personal/sensitive requirement was detected, cannot
+  be used for ranking, and should be removed or replaced by a job-related
+  professional requirement. Internal reason codes and prohibited source text
+  are not rendered as system guidance or persisted into scoring structures.
+
+**Explicit deferrals:** durable unsupported/review-state persistence across a
+later reload/re-rank and natural-language requested-result-count (`top 10`)
+handling remain NOT IMPLEMENTED. No deployment/API-first work, evaluator
+schema expansion, duration arithmetic, or candidate-authority redesign is in
+this correction.
+
+## D-056 — Dedicated idempotent agent confirmation and bounded residual review (issue #44)
+
+**Date:** 2026-09-15. **Status:** Local corrective implementation atop exact
+audit HEAD `4b900567f289c57b027b83e8ae04476dad5d98dc`; PR #42 remains open
+and unaccepted. Supersedes D-055 only where D-055 routed confirmation through
+`POST /ui/jobs`, accepted a scorable subset, and deleted consumption state.
+
+**Reproduced P0/P1:** The browser-owned `from_agent_draft` field selected
+whether `/ui/jobs` enforced canonical authority; deleting it converted agent
+confirmation into unrestricted manual creation. Consumption then removed the
+only draft link before inline ranking, so a ranking failure reported an error
+after Job/version/audit state had committed and could not be retried through
+the original operation. The bounded modality parser also treated arbitrary
+`is plus` material as preference, and standalone `Python` produced no span.
+
+**Decision:**
+- Manual creation and agent confirmation are distinct operations. The normal
+  review form posts to `POST /ui/agent/drafts/{draft_id}/confirm`; its path and
+  authenticated context, never a hidden mode flag, select the protected flow.
+  `/ui/jobs` rejects agent provenance instead of ignoring it.
+- Confirmation locks the tenant/session conversation row, resolves only its
+  stored canonical draft, and requires the exact unchanged SCORABLE set.
+  Value/subject, kind, modality, duration, weight, span identity, insertion,
+  duplication, deletion, and unsupported-to-scorable conversion all fail
+  before Job/version/audit persistence.
+- The same transaction replaces `pending_job_draft` with a durable
+  `confirmed_job_draft` link containing the resulting Job/version ids and the
+  safe unscored display lists. Replay resolves that object idempotently. The
+  row lock makes concurrent confirmations serialize; exactly one creates the
+  canonical Job/version. Ranking begins only after that transaction commits.
+  A later ranking failure explicitly says confirmation succeeded and offers
+  the existing rank action as a retry, without duplicating confirmed state.
+- English `<subject> is a plus` is recognized only as a full bounded idiom
+  whose subject belongs to a small reviewed professional taxonomy shared with
+  curated skill aliases. Trailing VAT/bonus/arithmetic material is not
+  preference authority. Exact standalone recognized professional subjects,
+  bullets, and existing short requirement cues receive a canonical span but
+  no invented modality; they remain NEEDS_HUMAN_REVIEW. Ordinary descriptive
+  prose remains outside reconciliation.
+- A zero-scorable draft retains its source disclosures but renders no
+  confirm/rank action and explains in HR language that clarification/review is
+  required.
+
+**Schema and scope:** No migration. The existing bounded conversation JSON
+holds the durable confirmation link. Candidate factuality, canonical span
+offset/subject/type authority, scoring arithmetic, and evaluator behavior are
+unchanged. Skill/domain-duration scoring, language-level scoring, durable
+unsupported/review display across arbitrary later reload/re-rank, natural-
+language top-K, API-first/deployment work, and the concrete mixed unsupported
+HR example's missing evaluator capabilities remain explicitly deferred.
+
+## D-057 — Zero-authority model source hints and independent confirmation identity (issue #44)
+
+**Date:** 2026-09-15. **Status:** Local corrective implementation atop exact
+audit HEAD `155bc8f7d89a95b58b1e5862b68a184850510cd2`; PR #42 remains open
+and unaccepted. Supersedes D-056 only where it treated bounded conversation
+JSON as the durable confirmation identity.
+
+**Reproduced P1s:** `_build_criterion_from_draft_item` passed model-authored
+`requirement`, `source_text`, and `required_level` into prohibited-term policy
+before resolving the server's canonical span. Thus a `Female required`
+`source_text` hint on canonical `Python required` manufactured a prohibition,
+suppressed Python, and incremented `prohibited_count`. Separately, the only
+confirmed draft→Job/version lookup walked bounded `AgentConversation.turns`;
+reset/truncation removed the otherwise committed idempotency mapping.
+
+**Decision:**
+- `source_text` remains an optional/default-empty model usability hint, but no
+  policy branch reads it. Prohibition is derived from raw JD and server-owned
+  canonical spans only; complete-span binding continues to own subject, kind,
+  modality, number/duration, proficiency, terminal state, and scoring
+  eligibility. The valid/missing and fabricated-hint matrix therefore has the
+  same result as the canonical span, while a real canonical prohibition cannot
+  be hidden by a safe-looking hint.
+- A dedicated `agent_draft_confirmations` table stores only confirmation
+  identity: tenant, canonical draft id, owning browser-session id, Job id,
+  criteria-version id, fixed `CONFIRMED` status, and timestamp. Unique
+  constraints enforce one row per tenant/draft and one confirmation per Job
+  and criteria version; foreign keys bind the server-owned objects.
+- Confirmation locks the session conversation as before, checks the new table
+  before pending transcript state, validates the unchanged canonical draft,
+  then atomically writes Job, criteria version, audit event, independent
+  confirmation row, and optional transcript UI state. Ranking remains a
+  separate post-commit step. Replay resolves the independent row even after
+  transcript reset and uses transcript disclosures only when their ids agree;
+  the independent record always wins identity disagreements.
+- Lookup requires the authenticated tenant and exact browser session as well
+  as draft id. Another tenant/session sees safe not-found behavior. The
+  existing conversation row lock serializes ordinary same-session concurrency,
+  while database uniqueness fails closed if an abnormal competing write
+  bypasses that serialization.
+
+**Schema and scope:** Migration `c7e91a4d2f60` adds only the independent
+identity table, indexes, foreign keys, fixed-status check, and unique
+constraints; no JD or candidate content is duplicated. D-055 canonical span
+segmentation and all accepted candidate factual-authority logic are unchanged.
+Skill/domain-duration scoring, language-level scoring, natural-language top-K,
+full durable unsupported/review product history, API-first work, and deployment
+remain explicitly deferred.
+
+## D-058 — Final criterion/workflow parity and bounded top-K (issue #44)
+
+**Date:** 2026-09-16. **Status:** Local corrective implementation on
+`feat/agent-product-ux-jd-matching`; PR #42 remains open and unaccepted.
+
+**Root cause:** The deterministic evaluator already supported attributable
+skill/domain intervals, but the canonical JD dispatch deliberately routed
+`SKILL_EXPERIENCE`, `DOMAIN_EXPERIENCE`, and any `required_level` to
+UNSUPPORTED because the review form could not round-trip them. The same seam
+kept unsupported/review disclosures only in bounded transcript state, had no
+vacancy result-count contract, and resolved UI dates from unconfigured
+`date.today()`. Language evaluation compared only exact strings and treated a
+missing level as partial evidence.
+
+**Decision:**
+- Canonical span binding now admits the three already-defined semantic shapes
+  after exact subject/scope/modality/number/level validation. Confirmation
+  revalidates kind, value, modality, `min_years`, `required_level`, weight,
+  evidence policy, and review policy. Draft weights remain system-owned `1.0`.
+- Skill duration unions attributable item-owned intervals, never employment
+  duration, and additionally requires each interval to fit its linked
+  employment occurrence. Domain presence without a numeric threshold matches
+  only explicit accepted domain evidence; numeric domain duration follows the
+  same attributable/overlap-safe rules. Missing or incompatible evidence is
+  UNKNOWN.
+- CEFR has one fixed ordering (`A1 < A2 < B1 < B2 < C1 < C2`). A lower CEFR
+  level is NOT_MATCHED, an equal/higher level MATCH, missing level UNKNOWN,
+  and incompatible scales UNKNOWN. Non-CEFR labels compare only by exact
+  normalized equality.
+- `JobCriteriaVersion` now durably stores safe unsupported/review disclosures,
+  effective `result_limit`, and whether the agent workflow presents eligible
+  results only. Migration `6f4c2a9d8e10` backfills `[]`, `[]`, `20`, and false.
+  Prohibited text is not stored. Reload/re-rank reads the immutable version.
+- Result-count phrases are parsed separately from requirement spans. Default
+  is 20 and the server bounds explicit intent to 1–100. Count affects only
+  presentation truncation. Agent-confirmed vacancies present only
+  STRONG_MATCH/POTENTIAL_MATCH results; API/manual historical ranking retains
+  its prior all-fit-band behavior. Scores and MUST_HAVE/PREFERRED policy are
+  unchanged.
+- `MEYAR_BUSINESS_TIMEZONE` (default `Asia/Baku`) owns UI date resolution.
+  Search, agent turns, confirmation, and re-rank resolve one date at their
+  application boundary and pass it explicitly. Deterministic scoring services
+  still have no clock access.
+- Evaluator semantics materially changed, so provenance/cache identity moves
+  from `meyar-policy-v1` to `meyar-policy-v2`; scoring arithmetic remains
+  `meyar-score-v1`. Explanations now persist and display the evaluator's
+  criterion-level evidence conclusion, while internal reason codes remain
+  hidden from normal HR UI.
+
+**Unchanged:** candidate factual authority, canonical RequirementSpan and
+prohibited policy, confirmation idempotency/tamper/tenant/concurrency guards,
+ranking retry, identity exclusion, local-only candidate AI, and deterministic
+score arithmetic. No API-first or deployment work is included.
+
+## D-059 — Primary vacancy browser-flow typed boundary and protected review (issue #44)
+
+**Date:** 2026-09-16. **Status:** Local corrective implementation on exact
+audit base `dea50267c2936d2538dae305d20b6208c149b926`; PR #42 remains open
+and unaccepted.
+
+**Reproduced root cause:** The real browser path did call the configured local
+Ollama provider. Its JSON-Schema mode failed before inference because the
+configured model/runtime could not compile the schema vocabulary. In plain
+JSON mode the same provider exposed the second boundary mismatch: it could
+still emit legacy `EXPERIENCE`/`SKILL + min_years`, incomplete `LANGUAGE`, a
+wrong-bucket domain item, and a top-K `OTHER` item. The application accepted
+only the new typed contract, so valid source occurrences never reached the
+review UI and the entire turn collapsed to a generic draft failure.
+
+**Decision:**
+- Ollama JD drafting uses its supported JSON-output mode, followed by the
+  existing strict Pydantic validation and bounded repair attempt. Runtime
+  configuration accepts only `ollama`; no fake or deterministic provider can
+  be selected silently. Provider unavailability still fails visibly.
+- A bounded application adapter resolves every model item through its exact
+  server-owned `RequirementSpan`, derives only fields already present in that
+  occurrence, and then runs the unchanged canonical authority validator.
+  It maps skill duration, domain experience, and language level onto the D-058
+  typed contract; unsafe generic, mismatched, invented, or ungrounded shapes
+  continue to fail closed. A model echo of top-K remains workflow metadata,
+  never a criterion.
+- An implicit bounded CEFR-language occurrence has no invented modality. It
+  is rendered as a supported human-review item. HR may choose only the
+  server-declared required/preferred field; subject, level, span identity, and
+  professional semantics remain server-owned. Confirmation is unavailable
+  until that ambiguity is resolved and continues through the protected draft
+  endpoint.
+- The review visibly presents scorable rows, review-required rows, and result
+  count. Ranking exposes criterion evidence and replaces the post-confirm URL
+  with a stable authenticated GET route so reload preserves the confirmed
+  semantics and disclosures. The existing `Namizədlər` header correctly
+  targets `/ui/library`; no `/ui/candidates` alias is added.
+
+**Unchanged:** candidate/JD factual authority, prohibited filtering,
+tenant/session isolation, confirmation tamper protection and idempotency,
+deterministic evaluator/date/top-K semantics, score arithmetic, and local-only
+AI. No evaluation-date input, API-first work, deployment work, push, or merge
+is included.
+
+## D-060 — Source-bound AZ/EN semantic requirements and shared search parity (issue #44)
+
+**Date:** 2026-09-17. **Status:** Local corrective implementation on exact
+audit base `1aed40ef66df563f05b1782e9861909176c77fa7`; PR #42 remains open
+and unaccepted.
+
+**Root cause:** D-059 still let the small local model determine too much of
+the material shape. Canonical spans were coarse for ordinary Azerbaijani,
+ASCII input, paragraph lists, and unfamiliar professional vocabulary;
+normalization deleted example-specific tokens rather than bounded grammatical
+wrappers; result-count syntax was narrow; ordinary search rejected semantic
+shapes already supported by the evaluator; and routing never consulted a
+pending draft before treating a follow-up as a new search. The protected-term
+denylist also covered Azerbaijani ``milliyyət`` but not ordinary
+``vətəndaş``/citizenship language, allowing nationality to be recast as a
+scorable language.
+
+**Decision:**
+- Supported HR input is Azerbaijani and English, including safe mixed
+  professional terminology. Cyrillic/Russian fails closed before model
+  inference and before any criterion exists, with guidance to use AZ or EN.
+- The server first scans raw supported-language text for protected classes,
+  creates exact requirement occurrences, derives independently attributed
+  subject/modality/duration/proficiency slots, scans the resulting span and
+  normalized subject again, and only then constructs a typed criterion.
+  Gender/sex, age, nationality/citizenship, health, and disability policy is
+  independent of model kind, subject, modality, omission, or ``OTHER``.
+- Ollama may propose a title and legacy semantic draft, but no model-authored
+  material field is scoring authority. A server-owned ``SemanticRequirement``
+  binds every material field to offsets in one canonical source occurrence.
+  Each occurrence terminates as SCORABLE, NEEDS_HUMAN_REVIEW,
+  UNSUPPORTED_VISIBLE, or PROHIBITED; result count is separate workflow data.
+- Grammar normalization removes only bounded AZ/EN HR wrappers and preserves
+  the remaining exact professional occurrence. Curated aliases still resolve
+  true aliases; unfamiliar safe terms are not rejected for being absent from
+  the taxonomy. Strict ``>`` duration is never weakened to ``>=``.
+- Ordinary search consumes the same source-bound skill duration,
+  domain-duration, language-level, and result-count primitives and delegates
+  evaluation to the existing deterministic criterion evaluators. Unsupported
+  project-scoped meaning remains non-executable rather than becoming a softer
+  skill or semantic query.
+- Before normal model routing, a pending draft accepts only four bounded
+  server-side changes: result limit, CEFR level, duration threshold, and
+  required-to-preferred modality. Each produces a new draft identity and
+  retains the exact modification text; unsafe/ambiguous edits request
+  clarification. A simple search entered in vacancy mode produces guidance
+  and no nonsense criteria.
+
+**Unchanged:** candidate facts and evidence provenance, scoring arithmetic,
+identity exclusion, canonical confirmation binding and idempotency,
+tenant/session/auth/CSRF controls, protected review endpoints, local-only
+candidate/JD AI, and immutable confirmed versions. No migration, model-default
+change, API-first work, deployment work, push, or merge is included.
+
+## D-061 — Concept-safe protected policy and source-occurrence reconciliation (issue #44)
+
+**Date:** 2026-09-18. **Status:** Local corrective implementation on exact
+independent-audit base `23374bbc43f6a738f7a1b2117accc73fb5ec4aa2`; PR #42 remains open
+and unaccepted.
+
+**Reproduced failures:** unseen Azerbaijani citizenship inflection, English
+comparative age wording, and an English health idiom reached SCORABLE state.
+Whole-clause subtraction retained applicant/predicate/contrast wrappers in
+professional identities; undated named experience was weakened to SKILL; a
+certification quantity became a skill; simple English search in vacancy mode
+missed deterministic guidance; and preferred-to-required follow-up minted a
+new draft id without moving the criterion.
+
+**Root cause:** D-060 still combined phrase-bounded protected lexicons with a
+subtractive whole-clause normalizer. The final typed criterion schema checked
+sensitive labels but did not reject structurally impossible family subjects.
+Material detection and modality vocabulary were narrower than the supported
+natural prose, result-count recognition was not an independent consumed
+occurrence in every form, and follow-up direction was inferred from the mere
+presence of both modality words.
+
+**Decision:**
+- Protected authority now combines bounded protected lexeme families with
+  server-owned AZ/EN concept grammar for nationality/citizenship, comparative
+  age, gender/sex, health/medical-fitness idioms, disability, and common
+  euphemisms. It runs on raw text and canonical spans before family handling,
+  then again on normalized subject and at `CriterionIn`; a wrong model kind or
+  safe-looking model subject cannot authorize protected scoring.
+- Subject identity is selected from exact source occurrences by bounded
+  professional grammar (knowledge/proficiency, AZ knowledge/use inflections,
+  experience scope, language, certification, and education wrappers). Unknown
+  entities remain supported. Ambiguous unhyphenated AZ suffixes are stripped
+  only for reviewed aliases/domains, preventing entity collisions such as an
+  unseen product name ending in `-da`.
+- Professional family is preserved. Named experience without the evaluator's
+  required duration is NEEDS_HUMAN_REVIEW, not weakened to SKILL; generic
+  certification quantities and ambiguous coordinated subjects likewise remain
+  visible and unscored. Every server-owned material span is checked by a
+  one-span/one-terminal-state reconciliation invariant.
+- Result-limit consumption stays separate from requirements. Candidate/result
+  count-only clauses are removed as workflow control; certification quantities
+  cannot become a skill; duration, CEFR, certification quantity, and result
+  limit retain independent source slots.
+- Modality grammar covers required, preferred, optional/desirable/advantageous,
+  negative, and AZ/EN contrast forms. Follow-ups resolve direction from
+  `instead of`, `from ... to ...`, or AZ `... yox, ...`; both promotions and
+  demotions move the unchanged criterion between buckets and persist the new
+  draft. Ambiguous/no-op requests fail truthfully without a new draft id.
+- Deterministic wrong-mode detection now treats equivalent simple AZ/EN
+  candidate-search requests alike, while duration/level/multi-requirement
+  vacancy text is not misclassified. It invokes no model and creates no Job or
+  criteria version.
+
+**Validation:** A fresh loopback `qwen3:1.7b` matrix used unchanged model
+options: 12 new AZ, 10 new EN, 5 protected probes per language, 5 cross-domain,
+5 multi-number/top-K, and 4 modality cases. The initial run exposed the
+wrong-mode overreach; after correction the affected five-case rerun passed,
+and a final real-model probe confirmed the unseen `-da` entity identity fix.
+Corrected aggregate: 46/46 materially correct, zero omissions, hallucinated
+scorable fields, protected violations, or generic failures; 5 repair calls;
+about 526.4 seconds total selected-sample latency, maximum 38.36 seconds.
+
+**Unchanged:** candidate factual authority, canonical JD ownership,
+tenant/session/draft isolation, confirmation idempotency, evidence provenance,
+identity exclusion, deterministic scoring/evaluation date, local-only Ollama,
+and no-fallback provider behavior. No migration, candidate Q&A/result-set
+comparison, deployment, model-option change, push, or merge is included.
+
+## D-062 — Exact-browser subject, domain-presence, follow-up, and search correction (issue #44)
+
+**Date:** 2026-09-18. **Status:** Local corrective implementation on exact
+audit base `12392c5113f38b25880ba36417ba5f3aefc57063`; PR #42 remains open
+and unaccepted.
+
+**Root causes:** English subject extraction did not consume ordinary
+recruitment prose and could attach sentence wrappers to the first experience
+criterion; coordinating/subordinate clauses were not always separated before
+slot assignment. Azerbaijani `sektorunda` was absent from generic domain
+grammar, while D-061's no-duration guard incorrectly included
+`DOMAIN_EXPERIENCE` despite its accepted optional `min_years` schema/evaluator
+contract. A context-only modality follow-up required a literal criterion name
+and did not recognize `əsas tələb`; the exact Java duration/top-K request was
+therefore also left to the model planner after a consumed result count made its
+otherwise-valid requirement look ambiguous. Wrong-mode template rows were
+empty, but the deterministic headline still promised criteria below.
+
+**Decision:**
+- Bounded leading recruitment prose, duration-first English experience syntax,
+  coordinating `while`/`whereas`, and non-material subordinate prefixes are
+  handled before one-to-one terminal-state reconciliation. Subject identity
+  remains an exact source occurrence; no product/domain sentence is special
+  cased.
+- Explicit sector/domain grammar remains open to unfamiliar professional
+  domains. Presence-only `DOMAIN_EXPERIENCE(subject, min_years=null)` is
+  scorable; duration remains mandatory for `SKILL_EXPERIENCE`. Central domain
+  aliases canonicalize Azerbaijani finance wording without limiting generic
+  sector grammar. IFRS is preserved as a presence-only domain acronym.
+- A pronoun/context-only modality request may select an unnamed target only
+  when exactly one criterion exists in the source modality. Named mismatches
+  and multiple possible targets still request clarification; successful
+  changes mint and persist a new server-owned pending-draft identity.
+- A recognized result-count tail is workflow control and no longer converts
+  the attached duration requirement to review. Ordinary search therefore
+  builds a structured Java-duration plan and treats zero matches as a valid
+  result, not provider failure.
+- Wrong-mode guidance now replaces the incompatible headline, headings,
+  actions, and draft-review help text; routing and persistence behavior are
+  unchanged.
+
+**Unchanged:** protected policy, candidate/JD factual authority, deterministic
+evaluator and scoring, tenant/session/CSRF/draft authorization, confirmation
+idempotency, identity exclusion, local-only Ollama, and the prohibition on
+candidate result-set Q&A/comparison. No migration, push, or merge is included.
+
+## D-063 — Result-control and professional-identity authority completion (issue #44)
+
+**Date:** 2026-09-20. **Status:** Local corrective implementation on exact
+independent-audit base `5bb13d5dc566d6796072cbde53905962e3cc99bd`; PR #42 remains open
+and unaccepted.
+
+**Root causes:** Passport-holder eligibility was outside the protected
+citizenship grammar. Result-limit extraction returned the same shape for an
+absent and an unresolved explicit count and retained no complete source range,
+so count fragments could be reparsed as material. Subject validation rejected
+some count-plus-noun shapes but not a bare number word. Certification quantity
+masking discarded adjacent named identities. Discourse wrappers could survive
+as subject prefixes, and bare English domain experience still depended on a
+small sector list despite the evaluator accepting `min_years=null`.
+
+**Decision:**
+- Protected grammar recognizes personal citizen/national/passport-holder and
+  country-of-citizenship eligibility constructions independently of model
+  family. Passport authentication/document systems do not match without the
+  personal holder/eligibility grammar; ambiguous personal context fails closed.
+- `ResultCountIntent` carries ABSENT, VALID, AMBIGUOUS, or OUT_OF_RANGE and
+  exact `ResultControlSpan` occurrences. Only ABSENT receives default 20;
+  unresolved explicit wording blocks confirmation with review state. Complete
+  control occurrences are subtracted by offset before material parsing, and a
+  runtime reconciliation assertion rejects any control/material overlap.
+- A shared typed boundary rejects pure digits, AZ/EN number words, counters,
+  result nouns, and generic quantity phrases as SKILL, DOMAIN_EXPERIENCE,
+  CERTIFICATION, EDUCATION, or LANGUAGE identities. Server semantic parsing
+  applies the same non-quantifier identity invariant before SCORABLE state.
+- Certification-list grammar propagates source modality through `including`,
+  `such as`, and `namely` lists and preserves each exact named identity. Generic
+  certification counts remain review-visible and unscored.
+- Exact subject offsets exclude leading/trailing AZ/EN connectives, discourse
+  preambles, modality wrappers, and bounded case particles. Presence-only
+  English experience wrappers classify unambiguous non-technical subjects as
+  DOMAIN_EXPERIENCE without inventing duration; structurally technical or
+  ambiguous names remain on the review-safe path.
+
+**Validation:** The new structural matrix contains 8 fresh protected forms, 10
+AZ result-limit forms, 6 multi-number cases, 6 certification/count cases, 8
+English domain cases, 10 connective/subject identities, typed-boundary probes,
+and safe passport-system controls. Real loopback `qwen3:1.7b` acceptance used
+unchanged options across 32 independent-style requests: 32/32 materially
+correct, 3 bounded repairs, zero generic failures, hallucinated scorable
+fields, protected violations, or silent omissions; 261.49 seconds total and
+32.833 seconds maximum latency. Authenticated Playwright/Google Chrome checks
+against the real local app passed 5/5 rendered semantic states with synthetic
+data. Focused authority/security/search/evaluator/UI regression: 682 passed;
+the full repository suite passed 1,422 tests.
+
+**Unchanged:** deterministic scoring, candidate factual authority, model-output
+authority, tenant/session and pending-draft ownership, confirmation idempotency,
+ordinary-search persistence/presentation, identity exclusion, no-exfiltration,
+default Ollama configuration, and the ban on candidate result-set conversation.
+No migration, push, or merge is included.
+
+## D-064 — Structural span-role and family-authorization boundary (issue #44)
+
+**Date:** 2026-09-19. **Status:** Local corrective implementation on exact
+independent-audit base `ee5f9f2d9f4bbe1b77cbc5300c17670762f66af9`; PR #42 remains open
+and unaccepted.
+
+**Root cause:** D-063 retained exact source occurrences but still allowed the
+subject extractor and a narrow count-shape check to confer authority. Generic
+quantifiers outside that shape became professional identities, recruitment
+wrappers contaminated subjects, certification quantities displaced named
+credentials, and result-count extraction could call an unfamiliar explicit
+construction ABSENT or select one of two competing values.
+
+**Decision:** Every relevant source occurrence is reconciled into exact-offset
+roles (`SUBJECT`, `RELATION`, `QUANTITY`, `DURATION`, `PROFICIENCY`, `MODALITY`,
+`CONTROL_RESULT_COUNT`, connective/preamble/protected/generic/other) and one
+terminal owner. Result-control ownership is consumed before material parsing;
+runtime reconciliation rejects incompatible overlap. Family classification is
+not authorization: each scorable family must have an identity-bearing subject,
+its required source relation, source modality/material fields, and no personal
+eligibility or workflow-control meaning. Pure quantity/result/person shapes fail
+again at `CriterionIn`, independent of parser or model kind.
+
+Result-count candidacy now precedes ABSENT. A locally attached number plus a
+result noun and ranking/listing intent resolves to VALID/OUT_OF_RANGE or, when
+values compete, AMBIGUOUS; unrelated duration and certification quantities do
+not participate. Generic certification counts remain review-visible while
+separately attributable named credentials survive. Subject extraction is
+relation-centered and removes grammatical recruitment/connective wrappers
+without altering the original canonical text.
+
+Ordinary search authorizes `with` as filter modality and can deterministically
+execute top-K plus skill duration. The same request submitted through vacancy
+analysis is identified as wrong-mode search intent rather than minting vacancy
+modality. No scoring arithmetic, evaluator semantics, default Ollama model,
+candidate-result conversation, migration, push, or merge is changed.
+
+## D-065 — Result-count branch ordering, shared coordination-split authority, and orthography-independent family (issue #44)
+
+**Date:** 2026-09-22. **Status:** Local corrective implementation on exact
+independent-audit base `989569bc3789b2a0b3c46764c54e8f86c65909e4`; PR #42
+remains open and unaccepted.
+
+**F1 root cause:** `extract_result_count_intent`'s single-exact-candidate
+branch returned `VALID` before its own ambiguous-cue safeguard could run, and
+treated the AZ number word `bir` ("one") as an exact count candidate even when
+it was the first word of the vague-quantity idiom `bir neçə`/`bir qədər`
+("a few"/"some"). **Decision:** a number-word candidate immediately continued
+by `neçə`/`qədər` is never counted as an exact value; a sentence expressing
+result-count intent (a result noun plus a ranking/listing action) that
+contains a vague quantifier (`bir neçə`, `bir qədər`, `çoxlu`, `few`,
+`several`, `some`, `many`, `texminen`, `about`, `approximately`) with no
+independently attributable exact number resolves to `AMBIGUOUS`, never
+`VALID(1)`. Only true absence of any count-intent construction defaults to 20.
+
+**F3 root cause:** `jd_authority.segment_requirement_spans` already
+implemented D-055 (a same-sentence coordination splits only when every side
+has its own explicit modality), but
+`semantic_requirements.analyze_hr_text`'s independent `_split_units`
+segmenter decided the same question by "is either side material by keyword,"
+which could split a shared-modality clause with only one materially-cued
+side and silently drop the other (`"<X> should hold ACCA and CFA
+certifications"` lost ACCA entirely). **Decision:** the D-055 split rule is
+extracted once into `meyar.agent.segmentation_authority
+.coordinated_split_authorized`, used by both segmenters. A coordinated side
+may split from its sibling only when it is independently material or an
+already-attributed governing modality (a preceding `with`/`required`/
+`preferred`/enumeration-list occurrence) covers it; otherwise the complete
+clause is retained as one attributable material span. Nothing is silently
+dropped; independently modalized sides (`"X required and Y preferred"`)
+still split and both survive.
+
+**F2 root cause:** `_family()`'s bare-`"<X> experience"` classification used
+orthography (digits/symbols/ALL-CAPS/camelCase) as a `technical_identity`
+proxy to decide `SKILL_EXPERIENCE` vs `DOMAIN_EXPERIENCE`, so structurally
+identical sentences behaved differently purely by spelling (`Java` →
+scorable `DOMAIN_EXPERIENCE`, `JavaScript` → review-only `SKILL_EXPERIENCE`).
+**Decision:** family authority for a bare, duration-less `"<X> experience"`
+now comes only from explicit sector/industry/domain grammar or a server-known
+domain-taxonomy match (`_DOMAIN_HEADS`/`DOMAIN_SYNONYMS`, now including the
+word `industry`); a subject with neither stays `SKILL_EXPERIENCE`, which
+review-gates on duration exactly like any other unnamed skill claim. Known
+domain words (e.g. `Banking`, `Risk`/`Credit Risk`) and known collision pairs
+(`Java`/`JavaScript`, `C`/`C++`, `Go`/`Django`, `SQL`/`NoSQL`) now behave
+consistently; a handful of previously orthography-authorized bare domain
+words with no taxonomy/grammar signal (`Aviation`, `Hospitality`,
+`Construction`, `Healthcare`, `Manufacturing`, bare `Background/Experience in
+X`) now correctly fall to `NEEDS_HUMAN_REVIEW` instead of inconsistent
+scoring.
+
+**AZ wrapper:** a leading Azerbaijani postposition `ilə` ("with") was not
+excluded from the professional subject when it began the remaining relation
+text (`"ilə SQL"`), only when trailing. Added to the same leading
+discourse-prefix strip already used for `and`/`but`/`while`/`amma`/`lakin`/
+etc., in both the mask-based subject-bounds path and the
+`_SUBJECT_SYNTAX_PATTERNS` discourse-prefix post-strip. No SQL-specific
+logic was added.
+
+**Explicit deferrals:** no scoring arithmetic, evaluator semantics, default
+Ollama model, candidate-result conversation, migration, push, or merge is
+changed. Certification-list enumeration splitting (`"including CPA and
+CISA"`) is unchanged — it is a distinct, already-authorized shared-modality
+list construction, not the bare coordination this fix targets.

@@ -1,23 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Yeni vakansiya — MEYAR{% endblock %}
-{% macro criterion_rows(prefix, rows) %}
-<div class="table-wrap">
-<table>
-<thead><tr><th>Növ</th><th>Tələb</th><th>Minimum müddət (il) <span class="muted">(yalnız Təcrübə üçün)</span></th><th>Əhəmiyyət</th></tr></thead>
-<tbody>
-{% for row in rows %}
-{% set is_experience = row.kind == "EXPERIENCE" %}
-<tr>
-  <td><select class="js-kind-select" name="{{ prefix }}_kind_{{ loop.index0 }}">{% for value, label in kind_options %}<option value="{{ value }}"{% if row.kind == value %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></td>
-  <td><input type="text" name="{{ prefix }}_requirement_{{ loop.index0 }}" value="{{ row.requirement }}" maxlength="200" placeholder="Məs. Python, ACAMS, İngilis dili — 'Təcrübə' üçün qısa təsvir, məs. Minimum backend təcrübəsi"></td>
-  <td><input type="number" step="0.5" min="0" max="60" class="js-min-years" name="{{ prefix }}_min_years_{{ loop.index0 }}" value="{{ row.min_years if is_experience else "" }}" placeholder="{{ "Minimum müddət (il)" if is_experience else "Tətbiq olunmur" }}"{% if not is_experience %} disabled aria-disabled="true"{% endif %}></td>
-  <td><input type="number" step="0.5" min="0" max="10" name="{{ prefix }}_weight_{{ loop.index0 }}" value="{{ row.weight }}"></td>
-</tr>
-{% endfor %}
-</tbody>
-</table>
-</div>
-{% endmacro %}
+{% import "_criteria_rows.html" as criteria_form %}
 {% block content %}
 <a class="back-link" href="/ui/jobs">← Vakansiyalar</a>
 <div class="page-heading"><div><p class="eyebrow">Yeni vakansiya</p><h1>Vakansiya yaradın</h1><p class="lede">Başlığı və tələbləri daxil edin. Boş sətirlər nəzərə alınmır.</p></div></div>
@@ -30,13 +13,13 @@
   <section class="panel">
     <h2>Mütləq tələblər</h2>
     <p class="field-help">Namizəd bu tələblərin hamısına cavab verməlidir. Hər sətirdə bir tələb yazın (məs. Python, ACAMS, İngilis dili) — bu, həm görünən ad, həm də uyğunluğun yoxlanacağı dəqiq ifadədir. "Təcrübə" növünü seçəndə Tələb sahəsinə qısa təsvir yazıb yanındakı illik təcrübəni doldurun.</p>
-    {{ criterion_rows("must", must_have_rows) }}
+    {{ criteria_form.criterion_rows("must", must_have_rows, kind_options) }}
   </section>
 
   <section class="panel">
     <h2>Üstünlük tələbləri</h2>
     <p class="field-help">Bu tələblər mütləq deyil, lakin uyğunluğu artırır.</p>
-    {{ criterion_rows("pref", preferred_rows) }}
+    {{ criteria_form.criterion_rows("pref", preferred_rows, kind_options) }}
   </section>
 
   <p class="field-help">Əhəmiyyət — tələbin yekun bala təsirini göstərən çəki (defolt: 1). Adətən dəyişdirmək lazım deyil.</p>

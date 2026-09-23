@@ -20,4 +20,8 @@ prod_data/
 # Local document storage (uploaded CV bytes) — never committed.
 backend/var/
 
+# Local owner acceptance evidence packs (screenshots of the demo UI) —
+# never committed; delivered to the owner as local files only.
+local_evidence/
+
 .claude/scheduled_tasks.lock

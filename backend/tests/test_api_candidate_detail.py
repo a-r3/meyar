@@ -2,14 +2,20 @@
 Synthetic fixtures only. See .claude/rules/testing.md."""
 
 from httpx import AsyncClient
-from search_helpers import seed_candidate_with_profile
+from search_helpers import seed_candidate_with_profile, synthetic_evidence
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.services.tenant_repo import create_tenant
 
 EVIDENCE = [{"page": 1, "block_index": 0, "quote": "Synthetic evidence"}]
 PROFILE = {
-    "skills": [{"name": "Python", "category": "Backend", "evidence": EVIDENCE}],
+    "skills": [
+        {
+            "name": "Python",
+            "category": "Backend",
+            "evidence": synthetic_evidence("Python", "Backend"),
+        }
+    ],
     "employment_history": [],
     "education": [],
     "certifications": [],

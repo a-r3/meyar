@@ -4,7 +4,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, Field, model_validator
 
-from meyar.core.text import normalize_azerbaijani_case
+from meyar.core.text import fold_az_ascii, normalize_azerbaijani_case
 
 # Heuristic denylist enforcing docs/SECURITY_PRIVACY.md / MASTER_SPEC.md §4:
 # irrelevant/sensitive attributes must never become matching criteria.
@@ -31,6 +31,8 @@ _SENSITIVE_PATTERNS = [
         r"\bethnicity\b",
         r"\bethnic\b",
         r"\bnationality\b",
+        r"\bcitizenship\b",
+        r"\bcitizen\b",
         r"\breligio(n|us)\b",
         r"\bchristian\b",
         r"\bmuslim\b",
@@ -47,6 +49,7 @@ _SENSITIVE_PATTERNS = [
         r"\bparty affiliation\b",
         r"\bdisabilit(y|ies)\b",
         r"\bhealth condition\b",
+        r"\bhealthy\b",
         r"\bhiv\b",
         r"\bmental health\b",
         r"\bsexual orientation\b",
@@ -64,6 +67,7 @@ _SENSITIVE_PATTERNS = [
         r"\byaş\b",
         r"\bdoğum tarix(?:i|ini|inin|inə|ində|indən)\b",
         r"\bmilliyyət\b",
+        r"\bvətəndaş(?:lıq|ı|lığı)?\b",
         r"\bdin(i|ə)?\b",
         r"\bmüsəlman\b",
         r"\bxristian\b",
@@ -74,6 +78,20 @@ _SENSITIVE_PATTERNS = [
         r"\bsiyasi\b",
         r"\bəlillik\b",
         r"\bsağlamlıq\b",
+        r"\bsağlam\b",
+        # The same bounded Azerbaijani roots after ordinary ASCII-keyboard
+        # folding.  These are needed because the safety scan intentionally
+        # runs before semantic language interpretation.
+        r"\bcinsiyyet\b",
+        r"\bkisi\b",
+        r"\bqadin\b",
+        r"\byas\b",
+        r"\bdogum tarix\w*\b",
+        r"\bmilliyyet\b",
+        r"\bvetendas(?:liq|i|ligi)?\b",
+        r"\belillik\b",
+        r"\bsaglamliq\b",
+        r"\bsaglam\b",
     ]
 ]
 
@@ -96,8 +114,7 @@ _AZ_PROTECTED_TERM_SUFFIXES: tuple[tuple[str, frozenset[str]], ...] = (
     ("qadın", _AZ_BACK_CONSONANT_NOUN_SUFFIXES),
     (
         "yaş",
-        _AZ_BACK_CONSONANT_NOUN_SUFFIXES
-        | {"ını", "ının", "ına", "ında", "ından"},
+        _AZ_BACK_CONSONANT_NOUN_SUFFIXES | {"ını", "ının", "ına", "ında", "ından"},
     ),
     ("milliyyət", _AZ_FRONT_CONSONANT_NOUN_SUFFIXES),
     ("din", _AZ_FRONT_CONSONANT_NOUN_SUFFIXES),
@@ -110,7 +127,108 @@ _AZ_PROTECTED_TERM_SUFFIXES: tuple[tuple[str, frozenset[str]], ...] = (
     ("siyasi", _AZ_FRONT_VOWEL_NOUN_SUFFIXES),
     ("əlillik", _AZ_FRONT_CONSONANT_NOUN_SUFFIXES),
     ("sağlamlıq", _AZ_BACK_CONSONANT_NOUN_SUFFIXES),
+    ("sağlam", _AZ_BACK_CONSONANT_NOUN_SUFFIXES),
 )
+
+# Azerbaijani possessive/case suffixes can soften a final ``q``/``k``.
+# Enumerate those ordinary protected-lexeme forms explicitly; do not turn
+# the denylist into a substring/prefix matcher (``yaşıl`` must stay safe).
+_AZ_PROTECTED_MUTATED_FORMS = frozenset(
+    {
+        "sağlamlığı",
+        "sağlamlığın",
+        "sağlamlığa",
+        "sağlamlığında",
+        "sağlamlığından",
+        "əlilliyi",
+        "əlilliyin",
+        "əlilliyə",
+        "əlilliyində",
+        "əlilliyindən",
+    }
+)
+
+# Concept-level policy patterns complement the bounded lexical forms above.
+# They describe protected *semantics* (comparison, idiom, and multi-word
+# constructions), rather than individual audit sentences.  Both the raw JD
+# scan and the final CriterionIn boundary use this same server-owned policy.
+_PROTECTED_CONCEPT_PATTERNS = (
+    # Nationality / citizenship.
+    re.compile(
+        r"(?i)\b(?:nationalit(?:y|ies)|citizen(?:s|ship)?|"
+        r"right\s+to\s+citizenship|country\s+of\s+citizenship)\b"
+    ),
+    # Personal passport-holder eligibility is a citizenship proxy. Keep the
+    # person/holder grammar mandatory so technical uses such as "passport
+    # authentication system" remain valid professional material.
+    re.compile(
+        r"(?i)\b(?:"
+        r"passport(?:s|['’]s)?\s+(?:holders?|holding\s+(?:applicants?|candidates?|people|persons?))|"
+        r"passport[- ]holding\s+(?:applicants?|candidates?|people|persons?)|"
+        r"holders?\s+of\s+(?:(?:this|that|the|their|our|a)\s+)?"
+        r"(?:country(?:['’]s)?\s+)?passports?|"
+        r"(?:applicants?|candidates?|people|persons?)\s+(?:who\s+)?hold(?:ing|s)?\s+"
+        r"(?:(?:this|that|the|their|our|a)\s+)?(?:country(?:['’]s)?\s+)?passports?|"
+        r"(?:this|that|the|their|our)\s+country(?:['’]s)?\s+passport\s+holders?"
+        r")\b"
+    ),
+    re.compile(
+        r"(?i)\b(?:nationals\b|nationals?\s+of\s+(?:this|that|the|a|an|our|their)\s+country|"
+        r"(?:applicants?|candidates?|people|persons?)\s+(?:must\s+be|are|who\s+are)\s+"
+        r"(?:a\s+)?nationals?)\b"
+    ),
+    re.compile(r"(?i)\b(?:vetendas|milliyyet)\w*\b"),
+    # Age expressed directly, comparatively, or as an age band.
+    re.compile(
+        r"(?i)\b(?:younger|older)\s+than\s+(?:\d+|one|two|three|four|five|six|"
+        r"seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|"
+        r"seventeen|eighteen|nineteen|twenty(?:[- ](?:one|two|three|four|five|six|"
+        r"seven|eight|nine))?|thirty(?:[- ](?:one|two|three|four|five|six|seven|eight|"
+        r"nine))?|forty(?:[- ](?:one|two|three|four|five|six|seven|eight|nine))?|"
+        r"fifty(?:[- ](?:one|two|three|four|five|six|seven|eight|nine))?|sixty)\b|"
+        r"\b(?:under|below|above|over|aged?)\s+(?:the\s+age\s+of\s+)?"
+        r"(?:\d+|ten|twenty|thirty|forty|fifty|sixty)\b|"
+        r"\b(?:in\s+(?:his|her|their)\s+)?"
+        r"(?:twenties|thirties|forties|fifties|sixties)\b"
+    ),
+    re.compile(
+        r"(?i)\b(?:\d+|[a-z]+)\s*yas(?:inda|dan|a|i)?\b|"
+        r"\byas(?:i|ina|inda)?\s+(?:\d+|[a-z]+)\b|"
+        r"\b(?:cavan|genc|yuxari|asagi)\s+yas\w*\b"
+    ),
+    # Health and medical fitness, including common idioms.
+    re.compile(
+        r"(?i)\b(?:(?:clean|clear|good|sound)\s+(?:bill\s+of\s+)?health|"
+        r"medically\s+fit|fit\s+and\s+healthy|"
+        r"physical(?:ly)?\s+fit(?:ness)?|medical\s+(?:fitness|condition))\b"
+    ),
+    re.compile(
+        r"(?i)\b(?:sehhet\w*|tibbi\s+(?:cehetden\s+)?yararli|"
+        r"fiziki\s+(?:cehetden\s+)?saglam)\b"
+    ),
+    # Disability and euphemistic equivalents.
+    re.compile(
+        r"(?i)\b(?:disabled|able[- ]bodied|differently\s+abled|"
+        r"special\s+needs?|physical\s+impairment)\b"
+    ),
+    re.compile(r"(?i)\b(?:mehdud\s+imkan\w*|xususi\s+ehtiyac\w*)\b"),
+    # Gender/sex expressed without the literal field label.
+    re.compile(
+        r"(?i)\b(?:men|women|males?|females?)\s+only\b|"
+        r"\b(?:male|female)\s+(?:applicants?|candidates?)\b"
+    ),
+)
+
+
+def _matches_protected_concept(text: str) -> str | None:
+    folded = fold_az_ascii(normalize_azerbaijani_case(text))
+    for pattern in _PROTECTED_CONCEPT_PATTERNS:
+        match = pattern.search(folded)
+        if match:
+            return text[match.start() : match.end()]
+    return None
+
+
 def _normalize_az_token(token: str) -> str:
     words = re.findall(r"[^\W_]+", normalize_azerbaijani_case(token))
     return words[0] if len(words) == 1 else ""
@@ -147,14 +265,38 @@ def find_prohibited_term(*texts: str) -> str | None:
     for text in texts:
         if not text:
             continue
-        for pattern in _SENSITIVE_PATTERNS:
-            match = pattern.search(text)
-            if match:
-                return match.group(0)
-        for token in re.findall(r"[^\W_]+", text, flags=re.UNICODE):
-            for root, suffixes in _AZ_PROTECTED_TERM_SUFFIXES:
-                if matches_term_or_allowed_az_forms(token, root, suffixes):
+        concept = _matches_protected_concept(text)
+        if concept:
+            return concept
+        # Run the same bounded policy over both ordinary Unicode text and
+        # Azerbaijani ASCII-keyboard folding.  This is a safety boundary, not
+        # semantic interpretation: a model cannot evade it by relabelling
+        # ``vətəndaşlıq`` as LANGUAGE, and an HR user typing ``vetendasliq``
+        # receives the identical result.
+        for candidate, _is_ascii_folded in (
+            (text, False),
+            (fold_az_ascii(normalize_azerbaijani_case(text)), True),
+        ):
+            for pattern in _SENSITIVE_PATTERNS:
+                match = pattern.search(candidate)
+                if match:
+                    return match.group(0)
+        for candidate, is_ascii_folded in (
+            (text, False),
+            (fold_az_ascii(normalize_azerbaijani_case(text)), True),
+        ):
+            for token in re.findall(r"[^\W_]+", candidate, flags=re.UNICODE):
+                if normalize_azerbaijani_case(token) in _AZ_PROTECTED_MUTATED_FORMS:
                     return token
+                for root, suffixes in _AZ_PROTECTED_TERM_SUFFIXES:
+                    folded_root = fold_az_ascii(root) if is_ascii_folded else root
+                    folded_suffixes = (
+                        frozenset(fold_az_ascii(value) for value in suffixes)
+                        if is_ascii_folded
+                        else suffixes
+                    )
+                    if matches_term_or_allowed_az_forms(token, folded_root, folded_suffixes):
+                        return token
     return None
 
 
@@ -162,6 +304,79 @@ def _check_not_sensitive(criterion_id: str, *texts: str) -> None:
     term = find_prohibited_term(*texts)
     if term:
         raise ProhibitedCriterionError(criterion_id, term)
+
+
+_NON_SUBJECT_GRAMMAR_RE = re.compile(
+    r"(?i)\b(?:applicants?|candidates?|namized\w*)\s+(?:are|must|should|have|"
+    r"olmal\w*|teleb\w*)\b|\b(?:required|mandatory|preferred|optional|"
+    r"nice\s+to\s+have|teleb\w*|mecburi\w*|ustunluk\w*)\b"
+)
+_COUNT_LIKE_SUBJECT_RE = re.compile(
+    r"(?i)^\s*(?:(?:at\s+least|minimum|en\s+azi|maksimum|en\s+cox)\s+)?"
+    r"(?:\d+(?:[.,]\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|"
+    r"bir|iki|uc|dord|bes|alti|yeddi|sekkiz|doqquz|on)"
+    r"(?:\s+(?:eded|den[eə]|nefer|certificat(?:e|ion)s?|sertifikat\w*|degrees?|"
+    r"skills?|languages?|candidates?|applicants?|results?|profiles?|namized\w*|"
+    r"netice\w*))?\s*$"
+)
+_NON_IDENTITY_TOKEN_RE = re.compile(
+    r"(?i)^(?:\d+(?:[.,]\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|"
+    r"bir|iki|uc|dord|bes|alti|yeddi|sekkiz|doqquz|on|many|several|multiple|"
+    r"coxlu|nece|results?|candidates?|applicants?|profiles?|persons?|people|"
+    r"netice\w*|namized\w*|nefer\w*|certificat(?:e|ion)s?|credentials?|"
+    r"sertifikat\w*|professional|relevant|generic)$"
+)
+_GENERIC_QUANTITY_PHRASE_RE = re.compile(
+    r"(?i)^(?:a\s+(?:pair|couple)\s+of|bir\s+cut)(?:\s+[^\W_]+){0,4}$"
+)
+_LEADING_QUANTITY_RE = re.compile(
+    r"(?i)^(?:\d+(?:[.,]\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|"
+    r"bir|iki|uc|dord|bes|alti|yeddi|sekkiz|doqquz|on)\b"
+)
+_LANGUAGE_SUBJECT_RE = re.compile(
+    r"(?i)^[^\W\d_]+(?:[- ][^\W\d_]+){0,2}(?:\s+(?:language|dili))?$"
+)
+
+
+def _check_kind_subject_authority(criterion: "CriterionIn") -> None:
+    """Reject values that cannot be the named entity for their family.
+
+    This is deliberately a shape/grammar boundary, not a technology list.
+    Unknown professional entities remain valid, while complete HR clauses,
+    result/count expressions, and structurally impossible language subjects
+    cannot be persisted merely because an upstream model chose a safe kind.
+    """
+    value = (criterion.value or "").strip()
+    if not value:
+        return
+    folded = fold_az_ascii(normalize_azerbaijani_case(value))
+    if _NON_SUBJECT_GRAMMAR_RE.search(folded):
+        raise ValueError(
+            f"Criterion '{criterion.id}': value must be a bounded professional subject, "
+            "not an HR requirement clause."
+        )
+    if _COUNT_LIKE_SUBJECT_RE.fullmatch(folded):
+        raise ValueError(
+            f"Criterion '{criterion.id}': a count expression cannot be a criterion subject."
+        )
+    if _GENERIC_QUANTITY_PHRASE_RE.fullmatch(folded) or (
+        criterion.kind == CriterionKind.CERTIFICATION
+        and _LEADING_QUANTITY_RE.match(folded)
+    ):
+        raise ValueError(
+            f"Criterion '{criterion.id}': quantity cannot authorize a named identity."
+        )
+    identity_tokens = re.findall(r"[^\W_]+(?:[+#./-][^\W_]+)*", folded, re.UNICODE)
+    if identity_tokens and not any(
+        not _NON_IDENTITY_TOKEN_RE.fullmatch(token) for token in identity_tokens
+    ):
+        raise ValueError(
+            f"Criterion '{criterion.id}': value has no professional identity component."
+        )
+    if criterion.kind == CriterionKind.LANGUAGE and not _LANGUAGE_SUBJECT_RE.fullmatch(value):
+        raise ValueError(
+            f"Criterion '{criterion.id}': LANGUAGE requires one bounded language name."
+        )
 
 
 class CriterionKind(StrEnum):
@@ -202,9 +417,9 @@ class CriterionIn(BaseModel):
     def _validate_kind_specific_fields(self) -> "CriterionIn":
         if self.kind == CriterionKind.EXPERIENCE:
             if self.min_years is None:
-                raise ValueError(
-                    f"Criterion '{self.id}': kind EXPERIENCE requires min_years."
-                )
+                raise ValueError(f"Criterion '{self.id}': kind EXPERIENCE requires min_years.")
+            if self.value is not None:
+                raise ValueError(f"Criterion '{self.id}': kind EXPERIENCE does not accept value.")
         elif self.kind == CriterionKind.SKILL_EXPERIENCE:
             if not self.value:
                 raise ValueError(
@@ -225,6 +440,19 @@ class CriterionIn(BaseModel):
             raise ValueError(
                 f"Criterion '{self.id}': kind {self.kind.value} requires a non-empty value."
             )
+        if self.required_level is not None and self.kind != CriterionKind.LANGUAGE:
+            raise ValueError(f"Criterion '{self.id}': required_level is only valid for LANGUAGE.")
+        if self.min_years is not None and self.kind not in (
+            CriterionKind.EXPERIENCE,
+            CriterionKind.SKILL_EXPERIENCE,
+            CriterionKind.DOMAIN_EXPERIENCE,
+        ):
+            raise ValueError(
+                f"Criterion '{self.id}': min_years is not evaluated for {self.kind.value}."
+            )
+        if not self.evidence_required:
+            raise ValueError(f"Criterion '{self.id}': evidence_required must remain true.")
+        _check_kind_subject_authority(self)
         return self
 
     @model_validator(mode="after")

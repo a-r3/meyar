@@ -17,6 +17,7 @@ from starlette.responses import Response
 from starlette.templating import Jinja2Templates
 
 from meyar.config import Settings, get_settings
+from meyar.core.business_date import resolve_business_date
 from meyar.core.password import hash_password, needs_rehash, verify_password
 from meyar.db import get_db
 from meyar.embedding.dependency import get_embedding_provider, get_embedding_search_config
@@ -25,6 +26,7 @@ from meyar.ingestion.validation import PDF_MIME
 from meyar.llm.dependency import get_llm_provider
 from meyar.llm.provider import LLMProvider
 from meyar.models.job import JOB_STATUS_ACTIVE, JOB_STATUS_ARCHIVED
+from meyar.schemas.job import JobCreateRequest
 from meyar.scoring.batch import BatchRankingError, rank_candidates_for_job
 from meyar.scoring.policy import ScoringPolicyError
 from meyar.search.planner_policy import find_skill_specific_duration_mention
@@ -38,7 +40,7 @@ from meyar.services.browser_session_repo import (
     revoke_browser_session_by_id,
 )
 from meyar.services.candidate_document_repo import get_candidate_document
-from meyar.services.job_criteria_repo import create_criteria_version
+from meyar.services.job_criteria_repo import create_criteria_version, get_criteria_version_by_id
 from meyar.services.job_repo import archive_job, create_job, find_active_duplicate_job
 from meyar.services.tenant_membership_repo import (
     get_membership_by_id,
@@ -76,6 +78,7 @@ from meyar.ui.service import (
     JOB_DUPLICATE_MESSAGE,
     CriterionRowInput,
     UIServiceInputError,
+    authorize_agent_draft_confirmation,
     build_job_create_request,
     build_ranked_candidate_views,
     build_search_result_views,
@@ -194,7 +197,10 @@ async def _finalize_human_login(
     """The single place a real BrowserSession is minted for a human — both
     the direct single-membership login and the tenant-selection flow call
     this. Always issues a fresh random token (session-fixation prevention:
-    no pre-existing/attacker-supplied cookie value is ever reused)."""
+    no pre-existing/attacker-supplied cookie value is ever reused). Lands
+    on MEYAR AI, not the classic search page — Slice 4 (issue #33, D-030)
+    makes the agent the primary post-login HR surface; classic search
+    remains one click away via the secondary nav."""
     _session, raw_session_token = await create_browser_session(
         db,
         user_id=user_id,
@@ -209,7 +215,7 @@ async def _finalize_human_login(
         actor_id=user_id,
     )
     await db.commit()
-    response = RedirectResponse("/ui", status_code=status.HTTP_303_SEE_OTHER)
+    response = RedirectResponse("/ui/agent", status_code=status.HTTP_303_SEE_OTHER)
     _issue_session_cookie(response, raw_session_token, settings)
     return response
 
@@ -375,13 +381,14 @@ async def search(
     llm: LLMProvider = Depends(get_llm_provider),
     embedding_provider: EmbeddingProvider = Depends(get_embedding_provider),
     embedding_config: EmbeddingSearchConfig = Depends(get_embedding_search_config),
+    settings: Settings = Depends(get_settings),
 ) -> HTMLResponse:
     verify_csrf(ctx.csrf_token, csrf_token)
     # HR users never choose an evaluation date — the current date is
     # injected here, once, at the UI boundary, and passed explicitly
     # through the same deterministic API/CLI contract below. See
     # docs/DECISIONS.md D-023.
-    as_of_date = date.today()
+    as_of_date = resolve_business_date(settings.business_timezone)
     try:
         planned = await plan_and_search_candidates(
             db,
@@ -466,22 +473,31 @@ async def search(
 
 
 def _agent_turn_log_views(conversation) -> list:
-    """User turns are the HR user's own (untrusted, shown verbatim) text.
-    Assistant turns are re-derived through the exact same deterministic
-    outcome->text mapping the live turn banner uses
-    (agent_turn_outcome_message) rather than the raw stored value — a
-    past turn's stored text can be empty/None (its outcome carried no
-    model framing), and this guarantees it is never redisplayed as a
-    blank bubble (D-036)."""
+    """Replay only text rendered under the currently accepted server policy.
+
+    Older SERVER_VALIDATED markers do not prove current display authority.
+    Their text is replaced by fixed outcome copy, without mutating history.
+    User turns remain the HR user's own untrusted text.
+    """
+    from meyar.services.agent_conversation_repo import (
+        ASSISTANT_TEXT_AUTHORITY_SERVER,
+        ASSISTANT_TEXT_AUTHORITY_VERSION,
+    )
     from meyar.ui.view_models import AgentTurnLogView
 
     views = []
     for turn in conversation.turns:
         role = turn.get("role", "user")
         if role == "assistant":
-            text = agent_turn_outcome_message(
-                turn.get("outcome", "ANSWERED"), turn.get("text") or None
+            trusted_text = (
+                turn.get("text")
+                if (
+                    turn.get("text_authority") == ASSISTANT_TEXT_AUTHORITY_SERVER
+                    and turn.get("text_authority_version") == ASSISTANT_TEXT_AUTHORITY_VERSION
+                )
+                else None
             )
+            text = agent_turn_outcome_message(turn.get("outcome", "ANSWERED"), trusted_text or None)
         else:
             text = turn.get("text", "")
         views.append(AgentTurnLogView(role=role, text=text))
@@ -503,7 +519,13 @@ async def agent_workspace(
     return _render(
         request,
         "agent.html",
-        _context(ctx, turns=_agent_turn_log_views(conversation), latest=None),
+        _context(
+            ctx,
+            history_turns=_agent_turn_log_views(conversation),
+            latest=None,
+            latest_user_message=None,
+            kind_options=CRITERION_KIND_OPTIONS,
+        ),
     )
 
 
@@ -512,6 +534,14 @@ async def agent_turn(
     request: Request,
     message: str = Form(..., min_length=1, max_length=4000),
     csrf_token: str = Form(...),
+    # PR #42 owner correction (issue #33, D-043/D-044): the composer's
+    # "Vakansiya elanını analiz et" mode option submits this fixed value
+    # so the JD-drafting path is deterministic — never relying on a small
+    # local model to infer DRAFT_JOB_CRITERIA routing from arbitrary
+    # pasted text (D-042 point 6). Only this one literal value is ever
+    # recognized; any other/absent value (the default "Adi söhbət" mode)
+    # falls back to normal model-routed conversation, unchanged.
+    intent: str | None = Form(default=None, max_length=32),
     ctx: UIContext = Depends(require_ui_scopes("candidates:read")),
     db: AsyncSession = Depends(get_db),
     llm: LLMProvider = Depends(get_llm_provider),
@@ -520,8 +550,12 @@ async def agent_turn(
     settings: Settings = Depends(get_settings),
 ) -> HTMLResponse:
     verify_csrf(ctx.csrf_token, csrf_token)
+    from meyar.agent.schemas import AgentActionType
     from meyar.agent.service import run_agent_turn
-    from meyar.services.agent_conversation_repo import get_or_create_conversation
+    from meyar.services.agent_conversation_repo import (
+        get_or_create_conversation,
+        sync_last_turn_display_text,
+    )
     from meyar.ui.service import build_agent_turn_view
 
     conversation = await get_or_create_conversation(
@@ -529,7 +563,10 @@ async def agent_turn(
     )
     # Same "current date is a trusted-runtime value, never user/model
     # supplied" boundary as /ui/search (docs/DECISIONS.md D-023).
-    as_of_date = date.today()
+    as_of_date = resolve_business_date(settings.business_timezone)
+    explicit_action = (
+        AgentActionType.DRAFT_JOB_CRITERIA if intent == "draft_job_criteria" else None
+    )
     try:
         result = await run_agent_turn(
             db,
@@ -542,8 +579,15 @@ async def agent_turn(
             embedding_provider=embedding_provider,
             max_tool_calls=settings.agent_max_tool_calls,
             max_context_turns=settings.agent_max_context_turns,
+            explicit_action=explicit_action,
         )
         latest = await build_agent_turn_view(db, tenant_id=ctx.tenant_id, result=result)
+        # D-045 (PR #42 owner correction, issue #33): make the persisted
+        # turn text and the just-rendered live headline the same value, so
+        # a later history re-render is byte-for-byte identical to what HR
+        # saw live instead of falling back to a generic per-outcome
+        # message — see sync_last_turn_display_text's own docstring.
+        await sync_last_turn_display_text(db, conversation, text=latest.headline)
         await db.commit()
     except (EmbeddingProviderError, SearchRequestError, SQLAlchemyError):
         await db.rollback()
@@ -552,22 +596,80 @@ async def agent_turn(
         latest = AgentTurnView(
             outcome="AGENT_PROVIDER_FAILURE",
             message="MEYAR AI xidməti hazırda əlçatan deyil. Bir qədər sonra yenidən cəhd edin.",
+            headline="MEYAR AI xidməti hazırda əlçatan deyil. Bir qədər sonra yenidən cəhd edin.",
         )
         conversation = await get_or_create_conversation(
             db, tenant_id=ctx.tenant_id, browser_session_id=ctx.session_id
         )
+        # D-044 (PR #42 owner UX correction): nothing was persisted for
+        # this failed attempt (the exception happened before
+        # run_agent_turn's own _finish_turn), so `conversation.turns`
+        # does not contain it — show the HR user's own just-submitted
+        # text directly rather than losing it, still adjacent to its own
+        # explanation (chat-hierarchy requirement) instead of history
+        # being silently missing a turn.
         return _render(
             request,
             "agent.html",
-            _context(ctx, turns=_agent_turn_log_views(conversation), latest=latest),
+            _context(
+                ctx,
+                history_turns=_agent_turn_log_views(conversation),
+                latest=latest,
+                latest_user_message=message,
+                kind_options=CRITERION_KIND_OPTIONS,
+            ),
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
 
+    # D-044: run_agent_turn always persists exactly one new (user,
+    # assistant) pair via its own _finish_turn when it returns without
+    # raising — split it off history so it renders once, adjacent to its
+    # own rich `latest` cards, instead of duplicated as a plain text
+    # bubble AND a rich block separated by the composer.
+    all_turns = _agent_turn_log_views(conversation)
+    history_turns = all_turns[:-2] if len(all_turns) >= 2 else []
     return _render(
         request,
         "agent.html",
-        _context(ctx, turns=_agent_turn_log_views(conversation), latest=latest),
+        _context(
+            ctx,
+            history_turns=history_turns,
+            latest=latest,
+            latest_user_message=message,
+            kind_options=CRITERION_KIND_OPTIONS,
+        ),
     )
+
+
+@router.post("/agent/reset", response_class=HTMLResponse)
+async def agent_reset(
+    request: Request,
+    csrf_token: str = Form(...),
+    ctx: UIContext = Depends(require_ui_scopes("candidates:read")),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """"Yeni söhbət" — clears this browser session's own server-held agent
+    conversation state (turns + last_search_candidate_ids). Never affects
+    another session, tenant, candidate, or job row."""
+    verify_csrf(ctx.csrf_token, csrf_token)
+    from meyar.services.agent_conversation_repo import (
+        get_or_create_conversation,
+        reset_conversation,
+    )
+
+    conversation = await get_or_create_conversation(
+        db, tenant_id=ctx.tenant_id, browser_session_id=ctx.session_id
+    )
+    await reset_conversation(db, conversation)
+    await record_event(
+        db,
+        tenant_id=ctx.tenant_id,
+        event_type="agent.conversation.reset",
+        actor_type=ACTOR_HUMAN_USER,
+        actor_id=ctx.user_id,
+    )
+    await db.commit()
+    return RedirectResponse("/ui/agent", status_code=status.HTTP_303_SEE_OTHER)
 
 
 @router.get("/library", response_class=HTMLResponse)
@@ -787,6 +889,7 @@ def _job_form_row(form: object, prefix: str, index: int) -> CriterionRowInput:
         requirement=field("requirement"),
         min_years=field("min_years"),
         weight=field("weight"),
+        required_level=field("required_level"),
     )
 
 
@@ -817,6 +920,7 @@ async def job_new_form(
         requirement="",
         min_years="",
         weight=DEFAULT_CRITERION_WEIGHT,
+        required_level="",
     )
     return _render(
         request,
@@ -835,7 +939,15 @@ async def job_new_form(
 async def create_job_route(
     request: Request,
     csrf_token: str = Form(...),
-    ctx: UIContext = Depends(require_ui_scopes("jobs:write")),
+    # PR #42 owner correction (issue #33): every HR role already holds
+    # every one of these scopes together (meyar.core.roles — deliberately
+    # flat, no partial-permission tier exists yet), so declaring them here
+    # is honest-intent, not a functional access change. Needed because a
+    # job created from the agent's JD-confirmation flow renders straight
+    # into the ranking result below instead of a bare redirect.
+    ctx: UIContext = Depends(
+        require_ui_scopes("jobs:write", "jobs:read", "candidates:read", "evaluations:write")
+    ),
     db: AsyncSession = Depends(get_db),
 ) -> Response:
     verify_csrf(ctx.csrf_token, csrf_token)
@@ -843,6 +955,28 @@ async def create_job_route(
     title = str(form.get("title", ""))
     must_have_rows = [_job_form_row(form, "must", i) for i in range(CRITERION_ROW_COUNT)]
     preferred_rows = [_job_form_row(form, "pref", i) for i in range(CRITERION_ROW_COUNT)]
+
+    # Manual creation is a distinct operation. Agent provenance fields are
+    # never ignored here: an agent review payload posted to this endpoint
+    # cannot be reinterpreted as an unrestricted manual job creation.
+    if any(
+        key in {"from_agent_draft", "draft_id"} or "_span_id_" in key
+        for key in form.keys()
+    ):
+        return _render(
+            request,
+            "job_new.html",
+            _job_new_context(
+                ctx,
+                title=title,
+                must_have_rows=must_have_rows,
+                preferred_rows=preferred_rows,
+                error=(
+                    "Agent qaralaması yalnız öz təsdiq əməliyyatı ilə təsdiqlənə bilər."
+                ),
+            ),
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        )
 
     try:
         job_request = build_job_create_request(
@@ -950,22 +1084,382 @@ async def create_job_route(
     return RedirectResponse("/ui/jobs", status_code=status.HTTP_303_SEE_OTHER)
 
 
-@router.post("/jobs/{job_criteria_version_id}/rank", response_class=HTMLResponse)
-async def rank_job(
+def _render_agent_confirmation_error(
+    request: Request, ctx: UIContext, *, message: str, status_code: int
+) -> HTMLResponse:
+    return _render(
+        request,
+        "error.html",
+        _context(ctx, title="Qaralama təsdiqlənmədi", message=message),
+        status_code=status_code,
+    )
+
+
+@router.post("/agent/drafts/{draft_id}/resolve", response_class=HTMLResponse)
+async def resolve_agent_job_draft_review(
     request: Request,
-    job_criteria_version_id: uuid.UUID,
+    draft_id: uuid.UUID,
     csrf_token: str = Form(...),
-    ctx: UIContext = Depends(
-        require_ui_scopes("jobs:read", "candidates:read", "evaluations:write")
-    ),
+    span_id: str = Form(..., pattern=r"^req-\d{4}$"),
+    criterion_type: str = Form(..., max_length=16),
+    ctx: UIContext = Depends(require_ui_scopes("jobs:write", "candidates:read")),
     db: AsyncSession = Depends(get_db),
 ) -> HTMLResponse:
+    """Persist one canonical, server-declared human-review resolution."""
+    from meyar.agent.service import resolve_job_draft_review_modality
+    from meyar.schemas.criteria import CriterionType
+    from meyar.services.agent_conversation_repo import (
+        get_conversation_for_update_by_session,
+        get_pending_job_draft,
+        replace_pending_job_draft,
+    )
+    from meyar.ui.service import build_agent_job_draft_view
+    from meyar.ui.view_models import AgentToolResultView, AgentTurnView
+
     verify_csrf(ctx.csrf_token, csrf_token)
-    # Same UI-boundary rule as /search — no manual date input; today's
-    # date is injected here and threaded explicitly into the deterministic
-    # ranking service. See docs/DECISIONS.md D-023.
-    evaluation_as_of_date = date.today()
     try:
+        resolved_type = CriterionType(criterion_type)
+        conversation = await get_conversation_for_update_by_session(
+            db, tenant_id=ctx.tenant_id, browser_session_id=ctx.session_id
+        )
+        if conversation is None:
+            raise UIServiceInputError("Qaralama bu sessiyada tapılmadı.")
+        pending = get_pending_job_draft(conversation, draft_id=draft_id)
+        if pending is None:
+            raise UIServiceInputError("Qaralama bu sessiyada tapılmadı.")
+        resolved = resolve_job_draft_review_modality(
+            pending, span_id=span_id, criterion_type=resolved_type
+        )
+        await replace_pending_job_draft(db, conversation, draft=resolved)
+        await record_event(
+            db,
+            tenant_id=ctx.tenant_id,
+            event_type="agent.draft.review_resolved",
+            metadata={"span_id": span_id, "criterion_type": resolved_type.value},
+            actor_type=ACTOR_HUMAN_USER,
+            actor_id=ctx.user_id,
+        )
+        await db.commit()
+    except (ValueError, UIServiceInputError) as exc:
+        await db.rollback()
+        return _render_agent_confirmation_error(
+            request, ctx, message=str(exc), status_code=status.HTTP_422_UNPROCESSABLE_CONTENT
+        )
+
+    all_turns = _agent_turn_log_views(conversation)
+    latest_user_message = all_turns[-2].text if len(all_turns) >= 2 else ""
+    latest = AgentTurnView(
+        outcome="ANSWERED_FROM_TOOL_RESULT",
+        message=None,
+        headline=(
+            "Dəqiqləşdirmə yadda saxlanıldı. "
+            "Tələbləri təsdiqləyib namizədləri sıralaya bilərsiniz."
+        ),
+        tool_results=[
+            AgentToolResultView(
+                tool_name="DRAFT_JOB_CRITERIA",
+                job_draft=build_agent_job_draft_view(resolved),
+            )
+        ],
+    )
+    return _render(
+        request,
+        "agent.html",
+        _context(
+            ctx,
+            history_turns=all_turns[:-2] if len(all_turns) >= 2 else [],
+            latest=latest,
+            latest_user_message=latest_user_message,
+            kind_options=CRITERION_KIND_OPTIONS,
+        ),
+    )
+
+
+@router.post("/agent/drafts/{draft_id}/confirm", response_class=HTMLResponse)
+async def confirm_agent_job_draft(
+    request: Request,
+    draft_id: uuid.UUID,
+    csrf_token: str = Form(...),
+    ctx: UIContext = Depends(
+        require_ui_scopes("jobs:write", "jobs:read", "candidates:read", "evaluations:write")
+    ),
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> HTMLResponse:
+    """Confirm one session-held canonical draft, then rank separately.
+
+    The route itself establishes agent-confirmation provenance. Browser rows
+    are checked as proposals against the locked server draft and never select
+    the authorization mode. Confirmation commits before ranking and retains a
+    durable result link so replay/retry cannot create another Job or version.
+    """
+    from meyar.agent.schemas import ConfirmedAgentJobDraft
+    from meyar.services.agent_conversation_repo import (
+        get_confirmed_job_draft,
+        get_conversation_for_update_by_session,
+        get_pending_job_draft,
+        mark_pending_job_draft_confirmed,
+    )
+    from meyar.services.agent_draft_confirmation_repo import (
+        create_draft_confirmation,
+        get_draft_confirmation,
+    )
+
+    verify_csrf(ctx.csrf_token, csrf_token)
+    evaluation_as_of_date = resolve_business_date(settings.business_timezone)
+    form = await request.form()
+
+    try:
+        conversation = await get_conversation_for_update_by_session(
+            db, tenant_id=ctx.tenant_id, browser_session_id=ctx.session_id
+        )
+        durable_confirmation = await get_draft_confirmation(
+            db,
+            tenant_id=ctx.tenant_id,
+            browser_session_id=ctx.session_id,
+            draft_id=draft_id,
+        )
+        if durable_confirmation is not None:
+            # Conversation JSON is optional UI state only. Confirmation identity
+            # comes from the independent server-owned row; the render below
+            # reloads result policy and disclosures from the immutable criteria
+            # version.
+            transcript_confirmation = (
+                get_confirmed_job_draft(conversation, draft_id=draft_id)
+                if conversation is not None
+                else None
+            )
+            transcript_agrees = (
+                transcript_confirmation is not None
+                and transcript_confirmation.job_id == durable_confirmation.job_id
+                and transcript_confirmation.criteria_version_id
+                == durable_confirmation.criteria_version_id
+            )
+            confirmed = ConfirmedAgentJobDraft(
+                draft_id=durable_confirmation.draft_id,
+                job_id=durable_confirmation.job_id,
+                criteria_version_id=durable_confirmation.criteria_version_id,
+                unsupported_requirements=(
+                    transcript_confirmation.unsupported_requirements
+                    if transcript_agrees and transcript_confirmation is not None
+                    else []
+                ),
+                needs_review_requirements=(
+                    transcript_confirmation.needs_review_requirements
+                    if transcript_agrees and transcript_confirmation is not None
+                    else []
+                ),
+            )
+            # Release any conversation row lock before potentially expensive
+            # ranking. Replay resolves to the database-owned identity.
+            await db.commit()
+            return await _render_job_ranking(
+                request,
+                ctx,
+                db,
+                job_criteria_version_id=confirmed.criteria_version_id,
+                unsupported_requirements=confirmed.unsupported_requirements,
+                needs_review_requirements=confirmed.needs_review_requirements,
+                confirmation_succeeded=True,
+                evaluation_as_of_date=evaluation_as_of_date,
+            )
+
+        if conversation is None:
+            raise UIServiceInputError(
+                "Qaralama təsdiqi tapılmadı; elanı yenidən analiz edin."
+            )
+
+        pending = get_pending_job_draft(conversation, draft_id=draft_id)
+        if pending is None:
+            raise UIServiceInputError(
+                "Qaralama təsdiqi tapılmadı və ya bu sessiyaya aid deyil; "
+                "elanı yenidən analiz edin."
+            )
+
+        canonical_title = pending.title or "Vakansiya qaralaması"
+        submitted_authority = "title" in form or any(
+            key.startswith(("must_", "pref_")) for key in form
+        )
+        if submitted_authority:
+            # Backward-compatible handling for already-open review pages and
+            # explicit tamper regressions. New protected review pages submit no
+            # criterion authority at all.
+            must_have_rows = [
+                _job_form_row(form, "must", i) for i in range(CRITERION_ROW_COUNT)
+            ]
+            preferred_rows = [
+                _job_form_row(form, "pref", i) for i in range(CRITERION_ROW_COUNT)
+            ]
+            if str(form.get("title", "")).strip() != canonical_title.strip():
+                raise UIServiceInputError(
+                    "Qaralama başlığı yadda saxlanmış təsdiqli forma ilə uyğun gəlmir."
+                )
+            job_request = build_job_create_request(
+                title=canonical_title,
+                must_have_rows=must_have_rows,
+                preferred_rows=preferred_rows,
+            )
+            submitted_span_ids = [
+                str(form.get(f"{prefix}_span_id_{index}", ""))
+                for prefix, rows in (("must", must_have_rows), ("pref", preferred_rows))
+                for index, row in enumerate(rows)
+                if row.requirement.strip()
+            ]
+        else:
+            job_request = JobCreateRequest(
+                title=canonical_title,
+                criteria=[*pending.must_have, *pending.preferred],
+            )
+            span_by_criterion = {
+                item.criterion_id: item.span_id
+                for item in pending.requirements
+                if item.criterion_id is not None and item.state.value == "SCORABLE"
+            }
+            submitted_span_ids = []
+            for criterion in job_request.criteria:
+                span_id = span_by_criterion.get(criterion.id)
+                if span_id is None:
+                    raise UIServiceInputError(
+                        "Qaralama meyarlarının təsdiqi etibarsızdır; elanı yenidən analiz edin."
+                    )
+                submitted_span_ids.append(span_id)
+        authorize_agent_draft_confirmation(
+            draft=pending,
+            request=job_request,
+            submitted_span_ids=submitted_span_ids,
+        )
+
+        duplicate_signature = compute_job_duplicate_signature(
+            job_request.title, job_request.criteria
+        )
+        if (
+            await find_active_duplicate_job(
+                db, tenant_id=ctx.tenant_id, duplicate_signature=duplicate_signature
+            )
+            is not None
+        ):
+            await db.rollback()
+            return _render_agent_confirmation_error(
+                request,
+                ctx,
+                message=JOB_DUPLICATE_MESSAGE,
+                status_code=status.HTTP_409_CONFLICT,
+            )
+
+        job = await create_job(
+            db,
+            tenant_id=ctx.tenant_id,
+            title=job_request.title,
+            duplicate_signature=duplicate_signature,
+        )
+        version = await create_criteria_version(
+            db,
+            tenant_id=ctx.tenant_id,
+            job_id=job.id,
+            criteria=[criterion.model_dump(mode="json") for criterion in job_request.criteria],
+            created_by_api_key_id=None,
+            unsupported_requirements=[item.requirement for item in pending.unsupported],
+            needs_review_requirements=[item.requirement for item in pending.needs_review],
+            result_limit=pending.result_limit,
+            eligible_only=True,
+        )
+        await record_event(
+            db,
+            tenant_id=ctx.tenant_id,
+            event_type="job.created",
+            metadata={"job_id": str(job.id), "criteria_version": version.version_number},
+            actor_type=ACTOR_HUMAN_USER,
+            actor_id=ctx.user_id,
+        )
+        confirmation = ConfirmedAgentJobDraft(
+            draft_id=draft_id,
+            job_id=job.id,
+            criteria_version_id=version.id,
+            result_limit=pending.result_limit,
+            unsupported_requirements=[item.requirement for item in pending.unsupported],
+            needs_review_requirements=[item.requirement for item in pending.needs_review],
+        )
+        await create_draft_confirmation(
+            db,
+            tenant_id=ctx.tenant_id,
+            browser_session_id=ctx.session_id,
+            draft_id=draft_id,
+            job_id=job.id,
+            criteria_version_id=version.id,
+        )
+        await mark_pending_job_draft_confirmed(
+            db, conversation, confirmation=confirmation
+        )
+        await db.commit()
+    except UIServiceInputError as exc:
+        await db.rollback()
+        return _render_agent_confirmation_error(
+            request,
+            ctx,
+            message=str(exc),
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        )
+    except IntegrityError:
+        await db.rollback()
+        return _render_agent_confirmation_error(
+            request,
+            ctx,
+            message=JOB_DUPLICATE_MESSAGE,
+            status_code=status.HTTP_409_CONFLICT,
+        )
+    except (ValueError, SQLAlchemyError):
+        await db.rollback()
+        return _render_agent_confirmation_error(
+            request,
+            ctx,
+            message=(
+                "Qaralama təhlükəsiz şəkildə təsdiqlənə bilmədi. "
+                "Elanı yenidən analiz edin."
+            ),
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+
+    return await _render_job_ranking(
+        request,
+        ctx,
+        db,
+        job_criteria_version_id=confirmation.criteria_version_id,
+        unsupported_requirements=confirmation.unsupported_requirements,
+        needs_review_requirements=confirmation.needs_review_requirements,
+        confirmation_succeeded=True,
+        evaluation_as_of_date=evaluation_as_of_date,
+    )
+
+
+async def _render_job_ranking(
+    request: Request,
+    ctx: UIContext,
+    db: AsyncSession,
+    *,
+    job_criteria_version_id: uuid.UUID,
+    evaluation_as_of_date: date,
+    unsupported_requirements: list[str] | None = None,
+    needs_review_requirements: list[str] | None = None,
+    confirmation_succeeded: bool = False,
+) -> HTMLResponse:
+    """Shared by the manual "Namizədləri sırala" action (rank_job) and
+    the dedicated agent-draft confirmation path — one
+    deterministic ranking render, never duplicated. Same UI-boundary rule
+    as /search: no manual date input; today's date is injected here and
+    threaded explicitly into the deterministic ranking service (D-023).
+
+    Unsupported and review-required source requirements are loaded from
+    the immutable criteria version. They remain visible on every later
+    reload/re-rank but never become JobCriterion rows and never affect a
+    score. The optional arguments only preserve the already-built view if
+    the version lookup itself fails."""
+    try:
+        criteria_version = await get_criteria_version_by_id(
+            db, tenant_id=ctx.tenant_id, criteria_version_id=job_criteria_version_id
+        )
+        if criteria_version is not None:
+            unsupported_requirements = list(criteria_version.unsupported_requirements)
+            needs_review_requirements = list(criteria_version.needs_review_requirements)
         ranking = await rank_candidates_for_job(
             db,
             tenant_id=ctx.tenant_id,
@@ -976,6 +1470,16 @@ async def rank_job(
         await db.commit()
     except BatchRankingError as exc:
         await db.rollback()
+        if confirmation_succeeded:
+            return _render(
+                request,
+                "ranking_retry.html",
+                _context(
+                    ctx,
+                    job_criteria_version_id=job_criteria_version_id,
+                ),
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
         if exc.code == "JOB_ARCHIVED":
             return _render(
                 request,
@@ -1007,6 +1511,16 @@ async def rank_job(
         )
     except (ScoringPolicyError, SQLAlchemyError):
         await db.rollback()
+        if confirmation_succeeded:
+            return _render(
+                request,
+                "ranking_retry.html",
+                _context(
+                    ctx,
+                    job_criteria_version_id=job_criteria_version_id,
+                ),
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
         return _render(
             request,
             "error.html",
@@ -1023,7 +1537,56 @@ async def rank_job(
     return _render(
         request,
         "ranking_results.html",
-        _context(ctx, ranking=ranking, results=results, job_title=job_title),
+        _context(
+            ctx,
+            ranking=ranking,
+            results=results,
+            job_title=job_title,
+            unsupported_requirements=unsupported_requirements or [],
+            needs_review_requirements=needs_review_requirements or [],
+            canonical_ranking_url=f"/ui/jobs/{job_criteria_version_id}/ranking",
+        ),
+    )
+
+
+@router.get("/jobs/{job_criteria_version_id}/ranking", response_class=HTMLResponse)
+async def get_job_ranking(
+    request: Request,
+    job_criteria_version_id: uuid.UUID,
+    ctx: UIContext = Depends(
+        require_ui_scopes("jobs:read", "candidates:read", "evaluations:write")
+    ),
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> HTMLResponse:
+    """Stable, reload-safe ranking URL for a confirmed criteria version."""
+    return await _render_job_ranking(
+        request,
+        ctx,
+        db,
+        job_criteria_version_id=job_criteria_version_id,
+        evaluation_as_of_date=resolve_business_date(settings.business_timezone),
+    )
+
+
+@router.post("/jobs/{job_criteria_version_id}/rank", response_class=HTMLResponse)
+async def rank_job(
+    request: Request,
+    job_criteria_version_id: uuid.UUID,
+    csrf_token: str = Form(...),
+    ctx: UIContext = Depends(
+        require_ui_scopes("jobs:read", "candidates:read", "evaluations:write")
+    ),
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> HTMLResponse:
+    verify_csrf(ctx.csrf_token, csrf_token)
+    return await _render_job_ranking(
+        request,
+        ctx,
+        db,
+        job_criteria_version_id=job_criteria_version_id,
+        evaluation_as_of_date=resolve_business_date(settings.business_timezone),
     )
 
 

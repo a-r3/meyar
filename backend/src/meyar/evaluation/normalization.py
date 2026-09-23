@@ -23,3 +23,22 @@ def normalize_text(value: str) -> str:
 def normalize_skill_name(value: str) -> str:
     normalized = normalize_text(value)
     return SKILL_ALIASES.get(normalized, normalized)
+
+
+def accepted_skill_terms(value: str) -> frozenset[str]:
+    """All explicitly curated spellings that resolve to ``value``.
+
+    This is the inverse view of ``SKILL_ALIASES`` used by claim-specific
+    extraction evidence validation. Keeping it here guarantees evidence
+    acceptance and deterministic skill matching use the same canonical
+    alias authority; no fuzzy or model-judged synonym is introduced.
+    """
+    canonical = normalize_skill_name(value)
+    return frozenset(
+        {canonical}
+        | {
+            alias
+            for alias, alias_canonical in SKILL_ALIASES.items()
+            if alias_canonical == canonical
+        }
+    )

@@ -4,6 +4,7 @@ real CV, always hand-seeded rows."""
 
 import uuid
 from datetime import date
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,6 +22,49 @@ from meyar.services.candidate_profile_repo import create_profile_version
 from meyar.services.candidate_repo import create_candidate
 
 DEFAULT_AS_OF_DATE = date(2026, 1, 1)
+
+
+def synthetic_evidence(*parts: object) -> list[dict]:
+    """Explicitly author a synthetic positive quote for a non-evidence test.
+
+    Never invoked by persistence helpers or on caller-supplied evidence.
+    Boundary tests must supply their own independent canonical text/quotes.
+    """
+    quote = " ".join(str(part) for part in parts if part is not None and part != "")
+    return [{"page": 1, "block_index": 0, "quote": quote}]
+
+
+def _canonical_content_from_profile(profile_content: dict | None, *, fallback: str) -> dict:
+    blocks_by_page: dict[int, dict[int, list[str]]] = {}
+    if profile_content is not None:
+        for value in profile_content.values():
+            if not isinstance(value, list):
+                continue
+            for item in value:
+                if not isinstance(item, dict):
+                    continue
+                for ref in item.get("evidence", []):
+                    if not isinstance(ref, dict):
+                        continue
+                    page = int(ref.get("page", 1))
+                    index = int(ref.get("block_index", 0))
+                    quote = str(ref.get("quote", "")).strip()
+                    if quote:
+                        blocks_by_page.setdefault(page, {}).setdefault(index, []).append(quote)
+    if not blocks_by_page:
+        blocks_by_page = {1: {0: [fallback]}}
+    pages: list[dict[str, Any]] = []
+    for page, blocks in sorted(blocks_by_page.items()):
+        pages.append(
+            {
+                "page": page,
+                "blocks": [
+                    {"index": index, "text": "\n".join(quotes)}
+                    for index, quotes in sorted(blocks.items())
+                ],
+            }
+        )
+    return {"pages": pages}
 
 
 def current_source_sha256(profile_content: dict) -> str:
@@ -42,6 +86,9 @@ async def seed_candidate_with_profile(
     """Creates a Candidate + one document/canonical pair + one
     CandidateProfileVersion (v1) with the given content. Returns
     (candidate, profile_version)."""
+    stored_profile_content = (
+        profile_content if status == "COMPLETED" else None
+    )
     candidate = await create_candidate(db_session, tenant_id=tenant_id)
     document = await create_candidate_document(
         db_session,
@@ -60,7 +107,7 @@ async def seed_candidate_with_profile(
         parser_name="test-parser",
         parser_version="1.0.0",
         language=None,
-        content={"pages": [{"page": 1, "blocks": [{"index": 0, "text": "synthetic"}]}]},
+        content=_canonical_content_from_profile(stored_profile_content, fallback="synthetic"),
     )
     profile_version = await create_profile_version(
         db_session,
@@ -75,7 +122,7 @@ async def seed_candidate_with_profile(
         model_name="fake-model",
         model_metadata={},
         status=status,
-        profile_content=profile_content if status == "COMPLETED" else None,
+        profile_content=stored_profile_content,
     )
     return candidate, profile_version
 
@@ -89,6 +136,8 @@ async def seed_next_profile_version(
 ):
     """Creates the NEXT CandidateProfileVersion for an existing candidate
     (e.g. v2), reusing a fresh document/canonical pair."""
+    stored_profile_content = profile_content
+    assert stored_profile_content is not None
     document = await create_candidate_document(
         db_session,
         tenant_id=tenant_id,
@@ -106,7 +155,7 @@ async def seed_next_profile_version(
         parser_name="test-parser",
         parser_version="1.0.0",
         language=None,
-        content={"pages": [{"page": 1, "blocks": [{"index": 0, "text": "synthetic v2"}]}]},
+        content=_canonical_content_from_profile(stored_profile_content, fallback="synthetic v2"),
     )
     return await create_profile_version(
         db_session,
@@ -121,7 +170,7 @@ async def seed_next_profile_version(
         model_name="fake-model",
         model_metadata={},
         status="COMPLETED",
-        profile_content=profile_content,
+        profile_content=stored_profile_content,
     )
 
 

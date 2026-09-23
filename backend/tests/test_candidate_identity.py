@@ -255,6 +255,49 @@ async def test_fabricated_evidence_quote_rejected(
     assert version.error_code == "EVIDENCE_INVALID"
 
 
+@pytest.mark.parametrize(
+    "bad_extraction",
+    [
+        CandidateIdentityExtraction(
+            email=IdentityFieldItem(
+                value="mallory@example.com",
+                evidence=[EvidenceRef(page=1, block_index=0, quote="Jane Synthetic Doe")],
+            )
+        ),
+        CandidateIdentityExtraction(
+            phone=IdentityFieldItem(
+                value="+1-999-9999",
+                evidence=[EvidenceRef(page=1, block_index=0, quote="Jane Synthetic Doe")],
+            )
+        ),
+        CandidateIdentityExtraction(
+            full_name=IdentityFieldItem(
+                value="Mallory Example",
+                evidence=[EvidenceRef(page=1, block_index=0, quote="Jane Synthetic Doe")],
+            )
+        ),
+    ],
+)
+async def test_identity_value_must_be_supported_by_its_own_quote(
+    db_session: AsyncSession, candidate_with_contact_content, bad_extraction
+) -> None:
+    tenant, candidate, document, _canonical = candidate_with_contact_content
+    version = await extract_candidate_identity(
+        db_session,
+        FakeLLMProvider(identity_extraction=bad_extraction),
+        tenant_id=tenant.id,
+        candidate_id=candidate.id,
+        candidate_document=document,
+        model_provider_name="fake",
+        max_input_chars=20000,
+    )
+    await db_session.commit()
+
+    assert version.status == "FAILED"
+    assert version.error_code == "CLAIM_EVIDENCE_UNSUPPORTED"
+    assert version.identity_content is None
+
+
 async def test_bounded_retry_then_fails(
     db_session: AsyncSession, candidate_with_contact_content
 ) -> None:

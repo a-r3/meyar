@@ -4,7 +4,11 @@ from decimal import Decimal
 
 import pytest
 from conftest import TEST_DATABASE_URL
-from search_helpers import seed_candidate_with_profile, seed_next_profile_version
+from search_helpers import (
+    seed_candidate_with_profile,
+    seed_next_profile_version,
+    synthetic_evidence,
+)
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -73,7 +77,10 @@ async def test_scored_evaluation_persists_complete_provenance_and_safe_explanati
     db_session: AsyncSession, tenant_and_key
 ) -> None:
     tenant, _key, _plaintext = tenant_and_key
-    content = {**EMPTY_PROFILE, "skills": [{"name": "Python", "evidence": EVIDENCE}]}
+    content = {
+        **EMPTY_PROFILE,
+        "skills": [{"name": "Python", "evidence": synthetic_evidence("Python")}],
+    }
     candidate, profile = await seed_candidate_with_profile(
         db_session, tenant_id=tenant.id, profile_content=content
     )
@@ -89,7 +96,7 @@ async def test_scored_evaluation_persists_complete_provenance_and_safe_explanati
     assert result.reused is False
     assert evaluation.evaluation_as_of_date == date(2026, 6, 15)
     assert evaluation.numeric_score == Decimal("100.00")
-    assert evaluation.policy_engine_version == "meyar-policy-v1"
+    assert evaluation.policy_engine_version == "meyar-policy-v2"
     assert evaluation.scoring_policy_version == "meyar-score-v1"
     assert evaluation.score_explanation["evaluation_id"] == str(evaluation.id)
     assert evaluation.score_explanation["numeric_score"] == "100.00"
@@ -100,7 +107,10 @@ async def test_exact_provenance_is_idempotent_but_date_profile_and_criteria_chan
     db_session: AsyncSession, tenant_and_key
 ) -> None:
     tenant, _key, _plaintext = tenant_and_key
-    content = {**EMPTY_PROFILE, "skills": [{"name": "Python", "evidence": EVIDENCE}]}
+    content = {
+        **EMPTY_PROFILE,
+        "skills": [{"name": "Python", "evidence": synthetic_evidence("Python")}],
+    }
     candidate, profile_v1 = await seed_candidate_with_profile(
         db_session, tenant_id=tenant.id, profile_content=content
     )
@@ -158,7 +168,7 @@ async def test_present_experience_is_reproducible_for_explicit_historical_date(
                 "start_date": "2023",
                 "end_date": "Present",
                 "is_current": True,
-                "evidence": EVIDENCE,
+                "evidence": synthetic_evidence("Engineer", "2023", "Present", "present"),
             }
         ],
     }
@@ -197,7 +207,10 @@ async def test_identity_versions_do_not_change_exact_score(
     db_session: AsyncSession, tenant_and_key
 ) -> None:
     tenant, _key, _plaintext = tenant_and_key
-    content = {**EMPTY_PROFILE, "skills": [{"name": "Python", "evidence": EVIDENCE}]}
+    content = {
+        **EMPTY_PROFILE,
+        "skills": [{"name": "Python", "evidence": synthetic_evidence("Python")}],
+    }
     candidate, profile = await seed_candidate_with_profile(
         db_session, tenant_id=tenant.id, profile_content=content
     )
@@ -261,7 +274,10 @@ async def test_legacy_all_zero_criteria_version_fails_safely(
 
 async def test_score_audit_metadata_is_pii_safe(db_session: AsyncSession, tenant_and_key) -> None:
     tenant, _key, _plaintext = tenant_and_key
-    content = {**EMPTY_PROFILE, "skills": [{"name": "Python", "evidence": EVIDENCE}]}
+    content = {
+        **EMPTY_PROFILE,
+        "skills": [{"name": "Python", "evidence": synthetic_evidence("Python")}],
+    }
     candidate, profile = await seed_candidate_with_profile(
         db_session, tenant_id=tenant.id, profile_content=content
     )
@@ -288,7 +304,10 @@ async def test_concurrent_exact_requests_converge_on_one_evaluation(
     db_session: AsyncSession, tenant_and_key
 ) -> None:
     tenant, _key, _plaintext = tenant_and_key
-    content = {**EMPTY_PROFILE, "skills": [{"name": "Python", "evidence": EVIDENCE}]}
+    content = {
+        **EMPTY_PROFILE,
+        "skills": [{"name": "Python", "evidence": synthetic_evidence("Python")}],
+    }
     candidate, profile = await seed_candidate_with_profile(
         db_session, tenant_id=tenant.id, profile_content=content
     )

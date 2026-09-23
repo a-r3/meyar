@@ -21,7 +21,6 @@ from meyar.schemas.evaluation import (
     CRITERION_STATUS_MANUAL_REVIEW_REQUIRED,
     CRITERION_STATUS_MATCH,
     CRITERION_STATUS_NOT_MATCHED,
-    CRITERION_STATUS_PARTIAL_MATCH,
     CRITERION_STATUS_UNKNOWN,
     OVERALL_INSUFFICIENT_EVIDENCE,
     OVERALL_MANUAL_REVIEW_REQUIRED,
@@ -145,13 +144,14 @@ def test_language_explicit_level_match() -> None:
     assert result.status == CRITERION_STATUS_MATCH
 
 
-def test_language_present_without_required_level_is_partial() -> None:
+def test_language_present_without_required_level_is_unknown() -> None:
     criterion = _criterion(
         id="english", kind=CriterionKind.LANGUAGE, value="English", required_level="C1"
     )
     profile = _empty_profile(languages=[LanguageItem(language="English", evidence=_EV)])
     result = evaluate_criterion(criterion, profile)
-    assert result.status == CRITERION_STATUS_PARTIAL_MATCH
+    assert result.status == CRITERION_STATUS_UNKNOWN
+    assert result.reason_code == "LANGUAGE_LEVEL_UNSTATED"
 
 
 def test_language_absent_is_unknown() -> None:

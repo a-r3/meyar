@@ -1,4 +1,5 @@
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -15,8 +16,13 @@ class Settings(BaseSettings):
     rate_limit_per_minute: int = 60
     inference_concurrency: int = 1
     storage_root: str = "./var/storage"
-    llm_provider: str = "ollama"
-    llm_timeout_seconds: float = 60.0
+    # Request-serving runtime has no fake/deterministic provider mode.
+    # Test doubles are dependency overrides and the synthetic demo provider
+    # is scoped to the explicit seed command only.
+    llm_provider: Literal["ollama"] = "ollama"
+    # Small local models can need more than a minute for the bounded JD
+    # schema-repair turn on development hardware; still finite and explicit.
+    llm_timeout_seconds: float = 120.0
     llm_max_input_chars: int = 20000
     embedding_provider: str = "ollama"
     # DEV_INTEGRATION_MODEL default — not an approved final production
@@ -56,6 +62,10 @@ class Settings(BaseSettings):
     # agent's own prompt context each orchestration step. Bounds prompt
     # size and how much conversation state one BrowserSession accumulates.
     agent_max_context_turns: int = Field(default=8, ge=1, le=50)
+    # One bank/business timezone owns the UI's effective date. Deterministic
+    # services still receive the resolved date explicitly and never consult
+    # the wall clock themselves.
+    business_timezone: str = "Asia/Baku"
 
     @model_validator(mode="after")
     def _production_ui_cookie_must_be_secure(self) -> "Settings":

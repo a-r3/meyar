@@ -7,17 +7,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.evaluation.evaluators import evaluate_criterion
 from meyar.evaluation.policy import POLICY_ENGINE_VERSION, compute_overall_result
-from meyar.models.candidate_profile_version import (
-    PROFILE_STATUS_COMPLETED,
-    CandidateProfileVersion,
-)
+from meyar.models.candidate_profile_version import CandidateProfileVersion
 from meyar.models.evaluation import (
     EVALUATION_STATUS_COMPLETED,
     EVALUATION_STATUS_FAILED,
     Evaluation,
 )
 from meyar.models.job_criteria_version import JobCriteriaVersion
-from meyar.schemas.candidate_profile import CandidateProfileExtraction
 from meyar.schemas.criteria import CriterionIn
 from meyar.scoring.policy import SCORING_POLICY_VERSION, ScoringPolicyError, score_results
 from meyar.scoring.schemas import ScoredEvaluationResult
@@ -25,6 +21,7 @@ from meyar.services.audit_repo import record_event
 from meyar.services.candidate_profile_repo import get_profile_version_by_id
 from meyar.services.evaluation_repo import create_evaluation, get_scored_evaluation_by_provenance
 from meyar.services.job_criteria_repo import get_criteria_version_by_id
+from meyar.services.profile_authority import ProfileAuthorityError, authorize_profile_version
 
 
 class EvaluationInputError(Exception):
@@ -82,6 +79,21 @@ async def evaluate_and_score_candidate(
             "No job criteria version found for this tenant/job.",
         )
 
+    try:
+        profile = await authorize_profile_version(db, version=profile_version)
+    except ProfileAuthorityError as exc:
+        evaluation = await _persist_failure(
+            db,
+            tenant_id=tenant_id,
+            candidate_id=candidate_id,
+            candidate_profile_version_id=candidate_profile_version_id,
+            job_id=job_id,
+            job_criteria_version_id=job_criteria_version_id,
+            error_code=exc.code,
+            error_message=str(exc),
+        )
+        return ScoredEvaluationResult(evaluation=evaluation, reused=False)
+
     existing = await get_scored_evaluation_by_provenance(
         db,
         tenant_id=tenant_id,
@@ -107,31 +119,6 @@ async def evaluate_and_score_candidate(
             "evaluation_as_of_date": evaluation_as_of_date.isoformat(),
         },
     )
-
-    if (
-        profile_version.status != PROFILE_STATUS_COMPLETED
-        or profile_version.profile_content is None
-    ):
-        await _record_failure_audit(db, tenant_id, "INSUFFICIENT_STRUCTURED_DATA")
-        raise EvaluationInputError(
-            "INSUFFICIENT_STRUCTURED_DATA",
-            "Candidate profile version has no completed structured data to evaluate.",
-        )
-
-    try:
-        profile = CandidateProfileExtraction.model_validate(profile_version.profile_content)
-    except ValidationError as exc:
-        evaluation = await _persist_failure(
-            db,
-            tenant_id=tenant_id,
-            candidate_id=candidate_id,
-            candidate_profile_version_id=candidate_profile_version_id,
-            job_id=job_id,
-            job_criteria_version_id=job_criteria_version_id,
-            error_code="PROFILE_SCHEMA_UNSUPPORTED",
-            error_message=str(exc),
-        )
-        return ScoredEvaluationResult(evaluation=evaluation, reused=False)
 
     try:
         criteria = [CriterionIn.model_validate(item) for item in criteria_version.criteria]

@@ -46,10 +46,48 @@
 - Every extracted fact's evidence (page, block_index, quote) is
   re-verified against a freshly rebuilt `ProfessionalDocumentView` for
   the *exact* `CanonicalDocument` referenced — never trusted from model
-  output. A reference to a nonexistent page/block, a fabricated quote, or
-  (structurally impossible by construction) another document's content
-  fails validation and the extraction is persisted as `FAILED`, never as
-  a silently-accepted success.
+  output. Claim-specific validation then requires one attributable quote
+  to contain the material values of that fact: accepted skill alias (and
+  no supported explicit contradiction), language plus claimed
+  proficiency, certification identity and other populated fields,
+  education's populated institution/degree/field/date, or employment's
+  populated role/employer/date/current relationship. Project descriptions
+  are likewise attributable to their own quote. A reference to a
+  nonexistent page/block, a fabricated or unrelated quote, or an
+  unsupported material value fails validation and the extraction is
+  persisted as `FAILED`, never as a silently-accepted success. Existing
+  deterministic interval-grounding and duration rules are separate and
+  unchanged.
+- Claim-specific support is deliberately deterministic lexical
+  attribution, not general natural-language entailment. Matching is
+  case/whitespace/Azerbaijani-diacritic normalized; skills additionally
+  use the same curated aliases as deterministic evaluation. Positive
+  every material professional term fails closed for enumerated obvious
+  English `no`, `without`, and nearby `not` constructions, including
+  `does/do/did/has/have/had not` with the bounded supported verb list.
+  This applies to skill, language/proficiency, certification, education,
+  employment, project, domain, skill-experience and domain-experience
+  claims. Skill/domain intervals still require subject plus interval in
+  one accepted quote; when an experience item references an employment
+  row, that same quote must also support the referenced role/employer.
+  Paraphrases, implicit claims, complex negation scope, distant terms,
+  and unenumerated multilingual negation are not inferred. This is not a
+  natural-language entailment guarantee. Where literal support cannot be
+  established, the whole extraction remains unverified rather than
+  becoming positive evidence or a deterministic `NOT_MATCHED` fact.
+- Identity extraction has the same location/verbatim check plus
+  value-specific attribution before HR presentation: normalized email
+  value, normalized phone digits, or all material normalized name tokens
+  must occur in one of that field's own accepted quotes. Identity remains
+  presentation-only and is not introduced into matching, scoring,
+  ranking, embeddings, or suitability logic.
+- Current consumers re-run these validators against the immutable
+  canonical document before treating a persisted `COMPLETED` professional
+  or identity version as authority. Unsupported legacy facts are
+  unavailable to search, evaluation, agent profile/evidence flows, and HR
+  profile presentation; cached positive evaluations tied to such a
+  profile are not reused and are presented without score/fit as
+  unavailable. Ordinary reads never rewrite historical rows.
 - The extraction schema uses `extra="forbid"` and has no field for name/
   email/phone/age/gender/religion/ethnicity/marital status/health/
   photo/nationality — the model cannot smuggle a sensitive attribute into
@@ -63,6 +101,121 @@
   `FAILED`/`MANUAL_REVIEW_REQUIRED` `CandidateProfileVersion` — never a
   crash, never fabricated content.
 
+D-050 strengthens attribution: contradiction checks use a bounded canonical
+context (200 normalized characters around each attributed quote occurrence),
+with local token/clause scope. Current state must be explicit and positive;
+linked periods must fit the referenced employment occurrence. Domain intervals
+cannot borrow contradictory evidence. Email tokens and coherent phone
+occurrences replace substring/digit-concatenation attribution. Embedding
+generation/reuse and folder/demo readiness also enforce shared current
+authority. Historical rows remain immutable. This is bounded lexical
+validation, not general entailment or multilingual NLI.
+
+D-052 completes the bounded English coordination rule: an explicit negative
+governor remains active across `and`/`or`/`nor` members until a sentence,
+semicolon, independent newline, `but`, or `however` boundary. Local `not` does
+not spread into a later positive member, and `not only ... but also ...` remains
+positive. Phone authority additionally rejects two-fragment numeric strings
+without a phone-like prefix/shape, even when the supplied quote is cropped from
+canonical reference/code context.
+
+D-053 removes bare digits as self-authenticating phone evidence. Canonical
+source context must provide conventional phone syntax or a directly adjacent
+bounded phone/contact label, while explicit reference, invoice, employee-ID,
+account, ID, and code labels reject. Cropped quotes cannot hide that canonical
+meaning. Unlabeled uninterrupted digits fail closed, which may suppress a valid
+unlabeled number but never guesses that an arbitrary identifier is a phone.
+
+## Agent candidate-factual authority
+
+- `AgentDecision` has no free-text answer field. `FINAL_ANSWER` and
+  `CLARIFY` carry only a closed non-factual response code which the server
+  maps to fixed copy. Candidate facts can reach HR only through typed,
+  tenant-scoped tool results or a server-built rendering of validated
+  `GroundedFact` values; the model may only select those fact ids.
+- Numeric candidate evaluation remains exclusively the deterministic
+  evaluation service's output. The agent does not calculate or author a
+  score. Hiring recommendations are not an agent output: the server-owned
+  response explicitly reserves the decision for an authorized human.
+- Persisted assistant text is replayed only with both `SERVER_VALIDATED`
+  and current `text_authority_version=candidate-factuality-v2`. Legacy rows,
+  including older server-marked rows lacking that version, are rendered
+  from the fixed outcome mapping, preventing historical unrestricted model
+  prose from re-entering the UI.
+- `JDCriteriaDraft.title` remains untrusted draft content. It is retained
+  only in the editable JD review payload when its material tokens are
+  attributable to the HR-supplied JD text; otherwise a generic draft
+  title is used. The assistant headline is always fixed server copy and
+  never includes that title. Likewise, `evidence_topic` is only a selector:
+  the visible topic is resolved from a validated profile fact title, or
+  omitted in favor of generic server copy; raw model topic text is never
+  rendered or persisted as assistant authority.
+- JD criteria use server-owned canonical requirement-span authority (D-055,
+  strengthened by D-061):
+  the original JD is segmented before inference into occurrence-distinct ids,
+  exact offsets/text, and a server normalization. A model references an id;
+  its `source_text` is never authority. Complete-span subject/type, kind/scope,
+  modality, duration/level, and curated exact alias identity must validate
+  before a row is scorable. Raw-JD and post-parse prohibited checks remain
+  independent of model kind. D-061 adds server-owned protected-concept grammar
+  for AZ/EN inflection, comparison, idiom, paraphrase, and reordered wording;
+  the final typed criterion boundary also rejects clause/count shapes and
+  structurally impossible language subjects before persistence/evaluation.
+  Prohibited text is count-only outside the HR user's own original message and
+  cannot enter scoring. A dedicated confirmation operation resolves and locks
+  the server-held tenant/session draft; browser rows and hidden fields cannot
+  choose manual mode, add, weaken, delete, or replay scoring authority. The
+  consumed draft retains a durable Job/version link for idempotent ranking retry.
+- D-058 adds no new model authority: skill/domain duration comes only from
+  accepted attributable candidate-profile intervals, CEFR ordering is fixed
+  server policy, result count is deterministically parsed/bounded workflow
+  metadata, and all confirmed material fields are revalidated against the
+  locked canonical draft. Safe unsupported/review text is stored on the
+  criteria version for truthful reload; prohibited source text is never stored
+  there. The configured business date is resolved once at the UI boundary and
+  passed explicitly into deterministic services.
+
+## Local-only Ollama operating contract
+
+Two distinct guarantees are in play, and they must not be conflated —
+closing the transport-egress defect above (D-047) only closes the first:
+
+**APPLICATION GUARANTEE (verified in this repository's test suite):**
+- Every MEYAR-constructed HTTP client used for Ollama inference,
+  embeddings, or health/readiness rejects a non-loopback
+  `MEYAR_OLLAMA_BASE_URL` at construction time (`require_loopback_url`).
+- Every such client is built with `trust_env=False`, so process
+  environment proxy configuration (`HTTP_PROXY`/`HTTPS_PROXY`/
+  `ALL_PROXY`) can never redirect a candidate-content request off-machine,
+  and this does not depend on `NO_PROXY` being set correctly.
+- Every such client has `follow_redirects=False`, so a redirect response
+  from the local Ollama daemon cannot carry a request outside the
+  approved boundary.
+
+**HOST/OLLAMA CONFIGURATION GUARANTEE (deployment-environment
+responsibility — a future deployment preflight must verify these before
+go-live, not this codebase):**
+- The Ollama daemon itself binds only to an approved local interface,
+  preferably loopback (`OLLAMA_HOST=127.0.0.1`, not `0.0.0.0`).
+- Cloud-backed Ollama behavior (any "Ollama Cloud"/hosted-model routing
+  the daemon supports) is disabled.
+- Only approved local models are available to the daemon — no
+  unapproved/unreviewed model can be pulled or invoked.
+- Model identity/digest is release-managed (pinned, reviewed model
+  versions — not "whatever `latest` resolves to on the day of a pull").
+- Host-level outbound-network denial (OS firewall egress rule blocking
+  the Ollama process, or the whole host, from reaching the public
+  internet) remains defense in depth underneath the application-layer
+  guarantee above — the application guarantee must not be treated as a
+  substitute for it.
+
+**NOT VERIFIED in this development environment:** daemon-level
+cloud-disable status, interface binding, model pinning/digest management,
+and host-level egress denial are all deployment/target-hardware concerns
+(see `docs/TARGET_MAC_BENCHMARK.md`) that cannot be checked from this
+repository's test suite — they require a deployment preflight against the
+actual target Ollama installation, not yet implemented.
+
 ## Threat model (MVP-relevant)
 
 | Threat | Mitigation |
@@ -72,12 +225,15 @@
 | Prompt injection in CV content | CV text is always framed as quoted data in prompts, never as instructions; structured-output schema has no "instruction" field; dedicated fixture + test (see Test Data) |
 | Malicious upload (zip bomb, path traversal, MIME spoofing, oversized file) | MIME sniffing + extension cross-check, max size enforcement, opaque storage ids, no user-controlled paths |
 | Unvalidated LLM output reaching authoritative tables | All LLM output passes Pydantic v2 schema validation before persistence; validation failure → `MANUAL_REVIEW_REQUIRED`/`FAILED`, never silently coerced |
+| A protected JD phrase being mislabeled as a safe criterion kind | D-061 applies protected-concept policy to raw supported-language text before semantic interpretation and again to each canonical source occurrence plus normalized subject after interpretation. The policy covers AZ/EN nationality/citizenship, age, gender/sex, health, and disability through bounded lexeme families plus comparison/idiom/paraphrase grammar. A model kind, safe-looking subject, modality, omission, or `OTHER` label cannot override either scan; the typed `CriterionIn` boundary is a final backstop. Russian/Cyrillic fails closed before inference and creates no criterion. |
+| A model-authored JD field reaching scoring without source authority | D-061 requires a server-owned `SemanticRequirement`: family, exact bounded subject occurrence, normalized subject, modality occurrence, duration/number occurrence, and proficiency occurrence are independently bound to one canonical span. Every material span reconciles to exactly one explicit terminal state. Result-count occurrences are separate workflow control and typed criterion authorization rejects clause/count subjects. Only the resulting typed server object can construct `CriterionIn`; model free strings are never scoring authority. |
 | Local inference endpoint exposure | Ollama bound to localhost/internal Docker network only, in every environment; never a public route |
 | Secret leakage via logs/git | PII-safe structured logging (ids only); `.claude` hooks block obvious secret patterns and real CV files from commits |
 | Retry-induced duplicate work/cost | `Idempotency-Key` on unsafe writes where relevant |
 | Inference overload | Global concurrency semaphore around the `LLMProvider` call; per-tenant rate limit |
 | Candidate content leaving bank infrastructure via embeddings | Local-only embedding provider abstraction, same boundary pattern as `LLMProvider`; no external embedding API call anywhere in code |
-| Candidate content leaving the host machine via any outbound network call | Formally verified (Slice 13): static inventory confirms three `httpx.AsyncClient` construction sites exist in the app (`OllamaLLMProvider.health`, `OllamaLLMProvider._chat`, `OllamaEmbeddingProvider.embed`), all loopback-gated; a deterministic runtime guard (`test_no_exfiltration.py`) proves a representative extract+embed workflow, run through the real provider classes, never attempts a non-loopback request. Validated as an application-level, tested-configuration claim — not a physical-firewall/network-layer guarantee. |
+| Candidate content leaving the host machine via any outbound network call | Formally verified (Slice 13): static inventory confirms three call sites build a local-only HTTP client in the app (`OllamaLLMProvider.health`, `OllamaLLMProvider._chat`, `OllamaEmbeddingProvider.embed`), all loopback-gated; a deterministic runtime guard (`test_no_exfiltration.py`) proves a representative extract+embed workflow, run through the real provider classes, never attempts a non-loopback request. Validated as an application-level, tested-configuration claim — not a physical-firewall/network-layer guarantee. |
+| Candidate content leaving the host machine via process-environment proxy configuration (`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`), even when the logical request URL is loopback | D-047: all three client-construction sites above route through the single shared `meyar.llm.loopback.build_local_only_async_client` boundary, which passes `trust_env=False` — httpx's own environment-derived proxy selection (`_get_proxy_map`) is disabled outright, so the fix does not depend on `NO_PROXY` being set correctly. `follow_redirects` stays explicit `False` so a redirect response cannot carry a request outside the boundary either. Proven at the transport-configuration level (internal `_mounts`/`_trust_env` state, not just `request.url.host`) in `test_ollama_transport_proxy_isolation.py`. See "Local-only Ollama operating contract" below for the host/daemon-level guarantees this does not cover. |
 | Identity data (name/contact) leaking into scoring/ranking as a hidden signal | `CandidateIdentityVersion` is presentation-only by construction — matching/search/ranking inputs include only `CandidateProfile` fields, and Slice 11 resolves identity after backend order is fixed |
 | Untrusted local files treated as more trustworthy than uploads | Folder-discovered files go through the identical MIME/size/opaque-id validation path as direct upload — no separate, weaker code path |
 

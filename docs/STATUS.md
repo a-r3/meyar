@@ -1,6 +1,51 @@
 # MEYAR — Status
 
 ## Current phase
+**Issue #44 AZ/EN generalization hardening has an independent-audit corrective
+implementation locally on `feat/agent-product-ux-jd-matching` (D-061/D-062), not
+pushed or merged.** D-055's
+canonical `RequirementSpan` architecture and every previously accepted
+candidate/JD/confirmation boundary remain intact. Confirmed agent vacancies
+now round-trip and deterministically evaluate skill-specific duration,
+domain experience, and language proficiency; persist safe unsupported/review
+disclosures and bounded result count on the immutable criteria version; use a
+configured business timezone to resolve one explicit UI-boundary evaluation
+date; and return the requested top 1–100 eligible results without changing
+scores or requirements. The real local browser path now adapts bounded legacy
+Ollama draft shapes to those typed semantics, exposes supported modality
+ambiguity for protected HR resolution, and provides a stable reloadable
+ranking URL with criterion evidence. The source-bound semantic layer now
+supports Azerbaijani and English (plus safe mixed professional terminology),
+blocks protected attributes before and after parsing, preserves unfamiliar
+professional subjects without grammar suffixes, shares skill-duration/domain/
+language-level semantics with ordinary search, binds top-K separately, and
+handles bounded pending-draft edits before search routing. D-061 replaces the
+remaining phrase-bounded protected checks with concept/grammar policy, makes
+subject identity an exact bounded occurrence rather than a clause remainder,
+preserves professional families, rejects count expressions at the typed
+criterion boundary, reconciles every material span to one terminal state,
+supports truthful bidirectional modality follow-ups, and gives equivalent
+simple-search-in-vacancy-mode guidance in AZ/EN. Russian fails closed before
+inference. D-062 completes the exact-browser correction: English recruitment
+wrappers and coordinating clauses retain only their attributable professional
+subjects; explicit presence-only domain experience uses the evaluator's
+existing optional-duration contract; context-only modality changes resolve
+only a unique source bucket; duration/top-K search executes deterministically;
+and wrong-mode guidance suppresses incompatible review copy.
+PR #42 remains NOT accepted.
+
+**Issue #44 final-audit parser correction (D-063) is implemented locally on
+the required independent-audit base.** Passport-holder/national eligibility
+proxies are protected by person-context grammar while technical passport
+systems remain professional material; result-limit parsing exposes explicit
+ABSENT/VALID/AMBIGUOUS/OUT_OF_RANGE state plus complete consumed source
+occurrences; quantifiers cannot become typed professional identities; named
+certifications survive adjacent quantity language; discourse wrappers are
+excluded from exact subject offsets; and unambiguous English presence-only
+domain experience uses the accepted optional-duration evaluator contract.
+The accepted scoring, candidate authority, session/confirmation, ordinary
+search, local-only Ollama, and presentation architectures are unchanged.
+
 **Slice 13 — Security + Official Definition-of-Done Acceptance: implementation
 pass 1 MERGED (PR #22, squash SHA `a709ce1`, `Refs #20`); Target-Mac hardware
 gate PENDING.** Original-CV access, no-exfiltration formal verification,
@@ -834,9 +879,154 @@ Evaluation's persisted `candidate_profile_version_id`/
 `job_criteria_version_id` verified to equal the exact input versions.
 
 ## In progress
-**M8 Slice 3 — Evidence Capability Completion (#32)**: implementation
-complete on `feat/evidence-capability-completion`, PR opened against
-`main`, **pending owner review — not merged.** Closes the D-027-identified
+**M8 Slice 4 — Agent Product UX & JD Matching (#33)**: implementation
+complete on `feat/agent-product-ux-jd-matching` (from synced `main`
+`8c1782f`), PR #42 opened against `main`, **corrected per three rounds of
+owner UI review (D-043 functional, D-044 presentation, D-045 turn-render
+consistency/copy/evidence-attribution/composer/criteria/ranking/
+unsupported-requirement contract), then a fourth pass (D-046) closing the
+two remaining acceptance blockers — a real-Ollama JD-requirement
+grounding defect (an HR-facing "unsupported requirement" disclosure with
+no check that the requirement was ever actually in the JD text) and an
+independently-verified explanation of the 850/846/848 historical
+test-count question (822 → 838 → 846 → 846 → 848 → 851, zero test
+removals at any commit in this branch's lineage; no 850 anywhere in this
+repository's git/reflog/PR history) — and still awaiting owner re-review
+before merge — not merged, not self-accepted per the task's own
+instruction.** D-045 fixes a genuine root-cause bug (a search/tool-result
+turn's live headline and its persisted history text were two
+independently computed values — see D-045 item 1), a real string-
+duplication bug in education-title formatting, and search evidence that
+was not actually attributable to the requirement it was shown under; adds
+a narrow `JDDraftCriterionKind.OTHER` escape hatch so a real, non-
+sensitive, evaluator-unsupported JD requirement (e.g. relocation
+willingness) is disclosed and survives confirmation onto the ranking page
+as an explicitly "informational, not scored" notice instead of being
+silently dropped or misclassified into a scored criterion; and de-noises
+the composer/criteria-review/ranking presentation. See D-045 for the full
+per-item breakdown.
+MEYAR AI is now the primary post-login HR surface (`_finalize_human_login`
+redirects to `/ui/agent`; top nav — and the brand/logo link, and every
+page's own "home" link — is exactly `MEYAR AI | Namizədlər | Çıxış`, no
+secondary nav row at all any more (D-044): **neither Vacancies (D-043)
+nor classic search (D-044) is a normal HR nav/discovery destination**;
+`/ui/jobs`, `/ui/search`-family routes remain fully functional as
+backend/supporting capability, reachable by direct URL only). **D-044
+also unifies the composer** (one mode `<select>` — "Adi söhbət" /
+"Vakansiya elanını analiz et" — plus one send button, JS-guarded against
+an empty submit instead of the browser's native English validation
+popup), **restructures the conversation feed so each turn's user message,
+assistant explanation, and result cards render as one block with the
+composer strictly after it** (previously the composer sat between
+history and the live turn's own results), **replaces developer-taxonomy
+strings** (`"skill: Python"` → plain "Python"; evidence citations →
+`"CV, səhifə N — "quote""`, deduplicated), and **gives three tool types
+their own deterministic, evidence-grounded headline sentence** instead of
+the generic "Nəticələr aşağıdadır." filler.
+New `AgentActionType.DRAFT_JOB_CRITERIA`: HR pastes/describes a JD, a new
+bounded `LLMProvider.draft_job_criteria` call drafts a structured criteria
+set restricted to the manual form's five `CriterionKind`s, every item is
+re-validated into a real `CriterionIn` (same denylist/schema as the
+manual form and REST API). **D-043 correction: an item that fails that
+check is never silently dropped** — a non-sensitive failure is disclosed
+verbatim in the review (`AgentJobDraftToolResult.unsupported`); a
+sensitive/prohibited match is a safe count only
+(`prohibited_count`, matched text never redisplayed). **D-043 also adds a
+first-class deterministic JD entry point**: the composer's "Vakansiya
+elanını analiz et" mode (a `<select>` option since D-044, originally a
+second submit button) submits `intent=draft_job_criteria`, which makes
+`run_agent_turn(..., explicit_action=AgentActionType.DRAFT_JOB_CRITERIA)`
+skip `llm.decide_agent_action` entirely for that turn — no model call, no
+routing ambiguity, immune to the qwen3:1.7b misrouting limitation below.
+The review form (new shared `_criteria_rows.html` macro, also now used by
+`job_new.html`) posts through the existing `POST /ui/jobs` — nothing
+persisted until HR confirms, and **confirming from the agent's own review
+form now lands directly on the ranking result** (new shared
+`meyar.ui.router._render_job_ranking`, same `rank_candidates_for_job` call
+the manual "Namizədləri sırala" action already used — no new scoring
+authority) instead of a bare redirect to the de-emphasized jobs list; the
+unchanged manual `/ui/jobs/new` path still redirects to `/ui/jobs` as
+before. Conversation UX consolidated: one deterministic server-computed
+`headline` replaces the previous two-tier duplicate status-banner stack;
+new `POST /ui/agent/reset` ("Yeni söhbət") clears only the caller's own
+session-scoped `AgentConversation`. The semantic-similarity pill is
+relabeled "Semantik yaxınlıq %" and consistently hidden outside
+SEMANTIC_ONLY/HYBRID search modes on both `/ui/search` and `/ui/agent` —
+the real 0–100 deterministic score stays exactly where it already lived
+(`ranking_results.html` only). D-031's fast-path sunset condition is NOT
+acted on this slice — that owner-evaluated judgment is left to the
+accompanying UI review, per issue #33/D-031 point 3.
+Real-Ollama acceptance testing (qwen3:1.7b, same model as D-039/D-040)
+found and fixed a genuine defect: the model can echo
+`AGENT_SYSTEM_PROMPT`'s own instruction text verbatim into a CLARIFY/
+FINAL_ANSWER message — fixed structurally with
+`meyar.agent.service._looks_like_prompt_leak` (exact containment check,
+not a heuristic), reusing the existing bounded-retry-then-
+`MALFORMED_MODEL_OUTPUT`-fallback path; confirmed live post-fix that a
+repeat leak is rejected and only the safe fallback text renders. The same
+testing also surfaced a known, documented model-quality limitation (not
+a code defect): qwen3:1.7b sometimes still routes a raw pasted JD to
+SEARCH_CANDIDATES instead of DRAFT_JOB_CRITERIA when relying on
+conversational routing alone despite a sharpened disambiguation prompt
+(`AGENT_PROMPT_VERSION` -> `agent-orchestrator-prompt-v3`) — **the D-043
+explicit `intent` affordance is the product answer to this limitation,
+not a further prompt change**; both branches of the conversational path
+stay fully safe when misrouting happens (a misrouted JD's own
+search-planner call fails typed/non-fabricating, never silently produces
+a wrong result), and `draft_job_criteria` itself was independently
+verified end-to-end against the real model, including through the full
+validation/dispatch pipeline, producing a correctly structured,
+denylist-clean draft; the D-044 presentation pass was independently
+re-verified the same way (live browser session against real
+`qwen3:1.7b`, not only `FakeLLMProvider` fixtures) — see D-044 for the
+exact screenshots/assertions. Quality gates (D-044 pass): `ruff` clean,
+`mypy src` clean (136 files), `alembic heads` unchanged (no migration —
+purely additive schema/service/template layer), full `pytest` suite
+passed, `scripts/scan-tracked-tree.sh` clean.
+D-045 quality gates: `ruff` clean, `mypy src` clean (136 files),
+`alembic heads` unchanged (single head, still `a1c5e9f2b6d3` — no
+migration), full `pytest` suite passed (848 passed, +2 new tests vs
+D-044's 846, none deleted/weakened), `scripts/scan-tracked-tree.sh`
+clean.
+D-046 quality gates: `ruff` clean, `mypy src` clean (136 files), `alembic
+heads` unchanged (single head, still `a1c5e9f2b6d3` — no migration), full
+`pytest` suite passed (851 passed, +3 new tests vs D-045's 848 — the
+JD-grounding unit test plus two end-to-end fabricated-requirement
+regressions — none deleted/weakened), `scripts/scan-tracked-tree.sh`
+clean. A fifth pre-acceptance P0 pass (D-048) closes two reproduced
+candidate-factual authority defects without changing JD grounding,
+duration arithmetic, deterministic scoring, or the API: accepted
+professional facts now require claim-specific support from their own
+verified evidence, and unrestricted model prose has been removed from
+`FINAL_ANSWER`/`CLARIFY` in favor of closed response codes plus
+server-owned rendering. Legacy persisted assistant prose is ignored unless
+it carries the new server-authority marker. D-048 quality gates: focused
+suite 216 passed; `ruff` clean; `mypy src` clean (136 files); full `pytest`
+887 passed; Alembic remains at the single `a1c5e9f2b6d3` head; tracked-tree
+scan clean. See D-042, D-043, D-044, D-045, D-046, D-048.
+A sixth pre-acceptance P0 pass (D-049, issue #44) closes the remaining
+candidate-factuality authority escapes reproduced against `86d3e3f`:
+centralized deterministic contradiction handling now covers every
+professional fact type; linked skill/domain experience must attribute its
+employment context in the same accepted span; all professional-profile
+consumers revalidate legacy `COMPLETED` rows against current canonical
+evidence; identity values are attributable to their own evidence; and JD
+draft titles/evidence topics can no longer become model-authored trusted
+assistant headings. Unsupported legacy facts and cached evaluations are
+presented as unavailable without rewriting history. The safe-but-product-
+degrading whole-profile failure behavior is unchanged. D-049 gates:
+focused suite 186 passed; `ruff` clean; `mypy src` clean (138 files); full
+`pytest` 910 passed; Alembic remains at `a1c5e9f2b6d3`; tracked-tree scan
+clean. PR #42 remains open and not accepted; nothing was pushed or merged.
+See D-049.
+
+The independent re-audit at `7b748f4` disproved complete closure. D-050
+records the corrective canonical-context, current-state, period-attribution,
+embedding, identity-token, history-version and fixture-integrity changes.
+PR #42 remains not accepted; this work is local only, with no push or merge.
+
+**M8 Slice 3 — Evidence Capability Completion (#32)**: **MERGED as PR #41
+(`8c1782f`, squash); issue #32 closed.** Closes the D-027-identified
 `SkillItem`/`EmploymentItem` grounding gap: `CandidateProfileExtraction`
 gains optional `skill_experience` (skill <-> attributable employment-period
 grounding) and `domain_experience` (explicit sector/domain evidence,
@@ -1113,7 +1303,7 @@ due date because the official timeline has not been supplied.
 | M5 — Security, Target-Mac Validation & MVP Acceptance | Slice 13 + target-Mac benchmark | OPEN — issue #20 open; PR #22 merged at `a709ce1` implementing Pass 1 (original CV, no-exfiltration, backup/restore, audit guard, multilingual evidence) with `Refs #20`; Mac Mini benchmark execution on the now owner-confirmed target hardware remains the sole open mandatory gate |
 | M6 — Operational CV Intake & Reconciliation | Slice 14 | CLOSED — Slice 14 merged (PR #24 at `f6e31ff`), issue #23 closed; owner-approved closure |
 | M7 — HR UI & Presentation Readiness | HR UI productization (chore, issue #27) | OPEN — branch `feat/hr-ui-productization`, PR #29 open, pending final owner visual check; Job lifecycle implemented; see D-023 through D-029 |
-| M8 — Bounded Local-AI HR Agent Platform | Slices 1–5 (issues #30–#34) | OPEN — Slice 1 (#30) and Slice 2 (#31) merged; Slice 3 (#32) implementation complete, PR open, pending review |
+| M8 — Bounded Local-AI HR Agent Platform | Slices 1–5 (issues #30–#34) | OPEN — Slice 1 (#30), Slice 2 (#31), Slice 3 (#32) merged (PR #41 at `8c1782f`); Slice 4 (#33) factual-authority corrections are recorded through D-053 (issue #44), branch `feat/agent-product-ux-jd-matching`; PR #42 remains open and not accepted, awaiting owner re-review before merge |
 | M9 — Deployment, Benchmark & Integration Readiness | Slices 6–8 (issues #35–#37) | OPEN — created 2026-09-01 per D-030/D-031/D-032; no implementation started; does not supersede or close M5/#20 |
 
 ## Official requirement gap matrix
@@ -1149,7 +1339,7 @@ no code yet.
 | README examples | DONE | API-key provisioning, auth header, Swagger access, synthetic curl examples for search/NL-search/score/rank, local-AI dependency map, error semantics (Slice 12) | — | 12 |
 | Bad-file testing | DONE | Oversized/malformed/MIME-mismatch tests (Slice 3); malformed-PDF/DOCX isolation + path-traversal/symlink tests for the folder indexer (Slice 6) | — | 6, 13 |
 | Scoring consistency | DONE | Exact input reuse, explicit historical date, Decimal boundary/rounding/recomputation, version-change, stable-tie, gate-vs-score, and identity-invariance regressions (Slice 10) | Final target acceptance remains Slice 13 | 10, 13 |
-| External-network/exfiltration verification | DONE | Static inventory (only two `httpx.AsyncClient` construction sites in the whole app, both loopback-gated) plus a deterministic runtime guard (`test_no_exfiltration.py`) that patches `httpx.AsyncClient.send` to reject any non-loopback request, exercised against a representative extract+embed workflow via the real `OllamaLLMProvider`/`OllamaEmbeddingProvider` classes (`MockTransport`), plus a negative control proving the guard itself works | — | 13 |
+| External-network/exfiltration verification | DONE | Static inventory (only two `httpx.AsyncClient` construction sites in the whole app, both loopback-gated) plus a deterministic runtime guard (`test_no_exfiltration.py`) that patches `httpx.AsyncClient.send` to reject any non-loopback request, exercised against a representative extract+embed workflow via the real `OllamaLLMProvider`/`OllamaEmbeddingProvider` classes (`MockTransport`), plus a negative control proving the guard itself works. **D-047 (2026-09-05, PR #42 pre-merge internal audit):** closed a below-the-logical-URL-layer defect — httpx's default `trust_env=True` let process-environment `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` re-route a loopback-validated request through a proxy transport when `NO_PROXY` wasn't also set correctly. All Ollama client construction now goes through one shared `trust_env=False` boundary (`meyar.llm.loopback.build_local_only_async_client`); proven at the internal `_mounts`/`_trust_env` transport-configuration level, not just `request.url.host` (`test_ollama_transport_proxy_isolation.py`, 18 tests). | — | 13 |
 | Data-protection / backup description | DONE | `docs/BACKUP_RESTORE.md` runbook; `backend/scripts/backup_restore_acceptance.py` executed successfully against synthetic, disposable data — DB (`pg_dump`/`pg_restore`) + document storage (`tar`) backed up and restored into an isolated destination, row counts/relationships verified, original-CV bytes byte-identical, repeat score request reused the exact same `Evaluation` (`reused=true`) | — | 13 |
 | Git branch / PR workflow | PARTIAL | Remote connected (`a-r3/meyar`, private), CI + hooks + PR template merged (`16929fd`, D-012) | Migrate to official bank remote when supplied — organizational, owner-dependent, not a Slice 13 software gap | Git Infrastructure |
 

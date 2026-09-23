@@ -27,7 +27,13 @@ from docx import Document
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meyar.agent.schemas import AgentDecision, GroundedFact, GroundedSelection
+from meyar.agent.schemas import (
+    AgentDecision,
+    GroundedFact,
+    GroundedSelection,
+    JDCriteriaDraft,
+    RequirementSpan,
+)
 from meyar.core.roles import ROLE_HR_USER
 from meyar.embedding.provider import EmbeddingResult
 from meyar.evaluation.service import evaluate_and_score_candidate
@@ -42,10 +48,12 @@ from meyar.schemas.candidate_identity import CandidateIdentityExtraction, Identi
 from meyar.schemas.candidate_profile import (
     CandidateProfileExtraction,
     CertificationItem,
+    DomainExperienceItem,
     EducationItem,
     EmploymentItem,
     EvidenceRef,
     LanguageItem,
+    SkillExperienceItem,
     SkillItem,
 )
 from meyar.schemas.criteria import CriterionIn, CriterionKind, CriterionType
@@ -54,10 +62,10 @@ from meyar.services.api_key_repo import create_api_key, revoke_active_api_keys_f
 from meyar.services.audit_repo import record_event
 from meyar.services.candidate_document_service import ingest_candidate_document
 from meyar.services.candidate_embedding_service import embed_candidate_profile
-from meyar.services.candidate_profile_repo import get_current_profile_version
 from meyar.services.candidate_repo import count_candidates_for_tenant, create_candidate
 from meyar.services.job_criteria_repo import create_criteria_version
 from meyar.services.job_repo import create_job
+from meyar.services.profile_authority import get_current_authorized_profile
 from meyar.services.tenant_membership_repo import (
     create_membership,
     get_membership_for_user_and_tenant,
@@ -147,6 +155,15 @@ class _DemoLLMProvider:
     ) -> tuple[GroundedSelection, LLMResultProvenance]:
         raise NotImplementedError("The demo seed provider never runs the agent loop.")
 
+    async def draft_job_criteria(
+        self,
+        jd_text: str,
+        *,
+        requirement_spans: list[RequirementSpan],
+        repair: bool = False,
+    ) -> tuple[JDCriteriaDraft, LLMResultProvenance]:
+        raise NotImplementedError("The demo seed provider never drafts job criteria.")
+
     async def health(self) -> dict:
         return {"reachable": True, "model": self.model_name, "model_available": True}
 
@@ -191,6 +208,8 @@ class _DemoCandidate:
     education: list[dict]  # institution, degree, field_of_study, date, line_index
     certifications: list[dict] = field(default_factory=list)  # name, issuer, date, line_index
     languages: list[dict] = field(default_factory=list)  # language, proficiency, line_index
+    skill_experience: list[dict] = field(default_factory=list)
+    domain_experience: list[dict] = field(default_factory=list)
     embedding_vector: list[float] = field(default_factory=lambda: [0.1, 0.2, 0.3, 0.4])
 
 
@@ -541,13 +560,19 @@ def _demo_candidates() -> list[_DemoCandidate]:
                 disclaimer,
                 "Rashad Demo-Isayev",
                 "Email: rashad.demo@example.invalid | Phone: +994-00-000-0009",
-                "Skills: Site Reliability, Monitoring, Banking Systems Integration",
-                "Site Reliability Engineer — Zerafshan National Bank IT (2019 - 2025)",
+                "Skills: Python, Site Reliability, Monitoring, Banking Systems Integration",
+                (
+                    "Site Reliability Engineer — Zerafshan National Bank IT "
+                    "(2019 - 2025); Python used for banking systems integration "
+                    "throughout 2019 - 2025."
+                ),
                 "BSc Computer Science, Baku Engineering University (2015 - 2019)",
+                "Languages: English (B2)",
             ],
             name_line=1,
             contact_line=2,
             skills=[
+                ("Python", 3),
                 ("Site Reliability", 3),
                 ("Monitoring", 3),
                 ("Banking Systems Integration", 3),
@@ -569,6 +594,27 @@ def _demo_candidates() -> list[_DemoCandidate]:
                     "field_of_study": "Computer Science",
                     "date": "2015 - 2019",
                     "line": 5,
+                }
+            ],
+            languages=[{"language": "English", "proficiency": "B2", "line": 6}],
+            skill_experience=[
+                {
+                    "skill_name": "Python",
+                    "employment_index": 0,
+                    "start_date": "2019",
+                    "end_date": "2025",
+                    "is_current": False,
+                    "line": 4,
+                }
+            ],
+            domain_experience=[
+                {
+                    "domain": "Banking",
+                    "employment_index": 0,
+                    "start_date": "2019",
+                    "end_date": "2025",
+                    "is_current": False,
+                    "line": 4,
                 }
             ],
             embedding_vector=[0.15, 0.0, 0.2, 0.6],
@@ -649,6 +695,36 @@ def _profile_extraction(candidate: _DemoCandidate) -> CandidateProfileExtraction
                 ],
             )
             for entry in candidate.languages
+        ],
+        skill_experience=[
+            SkillExperienceItem(
+                skill_name=entry["skill_name"],
+                employment_index=entry["employment_index"],
+                start_date=entry["start_date"],
+                end_date=entry["end_date"],
+                is_current=entry["is_current"],
+                evidence=[
+                    EvidenceRef(
+                        page=1, block_index=entry["line"], quote=candidate.lines[entry["line"]]
+                    )
+                ],
+            )
+            for entry in candidate.skill_experience
+        ],
+        domain_experience=[
+            DomainExperienceItem(
+                domain=entry["domain"],
+                employment_index=entry["employment_index"],
+                start_date=entry["start_date"],
+                end_date=entry["end_date"],
+                is_current=entry["is_current"],
+                evidence=[
+                    EvidenceRef(
+                        page=1, block_index=entry["line"], quote=candidate.lines[entry["line"]]
+                    )
+                ],
+            )
+            for entry in candidate.domain_experience
         ],
     )
 
@@ -914,6 +990,7 @@ async def seed_demo(
     max_profile_input_chars: int,
     max_identity_input_chars: int,
     max_embedding_input_chars: int,
+    evaluation_as_of_date: date,
 ) -> DemoSeedSummary:
     """Idempotent: if the demo tenant already has seeded candidates, this
     is a safe no-op that rotates the demo login credential — every
@@ -1034,7 +1111,6 @@ async def seed_demo(
 
     jobs_created = 0
     evaluations_created = 0
-    evaluation_as_of_date = date.today()
     for job_spec in _demo_jobs():
         job = await create_job(db, tenant_id=tenant.id, title=job_spec["title"])
         criteria_version = await create_criteria_version(
@@ -1047,12 +1123,13 @@ async def seed_demo(
         jobs_created += 1
 
         for candidate_id in created_candidate_ids:
-            current_profile = await get_current_profile_version(
+            authorized = await get_current_authorized_profile(
                 db, tenant_id=tenant.id, candidate_id=candidate_id
             )
-            if current_profile is None or current_profile.status != "COMPLETED":
+            if authorized is None:
                 continue
-            await evaluate_and_score_candidate(
+            current_profile, _ = authorized
+            scored = await evaluate_and_score_candidate(
                 db,
                 tenant_id=tenant.id,
                 candidate_id=candidate_id,
@@ -1063,7 +1140,8 @@ async def seed_demo(
                 resolved_profile_version=current_profile,
                 resolved_criteria_version=criteria_version,
             )
-            evaluations_created += 1
+            if scored.evaluation.status == "COMPLETED":
+                evaluations_created += 1
 
     human_username, human_temp_password = await _bootstrap_demo_human_login(
         db, tenant_id=tenant.id

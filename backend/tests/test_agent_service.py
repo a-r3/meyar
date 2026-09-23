@@ -14,6 +14,7 @@ from meyar.agent.schemas import (
     MAX_CANDIDATE_REF,
     AgentActionType,
     AgentDecision,
+    AgentResponseCode,
     AgentTurnOutcome,
 )
 from meyar.agent.service import run_agent_turn
@@ -34,13 +35,16 @@ EMPTY_PROFILE = {
 
 
 def _profile(*skills: str, quote: str = "Synthetic evidence") -> dict:
+    def skill_quote(skill: str) -> str:
+        return quote if skill.lower() in quote.lower() else f"{quote}: {skill}"
+
     return {
         **EMPTY_PROFILE,
         "skills": [
             {
                 "name": skill,
-                "category": "Backend",
-                "evidence": [{"page": 1, "block_index": 0, "quote": quote}],
+                "category": None,
+                "evidence": [{"page": 1, "block_index": 0, "quote": skill_quote(skill)}],
             }
             for skill in skills
         ],
@@ -51,7 +55,13 @@ def _profile(*skills: str, quote: str = "Synthetic evidence") -> dict:
                 "start_date": "2020",
                 "end_date": None,
                 "is_current": True,
-                "evidence": [{"page": 1, "block_index": 0, "quote": quote}],
+                "evidence": [
+                    {
+                        "page": 1,
+                        "block_index": 0,
+                        "quote": "Backend Developer at Synthetic Co since 2020; current.",
+                    }
+                ],
             }
         ],
     }
@@ -87,6 +97,7 @@ async def _run(
     message,
     max_tool_calls=3,
     max_context_turns=8,
+    explicit_action=None,
 ):
     return await run_agent_turn(
         db_session,
@@ -99,6 +110,7 @@ async def _run(
         embedding_provider=None,
         max_tool_calls=max_tool_calls,
         max_context_turns=max_context_turns,
+        explicit_action=explicit_action,
     )
 
 
@@ -106,7 +118,11 @@ def test_agent_decision_schema_rejects_mismatched_action_shape() -> None:
     with pytest.raises(ValidationError):
         AgentDecision(action=AgentActionType.SEARCH_CANDIDATES)  # missing search_query
     with pytest.raises(ValidationError):
-        AgentDecision(action=AgentActionType.FINAL_ANSWER, candidate_ref=1, message="hi")
+        AgentDecision(
+            action=AgentActionType.FINAL_ANSWER,
+            candidate_ref=1,
+            response_code=AgentResponseCode.ACKNOWLEDGEMENT,
+        )
     with pytest.raises(ValidationError):
         AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=0)
     with pytest.raises(ValidationError):
@@ -120,7 +136,40 @@ def test_agent_decision_schema_rejects_mismatched_action_shape() -> None:
     # Extra unknown field must be rejected (extra=forbid), same discipline as PlannerDraft.
     with pytest.raises(ValidationError):
         AgentDecision.model_validate(
-            {"action": "FINAL_ANSWER", "message": "hi", "unexpected_field": "x"}
+            {
+                "action": "FINAL_ANSWER",
+                "response_code": "ACKNOWLEDGEMENT",
+                "unexpected_field": "x",
+            }
+        )
+
+
+def test_final_answer_schema_rejects_model_authored_candidate_fact() -> None:
+    # The removed free-text channel is structural: schema-valid model
+    # output cannot carry a candidate assertion at all.
+    with pytest.raises(ValidationError):
+        AgentDecision.model_validate(
+            {
+                "action": "FINAL_ANSWER",
+                "message": "The first candidate has 20 years of Python experience.",
+            }
+        )
+
+
+def test_final_answer_schema_rejects_model_authored_hiring_recommendation() -> None:
+    with pytest.raises(ValidationError):
+        AgentDecision.model_validate(
+            {"action": "FINAL_ANSWER", "message": "The first candidate should be hired."}
+        )
+
+
+def test_clarify_schema_rejects_model_authored_candidate_fact() -> None:
+    with pytest.raises(ValidationError):
+        AgentDecision.model_validate(
+            {
+                "action": "CLARIFY",
+                "message": "The first candidate has 20 years of Python experience.",
+            }
         )
 
 
@@ -162,7 +211,9 @@ async def test_search_candidates_tool_is_tenant_scoped_and_evidence_grounded(
                 action=AgentActionType.SEARCH_CANDIDATES,
                 search_query="Python bilən namizədləri göstər",
             ),
-            AgentDecision(action=AgentActionType.FINAL_ANSWER, message="Nəticələr aşağıdadır."),
+            AgentDecision(
+                action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
+            ),
         ],
     )
     conversation = await _new_conversation(db_session, tenant, user, membership)
@@ -211,7 +262,9 @@ async def test_cross_tenant_search_result_never_leaks(
                 action=AgentActionType.SEARCH_CANDIDATES,
                 search_query="Python bilən namizədləri göstər",
             ),
-            AgentDecision(action=AgentActionType.FINAL_ANSWER, message="Nəticələr aşağıdadır."),
+            AgentDecision(
+                action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
+            ),
         ],
     )
     conversation = await _new_conversation(db_session, tenant, user, membership)
@@ -251,7 +304,9 @@ async def test_multi_turn_ordinal_reference_resolves_server_side(
                 action=AgentActionType.SEARCH_CANDIDATES,
                 search_query="Python bilən namizədləri göstər",
             ),
-            AgentDecision(action=AgentActionType.FINAL_ANSWER, message="Nəticələr aşağıdadır."),
+            AgentDecision(
+                action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
+            ),
         ],
     )
     conversation = await _new_conversation(db_session, tenant, user, membership)
@@ -495,6 +550,62 @@ async def test_model_unavailable_is_a_safe_typed_failure(
     assert result.outcome == AgentTurnOutcome.AGENT_PROVIDER_FAILURE
 
 
+async def test_zero_tool_final_answer_uses_only_server_owned_copy(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    tenant, user, _password, membership = tenant_and_user
+    await db_session.commit()
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    llm = FakeLLMProvider(
+        agent_decision=AgentDecision(
+            action=AgentActionType.FINAL_ANSWER,
+            response_code=AgentResponseCode.GREETING,
+        )
+    )
+
+    result = await _run(
+        db_session, llm, tenant_id=tenant.id, conversation=conversation, message="salam"
+    )
+
+    assert result.tool_call_count == 0
+    assert result.tool_results == []
+    assert result.message == (
+        "Salam! Namizəd axtarışı, profil sübutları və vakansiya meyarları ilə bağlı "
+        "kömək edə bilərəm."
+    )
+    await db_session.refresh(conversation)
+    assert conversation.turns[-1]["text"] == result.message
+    assert conversation.turns[-1]["text_authority"] == "SERVER_VALIDATED"
+
+
+async def test_hiring_request_uses_server_owned_human_decision_copy(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    tenant, user, _password, membership = tenant_and_user
+    await db_session.commit()
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    llm = FakeLLMProvider(
+        agent_decision=AgentDecision(
+            action=AgentActionType.CLARIFY,
+            response_code=AgentResponseCode.HIRING_DECISION_REQUIRES_HUMAN,
+        )
+    )
+
+    result = await _run(
+        db_session,
+        llm,
+        tenant_id=tenant.id,
+        conversation=conversation,
+        message="Who should be hired?",
+    )
+
+    assert result.tool_call_count == 0
+    assert result.message == (
+        "MEYAR sübutları və deterministik qiymətləndirməni təqdim edir; işə qəbul "
+        "qərarını səlahiyyətli insan verir."
+    )
+
+
 async def test_repeated_schema_invalid_output_is_a_safe_typed_failure(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
@@ -503,7 +614,11 @@ async def test_repeated_schema_invalid_output_is_a_safe_typed_failure(
     conversation = await _new_conversation(db_session, tenant, user, membership)
     llm = FakeLLMProvider(agent_fail_first_n_calls=99, agent_decision=None)
     # Give it a decisions list so the fake doesn't assert-fail on success path.
-    llm._agent_decisions = [AgentDecision(action=AgentActionType.FINAL_ANSWER, message="unused")]
+    llm._agent_decisions = [
+        AgentDecision(
+            action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
+        )
+    ]
     result = await _run(
         db_session, llm, tenant_id=tenant.id, conversation=conversation, message="salam"
     )
@@ -513,13 +628,12 @@ async def test_repeated_schema_invalid_output_is_a_safe_typed_failure(
 async def test_skill_specific_duration_is_never_silently_weakened(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
-    """Reuses the existing D-027 planner guarantee through the agent's
-    search_candidates tool: 'N years of Java' must never silently become
-    'Java skill + N years total experience'."""
+    """Skill duration stays a typed, evidence-backed skill-duration filter;
+    it never becomes skill + total career duration."""
     tenant, user, _password, membership = tenant_and_user
     await db_session.commit()
 
-    from meyar.search.planner_schemas import PlannerDraft, PlannerReasonCode
+    from meyar.search.planner_schemas import PlannerDraft
     from meyar.search.schemas import RequiredFilters
 
     draft = PlannerDraft(
@@ -534,7 +648,7 @@ async def test_skill_specific_duration_is_never_silently_weakened(
             ),
             AgentDecision(
                 action=AgentActionType.CLARIFY,
-                message="Konkret bacarıq üzrə təcrübə müddətini sübut etmək mümkün deyil.",
+                response_code=AgentResponseCode.NEED_MORE_DETAIL,
             ),
         ],
     )
@@ -548,11 +662,14 @@ async def test_skill_specific_duration_is_never_silently_weakened(
     )
     search = result.tool_results[0].search
     assert search is not None
-    assert search.response.plan.executable is False
-    assert (
-        PlannerReasonCode.SKILL_SPECIFIC_EXPERIENCE_DURATION_UNSUPPORTED
-        in search.response.plan.reason_codes
-    )
+    assert search.response.plan.executable is True
+    request = search.response.plan.search_request
+    assert request is not None
+    assert request.required_filters.skills == []
+    assert request.required_filters.min_total_experience_years is None
+    assert [(item.value, item.min_years) for item in request.required_filters.skill_experience] == [
+        ("Java", 5.0)
+    ]
 
 
 async def test_prohibited_attribute_in_search_query_is_rejected(
@@ -571,7 +688,9 @@ async def test_prohibited_attribute_in_search_query_is_rejected(
             AgentDecision(
                 action=AgentActionType.SEARCH_CANDIDATES, search_query="qadın namizədləri göstər"
             ),
-            AgentDecision(action=AgentActionType.CLARIFY, message="Bu meyar dəstəklənmir."),
+            AgentDecision(
+                action=AgentActionType.CLARIFY, response_code=AgentResponseCode.UNSUPPORTED_REQUEST
+            ),
         ],
     )
     conversation = await _new_conversation(db_session, tenant, user, membership)
@@ -716,7 +835,9 @@ async def test_no_result_model_failure_stays_a_safe_failure_with_no_tool_results
 
     llm_malformed = FakeLLMProvider(agent_fail_first_n_calls=99, agent_decision=None)
     llm_malformed._agent_decisions = [
-        AgentDecision(action=AgentActionType.FINAL_ANSWER, message="unused")
+        AgentDecision(
+            action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
+        )
     ]
     result = await _run(
         db_session, llm_malformed, tenant_id=tenant.id, conversation=conversation, message="salam"
@@ -744,14 +865,6 @@ async def test_stored_assistant_turn_is_never_blank_across_all_outcomes(
 
     for outcome in AgentTurnOutcome:
         text = agent_turn_outcome_message(outcome.value, None)
-        if outcome == AgentTurnOutcome.ANSWERED:
-            # Unreachable in practice — AgentDecision guarantees a real
-            # FINAL_ANSWER always carries a non-empty message — but even
-            # this default must never be relied upon by a stored turn;
-            # confirmed separately by test_successful_search_with_* and
-            # test_get_candidate_profile_success_has_no_empty_turn below,
-            # which never produce plain ANSWERED with message=None.
-            continue
         assert text, f"AgentTurnOutcome.{outcome.name} has no non-empty fallback text"
 
 
@@ -940,14 +1053,14 @@ def test_render_grounded_answer_duration_caveat_never_states_a_number() -> None:
         GroundedSelection(used_facts=[0], caveat=GroundedCaveat.DURATION_NOT_PROVEN), facts
     )
     assert rendered is not None
-    assert "Mövcud sübut konkret müddəti göstərmir." in rendered
+    assert "Mövcud sübut bu mövzu üzrə konkret təcrübə müddətini əsaslandırmır." in rendered
     assert not any(char.isdigit() for char in rendered.split("Mövcud sübut")[-1])
 
     # A caveat alone (nothing relevant selected) is also renderable.
     caveat_only = render_grounded_answer(
         GroundedSelection(used_facts=[], caveat=GroundedCaveat.DURATION_NOT_PROVEN), facts
     )
-    assert caveat_only == "Mövcud sübut konkret müddəti göstərmir."
+    assert caveat_only == "Mövcud sübut bu mövzu üzrə konkret təcrübə müddətini əsaslandırmır."
 
 
 async def test_grounded_experience_explanation_uses_only_supplied_facts(
@@ -1083,3 +1196,854 @@ async def test_grounded_synthesis_does_not_disturb_ordinal_resolution(
     assert result.tool_results[0].profile.candidate_id == ordered_ids[1]
     await db_session.refresh(conversation)
     assert conversation.last_search_candidate_ids == [str(cid) for cid in ordered_ids]
+
+
+# --- Candidate-factuality P0: no model-authored response prose channel. ---
+
+
+async def test_prompt_leaking_clarify_message_is_rejected_and_retried(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    from meyar.agent.prompts import AGENT_SYSTEM_PROMPT
+
+    tenant, user, _password, membership = tenant_and_user
+    await db_session.commit()
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    leaked_sentence = AGENT_SYSTEM_PROMPT.splitlines()[3].strip()
+    assert len(leaked_sentence) >= 40
+    with pytest.raises(ValidationError):
+        AgentDecision.model_validate({"action": "CLARIFY", "message": leaked_sentence})
+    llm = FakeLLMProvider(
+        agent_decision=AgentDecision(
+            action=AgentActionType.CLARIFY,
+            response_code=AgentResponseCode.CANDIDATE_REFERENCE_REQUIRED,
+        )
+    )
+    result = await _run(
+        db_session, llm, tenant_id=tenant.id, conversation=conversation, message="salam"
+    )
+    assert result.outcome == AgentTurnOutcome.CLARIFICATION_REQUESTED
+    assert result.message == (
+        "Əvvəlcə namizədləri axtarın, sonra nəticə sırasındakı namizədi göstərin."
+    )
+    assert leaked_sentence not in (result.message or "")
+    assert llm.agent_call_count == 1
+
+
+async def test_prompt_leak_persisting_through_every_retry_falls_back_safely(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    tenant, user, _password, membership = tenant_and_user
+    await db_session.commit()
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    leaked_sentence = "The first candidate has 20 years of Python experience and should be hired."
+    conversation.turns = [{"role": "assistant", "text": leaked_sentence, "outcome": "ANSWERED"}]
+
+    from meyar.ui.router import _agent_turn_log_views
+
+    rendered = _agent_turn_log_views(conversation)
+    assert rendered[0].text == "Sorğu tamamlandı."
+    assert leaked_sentence not in rendered[0].text
+
+
+# --- Slice 4 (issue #33, D-030/D-032): DRAFT_JOB_CRITERIA ---
+
+
+async def test_draft_job_criteria_builds_valid_criteria_from_llm_draft(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    from meyar.agent.schemas import JDCriteriaDraft, JDDraftCriterionItem
+    from meyar.schemas.criteria import CriterionKind, CriterionType
+
+    tenant, user, _password, membership = tenant_and_user
+    await db_session.commit()
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    jd_text = "Baş Backend Mühəndisi axtarırıq. Python bilməlidir. AWS üstünlükdür."
+    llm = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        jd_draft=JDCriteriaDraft(
+            title="Baş Backend Mühəndisi",
+            must_have=[
+                JDDraftCriterionItem(
+                    span_id="req-0001",
+                    kind=CriterionKind.SKILL,
+                    requirement="Python",
+                    source_text="Python bilməlidir",
+                )
+            ],
+            preferred=[
+                JDDraftCriterionItem(
+                    span_id="req-0002",
+                    kind=CriterionKind.SKILL,
+                    requirement="AWS",
+                    source_text="AWS üstünlükdür",
+                )
+            ],
+        ),
+    )
+    result = await _run(
+        db_session, llm, tenant_id=tenant.id, conversation=conversation, message=jd_text
+    )
+    assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
+    assert len(result.tool_results) == 1
+    draft = result.tool_results[0].job_draft
+    assert draft is not None
+    assert draft.title == "Baş Backend Mühəndisi"
+    assert [c.label for c in draft.must_have] == ["Python"]
+    assert draft.must_have[0].type == CriterionType.MUST_HAVE
+    assert [c.label for c in draft.preferred] == ["AWS"]
+    assert draft.preferred[0].type == CriterionType.PREFERRED
+    assert draft.unsupported == []
+    assert draft.prohibited_count == 0
+    # Nothing is persisted — this is a draft only (D-032).
+    from sqlalchemy import select
+
+    from meyar.models.job import Job
+
+    jobs = (await db_session.execute(select(Job).where(Job.tenant_id == tenant.id))).scalars().all()
+    assert jobs == []
+    # Turn-terminal like GET_CANDIDATE_PROFILE/EVIDENCE — no second decision call.
+    assert llm.agent_call_count == 1
+
+
+async def test_pending_draft_followup_is_modified_before_search_routing(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    from meyar.agent.schemas import JDCriteriaDraft
+
+    tenant, user, _password, membership = tenant_and_user
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    initial = await _run(
+        db_session,
+        FakeLLMProvider(jd_draft=JDCriteriaDraft(title="Backend")),
+        tenant_id=tenant.id,
+        conversation=conversation,
+        message="Python minimum 5 il tələb olunur. 10 nəfər göstər.",
+        explicit_action=AgentActionType.DRAFT_JOB_CRITERIA,
+    )
+    assert initial.tool_results[0].job_draft is not None
+    await db_session.refresh(conversation)
+
+    routing_probe = FakeLLMProvider(
+        agent_decision=AgentDecision(
+            action=AgentActionType.SEARCH_CANDIDATES,
+            search_query="Python",
+        )
+    )
+    modified = await _run(
+        db_session,
+        routing_probe,
+        tenant_id=tenant.id,
+        conversation=conversation,
+        message="10 yox, 5 nəfər göstər.",
+    )
+    assert routing_probe.agent_call_count == 0
+    assert modified.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
+    assert modified.tool_results[0].tool_name == AgentActionType.DRAFT_JOB_CRITERIA
+    draft = modified.tool_results[0].job_draft
+    assert draft is not None and draft.result_limit == 5
+
+
+async def test_pending_draft_modality_followups_apply_and_persist_both_directions(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    from meyar.agent.schemas import AgentJobDraftToolResult, JDCriteriaDraft
+
+    tenant, user, _password, membership = tenant_and_user
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    initial_result = await _run(
+        db_session,
+        FakeLLMProvider(jd_draft=JDCriteriaDraft(title="Platform")),
+        tenant_id=tenant.id,
+        conversation=conversation,
+        message="ClickHouse tələb olunur. COBIT üstünlükdür.",
+        explicit_action=AgentActionType.DRAFT_JOB_CRITERIA,
+    )
+    initial = initial_result.tool_results[0].job_draft
+    assert initial is not None
+    await db_session.refresh(conversation)
+
+    promoted_result = await _run(
+        db_session,
+        FakeLLMProvider(),
+        tenant_id=tenant.id,
+        conversation=conversation,
+        message="Make COBIT required instead of preferred",
+    )
+    promoted = promoted_result.tool_results[0].job_draft
+    assert promoted is not None and promoted.draft_id != initial.draft_id
+    assert [item.value for item in promoted.must_have] == ["ClickHouse", "COBIT"]
+    await db_session.refresh(conversation)
+    persisted_promoted = AgentJobDraftToolResult.model_validate(
+        conversation.turns[-1]["pending_job_draft"]
+    )
+    assert persisted_promoted == promoted
+
+    demoted_result = await _run(
+        db_session,
+        FakeLLMProvider(),
+        tenant_id=tenant.id,
+        conversation=conversation,
+        message="Make ClickHouse preferred instead of required",
+    )
+    demoted = demoted_result.tool_results[0].job_draft
+    assert demoted is not None and demoted.draft_id != promoted.draft_id
+    assert [item.value for item in demoted.must_have] == ["COBIT"]
+    assert [item.value for item in demoted.preferred] == ["ClickHouse"]
+    await db_session.refresh(conversation)
+    persisted_demoted = AgentJobDraftToolResult.model_validate(
+        conversation.turns[-1]["pending_job_draft"]
+    )
+    assert persisted_demoted == demoted
+
+
+@pytest.mark.parametrize(
+    "message",
+    ["ClickHouse bilən namizədləri göstər", "Show candidates who know ClickHouse"],
+)
+async def test_vacancy_mode_simple_search_has_bilingual_guidance_and_no_persistence(
+    db_session: AsyncSession, tenant_and_user, message: str
+) -> None:
+    from sqlalchemy import select
+
+    from meyar.agent.schemas import JDCriteriaDraft
+    from meyar.models.job import Job
+
+    tenant, user, _password, membership = tenant_and_user
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    provider = FakeLLMProvider(jd_draft=JDCriteriaDraft(title="unused"))
+    result = await _run(
+        db_session,
+        provider,
+        tenant_id=tenant.id,
+        conversation=conversation,
+        message=message,
+        explicit_action=AgentActionType.DRAFT_JOB_CRITERIA,
+    )
+    draft = result.tool_results[0].job_draft
+    assert draft is not None and draft.wrong_mode_guidance
+    assert draft.must_have == draft.preferred == []
+    assert provider.jd_draft_call_count == 0
+    jobs = (await db_session.execute(select(Job).where(Job.tenant_id == tenant.id))).scalars().all()
+    assert jobs == []
+
+
+async def test_draft_job_criteria_title_never_becomes_trusted_assistant_headline(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    from meyar.agent.schemas import JDCriteriaDraft, JDDraftCriterionItem
+    from meyar.schemas.criteria import CriterionKind
+    from meyar.ui.service import build_agent_turn_view
+
+    tenant, user, _password, membership = tenant_and_user
+    await db_session.commit()
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    adversarial_title = "The first candidate has 20 years of Python experience and should be hired."
+    llm = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        jd_draft=JDCriteriaDraft(
+            title=adversarial_title,
+            must_have=[
+                JDDraftCriterionItem(
+                    span_id="req-0001",
+                    kind=CriterionKind.SKILL,
+                    requirement="Python",
+                    source_text="Python bilməlidir",
+                )
+            ],
+        ),
+    )
+    result = await _run(
+        db_session,
+        llm,
+        tenant_id=tenant.id,
+        conversation=conversation,
+        message="Backend role. Python bilməlidir.",
+    )
+    draft = result.tool_results[0].job_draft
+    assert draft is not None
+    view = await build_agent_turn_view(db_session, tenant_id=tenant.id, result=result)
+
+    assert draft.title != adversarial_title
+    assert adversarial_title not in (view.headline or "")
+
+
+async def test_draft_job_criteria_uses_original_user_message_never_a_model_restated_field(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    """The JD text is the HR user's own already-known message — never
+    round-tripped through a model OUTPUT field (see AgentActionType.
+    DRAFT_JOB_CRITERIA docstring and the D-035 Ollama maxLength lesson)."""
+    from meyar.agent.schemas import JDCriteriaDraft
+
+    tenant, user, _password, membership = tenant_and_user
+    await db_session.commit()
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    jd_text = "Uzun bir vakansiya təsviri." * 50
+    llm = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        jd_draft=JDCriteriaDraft(title="Rol"),
+    )
+    await _run(db_session, llm, tenant_id=tenant.id, conversation=conversation, message=jd_text)
+    assert llm.last_jd_text == jd_text
+
+
+async def test_draft_job_criteria_drops_prohibited_attribute_item(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    """A model-drafted item referencing a prohibited/sensitive attribute
+    is blocked by the same deterministic denylist the manual form and
+    REST API already enforce (D-031 point 4) — never shown, never
+    persisted, and its own matched text never present anywhere in the
+    turn output; only a safe count is exposed (D-043, PR #42 owner
+    correction, issue #33)."""
+    from meyar.agent.schemas import JDCriteriaDraft, JDDraftCriterionItem
+    from meyar.schemas.criteria import CriterionKind
+
+    tenant, user, _password, membership = tenant_and_user
+    await db_session.commit()
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    llm = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        jd_draft=JDCriteriaDraft(
+            title="Rol",
+            must_have=[
+                JDDraftCriterionItem(
+                    span_id="req-0002",
+                    kind=CriterionKind.SKILL,
+                    requirement="Python",
+                    source_text="Python bilməlidir",
+                ),
+                JDDraftCriterionItem(
+                    span_id="req-0001",
+                    kind=CriterionKind.SKILL,
+                    requirement="kişi",
+                    source_text="kişi olmalıdır",
+                ),
+            ],
+        ),
+    )
+    result = await _run(
+        db_session,
+        llm,
+        tenant_id=tenant.id,
+        conversation=conversation,
+        message="Rol üçün namizəd kişi olmalıdır. Python bilməlidir.",
+    )
+    draft = result.tool_results[0].job_draft
+    assert draft is not None
+    assert [c.label for c in draft.must_have] == ["Python"]
+    assert draft.prohibited_count == 1
+    assert draft.unsupported == []
+    assert draft.ungrounded_count == 0
+    rendered = result.model_dump_json()
+    assert "kişi" not in rendered
+
+
+async def test_nationality_misclassified_as_language_never_reaches_db_backed_draft(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    from meyar.agent.schemas import JDCriteriaDraft, JDDraftCriterionItem
+    from meyar.schemas.criteria import CriterionKind
+
+    tenant, user, _password, membership = tenant_and_user
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    source = "Namizəd Azərbaycan vətəndaşı olmalıdır."
+    llm = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        jd_draft=JDCriteriaDraft(
+            title="Rol",
+            must_have=[
+                JDDraftCriterionItem(
+                    span_id="req-0001",
+                    kind=CriterionKind.LANGUAGE,
+                    requirement="Azerbaijani",
+                    source_text=source,
+                )
+            ],
+        ),
+    )
+    result = await _run(
+        db_session,
+        llm,
+        tenant_id=tenant.id,
+        conversation=conversation,
+        message=source,
+    )
+    draft = result.tool_results[0].job_draft
+    assert draft is not None
+    assert draft.must_have == []
+    assert draft.preferred == []
+    assert draft.prohibited_count == 1
+    assert source not in result.model_dump_json()
+
+
+async def test_draft_job_criteria_supports_named_experience_without_inventing_duration(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    """Named experience without a threshold preserves its family for review;
+    it is never weakened to bare skill presence or given an invented duration."""
+    from meyar.agent.schemas import JDCriteriaDraft, JDDraftCriterionItem
+    from meyar.schemas.criteria import CriterionKind
+
+    tenant, user, _password, membership = tenant_and_user
+    await db_session.commit()
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    llm = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        jd_draft=JDCriteriaDraft(
+            title="Rol",
+            must_have=[
+                JDDraftCriterionItem(
+                    span_id="req-0001",
+                    kind=CriterionKind.SKILL,
+                    requirement="Python",
+                    source_text="Python bilməlidir",
+                ),
+                # No min_years is present in either model or source.
+                JDDraftCriterionItem(
+                    span_id="req-0002",
+                    kind="SKILL_EXPERIENCE",
+                    requirement="Backend",
+                    source_text="Backend təcrübəsi tələb olunur",
+                ),
+            ],
+        ),
+    )
+    result = await _run(
+        db_session,
+        llm,
+        tenant_id=tenant.id,
+        conversation=conversation,
+        message="Python bilməlidir. Backend təcrübəsi tələb olunur.",
+    )
+    draft = result.tool_results[0].job_draft
+    assert draft is not None
+    assert [c.label for c in draft.must_have] == ["Python"]
+    assert draft.prohibited_count == 0
+    assert draft.ungrounded_count == 0
+    assert draft.unsupported == []
+    assert len(draft.needs_review) == 1
+    assert draft.needs_review[0].kind == CriterionKind.SKILL_EXPERIENCE
+    assert draft.needs_review[0].subject == "Backend"
+    # Disclosed, never persisted.
+    from sqlalchemy import select
+
+    from meyar.models.job import Job
+
+    jobs = (await db_session.execute(select(Job).where(Job.tenant_id == tenant.id))).scalars().all()
+    assert jobs == []
+
+
+async def test_draft_job_criteria_other_kind_is_unsupported_never_scored(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    """D-045 (PR #42 owner correction, issue #33, item 6): a requirement
+    the model explicitly flags as JDDraftCriterionKind.OTHER — real,
+    non-sensitive, but outside the deterministic evaluator's five scoring
+    dimensions — must be routed to UNSUPPORTED deterministically, never
+    coerced into a supported CriterionKind merely to score it, and must
+    never appear as a real criterion."""
+    from meyar.agent.schemas import JDCriteriaDraft, JDDraftCriterionItem, JDDraftCriterionKind
+    from meyar.schemas.criteria import CriterionKind, CriterionType
+
+    tenant, user, _password, membership = tenant_and_user
+    await db_session.commit()
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    llm = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        jd_draft=JDCriteriaDraft(
+            title="Rol",
+            must_have=[
+                JDDraftCriterionItem(
+                    span_id="req-0001",
+                    kind=CriterionKind.SKILL,
+                    requirement="Python",
+                    source_text="Python bilməlidir",
+                )
+            ],
+            preferred=[
+                JDDraftCriterionItem(
+                    span_id="req-0002",
+                    kind=JDDraftCriterionKind.OTHER,
+                    requirement="Ezamiyyətə hazır olmaq",
+                    source_text="Namizəd ezamiyyətə hazır olması üstünlükdür",
+                )
+            ],
+        ),
+    )
+    result = await _run(
+        db_session,
+        llm,
+        tenant_id=tenant.id,
+        conversation=conversation,
+        message="Python bilməlidir. Namizəd ezamiyyətə hazır olması üstünlükdür.",
+    )
+    draft = result.tool_results[0].job_draft
+    assert draft is not None
+    assert [c.label for c in draft.must_have] == ["Python"]
+    assert draft.preferred == []
+    assert draft.prohibited_count == 0
+    assert draft.ungrounded_count == 0
+    assert len(draft.unsupported) == 1
+    assert draft.unsupported[0].requirement == "Namizəd ezamiyyətə hazır olması üstünlükdür"
+    assert draft.unsupported[0].criterion_type == CriterionType.PREFERRED
+
+
+# --- D-046 (PR #42 owner correction, issue #33): JD requirement grounding ---
+#
+# Real-Ollama acceptance testing (qwen3:1.7b) reproduced a genuine content-
+# fabrication defect distinct from D-042/D-045's routing/classification
+# findings: given a short, travel-readiness-only JD ("Namizəd ezamiyyətə
+# getməyə hazır olmalıdır"), the model can surface an entirely unrelated,
+# unstated requirement (reported as "Passing an exam") as if it were a
+# genuine JD requirement the system merely cannot score. These tests use
+# FakeLLMProvider (deterministic, no real model call) to pin the fix's
+# behavior; the real-Ollama reproduction itself is recorded in
+# docs/DECISIONS.md D-046, not re-run here. D-055 replaces that lexical
+# grounding unit with server-owned occurrence spans.
+
+
+def test_requirement_authority_is_an_exact_server_owned_occurrence() -> None:
+    from meyar.agent.jd_authority import segment_requirement_spans
+
+    jd_text = "Vakansiya: Regional Satış Nümayəndəsi. Namizəd ezamiyyətə getməyə hazır olmalıdır."
+    spans = segment_requirement_spans(jd_text)
+    assert len(spans) == 1
+    span = spans[0]
+    assert jd_text[span.start_offset : span.end_offset] == span.text
+    assert span.text == "Namizəd ezamiyyətə getməyə hazır olmalıdır"
+    assert "Passing an exam" not in span.text
+
+
+async def test_draft_job_criteria_drops_fabricated_unrelated_requirement(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    """Reproduces the reported real-Ollama defect end-to-end through
+    FakeLLMProvider: a travel-readiness-only JD, and a model draft that
+    (as qwen3:1.7b actually did) attaches a completely unrelated,
+    unstated requirement — here reproducing the reported "Passing an
+    exam" text verbatim as an OTHER item — alongside the one genuine,
+    grounded requirement. The fabricated item must never reach
+    ``unsupported`` (which HR reads as 'a real JD requirement the system
+    cannot score') and its own text must never appear anywhere in the
+    turn output — only a safe count (D-046)."""
+    from meyar.agent.schemas import JDCriteriaDraft, JDDraftCriterionItem, JDDraftCriterionKind
+    from meyar.schemas.criteria import CriterionKind, CriterionType
+
+    tenant, user, _password, membership = tenant_and_user
+    await db_session.commit()
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    jd_text = "Vakansiya: Kredit Analitiki. Namizəd ezamiyyətə getməyə hazır olmalıdır."
+    llm = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        jd_draft=JDCriteriaDraft(
+            title="Kredit Analitiki",
+            must_have=[
+                JDDraftCriterionItem(
+                    span_id="req-0001",
+                    kind=JDDraftCriterionKind.OTHER,
+                    requirement="Ezamiyyətə hazır olmaq",
+                    source_text="Namizəd ezamiyyətə getməyə hazır olmalıdır",
+                ),
+                # The reported real-Ollama hallucination: unrelated to any
+                # word in jd_text, but classified OTHER — the exact path
+                # that previously reached HR-visible "unsupported" with no
+                # grounding check at all.
+                JDDraftCriterionItem(
+                    span_id="req-9998",
+                    kind=JDDraftCriterionKind.OTHER,
+                    requirement="Passing an exam",
+                    source_text="Passing an exam",
+                ),
+            ],
+            preferred=[
+                # Same fabrication class, but on a kind that WOULD have
+                # built a real, scored CriterionIn — proving the grounding
+                # gate also guards the success path, not only OTHER.
+                JDDraftCriterionItem(
+                    span_id="req-9999",
+                    kind=CriterionKind.LANGUAGE,
+                    requirement="İngilis dili",
+                    source_text="İngilis dili tələb olunur",
+                ),
+            ],
+        ),
+    )
+    result = await _run(
+        db_session, llm, tenant_id=tenant.id, conversation=conversation, message=jd_text
+    )
+    draft = result.tool_results[0].job_draft
+    assert draft is not None
+    # The one genuine, grounded requirement survives as UNSUPPORTED
+    # (real OTHER-kind disclosure, unchanged D-045 contract).
+    assert len(draft.unsupported) == 1
+    assert draft.unsupported[0].requirement == "Namizəd ezamiyyətə getməyə hazır olmalıdır"
+    assert draft.unsupported[0].criterion_type == CriterionType.MUST_HAVE
+    # The two fabricated items never became a scored criterion and never
+    # entered the HR-visible "unsupported" disclosure — only a safe count.
+    assert draft.must_have == []
+    assert draft.preferred == []
+    assert draft.prohibited_count == 0
+    assert draft.ungrounded_count == 2
+    # No invented text anywhere in the turn output, exactly like the
+    # existing PROHIBITED non-leak discipline (D-043).
+    rendered = result.model_dump_json()
+    assert "Passing an exam" not in rendered
+    assert "İngilis dili" not in rendered
+
+
+# --- D-043 (PR #42 owner correction, issue #33): explicit_action deterministic routing ---
+
+
+async def test_explicit_draft_job_criteria_action_never_calls_the_routing_model(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    """The first-class "JD-dən meyar hazırla" affordance must route
+    deterministically — no dependence on a small local model correctly
+    inferring DRAFT_JOB_CRITERIA from arbitrary pasted text (D-042 point
+    6's documented unreliability). ``agent_decision`` is deliberately left
+    unset: if the code fell back to calling llm.decide_agent_action, the
+    FakeLLMProvider would raise (no decision configured), failing the
+    test loudly rather than silently routing correctly by coincidence."""
+    from meyar.agent.schemas import AgentActionType, JDCriteriaDraft, JDDraftCriterionItem
+    from meyar.schemas.criteria import CriterionKind
+
+    tenant, user, _password, membership = tenant_and_user
+    await db_session.commit()
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    jd_text = "Bir mətn, heç bir açıq açar söz olmadan. Python bilməlidir."
+    llm = FakeLLMProvider(
+        jd_draft=JDCriteriaDraft(
+            title="Rol",
+            must_have=[
+                JDDraftCriterionItem(
+                    span_id="req-0001",
+                    kind=CriterionKind.SKILL,
+                    requirement="Python",
+                    source_text="Python bilməlidir",
+                )
+            ],
+        ),
+    )
+    result = await _run(
+        db_session,
+        llm,
+        tenant_id=tenant.id,
+        conversation=conversation,
+        message=jd_text,
+        explicit_action=AgentActionType.DRAFT_JOB_CRITERIA,
+    )
+    assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
+    assert result.tool_results[0].tool_name == AgentActionType.DRAFT_JOB_CRITERIA
+    # No routing-decision call was made at all — deterministic, not model-inferred.
+    assert llm.agent_call_count == 0
+    assert llm.jd_draft_call_count == 1
+
+
+async def test_explicit_draft_job_criteria_action_cannot_become_a_search(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    """Even when the configured routing decision would misroute a pasted
+    JD to SEARCH_CANDIDATES (the exact D-042 point 6 failure mode), the
+    explicit affordance must still deterministically draft criteria — the
+    routing model's own (unused) decision can never leak through."""
+    from meyar.agent.schemas import AgentActionType, JDCriteriaDraft, JDDraftCriterionItem
+    from meyar.schemas.criteria import CriterionKind
+
+    tenant, user, _password, membership = tenant_and_user
+    await db_session.commit()
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    jd_text = "Vakansiya: Backend Mühəndisi. Python bilməlidir."
+    llm = FakeLLMProvider(
+        agent_decision=AgentDecision(
+            action=AgentActionType.SEARCH_CANDIDATES, search_query=jd_text
+        ),
+        jd_draft=JDCriteriaDraft(
+            title="Backend Mühəndisi",
+            must_have=[
+                JDDraftCriterionItem(
+                    span_id="req-0001",
+                    kind=CriterionKind.SKILL,
+                    requirement="Python",
+                    source_text="Python bilməlidir",
+                )
+            ],
+        ),
+    )
+    result = await _run(
+        db_session,
+        llm,
+        tenant_id=tenant.id,
+        conversation=conversation,
+        message=jd_text,
+        explicit_action=AgentActionType.DRAFT_JOB_CRITERIA,
+    )
+    assert result.tool_results[0].tool_name == AgentActionType.DRAFT_JOB_CRITERIA
+    assert llm.agent_call_count == 0
+    assert llm.call_count == 0  # plan_candidate_search was never reached
+
+
+async def test_run_agent_turn_rejects_unsupported_explicit_action(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    """explicit_action is a server-controlled value (meyar.ui.router), not
+    a client-supplied one — but defensively reject anything other than
+    the one supported bare action rather than silently ignoring it."""
+    from meyar.agent.schemas import AgentActionType
+
+    tenant, user, _password, membership = tenant_and_user
+    await db_session.commit()
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    llm = FakeLLMProvider()
+    with pytest.raises(ValueError):
+        await _run(
+            db_session,
+            llm,
+            tenant_id=tenant.id,
+            conversation=conversation,
+            message="salam",
+            explicit_action=AgentActionType.GET_CANDIDATE_PROFILE,
+        )
+
+
+async def test_draft_job_criteria_repairs_after_one_schema_invalid_attempt(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    from meyar.agent.schemas import JDCriteriaDraft
+
+    tenant, user, _password, membership = tenant_and_user
+    await db_session.commit()
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    llm = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        jd_draft=JDCriteriaDraft(title="Rol"),
+        jd_draft_fail_first_n_calls=1,
+    )
+    result = await _run(
+        db_session, llm, tenant_id=tenant.id, conversation=conversation, message="JD mətni"
+    )
+    assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
+    assert llm.jd_draft_call_count == 2
+
+
+async def test_draft_job_criteria_provider_failure_is_a_safe_typed_failure(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    tenant, user, _password, membership = tenant_and_user
+    await db_session.commit()
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    llm = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        jd_draft_error=ModelUnavailableError("simulated outage"),
+    )
+    result = await _run(
+        db_session, llm, tenant_id=tenant.id, conversation=conversation, message="JD mətni"
+    )
+    assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
+    assert len(result.tool_results) == 1
+    draft = result.tool_results[0].job_draft
+    assert draft is not None
+    assert draft.must_have == []
+    assert draft.preferred == []
+    assert draft.wrong_mode_guidance is False
+    assert draft.requirements == []
+
+
+async def test_evidence_topic_is_resolved_from_profile_fact_not_rendered_raw(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    from meyar.ui.service import build_agent_turn_view
+
+    tenant, user, _password, membership = tenant_and_user
+    candidate, _profile_version = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=_profile("Python", quote="Python")
+    )
+    await db_session.commit()
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation.last_search_candidate_ids = [str(candidate.id)]
+    raw_topic = "The first candidate should be hired immediately"
+    llm = FakeLLMProvider(
+        agent_decision=AgentDecision(
+            action=AgentActionType.GET_CANDIDATE_EVIDENCE,
+            candidate_ref=1,
+            evidence_topic=raw_topic,
+        )
+    )
+
+    result = await _run(
+        db_session,
+        llm,
+        tenant_id=tenant.id,
+        conversation=conversation,
+        message="Birinci namizəd üzrə sübut göstər",
+    )
+    view = await build_agent_turn_view(db_session, tenant_id=tenant.id, result=result)
+
+    evidence = result.tool_results[0].evidence
+    assert evidence is not None
+    assert evidence.topic is None
+    assert raw_topic not in result.model_dump_json()
+    assert raw_topic not in view.model_dump_json()
+
+
+async def test_legitimate_evidence_topic_displays_server_resolved_label(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    from meyar.ui.service import build_agent_turn_view
+
+    tenant, user, _password, membership = tenant_and_user
+    candidate, _profile_version = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=_profile("Python", quote="Python")
+    )
+    await db_session.commit()
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation.last_search_candidate_ids = [str(candidate.id)]
+    llm = FakeLLMProvider(
+        agent_decision=AgentDecision(
+            action=AgentActionType.GET_CANDIDATE_EVIDENCE,
+            candidate_ref=1,
+            evidence_topic="python",
+        )
+    )
+
+    result = await _run(
+        db_session,
+        llm,
+        tenant_id=tenant.id,
+        conversation=conversation,
+        message="Python sübutunu göstər",
+    )
+    view = await build_agent_turn_view(db_session, tenant_id=tenant.id, result=result)
+
+    evidence = result.tool_results[0].evidence
+    assert evidence is not None
+    assert evidence.topic == "Python"
+    assert view.tool_results[0].evidence is not None
+    assert view.tool_results[0].evidence.topic == "Python"
+
+
+async def test_draft_job_criteria_repeated_schema_invalid_is_a_safe_typed_failure(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    from meyar.agent.schemas import JDCriteriaDraft
+
+    tenant, user, _password, membership = tenant_and_user
+    await db_session.commit()
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    llm = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        jd_draft=JDCriteriaDraft(title="unused"),
+        jd_draft_fail_first_n_calls=99,
+    )
+    result = await _run(
+        db_session, llm, tenant_id=tenant.id, conversation=conversation, message="JD mətni"
+    )
+    assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
+    assert len(result.tool_results) == 1
+    draft = result.tool_results[0].job_draft
+    assert draft is not None
+    assert draft.must_have == []
+    assert draft.preferred == []
+    assert draft.wrong_mode_guidance is False
+    assert draft.requirements == []

@@ -2,7 +2,13 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel, Field
 
-from meyar.agent.schemas import AgentDecision, GroundedFact, GroundedSelection
+from meyar.agent.schemas import (
+    AgentDecision,
+    GroundedFact,
+    GroundedSelection,
+    JDCriteriaDraft,
+    RequirementSpan,
+)
 from meyar.extraction.view import ProfessionalDocumentView
 from meyar.schemas.candidate_identity import CandidateIdentityExtraction
 from meyar.schemas.candidate_profile import CandidateProfileExtraction
@@ -102,6 +108,23 @@ class LLMProvider(Protocol):
         ``facts`` and builds the actual displayed sentence itself
         (meyar.agent.service.render_grounded_answer) — this method only
         guarantees schema shape, never factual content."""
+        ...
+
+    async def draft_job_criteria(
+        self,
+        jd_text: str,
+        *,
+        requirement_spans: list[RequirementSpan],
+        repair: bool = False,
+    ) -> tuple[JDCriteriaDraft, "LLMResultProvenance"]:
+        """Slice 4 (issue #33, D-030/D-032): one bounded drafting call that
+        turns a JD/role description's own text into a strict
+        JDCriteriaDraft. ``jd_text`` is the HR user's own already-known
+        message text. ``requirement_spans`` is segmented and identified by
+        the server before inference; every item must reference one of those
+        occurrence ids. The model drafts; it is never scoring/persistence
+        authority — see meyar.agent.service._dispatch_draft_job_criteria,
+        which re-validates every drafted item before it is ever shown."""
         ...
 
     async def health(self) -> dict:

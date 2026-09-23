@@ -104,6 +104,18 @@ select:focus-visible, summary:focus-visible {
 .site-header .button-secondary:hover { background: var(--surface); color: var(--primary); }
 
 .page-shell { width: min(1180px, calc(100% - 32px)); margin: 34px auto 72px; }
+.nav-secondary {
+  width: min(1180px, calc(100% - 32px));
+  margin: 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  font-size: .85rem;
+  color: var(--text-muted);
+}
+.nav-secondary a { color: var(--text-muted); }
+.nav-secondary a:hover, .nav-secondary a:focus-visible { color: var(--primary); }
 footer {
   padding: 26px 16px;
   border-top: 1px solid var(--border);
@@ -145,6 +157,7 @@ h3 { font-size: 1rem; }
   box-shadow: var(--shadow-subtle);
 }
 .stack-form { display: grid; gap: 12px; }
+.button-row { display: flex; gap: 12px; flex-wrap: wrap; }
 .radio-option {
   display: flex;
   align-items: center;
@@ -475,3 +488,152 @@ tbody tr:hover { background: var(--surface-subtle); }
 .agent-turn .untrusted-text { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
 .agent-turn-user { margin-left: auto; background: var(--panel-alt, #f4f6fb); }
 .agent-turn-assistant { background: var(--panel, #fff); }
+.agent-message {
+  padding: 14px 18px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  margin-bottom: 20px;
+}
+.agent-message .agent-turn-role { margin-bottom: 4px; }
+.agent-message p { margin: 0; }
+.agent-message[data-outcome="PROHIBITED_REQUEST"],
+.agent-message[data-outcome="MALFORMED_MODEL_OUTPUT"],
+.agent-message[data-outcome="AGENT_PROVIDER_FAILURE"],
+.agent-message[data-outcome="JOB_DRAFT_FAILED"],
+.agent-message[data-outcome="TOOL_CALL_LIMIT_EXCEEDED"],
+.agent-message[data-outcome="CANDIDATE_REF_NOT_FOUND"] {
+  background: var(--status-danger-bg);
+  border-color: var(--status-danger-border);
+  color: var(--status-danger-text);
+}
+.agent-message[data-outcome="UNSUPPORTED_SEMANTICS"],
+.agent-message[data-outcome="AMBIGUOUS_REQUEST"],
+.agent-message[data-outcome="CLARIFICATION_REQUESTED"] {
+  background: var(--status-warning-bg);
+  border-color: var(--status-warning-border);
+  color: var(--status-warning-text);
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* PR #42 owner correction (issue #33, D-045) — composer productization:
+   one visually merged, chat-style input (textarea + mode + send) instead
+   of three stacked full-width form elements, so the agent reads as an
+   assistant, not a developer form. The JD mode stays an explicit select
+   (no magic prompt detection) — only its presentation changes. */
+.composer-panel { margin: 18px 0; }
+.composer {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 10px 12px 10px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 18px;
+  box-shadow: var(--shadow-subtle);
+}
+.composer:focus-within { border-color: var(--accent); }
+.composer textarea {
+  min-height: 26px;
+  max-height: 220px;
+  padding: 8px 4px;
+  border: 0;
+  resize: vertical;
+  box-shadow: none;
+}
+.composer textarea:hover, .composer textarea:focus { border: 0; }
+.composer textarea:focus-visible { outline: none; }
+.composer-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.composer-mode select {
+  min-height: 34px;
+  width: auto;
+  padding: 5px 30px 5px 12px;
+  border-radius: 999px;
+  border-color: var(--border);
+  background-color: var(--surface-subtle);
+  color: var(--text-muted);
+  font-size: .84rem;
+  font-weight: 650;
+}
+.composer-mode select:hover { border-color: var(--primary); color: var(--text); }
+.composer-send {
+  display: inline-flex;
+  min-width: 42px;
+  min-height: 42px;
+  justify-content: center;
+  align-items: center;
+  padding: 0 18px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--primary);
+  color: var(--surface);
+  font-weight: 750;
+  cursor: pointer;
+}
+.composer-send:hover { background: var(--primary-hover); }
+.composer-send:disabled { background: var(--border-strong); }
+
+/* PR #42 owner correction (issue #33, D-045) — criteria review noise
+   reduction: the requirement text column dominates the row, the
+   irrelevant-per-kind duration cell reads as inert "—" text rather than
+   a loud disabled form control repeated on every row, and weight is a
+   narrow, muted, small-type column — still fully editable, just no
+   longer competing visually with Növ/Tələb. */
+.criteria-table { table-layout: fixed; }
+.criteria-table .col-requirement { width: 46%; }
+.criteria-table .col-kind { width: 18%; }
+.criteria-table .col-years { width: 14%; }
+.criteria-table .col-weight { width: 10%; }
+.criteria-table-protected .col-requirement { width: 48%; }
+.criteria-table-protected td { vertical-align: middle; }
+.criteria-table-protected td span { display: inline-block; padding: 9px 0; }
+.criteria-table .col-weight, .criteria-table th.col-weight {
+  color: var(--text-muted);
+  font-size: .85rem;
+}
+.criteria-table .js-weight {
+  min-height: 36px;
+  padding: 6px 8px;
+  font-size: .85rem;
+  color: var(--text-muted);
+}
+.criteria-table .js-min-years:disabled {
+  border-color: transparent;
+  background: transparent;
+  text-align: center;
+  opacity: 1;
+  color: var(--text-muted);
+}
+
+/* PR #42 owner correction (issue #33, D-045) — ranking hierarchy: each
+   requirement's status and its own evidence/insufficient-evidence
+   explanation are the primary, always-visible reading surface; raw
+   weight/match-degree/score-contribution numbers move into the
+   secondary, collapsed "Hesablama detalları" disclosure below them. */
+.criterion-status-list { list-style: none; margin: 14px 0 6px; padding: 0; display: grid; gap: 10px; }
+.criterion-status-row { padding: 10px 0; border-top: 1px solid var(--border); }
+.criterion-status-row:first-child { border-top: 0; padding-top: 0; }
+.criterion-status-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+.criterion-label { font-weight: 700; }

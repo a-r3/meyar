@@ -14,7 +14,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.embedding.provider import EmbeddingProvider
 from meyar.embedding.serializer import build_professional_embedding_text, compute_source_sha256
-from meyar.models.candidate_profile_version import PROFILE_STATUS_COMPLETED
 from meyar.schemas.candidate_profile import CandidateProfileExtraction
 from meyar.search.policy import (
     SEARCH_POLICY_VERSION,
@@ -33,6 +32,7 @@ from meyar.search.structured import evaluate_preferred_filters, evaluate_require
 from meyar.services.audit_repo import record_event
 from meyar.services.candidate_embedding_repo import search_compatible_embeddings
 from meyar.services.candidate_profile_repo import list_current_profile_versions_for_tenant
+from meyar.services.profile_authority import ProfileAuthorityError, authorize_profile_version
 
 
 class SearchRequestError(Exception):
@@ -68,14 +68,16 @@ async def search_candidates(
     # (candidate_id, profile_version_id, profile, profile_content, required_matches)
     eligible: list[tuple[uuid.UUID, uuid.UUID, CandidateProfileExtraction, dict, list]] = []
     for version in profile_versions:
-        if version.status != PROFILE_STATUS_COMPLETED or version.profile_content is None:
-            continue
         try:
-            profile = CandidateProfileExtraction.model_validate(version.profile_content)
-        except Exception:  # noqa: BLE001 - malformed stored content is simply not searchable
+            profile = await authorize_profile_version(db, version=version)
+        except ProfileAuthorityError:
             continue
+        assert version.profile_content is not None
         required_result = evaluate_required_filters(
-            profile, request.required_filters, as_of_year=as_of_year
+            profile,
+            request.required_filters,
+            as_of_year=as_of_year,
+            as_of_date=request.as_of_date,
         )
         if not required_result.satisfied:
             continue
@@ -97,7 +99,10 @@ async def search_candidates(
     if request.mode in (SearchMode.STRUCTURED_ONLY, SearchMode.HYBRID):
         for candidate_id, _pv_id, profile, _content, _req_matches in eligible:
             preferred_result = evaluate_preferred_filters(
-                profile, request.preferred_filters, as_of_year=as_of_year
+                profile,
+                request.preferred_filters,
+                as_of_year=as_of_year,
+                as_of_date=request.as_of_date,
             )
             structured_scores[candidate_id] = (preferred_result.score, preferred_result.matches)
     else:
@@ -152,8 +157,7 @@ async def search_candidates(
         if not is_valid_query_vector(embed_result.vector):
             raise SearchRequestError(
                 "QUERY_VECTOR_INVALID",
-                "Query embedding vector must be non-empty and contain only finite "
-                "numeric values.",
+                "Query embedding vector must be non-empty and contain only finite numeric values.",
             )
         if (
             embed_result.dimensions != config.embedding_dimensions

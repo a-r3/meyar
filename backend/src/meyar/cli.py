@@ -5,6 +5,7 @@ import uuid
 from datetime import date
 
 from meyar.config import get_settings
+from meyar.core.business_date import resolve_business_date
 from meyar.core.roles import VALID_ROLES
 from meyar.db import get_session_factory
 from meyar.embedding.dependency import get_embedding_provider, get_embedding_search_config
@@ -517,6 +518,7 @@ async def _seed_demo(reset: bool) -> None:
                 max_profile_input_chars=settings.llm_max_input_chars,
                 max_identity_input_chars=settings.llm_max_input_chars,
                 max_embedding_input_chars=settings.embedding_max_input_chars,
+                evaluation_as_of_date=resolve_business_date(settings.business_timezone),
             )
             await db.commit()
     except DemoTenantAmbiguousError as exc:

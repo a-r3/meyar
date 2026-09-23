@@ -6,7 +6,12 @@ prompt test."""
 
 import json
 
-from meyar.agent.prompts import AGENT_SYSTEM_PROMPT, build_agent_user_prompt
+from meyar.agent.jd_authority import segment_requirement_spans
+from meyar.agent.prompts import (
+    AGENT_SYSTEM_PROMPT,
+    build_agent_user_prompt,
+    build_jd_criteria_draft_user_prompt,
+)
 
 
 def test_system_prompt_prohibits_reasoning_disclosure_and_sql() -> None:
@@ -49,3 +54,17 @@ def test_user_prompt_never_includes_evidence_or_identity_looking_keys() -> None:
     )
     for forbidden in ("full_name", "email", "phone", "quote", "evidence"):
         assert forbidden not in prompt
+
+
+def test_jd_prompt_supplies_server_owned_occurrence_ids_before_inference() -> None:
+    source = "Python required. Python required."
+    spans = segment_requirement_spans(source)
+    prompt = build_jd_criteria_draft_user_prompt(
+        jd_text=source, requirement_spans=spans
+    )
+    payload = json.loads(prompt.split("\n", 1)[1])
+    assert payload["job_description"] == source
+    assert payload["SERVER_REQUIREMENT_SPANS"] == [
+        {"span_id": span.span_id, "text": span.text} for span in spans
+    ]
+    assert spans[0].span_id != spans[1].span_id

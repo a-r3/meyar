@@ -4,7 +4,7 @@ tenant-scoped counts (no more hardcoded zero placeholder)."""
 from datetime import date
 
 from httpx import AsyncClient
-from search_helpers import seed_candidate_with_profile
+from search_helpers import seed_candidate_with_profile, synthetic_evidence
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.evaluation.service import evaluate_and_score_candidate
@@ -15,7 +15,7 @@ from meyar.services.tenant_repo import create_tenant
 
 EVIDENCE = [{"page": 1, "block_index": 0, "quote": "Synthetic"}]
 PROFILE = {
-    "skills": [{"name": "Python", "evidence": EVIDENCE}],
+    "skills": [{"name": "Python", "evidence": synthetic_evidence("Python")}],
     "employment_history": [],
     "education": [],
     "certifications": [],

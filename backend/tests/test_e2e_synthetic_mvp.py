@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 from httpx import AsyncClient
-from search_helpers import seed_candidate_with_profile
+from search_helpers import seed_candidate_with_profile, synthetic_evidence
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.config import Settings, get_settings
@@ -55,18 +55,20 @@ def _profile(*, skills: list[str], languages: list[str]) -> dict:
     return {
         **EMPTY_PROFILE,
         "skills": [
-            {"name": skill, "category": "Backend", "evidence": EVIDENCE} for skill in skills
+            {"name": skill, "category": "Backend", "evidence": synthetic_evidence(skill, "Backend")}
+            for skill in skills
         ],
         "employment_history": [
             {
                 "title": "Backend Developer",
                 "start_date": "2020",
                 "end_date": "2025",
-                "evidence": EVIDENCE,
+                "evidence": synthetic_evidence("Backend Developer", "2020", "2025"),
             }
         ],
         "languages": [
-            {"language": language, "evidence": EVIDENCE} for language in languages
+            {"language": language, "evidence": synthetic_evidence(language)}
+            for language in languages
         ],
     }
 
