@@ -48,23 +48,29 @@ Apple-Silicon `launchctl`/reboot behavior remains **UNCONFIRMED**. The
 production model remains **TBD**.
 
 **PR3 for #35 (immutable application release artifact builder, D-068) is
-implemented on branch `feat/release-artifact-builder`, PR not yet
-opened/merged.** Adds one `meyar-ops` command — `build-release` — that
+MERGED — squash SHA `500e665c8e32e2f6c9f574b70a4ba7462623de73` on `main`
+(PR #56).** `meyar-ops build-release` is now accepted on `main`. It
 builds an immutable, verifiable MEYAR **application** release artifact
 (`backend/src/meyar/**`, migrations, `pyproject.toml`/`uv.lock`, and
 release identity/integrity metadata) from an exact Git commit SHA, via
-fixed-argv Git plumbing, never the mutable working tree. Allowlist-driven
-(`backend/tests/`, `backend/scripts/`, `.env` never enter the picture);
-produces an embedded + external `ReleaseManifest` and a
+fixed-argv Git plumbing, never the mutable working tree — exact
+Git-commit provenance remains the authority for every source-derived
+manifest field. Allowlist-driven (`backend/tests/`, `backend/scripts/`,
+`.env` never enter the picture); Alembic migration Python is statically
+parsed (`ast.parse`/`ast.literal_eval`), never executed, by
+`build-release`; produces an embedded + external `ReleaseManifest` and a
 `SHA256SUMS`-bound output bundle that passes the existing, unmodified
-`verify-release` command. This is **not** yet a complete offline
+`verify-release` command, whose own resource bounds are prechecked
+before use. Output-identity failure semantics remain fail-closed
+(`OUTPUT_IDENTITY_UNAVAILABLE`). This is **not** yet a complete offline
 deployment bundle: no Python runtime, `uv` executable, third-party
 wheels/offline wheelhouse, Ollama, models, or PostgreSQL are packaged,
 and no host install layout/extraction/activation/service-lifecycle
 orchestration exists. No production model approval is made or implied.
 See `docs/MEYAR_OPS.md` and `docs/DECISIONS.md` D-068. Verified on Linux
 only, against real throwaway Git repositories and this repository's own
-real HEAD commit (read-only).
+real HEAD commit (read-only); Apple-Silicon runtime acceptance remains
+**UNCONFIRMED** and the production model remains **TBD**.
 
 Issue #35 remains OPEN as the current active engineering phase (offline
 dependency provisioning, host install layout, plist
