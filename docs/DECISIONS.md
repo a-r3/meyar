@@ -5011,3 +5011,99 @@ Ollama model, candidate-result conversation, migration, push, or merge is
 changed. Certification-list enumeration splitting (`"including CPA and
 CISA"`) is unchanged — it is a distinct, already-authorized shared-modality
 list construction, not the bare coordination this fix targets.
+
+## D-066 — `meyar-ops` foundation: manifests, preflight/status/readiness, release verification (issue #35 PR1)
+
+**Date:** 2026-09-23. **Status:** Local implementation on
+`feat/meyar-ops-foundation`, branched from accepted `main`
+`dddd6eb0967bb1a9225fb43470c2468db30da5d6`; PR not yet merged.
+
+**Scope.** First bounded PR for issue #35 (Slice 6 — Agentless Mac
+Deployment Readiness, M9). Adds `backend/src/meyar/ops/` as normal typed/
+tested/linted package code (never an ad-hoc shell script), with a
+`meyar-ops` console entry point (`backend/pyproject.toml`
+`[project.scripts]`) and four commands: `preflight`, `status`,
+`readiness`, `verify-release`. Full detail: `docs/MEYAR_OPS.md`.
+
+**Result contract.** One stable JSON envelope (`meyar.ops.result.OpsResult`)
+for every command — `action`, `ok`, `started_at`, `finished_at`,
+`findings[]`, each a typed `Finding` (`component`, `status`, `code`,
+`message`). `ok` is defined uniformly across all four commands as "no
+`Finding` has status `FAIL`" — `WARN`/`SKIPPED` never affect it. This was
+chosen over a per-command-bespoke definition so a caller never has to
+special-case which command it invoked to interpret `ok`/the exit code.
+Exit codes are a 4-value `OpsExitCode` (`SUCCESS=0`, `CHECK_FAILURE=1`,
+`INVALID_INVOCATION=2`, `INFRASTRUCTURE_FAILURE=3`); argparse's own
+invalid-argument exit code is already `2`, so no special-casing was
+needed there either.
+
+**Ops config kept separate from application config.** `meyar.ops.config
+.OpsSettings` (env prefix `MEYAR_OPS_`) is its own `pydantic-settings`
+class, not an addition to `meyar.config.Settings` — meyar-ops is
+operationally separate tooling (per `.claude/rules/architecture.md`), and
+keeping its handful of settings (disk-space minimum, an alembic.ini
+override) out of the widely-imported application `Settings` avoids
+coupling business-config surface area to deployment-tooling surface area.
+
+**Embedding provider gained `health()`.** `meyar.embedding.provider
+.EmbeddingProvider` and `OllamaEmbeddingProvider` gained a `health()`
+method mirroring the existing `LLMProvider.health()` (same `/api/tags`
+reachability/model-availability check, same boundary). This was necessary
+so `meyar-ops status`/`readiness` can report configured-embedding-model
+availability through the existing approved local-only boundary
+(`meyar.llm.loopback.build_local_only_async_client` +
+`require_loopback_url`) instead of ops code constructing its own Ollama
+HTTP call — see the static `test_ops_package_never_imports_httpx_directly`
+proof in `test_ops_no_exfiltration.py`. `tests/fakes.FakeEmbeddingProvider`
+and `demo_seed_service._DemoEmbeddingProvider` both gained a matching
+`health()` so they still satisfy the `EmbeddingProvider` protocol under
+mypy.
+
+**Release-identity uses `pyproject.toml`'s `[project].version`
+(currently `0.1.0`), never the FastAPI/OpenAPI display version
+(`meyar.main.app.version`, currently `1.0.0`).** These two numbers are
+already inconsistent in the repository today; this PR does not change
+either value or attempt to reconcile them — that is a separate, later
+decision if ever made. `release_id` is deterministic:
+`meyar-{release_version}+{source_sha[:12]}` from the full 40-character
+`source_sha`, never randomly generated, so re-verifying the same accepted
+commit always yields the same identity.
+
+**Release-artifact integrity model.** Tarball + release manifest +
+external `SHA256SUMS` — the artifact's own SHA-256 is never computed over
+bytes that are themselves inside that same artifact (no self-referential
+hashing). The release manifest *may* also be embedded inside the archive
+(for installed-state identity once deployed); `verify-release` treats
+that as an optional additional consistency check against the external
+manifest, never as the source of truth for the checksum. Archive member
+metadata (`meyar.ops.archive_safety`) is inspected for absolute paths,
+`..` traversal, symlinks, hard links, device/special files, and paths
+escaping the one expected top-level root (`release_id/`) — a violation is
+a hard failure and the archive is never extracted (`extractall`/`extract`
+are never called anywhere in this PR; `verify-release` only ever reads
+one designated member's bytes into memory via `extractfile`, and only
+after every member has already passed the safety inspection with zero
+violations).
+
+**No production model approved; no artifact built.** `meyar.ops
+.model_manifest` defines the three-state approval contract
+(`DEVELOPMENT_INTEGRATION` / `BENCHMARKED_PENDING_APPROVAL` /
+`PRODUCTION_APPROVED`) but this PR ships no instance anywhere in the repo
+with `PRODUCTION_APPROVED` — current truth stays `qwen3:0.6b` (source
+default) and `qwen3:1.7b` (recent local acceptance override), both
+`DEVELOPMENT_INTEGRATION`; production selection remains TBD, blocked on
+issue #36's real Target-Mac benchmark. Release-artifact *building* is
+explicitly deferred to a later #35 PR — this PR's `verify-release` only
+verifies synthetic fixtures.
+
+**#35/#46 boundary preserved.** No HTTP `/ready` route was added; `/api/v1
+/health` is untouched (liveness-only). `meyar-ops readiness` is a local
+CLI composition of existing primitives, not an authenticated HTTP
+endpoint — that, plus in-application degraded-state semantics and
+production config fail-closed hardening, remains issue #46.
+
+**Explicit deferrals:** no candidate/search/scoring semantics changed, no
+launchd/service lifecycle, no update/rollback orchestration, no Apple
+Silicon runtime claim (Linux-verified only in this PR), no bank-Mac
+verification claim, no PostgreSQL/Homebrew/Docker production provisioning
+topology chosen.

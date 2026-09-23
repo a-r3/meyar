@@ -47,3 +47,10 @@ class EmbeddingProvider(Protocol):
         EmbeddingInvalidOutputError on failure — never returns an empty,
         NaN/Inf-containing, or otherwise invalid vector."""
         ...
+
+    async def health(self) -> dict:
+        """Best-effort reachability/model-availability check, mirroring
+        meyar.llm.provider.LLMProvider.health(). Used by meyar-ops
+        readiness/status (issue #35) — never exposed as a public/external
+        endpoint."""
+        ...
