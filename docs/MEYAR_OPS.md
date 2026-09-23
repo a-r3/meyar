@@ -1,9 +1,10 @@
 # MEYAR Ops — `meyar-ops`
 
 Operator tooling for agentless deployment readiness (issue #35 — Slice 6,
-M9). This document covers what **this PR** ("PR1") delivers. See
-`docs/DECISIONS.md` D-066 for the material decisions behind it, and §11
-below for the exact #35/#46 boundary.
+M9). This document covers PR1 (`preflight`/`status`/`readiness`/
+`verify-release` — `docs/DECISIONS.md` D-066) and PR2 (`service-render`/
+`service-verify`/`service-status` — D-067). See §11 below for the exact
+#35/#46 boundary.
 
 ## What `meyar-ops` is
 
@@ -25,6 +26,9 @@ uv run meyar-ops <command> [options]
 ```
 
 ## PR1 commands
+
+Local operator `preflight`, `status`, `readiness`, and release
+*verification* (`verify-release`).
 
 ### `preflight`
 
@@ -139,6 +143,121 @@ own `ARCHIVE_RESOURCE_BOUND_EXCEEDED`/`*_TOO_LARGE` finding. Release-artifact
 *building* is deferred to a later #35 PR — this PR's tests use synthetic
 fixtures built on the fly, never real repository binaries.
 
+## PR2 commands
+
+macOS LaunchDaemon **foundation** for the MEYAR application process only —
+render, verify, and read-only status. **Not** installation or lifecycle
+orchestration: no command in this section writes to
+`/Library/LaunchDaemons`, invokes `launchctl bootstrap`/`bootout`/
+`kickstart`, requires/uses `sudo`, or creates a service account. The
+target service model (not yet installed by any command here) is: system
+LaunchDaemon -> dedicated non-root `UserName` -> MEYAR application
+process -> loopback-bound Uvicorn. PostgreSQL and Ollama remain local
+external dependencies, unmanaged by these commands. There is no accepted
+immutable release/install filesystem layout yet, and these commands do
+not invent one. See `docs/DECISIONS.md` D-067.
+
+### `service-render`
+
+```bash
+uv run meyar-ops service-render \
+  --label <launchd-label> \
+  --user-name <dedicated-non-root-account> \
+  --working-directory <absolute-path> \
+  --executable <absolute-path-to-interpreter> \
+  --port <1-65535> \
+  --stdout-path <absolute-path> \
+  --stderr-path <absolute-path> \
+  --output <path-to-write>
+```
+
+Renders a deterministic LaunchDaemon plist (`plistlib`, `sort_keys=True`)
+with exactly seven keys: `Label`, `UserName`, `WorkingDirectory`,
+`ProgramArguments`, `StandardOutPath`, `StandardErrorPath`, `KeepAlive`.
+Every typed input is required and operator-supplied — no bank-specific or
+otherwise hardcoded default for any field.
+
+- **Label:** rejected if empty, containing `/`, or containing any
+  whitespace/control character.
+- **UserName:** rejected if empty or `root`. `meyar-ops` only references
+  this account in the plist; it never creates it.
+- **WorkingDirectory / Executable / StandardOutPath / StandardErrorPath:**
+  each must be an absolute path, free of NUL/control characters, free of
+  a lexical `..` traversal component. Symlink path components are
+  deliberately **not** blanket-rejected — no final immutable-release-path
+  contract exists yet.
+- **Executable:** never a bare `uv`/PATH-resolved name — an absolute
+  interpreter path. `ProgramArguments` is always constructed as a real
+  argv array: `[executable, "-m", "uvicorn", "meyar.main:app", "--host",
+  "127.0.0.1", "--port", str(port)]`. Never a shell command string, never
+  `shell=True`.
+- **Port:** validated 1–65535.
+- **EnvironmentVariables:** never emitted — secrets stay outside the
+  plist in host-local configuration.
+- **KeepAlive:** always the structured `{"SuccessfulExit": false}` —
+  restart-after-abnormal-exit semantics. No explicit `RunAtLoad` (already
+  implied) and no `ThrottleInterval` (would only restate launchd's own
+  default) are emitted.
+
+Writes only to the explicit `--output` path — never
+`/Library/LaunchDaemons`, never `launchctl`, never `sudo`. The output
+file is created with `O_CREAT | O_EXCL` (atomic, not a `Path.exists()`
+pre-check, so no overwrite race): an existing path is refused as
+`OUTPUT_PATH_EXISTS` and left untouched. `ServiceSpec` validation happens
+before any filesystem write, so invalid input never creates a file; any
+failure during the write removes the partial file it created.
+
+### `service-verify`
+
+```bash
+uv run meyar-ops service-verify --plist <path> [--expected-label <label>]
+```
+
+Bounded read (1 MiB cap, enforced by the read call itself — never a
+`stat()` pre-check) and `plistlib` parse of an operator-supplied plist,
+then independent checks for every component of the security/shape
+contract: plist validity; `Label` well-formedness (and, if
+`--expected-label` is given, an exact match); `ProgramArguments` present
+as a non-empty argv array of strings; the executable path absolute; the
+full invocation matching the expected `meyar.main:app` uvicorn contract;
+host exactly `127.0.0.1`; port in range; `UserName` present and not
+`root`; `WorkingDirectory`/`StandardOutPath`/`StandardErrorPath`
+absolute; no `EnvironmentVariables`; no shell wrapper (`Program` key or a
+shell interpreter as the executable); `KeepAlive` exactly
+`{SuccessfulExit: false}`; and the plist's top-level key set is exactly
+the seven keys `service-render` emits — any other key (a tampered
+`EnvironmentVariables`, a re-added `RunAtLoad`, a `Program` string, an
+unrecognized key) is rejected as `UNSUPPORTED_KEY`, never silently
+accepted. A malformed (non-plist) file and a well-formed-but-tampered
+plist are both rejected with distinct, truthful finding codes — never
+folded into one generic failure. No final install-root containment rule
+is invented (no final immutable release layout exists yet), and symlinked
+path components are not blanket-rejected, matching `service-render`.
+
+### `service-status`
+
+```bash
+uv run meyar-ops service-status --label <launchd-label>
+```
+
+Read-only, macOS-only probe of whether the given label is currently
+visible in the **system** launchd domain: fixed argv (`/bin/launchctl
+print system/<validated-label>`, never `shell=True`, never a bare
+`launchctl` relying on `PATH`), no `sudo`, no mutation
+(`bootstrap`/`bootout`/`kickstart` are never called). The launchctl
+runner is injected/testable, so this command's tests never require a
+real `launchctl`/macOS host. On any non-Darwin platform (all current
+CI), it returns a truthful `PLATFORM_UNSUPPORTED` finding — it does not
+pretend the check ran, and it does not require `launchctl` to exist on
+ordinary Linux CI. Raw `launchctl` stdout/stderr is never included in the
+returned `OpsResult` — only the fixed argv used, the process exit status,
+and (on a genuine runner-level infrastructure failure — missing binary,
+timeout) bounded/redacted error text via the existing
+`meyar.ops.redact.safe_exception_text`.
+
+**Real `launchctl`/`bootstrap`/reboot behavior on macOS remains
+UNCONFIRMED** — see "Platform verification status" below.
+
 ## JSON result contract
 
 Every command prints exactly one JSON object to stdout:
@@ -189,12 +308,23 @@ never flip `ok`. Every component's finding is always present in the list
   `TarFile.extractall`/`.extract` are never called; a monkeypatch-based
   test asserts this at runtime, and a static grep-based test asserts it
   in source.
+- `service-status` never includes raw `launchctl` stdout/stderr in its
+  `OpsResult` — only the fixed argv, exit status, and bounded/redacted
+  error text on a genuine runner failure; never `shell=True`; never
+  `sudo`.
 
 ## What is NOT implemented yet
 
 - No HTTP `/ready` route (`/api/v1/health` remains liveness-only,
   unchanged) — issue #46.
-- No launchd/service lifecycle.
+- No launchd/service **lifecycle**: no `service-install`, `service-start`,
+  `service-stop`, `service-restart`. No plist is ever written to
+  `/Library/LaunchDaemons`, no `launchctl bootstrap`/`bootout`/
+  `kickstart` is ever called, no `sudo`/privilege escalation, no service
+  account is created. `service-render`/`service-verify`/`service-status`
+  are foundation-only (D-067).
+- No final immutable release/install filesystem layout — path fields are
+  operator-supplied and validated lexically only.
 - No update/rollback orchestration (the `RollbackCompatibility` enum is a
   typed classification for a future human-operated runbook, not an
   executable mechanism — no automatic Alembic downgrade).
@@ -215,9 +345,16 @@ never flip `ok`. Every component's finding is always present in the list
 
 ## #35 / #46 boundary
 
-**This PR (#35 PR1):** local operator `preflight`, local operator
-`status`, local operator component `readiness`, the release/model
-manifest typed contracts, and release-artifact *verification*.
+**#35 PR1:** local operator `preflight`, local operator `status`, local
+operator component `readiness`, the release/model manifest typed
+contracts, and release-artifact *verification*.
+
+**#35 PR2 (this PR):** macOS LaunchDaemon **foundation** only —
+`service-render` (typed plist generation), `service-verify` (bounded
+plist shape/security verification), `service-status` (read-only
+`launchctl print system/<label>` probe). No plist installation, no
+`launchctl` mutation, no service-account creation, no PostgreSQL/Ollama
+lifecycle. No final immutable release/install path is chosen.
 
 **Deferred to #46:** authenticated HTTP `/ready`, in-application
 degraded-state semantics, comprehensive production config fail-closed
@@ -230,16 +367,20 @@ benchmark, or approve a production model.
 
 ## Platform verification status
 
-Everything in this PR — `preflight`, `status`, `readiness`,
-`verify-release`, and the full test suite — has been run and verified
-**on Linux only**, against the local Ollama daemon and the local
-PostgreSQL/`pgvector` container described in `docker-compose.yml`.
+Everything in this document — `preflight`, `status`, `readiness`,
+`verify-release`, `service-render`, `service-verify`, `service-status`,
+and the full test suite — has been run and verified **on Linux only**,
+against the local Ollama daemon and the local PostgreSQL/`pgvector`
+container described in `docker-compose.yml`. `service-status`'s tests use
+an injected fake `launchctl` runner; no test claims real `launchctl`
+behavior.
 
 **Apple Silicon / Mac mini M4 Pro reference-hardware rehearsal remains
-UNCONFIRMED.** No claim of Apple-Silicon runtime acceptance or
-bank-Mac verification is made by this PR. That verification is issue
-#36's scope, and depends on this PR's tooling first being reviewed and
-merged.
+UNCONFIRMED.** No claim of Apple-Silicon runtime acceptance, real
+`launchctl print`/`bootstrap` behavior, service-survives-reboot behavior,
+or bank-Mac verification is made by this document. That verification is
+issue #35's later (installation/lifecycle) scope plus issue #36, and
+depends on this tooling first being reviewed and merged.
 
 **Production model remains TBD** — `qwen3:0.6b` is the source/default
 development/integration setting, `qwen3:1.7b` is a recent local
