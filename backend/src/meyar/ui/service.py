@@ -842,6 +842,22 @@ async def build_agent_turn_view(
     )
 
 
+def agent_draft_requires_resolution(draft: AgentJobDraftToolResult) -> bool:
+    """Single server-owned confirmability predicate for a pending job draft.
+
+    Both the draft's presentation (whether confirm controls render) and its
+    mutation authorization (whether ``POST .../confirm`` may persist)
+    consult this exact rule — see ``build_agent_job_draft_view`` and
+    ``authorize_agent_draft_confirmation``. A draft is unresolved, and
+    therefore never confirmable, while an ambiguous result-count request
+    has left ``result_limit_needs_review`` set (the placeholder
+    ``result_limit`` must never become confirmation authority) or any
+    ``needs_review`` item still carries unresolved allowed types."""
+    return draft.result_limit_needs_review or any(
+        item.allowed_types for item in draft.needs_review
+    )
+
+
 def build_agent_job_draft_view(draft: AgentJobDraftToolResult) -> AgentJobDraftView:
     return AgentJobDraftView(
         title=draft.title,
@@ -893,10 +909,7 @@ def build_agent_job_draft_view(draft: AgentJobDraftToolResult) -> AgentJobDraftV
             )
             for item in draft.needs_review
         ],
-        requires_resolution=(
-            draft.result_limit_needs_review
-            or any(item.allowed_types for item in draft.needs_review)
-        ),
+        requires_resolution=agent_draft_requires_resolution(draft),
         prohibited_count=draft.prohibited_count,
         ungrounded_count=draft.ungrounded_count,
         unsupported_language=draft.unsupported_language is not None,
@@ -1421,8 +1434,17 @@ def authorize_agent_draft_confirmation(
     request: JobCreateRequest,
     submitted_span_ids: list[str],
 ) -> None:
-    """Permit exactly the unchanged server-authorized SCORABLE draft rows."""
-    if any(item.allowed_types for item in draft.needs_review):
+    """Permit exactly the unchanged server-authorized SCORABLE draft rows.
+
+    Authorization is refused for the same server-owned reason the confirm
+    UI never renders in the first place — ``agent_draft_requires_resolution``
+    is the single confirmability rule shared by both. This closes the gap
+    where a caller who already holds a valid draft_id (session/CSRF/tenant
+    all otherwise legitimate) could POST directly to the confirm route: UI
+    visibility is not authorization, so the mutation boundary re-checks the
+    same predicate independently rather than trusting that the rendered
+    page happened to hide the control."""
+    if agent_draft_requires_resolution(draft):
         raise UIServiceInputError(
             "İnsan baxışı tələb edən sahələri dəqiqləşdirmədən sıralamanı təsdiqləmək olmaz."
         )

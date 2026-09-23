@@ -2683,3 +2683,179 @@ async def test_wrong_mode_guidance_suppresses_incompatible_review_headings(
     assert "Mütləq tələblər" not in response.text
     assert "Üstünlük tələbləri" not in response.text
     assert "AI tərəfindən hazırlanmış qaralamadır" not in response.text
+
+
+async def _pending_draft_id(db_session: AsyncSession) -> uuid.UUID:
+    """Server-held pending draft id — the confirm form/draft_id is never
+    rendered while the draft is unconfirmable, so a real repro of a direct
+    bypass POST has no HTML source for it either; this mirrors reading the
+    same session-scoped conversation state the confirm route itself reads
+    (meyar.services.agent_conversation_repo.get_pending_job_draft)."""
+    from sqlalchemy import select
+
+    from meyar.models.agent_conversation import AgentConversation
+
+    conversation = (await db_session.execute(select(AgentConversation))).scalar_one()
+    for turn in reversed(conversation.turns):
+        payload = turn.get("pending_job_draft")
+        if isinstance(payload, dict):
+            return uuid.UUID(payload["draft_id"])
+    raise AssertionError("no pending job draft found in conversation state")
+
+
+async def test_ambiguous_result_count_draft_renders_no_confirm_control(
+    client: AsyncClient,
+    tenant_and_user,
+    local_ui_settings: Settings,
+) -> None:
+    """Issue #44 (confirmation-authority blocker): an ambiguous AZ result-
+    count request ("bir neçə" = "a few") must never render a confirm
+    control, even though the Terraform requirement itself is real,
+    server-grounded, and SCORABLE."""
+    from meyar.agent.schemas import JDCriteriaDraft, JDDraftCriterionItem
+
+    _tenant, user, password, _membership = tenant_and_user
+    fake = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        jd_draft=JDCriteriaDraft(
+            title="Backend",
+            must_have=[
+                JDDraftCriterionItem(
+                    span_id="req-0002",
+                    kind="SKILL_EXPERIENCE",
+                    requirement="Terraform",
+                    min_years=4,
+                    source_text="minimum 4 il Terraform təcrübəsi mütləqdir",
+                )
+            ],
+        ),
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake
+    csrf = await _login_and_csrf(client, user.username, password)
+    response = await client.post(
+        "/ui/agent",
+        data={
+            "message": "Bir neçə namizəd lazımdır, minimum 4 il Terraform təcrübəsi mütləqdir.",
+            "csrf_token": csrf,
+        },
+    )
+    assert response.status_code == 200
+    assert "Terraform" in response.text
+    assert "Sorğuda nəticə sayı göstərilib" in response.text
+    assert "/confirm" not in response.text
+    assert "Tələbləri təsdiqlə və namizədləri sırala" not in response.text
+
+
+async def test_ambiguous_result_count_direct_confirm_post_is_rejected_without_persistence(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
+) -> None:
+    """Issue #44: server-authority regression. UI visibility is not
+    authorization — a caller who already holds a legitimate session, CSRF
+    token, and server-issued draft_id must still be rejected by the confirm
+    route itself when the draft's result-count intent is unresolved, even
+    though no confirm form was ever rendered to obtain that draft_id from."""
+    from sqlalchemy import func, select
+
+    from meyar.agent.schemas import JDCriteriaDraft, JDDraftCriterionItem
+    from meyar.models.job import Job
+    from meyar.models.job_criteria_version import JobCriteriaVersion
+
+    _tenant, user, password, _membership = tenant_and_user
+    fake = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        jd_draft=JDCriteriaDraft(
+            title="Backend",
+            must_have=[
+                JDDraftCriterionItem(
+                    span_id="req-0002",
+                    kind="SKILL_EXPERIENCE",
+                    requirement="Terraform",
+                    min_years=4,
+                    source_text="minimum 4 il Terraform təcrübəsi mütləqdir",
+                )
+            ],
+        ),
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake
+    csrf = await _login_and_csrf(client, user.username, password)
+    draft = await client.post(
+        "/ui/agent",
+        data={
+            "message": "Bir neçə namizəd lazımdır, minimum 4 il Terraform təcrübəsi mütləqdir.",
+            "csrf_token": csrf,
+        },
+    )
+    assert draft.status_code == 200
+    assert "/confirm" not in draft.text  # confirms no rendered bypass source
+
+    jobs_before = await db_session.scalar(select(func.count()).select_from(Job))
+    versions_before = await db_session.scalar(select(func.count()).select_from(JobCriteriaVersion))
+
+    draft_id = await _pending_draft_id(db_session)
+    bypass = await client.post(
+        f"/ui/agent/drafts/{draft_id}/confirm",
+        data={"csrf_token": csrf},
+        follow_redirects=False,
+    )
+    assert bypass.status_code == 422
+    assert "Reytinq nəticələri" not in bypass.text
+
+    jobs_after = await db_session.scalar(select(func.count()).select_from(Job))
+    versions_after = await db_session.scalar(select(func.count()).select_from(JobCriteriaVersion))
+    assert jobs_after == jobs_before
+    assert versions_after == versions_before
+
+
+async def test_explicit_result_count_control_confirms_and_persists_normally(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
+) -> None:
+    """Issue #44 control (scenario C): an unambiguous request carries no
+    result-count review flag at all, and normal confirmation/persistence is
+    unaffected by the new confirmability check."""
+    from sqlalchemy import func, select
+
+    from meyar.agent.schemas import JDCriteriaDraft, JDDraftCriterionItem
+    from meyar.models.job import Job
+    from meyar.models.job_criteria_version import JobCriteriaVersion
+
+    _tenant, user, password, _membership = tenant_and_user
+    fake = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        jd_draft=JDCriteriaDraft(
+            title="Backend",
+            must_have=[
+                JDDraftCriterionItem(
+                    span_id="req-0001",
+                    kind="SKILL_EXPERIENCE",
+                    requirement="Terraform",
+                    min_years=4,
+                    source_text="Minimum 4 il Terraform təcrübəsi mütləqdir",
+                )
+            ],
+        ),
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake
+    csrf = await _login_and_csrf(client, user.username, password)
+    draft = await client.post(
+        "/ui/agent",
+        data={
+            "message": "Minimum 4 il Terraform təcrübəsi mütləqdir.",
+            "csrf_token": csrf,
+        },
+    )
+    assert draft.status_code == 200
+    assert "Sorğuda nəticə sayı göstərilib" not in draft.text
+    confirm_path = _draft_confirm_path(draft.text)
+
+    response = await client.post(confirm_path, data={"csrf_token": csrf}, follow_redirects=False)
+    assert response.status_code == 200
+    assert "Reytinq nəticələri" in response.text
+
+    assert await db_session.scalar(select(func.count()).select_from(Job)) == 1
+    assert await db_session.scalar(select(func.count()).select_from(JobCriteriaVersion)) == 1

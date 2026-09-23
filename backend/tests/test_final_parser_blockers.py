@@ -98,6 +98,65 @@ def test_ambiguous_explicit_result_limit_blocks_browser_confirmation() -> None:
     assert view.requires_resolution
 
 
+def test_agent_draft_requires_resolution_is_shared_by_view_and_authorization() -> None:
+    """Issue #44: one server-owned confirmability predicate governs both the
+    confirm UI (requires_resolution) and the confirm route's mutation
+    authorization (authorize_agent_draft_confirmation). An ambiguous
+    result-count draft must be refused by both, not merely hidden in the
+    UI — a direct POST holding a valid draft_id must still fail closed."""
+    from meyar.agent.schemas import RequirementSpanResult, RequirementSpanState
+    from meyar.schemas.job import JobCreateRequest
+    from meyar.ui.service import (
+        UIServiceInputError,
+        agent_draft_requires_resolution,
+        authorize_agent_draft_confirmation,
+    )
+
+    terraform_criterion = CriterionIn(
+        id="terraform",
+        kind=CriterionKind.SKILL_EXPERIENCE,
+        type=CriterionType.MUST_HAVE,
+        label="Terraform",
+        value="Terraform",
+        min_years=4,
+        weight=1.0,
+    )
+    ambiguous_draft = AgentJobDraftToolResult(
+        draft_id=uuid.uuid4(),
+        result_limit=1,
+        result_limit_needs_review=True,
+        must_have=[terraform_criterion],
+        requirements=[
+            RequirementSpanResult(
+                span_id="req-0002",
+                start_offset=0,
+                end_offset=9,
+                text="Terraform",
+                normalized="terraform",
+                state=RequirementSpanState.SCORABLE,
+                criterion_type=CriterionType.MUST_HAVE,
+                criterion_id="terraform",
+            )
+        ],
+    )
+    assert agent_draft_requires_resolution(ambiguous_draft)
+    assert build_agent_job_draft_view(ambiguous_draft).requires_resolution
+    with pytest.raises(UIServiceInputError):
+        authorize_agent_draft_confirmation(
+            draft=ambiguous_draft,
+            request=JobCreateRequest(title="Backend", criteria=[terraform_criterion]),
+            submitted_span_ids=["req-0002"],
+        )
+
+    resolved_draft = AgentJobDraftToolResult(
+        draft_id=uuid.uuid4(),
+        result_limit=20,
+        result_limit_needs_review=False,
+    )
+    assert not agent_draft_requires_resolution(resolved_draft)
+    assert not build_agent_job_draft_view(resolved_draft).requires_resolution
+
+
 def test_consumed_english_top_k_keeps_distinct_with_modality_and_duration() -> None:
     analysis = analyze_hr_text(
         "Show top 5 candidates with 4 years of Snowflake experience."
