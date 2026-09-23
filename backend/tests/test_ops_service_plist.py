@@ -1,0 +1,718 @@
+"""`meyar-ops service-render` / `service-verify` (issue #35 PR2). Covers
+plist generation, the exact narrow key set, path/label/user validation,
+no-overwrite/no-partial-write output behavior, bounded input reads, and
+malformed/tampered plist rejection. See docs/MEYAR_OPS.md."""
+
+from __future__ import annotations
+
+import os
+import plistlib
+from pathlib import Path
+
+import pytest
+
+from meyar.ops.result import FindingStatus
+from meyar.ops.service_plist import (
+    APPLICATION_MODULE,
+    REQUIRED_HOST,
+    REQUIRED_PLIST_KEYS,
+    ServiceRenderOutputExistsError,
+    ServiceRenderOutputPathPrivilegedError,
+    ServiceSpec,
+    render_service_plist,
+    render_service_plist_to_file,
+    run_service_render,
+    validate_absolute_path,
+    validate_label,
+    validate_port,
+    validate_user_name,
+    verify_service_plist,
+)
+
+
+def _valid_spec(**overrides: object) -> ServiceSpec:
+    base = {
+        "label": "meyar.application",
+        "user_name": "meyar-svc",
+        "working_directory": "/opt/meyar/current/backend",
+        "executable": "/opt/meyar/venv/bin/python3",
+        "port": 8000,
+        "stdout_path": "/var/log/meyar/app.out.log",
+        "stderr_path": "/var/log/meyar/app.err.log",
+    }
+    base.update(overrides)
+    return ServiceSpec(**base)  # type: ignore[arg-type]
+
+
+# --- 1. plist generation via plistlib / round-trip -------------------------
+
+
+def test_render_service_plist_round_trips_through_plistlib() -> None:
+    data = render_service_plist(_valid_spec())
+    payload = plistlib.loads(data)
+    assert payload["Label"] == "meyar.application"
+    assert payload["ProgramArguments"][0] == "/opt/meyar/venv/bin/python3"
+
+
+def test_render_service_plist_is_deterministic() -> None:
+    spec = _valid_spec()
+    assert render_service_plist(spec) == render_service_plist(spec)
+
+
+# --- 2. exact generated key set --------------------------------------------
+
+
+def test_render_service_plist_has_exactly_the_required_key_set() -> None:
+    payload = plistlib.loads(render_service_plist(_valid_spec()))
+    assert set(payload.keys()) == set(REQUIRED_PLIST_KEYS)
+
+
+# --- 3. absolute executable path requirement --------------------------------
+
+
+def test_relative_executable_is_rejected() -> None:
+    with pytest.raises(ValueError, match="absolute"):
+        render_service_plist(_valid_spec(executable="python3"))
+
+
+def test_render_service_plist_never_uses_program_key_or_bare_uv() -> None:
+    payload = plistlib.loads(render_service_plist(_valid_spec()))
+    assert "Program" not in payload
+    args = payload["ProgramArguments"]
+    assert args[0].startswith("/")
+    assert "uv" not in Path(args[0]).name
+
+
+# --- 4. UserName required / root rejected -----------------------------------
+
+
+def test_root_user_name_is_rejected() -> None:
+    with pytest.raises(ValueError, match="root"):
+        render_service_plist(_valid_spec(user_name="root"))
+
+
+def test_empty_user_name_is_rejected() -> None:
+    with pytest.raises(ValueError):
+        validate_user_name("")
+
+
+def test_user_name_with_whitespace_is_rejected() -> None:
+    with pytest.raises(ValueError):
+        validate_user_name("meyar svc")
+
+
+# --- 5. loopback host pinned to 127.0.0.1 -----------------------------------
+
+
+def test_program_arguments_always_use_required_host() -> None:
+    payload = plistlib.loads(render_service_plist(_valid_spec()))
+    args = payload["ProgramArguments"]
+    assert args[4] == "--host"
+    assert args[5] == REQUIRED_HOST == "127.0.0.1"
+
+
+def test_program_arguments_invoke_expected_application_module() -> None:
+    payload = plistlib.loads(render_service_plist(_valid_spec()))
+    args = payload["ProgramArguments"]
+    assert args[1:4] == ["-m", "uvicorn", APPLICATION_MODULE]
+
+
+# --- 6. port validation ------------------------------------------------------
+
+
+@pytest.mark.parametrize("port", [0, -1, 65536, 100000])
+def test_out_of_range_port_is_rejected(port: int) -> None:
+    with pytest.raises(ValueError):
+        validate_port(port)
+
+
+@pytest.mark.parametrize("port", [1, 8000, 65535])
+def test_in_range_port_is_accepted(port: int) -> None:
+    validate_port(port)  # must not raise
+
+
+def test_port_is_embedded_as_string_argv_entry() -> None:
+    payload = plistlib.loads(render_service_plist(_valid_spec(port=8123)))
+    args = payload["ProgramArguments"]
+    assert args[6] == "--port"
+    assert args[7] == "8123"
+
+
+# --- 7. no EnvironmentVariables ----------------------------------------------
+
+
+def test_render_service_plist_never_includes_environment_variables() -> None:
+    payload = plistlib.loads(render_service_plist(_valid_spec()))
+    assert "EnvironmentVariables" not in payload
+
+
+# --- 8. no explicit RunAtLoad -------------------------------------------------
+
+
+def test_render_service_plist_never_includes_run_at_load() -> None:
+    payload = plistlib.loads(render_service_plist(_valid_spec()))
+    assert "RunAtLoad" not in payload
+    assert "ThrottleInterval" not in payload
+
+
+# --- 9. KeepAlive.SuccessfulExit == false -------------------------------------
+
+
+def test_render_service_plist_keep_alive_is_structured_successful_exit_false() -> None:
+    payload = plistlib.loads(render_service_plist(_valid_spec()))
+    assert payload["KeepAlive"] == {"SuccessfulExit": False}
+
+
+# --- 10. absolute WorkingDirectory/log paths ----------------------------------
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["working_directory", "stdout_path", "stderr_path"],
+)
+def test_relative_path_fields_are_rejected(field: str) -> None:
+    with pytest.raises(ValueError, match="absolute"):
+        render_service_plist(_valid_spec(**{field: "relative/path"}))
+
+
+# --- 11. lexical traversal/control-character rejection ------------------------
+
+
+def test_lexical_traversal_is_rejected() -> None:
+    with pytest.raises(ValueError, match="traversal"):
+        validate_absolute_path("/opt/meyar/../etc/passwd", field_name="X")
+
+
+def test_control_character_in_path_is_rejected() -> None:
+    with pytest.raises(ValueError, match="control"):
+        validate_absolute_path("/opt/meyar/\x00evil", field_name="X")
+
+
+def test_nul_in_path_is_rejected() -> None:
+    with pytest.raises(ValueError):
+        validate_absolute_path("/opt/meyar\x00", field_name="X")
+
+
+def test_label_rejects_slash_whitespace_control_and_empty() -> None:
+    with pytest.raises(ValueError):
+        validate_label("")
+    with pytest.raises(ValueError):
+        validate_label("meyar/application")
+    with pytest.raises(ValueError):
+        validate_label("meyar application")
+    with pytest.raises(ValueError):
+        validate_label("meyar\x01application")
+
+
+def test_symlink_shaped_component_is_not_blanket_rejected() -> None:
+    # No final immutable-release-path contract exists yet — a path that
+    # merely *looks* like it could contain a symlinked component (no `..`,
+    # absolute, no control chars) must not be rejected lexically.
+    validate_absolute_path("/opt/meyar/releases/current/backend", field_name="X")
+
+
+# --- 12. output no-overwrite / no-partial-write behavior ----------------------
+
+
+def test_render_to_file_writes_expected_bytes(tmp_path: Path) -> None:
+    output = tmp_path / "meyar.plist"
+    render_service_plist_to_file(_valid_spec(), output)
+    assert output.exists()
+    assert plistlib.loads(output.read_bytes())["Label"] == "meyar.application"
+
+
+def test_render_to_file_refuses_to_overwrite_existing_output(tmp_path: Path) -> None:
+    output = tmp_path / "meyar.plist"
+    output.write_bytes(b"pre-existing content")
+    with pytest.raises(ServiceRenderOutputExistsError):
+        render_service_plist_to_file(_valid_spec(), output)
+    assert output.read_bytes() == b"pre-existing content"
+
+
+def test_render_to_file_leaves_no_output_on_invalid_spec(tmp_path: Path) -> None:
+    output = tmp_path / "meyar.plist"
+    with pytest.raises(ValueError):
+        render_service_plist_to_file(_valid_spec(user_name="root"), output)
+    assert not output.exists()
+
+
+def test_run_service_render_reports_output_path_exists_as_fail(tmp_path: Path) -> None:
+    output = tmp_path / "meyar.plist"
+    output.write_bytes(b"pre-existing content")
+    result = run_service_render(_valid_spec(), output)
+    assert result.ok is False
+    assert result.findings[0].code == "OUTPUT_PATH_EXISTS"
+    assert output.read_bytes() == b"pre-existing content"
+
+
+def test_run_service_render_success_returns_ok_result(tmp_path: Path) -> None:
+    output = tmp_path / "meyar.plist"
+    result = run_service_render(_valid_spec(), output)
+    assert result.ok is True
+    assert result.action == "service-render"
+
+
+def test_run_service_render_invalid_spec_is_fail_and_no_file(tmp_path: Path) -> None:
+    output = tmp_path / "meyar.plist"
+    result = run_service_render(_valid_spec(label=""), output)
+    assert result.ok is False
+    assert result.findings[0].code == "SERVICE_SPEC_INVALID"
+    assert not output.exists()
+
+
+# --- 13. bounded plist input read --------------------------------------------
+
+
+def test_verify_service_plist_rejects_oversized_input(tmp_path: Path, monkeypatch) -> None:
+    import meyar.ops.service_plist as service_plist_module
+
+    monkeypatch.setattr(service_plist_module, "_MAX_PLIST_BYTES", 16)
+    plist_path = tmp_path / "big.plist"
+    plist_path.write_bytes(render_service_plist(_valid_spec()))
+    result = verify_service_plist(plist_path)
+    assert result.ok is False
+    assert result.findings[0].code == "PLIST_TOO_LARGE"
+
+
+def test_verify_service_plist_reports_unreadable_file(tmp_path: Path) -> None:
+    result = verify_service_plist(tmp_path / "does-not-exist.plist")
+    assert result.ok is False
+    assert result.findings[0].code == "PLIST_UNREADABLE"
+
+
+# --- 14. malformed plist rejection -------------------------------------------
+
+
+def test_verify_service_plist_rejects_non_xml_garbage(tmp_path: Path) -> None:
+    plist_path = tmp_path / "garbage.plist"
+    plist_path.write_bytes(b"this is not a plist at all")
+    result = verify_service_plist(plist_path)
+    assert result.ok is False
+    assert result.findings[0].code == "PLIST_INVALID"
+
+
+def test_verify_service_plist_rejects_non_dict_top_level(tmp_path: Path) -> None:
+    plist_path = tmp_path / "array.plist"
+    plist_path.write_bytes(plistlib.dumps(["not", "a", "dict"]))
+    result = verify_service_plist(plist_path)
+    assert result.ok is False
+    assert result.findings[0].code == "PLIST_NOT_A_DICT"
+
+
+# --- 15. edited/tampered plist rejection -------------------------------------
+
+
+def _write_plist(tmp_path: Path, payload: dict) -> Path:
+    plist_path = tmp_path / "tampered.plist"
+    plist_path.write_bytes(plistlib.dumps(payload))
+    return plist_path
+
+
+def _valid_payload() -> dict:
+    return plistlib.loads(render_service_plist(_valid_spec()))
+
+
+def test_verify_service_plist_accepts_a_freshly_rendered_plist(tmp_path: Path) -> None:
+    plist_path = tmp_path / "ok.plist"
+    plist_path.write_bytes(render_service_plist(_valid_spec()))
+    result = verify_service_plist(plist_path, expected_label="meyar.application")
+    assert result.ok is True
+    codes = {f.component: f.status for f in result.findings}
+    assert codes["label"] == FindingStatus.OK
+    assert codes["host"] == FindingStatus.OK
+    assert codes["port"] == FindingStatus.OK
+    assert codes["keep_alive"] == FindingStatus.OK
+
+
+def test_verify_service_plist_rejects_environment_variables_injection(tmp_path: Path) -> None:
+    payload = _valid_payload()
+    payload["EnvironmentVariables"] = {"SECRET": "leak"}
+    plist_path = _write_plist(tmp_path, payload)
+    result = verify_service_plist(plist_path)
+    assert result.ok is False
+    codes = {f.component: f.code for f in result.findings}
+    assert codes["no_environment_variables"] == "ENVIRONMENT_VARIABLES_PRESENT"
+    assert codes["allowed_keys"] == "UNSUPPORTED_KEY"
+
+
+def test_verify_service_plist_rejects_run_at_load_injection(tmp_path: Path) -> None:
+    payload = _valid_payload()
+    payload["RunAtLoad"] = True
+    plist_path = _write_plist(tmp_path, payload)
+    result = verify_service_plist(plist_path)
+    assert result.ok is False
+    codes = {f.component: f.code for f in result.findings}
+    assert codes["allowed_keys"] == "UNSUPPORTED_KEY"
+
+
+def test_verify_service_plist_rejects_root_user_name_tamper(tmp_path: Path) -> None:
+    payload = _valid_payload()
+    payload["UserName"] = "root"
+    plist_path = _write_plist(tmp_path, payload)
+    result = verify_service_plist(plist_path)
+    assert result.ok is False
+    codes = {f.component: f.code for f in result.findings}
+    assert codes["user_name"] == "USER_NAME_INVALID"
+
+
+def test_verify_service_plist_rejects_non_loopback_host_tamper(tmp_path: Path) -> None:
+    payload = _valid_payload()
+    payload["ProgramArguments"][5] = "0.0.0.0"
+    plist_path = _write_plist(tmp_path, payload)
+    result = verify_service_plist(plist_path)
+    assert result.ok is False
+    codes = {f.component: f.code for f in result.findings}
+    assert codes["host"] == "HOST_NOT_LOOPBACK"
+
+
+def test_verify_service_plist_rejects_out_of_range_port_tamper(tmp_path: Path) -> None:
+    payload = _valid_payload()
+    payload["ProgramArguments"][7] = "70000"
+    plist_path = _write_plist(tmp_path, payload)
+    result = verify_service_plist(plist_path)
+    assert result.ok is False
+    codes = {f.component: f.code for f in result.findings}
+    assert codes["port"] == "PORT_INVALID"
+
+
+def test_verify_service_plist_rejects_keep_alive_true_tamper(tmp_path: Path) -> None:
+    payload = _valid_payload()
+    payload["KeepAlive"] = True
+    plist_path = _write_plist(tmp_path, payload)
+    result = verify_service_plist(plist_path)
+    assert result.ok is False
+    codes = {f.component: f.code for f in result.findings}
+    assert codes["keep_alive"] == "KEEP_ALIVE_INVALID"
+
+
+def test_verify_service_plist_rejects_program_string_shell_wrapper(tmp_path: Path) -> None:
+    payload = _valid_payload()
+    del payload["ProgramArguments"]
+    payload["Program"] = "/bin/sh -c 'run something'"
+    plist_path = _write_plist(tmp_path, payload)
+    result = verify_service_plist(plist_path)
+    assert result.ok is False
+    codes = {f.component: f.code for f in result.findings}
+    assert codes["allowed_keys"] == "UNSUPPORTED_KEY"
+
+
+def test_verify_service_plist_rejects_shell_executable() -> None:
+    from meyar.ops.result import OpsResultBuilder
+    from meyar.ops.service_plist import _check_no_shell_wrapper
+
+    builder = OpsResultBuilder(action="service-verify")
+    _check_no_shell_wrapper(builder, {}, ["/bin/bash", "-c", "echo hi"])
+    result = builder.build()
+    assert result.ok is False
+    assert result.findings[0].code == "SHELL_WRAPPER_DETECTED"
+
+
+def test_verify_service_plist_expected_label_mismatch_fails(tmp_path: Path) -> None:
+    plist_path = tmp_path / "ok.plist"
+    plist_path.write_bytes(render_service_plist(_valid_spec()))
+    result = verify_service_plist(plist_path, expected_label="something.else")
+    assert result.ok is False
+    codes = {f.component: f.code for f in result.findings}
+    assert codes["label"] == "LABEL_MISMATCH"
+
+
+def test_verify_service_plist_missing_required_key_fails(tmp_path: Path) -> None:
+    payload = _valid_payload()
+    del payload["WorkingDirectory"]
+    plist_path = _write_plist(tmp_path, payload)
+    result = verify_service_plist(plist_path)
+    assert result.ok is False
+    codes = {f.component: f.code for f in result.findings}
+    assert codes["required_keys"] == "MISSING_REQUIRED_KEY"
+    assert codes["working_directory"] == "WORKING_DIRECTORY_MISSING_OR_INVALID_TYPE"
+
+
+def test_verify_service_plist_malformed_program_arguments_skips_dependent_checks(
+    tmp_path: Path,
+) -> None:
+    payload = _valid_payload()
+    payload["ProgramArguments"] = "not-an-array"
+    plist_path = _write_plist(tmp_path, payload)
+    result = verify_service_plist(plist_path)
+    assert result.ok is False
+    codes = {f.component: f.status for f in result.findings}
+    assert codes["executable_path"] == FindingStatus.SKIPPED
+    assert codes["host"] == FindingStatus.SKIPPED
+    assert codes["port"] == FindingStatus.SKIPPED
+
+
+# --- 16. service-render never writes into /Library/LaunchDaemons ------------
+
+
+def test_render_to_file_rejects_direct_launchdaemons_output_path() -> None:
+    output = Path("/Library/LaunchDaemons/com.meyar.plist")
+    with pytest.raises(ServiceRenderOutputPathPrivilegedError):
+        render_service_plist_to_file(_valid_spec(), output)
+
+
+def test_render_to_file_rejects_launchdaemons_output_path_via_dot_dot_traversal() -> None:
+    # Lexically normalizes to exactly /Library/LaunchDaemons/com.meyar.plist.
+    output = Path("/Library/LaunchDaemons/../LaunchDaemons/com.meyar.plist")
+    with pytest.raises(ServiceRenderOutputPathPrivilegedError):
+        render_service_plist_to_file(_valid_spec(), output)
+
+
+def test_render_to_file_privileged_rejection_never_calls_os_open(monkeypatch) -> None:
+    import meyar.ops.service_plist as service_plist_module
+
+    def _fail_if_called(*args: object, **kwargs: object) -> int:
+        raise AssertionError("os.open must not be called when the output path is rejected")
+
+    monkeypatch.setattr(service_plist_module.os, "open", _fail_if_called)
+
+    with pytest.raises(ServiceRenderOutputPathPrivilegedError):
+        render_service_plist_to_file(
+            _valid_spec(), Path("/Library/LaunchDaemons/com.meyar.plist")
+        )
+
+
+def test_render_to_file_ordinary_staging_output_still_succeeds(tmp_path: Path) -> None:
+    output = tmp_path / "staging" / "com.meyar.plist"
+    output.parent.mkdir()
+    render_service_plist_to_file(_valid_spec(), output)
+    assert output.exists()
+
+
+def test_run_service_render_reports_privileged_output_path_as_fail() -> None:
+    result = run_service_render(_valid_spec(), Path("/Library/LaunchDaemons/com.meyar.plist"))
+    assert result.ok is False
+    assert result.findings[0].code == "OUTPUT_PATH_PRIVILEGED_LOCATION"
+
+
+# --- 17. inode-safe cleanup after write/close failure ------------------------
+
+
+def test_render_to_file_cleans_up_partial_output_after_write_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import meyar.ops.service_plist as service_plist_module
+
+    output = tmp_path / "meyar.plist"
+    real_fdopen = os.fdopen
+
+    class _ExplodingFile:
+        def __init__(self, fh: object) -> None:
+            self._fh = fh
+
+        def __enter__(self) -> _ExplodingFile:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+            self._fh.close()  # type: ignore[attr-defined]
+            return False
+
+        def write(self, data: bytes) -> int:
+            raise OSError("simulated write failure")
+
+    def _fake_fdopen(fd: int, mode: str) -> _ExplodingFile:
+        return _ExplodingFile(real_fdopen(fd, mode))
+
+    monkeypatch.setattr(service_plist_module.os, "fdopen", _fake_fdopen)
+
+    with pytest.raises(OSError, match="simulated write failure"):
+        render_service_plist_to_file(_valid_spec(), output)
+
+    assert not output.exists()
+
+
+def test_render_to_file_cleanup_does_not_delete_replacement_file(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Regression for the TOCTOU cleanup race: cleanup must identity-check
+    the pathname (inode) before unlinking, so it never deletes a file a
+    concurrent actor swapped into this pathname after this invocation's
+    `os.open()` but before its write/close failure completes."""
+    import meyar.ops.service_plist as service_plist_module
+
+    output = tmp_path / "meyar.plist"
+    sentinel_content = b"sentinel-must-survive-cleanup"
+    real_fdopen = os.fdopen
+
+    class _RacingFile:
+        def __init__(self, fh: object) -> None:
+            self._fh = fh
+
+        def __enter__(self) -> _RacingFile:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+            self._fh.close()  # type: ignore[attr-defined]
+            return False
+
+        def write(self, data: bytes) -> int:
+            output.unlink()
+            output.write_bytes(sentinel_content)
+            raise OSError("simulated write failure after concurrent pathname replacement")
+
+    def _fake_fdopen(fd: int, mode: str) -> _RacingFile:
+        return _RacingFile(real_fdopen(fd, mode))
+
+    monkeypatch.setattr(service_plist_module.os, "fdopen", _fake_fdopen)
+
+    with pytest.raises(OSError, match="simulated write failure after concurrent"):
+        render_service_plist_to_file(_valid_spec(), output)
+
+    assert output.read_bytes() == sentinel_content
+
+
+def test_render_to_file_cleans_up_partial_output_after_fdopen_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Regression: a failed `os.fdopen()` (not only a failed write) must
+    not leave the just-created partial output file behind."""
+    import meyar.ops.service_plist as service_plist_module
+
+    output = tmp_path / "meyar.plist"
+
+    def _fake_fdopen(fd: int, mode: str) -> object:
+        raise OSError("simulated fdopen failure")
+
+    monkeypatch.setattr(service_plist_module.os, "fdopen", _fake_fdopen)
+
+    with pytest.raises(OSError, match="simulated fdopen failure"):
+        render_service_plist_to_file(_valid_spec(), output)
+
+    assert not output.exists()
+
+
+def test_render_to_file_fdopen_failure_cleanup_does_not_delete_replacement_file(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Same TOCTOU cleanup-identity regression as
+    `test_render_to_file_cleanup_does_not_delete_replacement_file`, but for
+    a failure raised by `os.fdopen()` itself rather than by the write."""
+    import meyar.ops.service_plist as service_plist_module
+
+    output = tmp_path / "meyar.plist"
+    sentinel_content = b"sentinel-must-survive-fdopen-cleanup"
+
+    def _fake_fdopen(fd: int, mode: str) -> object:
+        # `fd` (this invocation's own descriptor) is deliberately left open
+        # here, matching the realistic race: the concurrent actor swaps the
+        # *pathname*, but this invocation has not released its own fd yet.
+        # Closing it first would let the kernel immediately recycle the
+        # freed inode number for the replacement file on some filesystems
+        # (observed on tmpfs), which would make the identity check pass
+        # for the wrong reason instead of proving pathname-vs-inode safety.
+        output.unlink()
+        output.write_bytes(sentinel_content)
+        raise OSError("simulated fdopen failure after concurrent pathname replacement")
+
+    monkeypatch.setattr(service_plist_module.os, "fdopen", _fake_fdopen)
+
+    with pytest.raises(OSError, match="simulated fdopen failure after concurrent"):
+        render_service_plist_to_file(_valid_spec(), output)
+
+    assert output.read_bytes() == sentinel_content
+
+
+# --- 18. symlink-aware output-parent-directory boundary ---------------------
+
+
+def test_render_to_file_rejects_parent_symlink_resolving_into_privileged_target(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A lexically innocuous output path (e.g.
+    `/tmp/staging-link/com.meyar.plist`) must still be rejected when
+    `staging-link` is a symlink whose canonical target is the configured
+    privileged directory — this is the actual attack the lexical-only
+    `abspath()` check in `_reject_privileged_output_path` cannot catch.
+    The privileged-directory constant is monkeypatched to a tmp-path
+    target so this proves the resolution logic without needing write
+    access to the real `/Library/LaunchDaemons`."""
+    import meyar.ops.service_plist as service_plist_module
+
+    fake_privileged = tmp_path / "priv" / "LaunchDaemons"
+    fake_privileged.mkdir(parents=True)
+    monkeypatch.setattr(
+        service_plist_module, "_PRIVILEGED_LAUNCHDAEMONS_DIR", str(fake_privileged)
+    )
+    staging_link = tmp_path / "staging-link"
+    staging_link.symlink_to(fake_privileged, target_is_directory=True)
+    output = staging_link / "com.meyar.plist"
+
+    with pytest.raises(ServiceRenderOutputPathPrivilegedError):
+        render_service_plist_to_file(_valid_spec(), output)
+
+    assert list(fake_privileged.iterdir()) == []
+
+
+def test_render_to_file_symlinked_privileged_target_never_gets_a_created_file(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Explicit proof that no file creation (`os.open`) is ever attempted
+    once the resolved parent is identified as the privileged target: the
+    resolved directory stays empty, and `os.open` is never called with a
+    dir_fd anchored to it."""
+    import meyar.ops.service_plist as service_plist_module
+
+    fake_privileged = tmp_path / "priv" / "LaunchDaemons"
+    fake_privileged.mkdir(parents=True)
+    monkeypatch.setattr(
+        service_plist_module, "_PRIVILEGED_LAUNCHDAEMONS_DIR", str(fake_privileged)
+    )
+    staging_link = tmp_path / "staging-link"
+    staging_link.symlink_to(fake_privileged, target_is_directory=True)
+    output = staging_link / "com.meyar.plist"
+
+    real_open = os.open
+
+    def _fail_if_creating_basename(*args: object, **kwargs: object) -> int:
+        if args and args[0] == "com.meyar.plist":
+            raise AssertionError(
+                "os.open must not create a file once the parent resolves to the "
+                "privileged target"
+            )
+        return real_open(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(service_plist_module.os, "open", _fail_if_creating_basename)
+
+    with pytest.raises(ServiceRenderOutputPathPrivilegedError):
+        render_service_plist_to_file(_valid_spec(), output)
+
+    assert list(fake_privileged.iterdir()) == []
+
+
+def test_render_to_file_rejects_direct_privileged_target_dir_fd_open(tmp_path: Path) -> None:
+    """The low-level helper rejects a privileged parent before ever
+    opening a dir-fd to it, proven directly against a tmp-path stand-in
+    for the privileged constant (no monkeypatching needed for the
+    default-argument override path)."""
+    from meyar.ops.service_plist import _open_anchored_output_parent_dir
+
+    privileged = tmp_path / "LaunchDaemons"
+    privileged.mkdir()
+    output = privileged / "com.meyar.plist"
+
+    with pytest.raises(ServiceRenderOutputPathPrivilegedError):
+        _open_anchored_output_parent_dir(output, privileged_dir=str(privileged))
+
+
+def test_render_to_file_nonprivileged_symlinked_parent_still_succeeds(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A parent-directory symlink that resolves somewhere ordinary (not
+    the privileged target) must still be allowed — this module does not
+    blanket-reject symlinks, only ones resolving into the privileged
+    directory."""
+    import meyar.ops.service_plist as service_plist_module
+
+    fake_privileged = tmp_path / "priv" / "LaunchDaemons"
+    fake_privileged.mkdir(parents=True)
+    monkeypatch.setattr(
+        service_plist_module, "_PRIVILEGED_LAUNCHDAEMONS_DIR", str(fake_privileged)
+    )
+    real_staging = tmp_path / "real-staging"
+    real_staging.mkdir()
+    staging_link = tmp_path / "staging-link"
+    staging_link.symlink_to(real_staging, target_is_directory=True)
+    output = staging_link / "com.meyar.plist"
+
+    render_service_plist_to_file(_valid_spec(), output)
+
+    assert (real_staging / "com.meyar.plist").exists()

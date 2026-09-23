@@ -10,6 +10,7 @@ from search_helpers import seed_candidate_with_profile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import meyar.search.planner_service as planner_service
+import meyar.ui.router as ui_router
 from meyar.config import Settings, get_settings
 from meyar.llm.dependency import get_llm_provider
 from meyar.llm.provider import ModelUnavailableError
@@ -771,11 +772,21 @@ async def test_ranking_form_has_no_manual_date_input(
     assert "evaluation_as_of_date" not in response.text
 
 
-async def test_search_injects_current_date_and_displays_effective_date(
+async def test_search_injects_business_date_and_displays_effective_date(
     client: AsyncClient,
     tenant_and_user,
     local_ui_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Proves the UI boundary injects and displays the trusted business
+    date (`resolve_business_date`, via `meyar.ui.router`) rather than the
+    runner's wall-clock date — fixed to a date that is not "today" in any
+    timezone, so this cannot pass by coincidence with the CI runner's UTC
+    clock."""
+    fixed_business_date = date(2026, 1, 2)
+    monkeypatch.setattr(
+        ui_router, "resolve_business_date", lambda _timezone_name: fixed_business_date
+    )
     _tenant, user, password, _membership = tenant_and_user
     fake = FakeLLMProvider(
         planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"]))
@@ -787,15 +798,23 @@ async def test_search_injects_current_date_and_displays_effective_date(
         data={"query": "Python bilən namizədləri göstər.", "csrf_token": csrf},
     )
     assert response.status_code == 200
-    assert f"Qiymətləndirmə tarixi: {date.today().isoformat()}" in response.text
+    assert f"Qiymətləndirmə tarixi: {fixed_business_date.isoformat()}" in response.text
 
 
-async def test_ranking_injects_current_date_and_displays_effective_date(
+async def test_ranking_injects_business_date_and_displays_effective_date(
     client: AsyncClient,
     db_session: AsyncSession,
     tenant_and_user,
     local_ui_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Same business-date-boundary proof as
+    `test_search_injects_business_date_and_displays_effective_date`, for
+    the ranking route."""
+    fixed_business_date = date(2026, 1, 2)
+    monkeypatch.setattr(
+        ui_router, "resolve_business_date", lambda _timezone_name: fixed_business_date
+    )
     tenant, user, password, _membership = tenant_and_user
     job = await create_job(db_session, tenant_id=tenant.id, title="Effective Date JD")
     criteria = await create_criteria_version(
@@ -820,7 +839,7 @@ async def test_ranking_injects_current_date_and_displays_effective_date(
         data={"csrf_token": csrf},
     )
     assert response.status_code == 200
-    assert f"Qiymətləndirmə tarixi: {date.today().isoformat()}" in response.text
+    assert f"Qiymətləndirmə tarixi: {fixed_business_date.isoformat()}" in response.text
 
 
 async def test_library_card_does_not_expose_raw_candidate_uuid(

@@ -24,6 +24,8 @@ from meyar.ops.result import (
     build_single_finding_result,
     exit_code_for,
 )
+from meyar.ops.service_plist import ServiceSpec, run_service_render, verify_service_plist
+from meyar.ops.service_status import run_service_status
 from meyar.ops.status import run_status
 from meyar.ops.verify_release import verify_release
 
@@ -52,6 +54,31 @@ def _build_parser() -> argparse.ArgumentParser:
     verify_parser.add_argument("--artifact", type=Path, required=True)
     verify_parser.add_argument("--expected-release-id", type=str, default=None)
 
+    render_parser = sub.add_parser(
+        "service-render",
+        help="Render a macOS LaunchDaemon plist for the MEYAR application process.",
+    )
+    render_parser.add_argument("--label", type=str, required=True)
+    render_parser.add_argument("--user-name", type=str, required=True)
+    render_parser.add_argument("--working-directory", type=str, required=True)
+    render_parser.add_argument("--executable", type=str, required=True)
+    render_parser.add_argument("--port", type=int, required=True)
+    render_parser.add_argument("--stdout-path", type=str, required=True)
+    render_parser.add_argument("--stderr-path", type=str, required=True)
+    render_parser.add_argument("--output", type=Path, required=True)
+
+    verify_plist_parser = sub.add_parser(
+        "service-verify", help="Verify a rendered LaunchDaemon plist's shape/security contract."
+    )
+    verify_plist_parser.add_argument("--plist", type=Path, required=True)
+    verify_plist_parser.add_argument("--expected-label", type=str, default=None)
+
+    status_plist_parser = sub.add_parser(
+        "service-status",
+        help="Read-only probe of the MEYAR LaunchDaemon in the system launchd domain (macOS only).",
+    )
+    status_plist_parser.add_argument("--label", type=str, required=True)
+
     return parser
 
 
@@ -69,6 +96,21 @@ def _run_command(args: argparse.Namespace) -> OpsResult:
             artifact_path=args.artifact,
             expected_release_id=args.expected_release_id,
         )
+    if args.command == "service-render":
+        spec = ServiceSpec(
+            label=args.label,
+            user_name=args.user_name,
+            working_directory=args.working_directory,
+            executable=args.executable,
+            port=args.port,
+            stdout_path=args.stdout_path,
+            stderr_path=args.stderr_path,
+        )
+        return run_service_render(spec, args.output)
+    if args.command == "service-verify":
+        return verify_service_plist(args.plist, expected_label=args.expected_label)
+    if args.command == "service-status":
+        return run_service_status(label=args.label)
     raise AssertionError(f"unreachable: unknown command {args.command!r}")  # argparse enforces this
 
 

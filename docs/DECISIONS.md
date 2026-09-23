@@ -5157,3 +5157,113 @@ launchd/service lifecycle, no update/rollback orchestration, no Apple
 Silicon runtime claim (Linux-verified only in this PR), no bank-Mac
 verification claim, no PostgreSQL/Homebrew/Docker production provisioning
 topology chosen.
+
+## D-067 — macOS LaunchDaemon service foundation: render/verify/status only (issue #35 PR2)
+
+**Date:** 2026-09-23. **Status:** Local implementation on
+`feat/macos-launchd-service-foundation`, branched from accepted `main`
+`e868632cca457d69c99e8454d0cc35f85023dae1`; PR not yet merged.
+
+**Scope.** Second bounded PR for issue #35 (Slice 6 — Agentless Mac
+Deployment Readiness, M9), following PR1 (#52, D-066). Adds three
+`meyar-ops` commands — `service-render`, `service-verify`,
+`service-status` — that render, verify, and read-only-probe a macOS
+system LaunchDaemon plist for the MEYAR application process. Full detail:
+`docs/MEYAR_OPS.md`.
+
+**Accepted target service model (not yet installed by any command):**
+system LaunchDaemon -> dedicated non-root `UserName` -> MEYAR application
+process -> loopback-bound Uvicorn. PostgreSQL and Ollama remain local
+external dependencies, unmanaged by this PR. There is still no accepted
+immutable release/install filesystem layout — this PR deliberately does
+not invent one (`WorkingDirectory`/`Executable`/log paths are fully
+operator-supplied, lexically validated only, symlink components are not
+blanket-rejected).
+
+**Deliberately narrow — no privileged operation.** `service-render` only
+writes plist bytes to an explicit operator-supplied output path (never
+`/Library/LaunchDaemons`, never with overwrite, never `launchctl`, never
+`sudo`). `service-verify` only reads and validates an existing plist file.
+`service-status` only runs a fixed-argv, read-only `launchctl print
+system/<label>` probe — no `bootstrap`/`bootout`/`kickstart`, no mutation,
+no `sudo`. `service-install`/`start`/`stop`/`restart`, service-account
+creation, and PostgreSQL/Ollama lifecycle are explicitly out of scope and
+not implemented.
+
+**Plist key set is narrow and deterministic.** Exactly seven keys —
+`Label`, `UserName`, `WorkingDirectory`, `ProgramArguments`,
+`StandardOutPath`, `StandardErrorPath`, `KeepAlive`
+(`{"SuccessfulExit": false}`) — via `meyar.ops.service_plist
+.REQUIRED_PLIST_KEYS`, `plistlib.dumps(..., sort_keys=True)` for
+determinism. No `EnvironmentVariables` (secrets stay outside the plist in
+host-local configuration — enforced by both a general unsupported-key
+check and a dedicated `no_environment_variables` finding), no explicit
+`RunAtLoad` (`KeepAlive.SuccessfulExit=false` already supplies
+restart-after-abnormal-exit semantics), no `ThrottleInterval` (would only
+restate launchd's own default). `ProgramArguments` is always a real argv
+array — `[executable, "-m", "uvicorn", "meyar.main:app", "--host",
+"127.0.0.1", "--port", str(port)]` — never a `Program` shell-string, and
+`executable` is a required absolute path so the daemon never depends on
+bare `uv`/PATH resolution at launch time. `service-verify` rejects any
+plist key outside this set as `UNSUPPORTED_KEY`, never silently accepting
+an unexpected/dangerous key (e.g. a tampered `EnvironmentVariables` or
+`RunAtLoad` re-injected into an already-rendered plist).
+
+**Path validation is lexical only, on purpose.** `WorkingDirectory`,
+`Executable`, `StandardOutPath`, `StandardErrorPath` are each validated
+for: required absolute, no NUL/control characters, no lexical `..`
+traversal component. None of these calls `Path.resolve()`/
+`os.path.realpath()` — there is no final immutable-release-path contract
+yet (per the open #35 issue's own acceptance addendum), so a path
+containing a symlinked component is not blanket-rejected here; that
+containment decision is deferred to whichever future PR actually defines
+the release/install layout.
+
+**`service-render` no-overwrite is atomic, not a pre-check.** The output
+file is created with `os.O_CREAT | os.O_EXCL`, never a `Path.exists()`
+check followed by a separate write (which would be a TOCTOU race).
+Validation of the `ServiceSpec` happens before any filesystem call, so
+invalid input never creates or touches the output path; any failure
+during the write removes the partial file it created, so no partial file
+is ever left behind.
+
+**`service-verify` bounded read mirrors `verify-release`'s pattern.**
+`meyar.ops.service_plist._read_bounded_plist_bytes` never requests more
+than `limit + 1` bytes from the open file handle (1 MiB bound — a real
+service plist is a few hundred bytes), so an oversized or hostile file is
+rejected as `PLIST_TOO_LARGE` before any XML parsing is attempted; the
+bound is enforced by the read call itself, never by a `stat()` taken
+beforehand.
+
+**`service-status` is read-only, fixed-argv, macOS-only, and never
+installs a coding-agent-free path around itself.** `meyar.ops
+.service_status.default_launchctl_runner` calls `subprocess.run` with a
+fixed `[/bin/launchctl, "print", f"system/{label}"]` argv — never
+`shell=True`, never a bare `launchctl` relying on `PATH`, never `sudo`.
+The runner is injected (`LaunchctlRunner` protocol) so every test uses a
+fake — no test claims real macOS/`launchctl` acceptance. On any
+non-Darwin `platform.system()` (all current CI), it returns a truthful
+`PLATFORM_UNSUPPORTED` finding without invoking any runner — it never
+pretends the check ran, and never requires `launchctl` to exist on Linux
+CI. Raw `launchctl` stdout/stderr is never included in the returned
+`OpsResult` — only the fixed argv, the process exit status, and (on the
+rare runner-level infrastructure failure) bounded/redacted error text via
+the existing `meyar.ops.redact.safe_exception_text`.
+
+**Real macOS/Apple-Silicon acceptance remains UNCONFIRMED by this PR.**
+All new tests (`test_ops_service_plist.py`, `test_ops_service_status.py`)
+run and pass on Linux only, using synthetic fixtures and an injected fake
+`launchctl` runner. No claim is made that a rendered plist has been
+loaded by a real `launchd`, that `launchctl print` output has been
+observed on real hardware, or that the service survives a real reboot —
+that rehearsal remains issue #35's later scope (plist *installation* and
+lifecycle) plus the Apple Silicon rehearsal called out in #35's
+acceptance criteria and issue #36.
+
+**Explicit deferrals (same as the issue's own "DO NOT implement" list):**
+`service-install`/`start`/`stop`/`restart`, `sudo`/privilege escalation,
+writing to `/Library/LaunchDaemons`, `launchctl bootstrap`/`bootout`/
+`kickstart`, service-account creation, PostgreSQL/Ollama provisioning or
+lifecycle, release-artifact build/install/update/rollback, HTTP `/ready`
+(#46), issue #46 runtime hardening, issue #36 benchmark/model selection,
+production-model approval, HTTPS/reverse-proxy/PKI topology.

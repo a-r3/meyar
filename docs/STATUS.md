@@ -28,8 +28,28 @@ the release/model manifest contracts, and release-artifact verification
 (no artifact building yet). See `docs/MEYAR_OPS.md`. Verified on Linux
 only; Apple-Silicon/Mac-mini-M4-Pro rehearsal remains **UNCONFIRMED**
 (issue #36's scope), and no production model is approved by this PR.
-Issue #35 remains OPEN as the current active engineering phase (further
-PRs for #35 are still to come); issue #36 remains OPEN and not started.
+
+**PR2 for #35 (macOS LaunchDaemon service foundation, D-067) is local
+on `feat/macos-launchd-service-foundation`, branched from accepted `main`
+`e868632cca457d69c99e8454d0cc35f85023dae1`; PR not yet opened/merged at
+the time of this entry.** Adds three `meyar-ops` commands —
+`service-render`, `service-verify`, `service-status` — that render,
+verify, and read-only-probe a macOS system LaunchDaemon plist for the
+MEYAR application process (system LaunchDaemon -> dedicated non-root
+`UserName` -> MEYAR application process -> loopback-bound Uvicorn). This
+is foundation only: no `service-install`/`start`/`stop`/`restart`, no
+plist ever written to `/Library/LaunchDaemons`, no `launchctl` mutation
+(`bootstrap`/`bootout`/`kickstart`), no `sudo`, no service-account
+creation, no PostgreSQL/Ollama lifecycle, no HTTP `/ready` (#46), no #36
+benchmark/model work, no production-model approval, no HTTPS/reverse-
+proxy/PKI topology. See `docs/MEYAR_OPS.md`. Verified on Linux only, with
+an injected fake `launchctl` runner for `service-status` — real macOS/
+Apple-Silicon `launchctl`/reboot behavior remains **UNCONFIRMED**.
+
+Issue #35 remains OPEN as the current active engineering phase (plist
+*installation*/lifecycle orchestration and further #35 work are still to
+come); issue #36 remains OPEN and not started; issue #46 remains OPEN and
+separate.
 
 **Next phase: issue #36 — Real Target-Mac Model Selection & Benchmark
 (M9).** Executes `backend/scripts/target_mac_benchmark.py` on the actual
