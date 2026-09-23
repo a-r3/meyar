@@ -17,6 +17,7 @@ from meyar.embedding.dependency import get_embedding_provider
 from meyar.llm.dependency import get_llm_provider
 from meyar.ops.alembic_introspect import (
     AlembicIntrospectionError,
+    AlembicRevisionQueryError,
     get_code_alembic_heads,
     get_db_alembic_revision,
 )
@@ -104,7 +105,15 @@ async def _check_db_migration(builder: OpsResultBuilder, *, database_ok: bool) -
     engine = make_engine(settings.database_url)
     try:
         try:
-            revision = await get_db_alembic_revision(engine)
+            db_result = await get_db_alembic_revision(engine)
+        except AlembicRevisionQueryError as exc:
+            builder.add(
+                component="db_migration",
+                status=FindingStatus.FAIL,
+                code="ALEMBIC_REVISION_QUERY_FAILED",
+                message=f"alembic revision query failed: {safe_exception_text(exc)}",
+            )
+            return
         except (SQLAlchemyError, OSError) as exc:
             builder.add(
                 component="db_migration",
@@ -117,14 +126,24 @@ async def _check_db_migration(builder: OpsResultBuilder, *, database_ok: bool) -
         await engine.dispose()
 
     code_head = heads[0]
-    if revision is None:
+    if not db_result.table_exists or not db_result.revisions:
         builder.add(
             component="db_migration",
             status=FindingStatus.FAIL,
             code="NO_DB_REVISION",
             message="database has no recorded Alembic revision (never migrated)",
         )
-    elif revision == code_head:
+    elif len(db_result.revisions) > 1:
+        builder.add(
+            component="db_migration",
+            status=FindingStatus.FAIL,
+            code="MULTIPLE_DB_REVISIONS",
+            message=(
+                f"database has {len(db_result.revisions)} Alembic revision rows, "
+                "expected exactly one"
+            ),
+        )
+    elif db_result.revisions[0] == code_head:
         builder.add(
             component="db_migration",
             status=FindingStatus.OK,
@@ -136,7 +155,9 @@ async def _check_db_migration(builder: OpsResultBuilder, *, database_ok: bool) -
             component="db_migration",
             status=FindingStatus.FAIL,
             code="SCHEMA_MISMATCH",
-            message=f"database revision {revision} does not match code head {code_head}",
+            message=(
+                f"database revision {db_result.revisions[0]} does not match code head {code_head}"
+            ),
         )
 
 

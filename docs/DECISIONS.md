@@ -5102,6 +5102,56 @@ CLI composition of existing primitives, not an authenticated HTTP
 endpoint — that, plus in-application degraded-state semantics and
 production config fail-closed hardening, remains issue #46.
 
+**Corrective hardening (pre-merge independent review, same branch/PR).**
+Five defects found in independent review of the above before merge, fixed
+in one follow-up commit, still #35 PR1 scope — no new command, no #36/#46
+work pulled forward:
+
+1. `internal_manifest_consistency` compared only `release_id`/
+   `release_version`/`source_sha`, so an embedded manifest could disagree
+   on `uv_lock_sha256`, `alembic_heads`, `rollback_compatibility`,
+   `model_manifest`, `required_python_version`, or `artifact_format`(`_version`)
+   and still report `INTERNAL_MANIFEST_CONSISTENT`. Now compares the full
+   typed `ReleaseManifest` (structured field equality, not raw JSON
+   text/order) — any field mismatch is `INTERNAL_MANIFEST_MISMATCH`.
+2. `uv_lock_sha256` was only syntactically validated (64 hex chars) and
+   never checked against anything — a "valid" artifact could omit
+   `backend/uv.lock` entirely. `verify-release` now locates the exact
+   `release_id/backend/uv.lock` member (missing/duplicate/non-regular is
+   a hard failure), streams its SHA-256 in bounded chunks, and compares
+   it to the manifest's declared digest.
+3. `probe_storage_writable` called `mkdir(parents=True, exist_ok=True)`,
+   so a readiness *check* silently provisioned the storage root. It now
+   only reports truthfully on an already-provisioned root (missing root
+   or non-directory ⇒ not writable) and never creates anything —
+   provisioning remains a later #35 step.
+4. `get_db_alembic_revision` caught every `SQLAlchemyError` from the
+   revision query and returned `None`, conflating "table never migrated"
+   with a genuine query/permission failure, and read only `.first()`.
+   It now does a PostgreSQL-specific table-existence probe first, reads
+   every revision row, and raises a distinct `AlembicRevisionQueryError`
+   for a post-connection query failure so `status`/`readiness` can report
+   it truthfully (`ALEMBIC_REVISION_QUERY_FAILED`) instead of as "no
+   revision", and report more-than-one DB revision row as its own
+   `MULTIPLE_DB_REVISIONS` instead of silently using the first.
+5. Archive inspection was otherwise unbounded (`TarFile.getmembers()`
+   eagerly parses every header; `SHA256SUMS` duplicate filenames resolved
+   last-write-wins). `archive_safety.inspect_archive_members` now scans
+   via `TarFile.next()` and aborts the instant member count, member-name
+   length, or aggregate declared uncompressed size exceeds a documented
+   bound; the two members `verify-release` reads by name each have their
+   own declared-size bound checked before any read; and a duplicate
+   `SHA256SUMS` entry for the target artifact filename is rejected as
+   `CHECKSUM_ENTRY_AMBIGUOUS` rather than silently resolved.
+
+Also added, same review: `ModelManifestEntry` now requires a non-empty
+`benchmark_reference` for `BENCHMARKED_PENDING_APPROVAL`/
+`PRODUCTION_APPROVED` (schema-level only — no stronger cross-field rule
+invented; still ships no `PRODUCTION_APPROVED` instance, still #36's
+call). No behavior changed for candidate/search/scoring, no HTTP `/ready`
+was added, no launchd/update/rollback orchestration was added, and no
+production model was approved.
+
 **Explicit deferrals:** no candidate/search/scoring semantics changed, no
 launchd/service lifecycle, no update/rollback orchestration, no Apple
 Silicon runtime claim (Linux-verified only in this PR), no bank-Mac

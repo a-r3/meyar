@@ -1,18 +1,35 @@
 """Release-artifact archive safety inspection. Reading member metadata
-via `tarfile.getmembers()` never extracts anything to disk — this module
-never calls `TarFile.extract`/`extractall`, in this PR or any future one
-that reuses it; extraction itself remains out of scope for #35 PR1.
+never extracts anything to disk — this module never calls
+`TarFile.extract`/`extractall`, in this PR or any future one that reuses
+it; extraction itself remains out of scope for #35 PR1.
 
 Every unsafe archive shape called out by the issue is rejected here:
 absolute paths, `..` traversal, symlinks, hard links, device/special
 files, and paths escaping the expected single top-level artifact root.
-"""
+
+`verify-release` is an operational security boundary that runs against a
+downloaded artifact, so member scanning is bounded rather than trusting
+the archive's own header count/sizes: members are read one at a time via
+`TarFile.next()` (never the eager `TarFile.getmembers()`, which would
+parse every header into memory before this function gets a chance to
+stop), and scanning aborts the instant any bound below is exceeded —
+never after reading further into a hostile archive."""
 
 from __future__ import annotations
 
 import tarfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+
+# Conservative bounds for a release artifact, which is expected to be a
+# modest source tree (application code, migrations, a lockfile) — not a
+# byte-for-byte contract, just generous headroom that still turns an
+# archive-header decompression bomb (huge member count, absurd declared
+# sizes) into a fast, truthful FAIL instead of unbounded memory/CPU use.
+# `backend/` currently has ~330 tracked files; 5,000 is >10x headroom.
+MAX_ARCHIVE_MEMBER_COUNT = 5_000
+MAX_MEMBER_NAME_LENGTH = 400
+MAX_AGGREGATE_UNCOMPRESSED_SIZE = 1024 * 1024 * 1024  # 1 GiB
 
 
 @dataclass(frozen=True)
@@ -28,16 +45,49 @@ class UnsafeArchiveError(ValueError):
         super().__init__(f"unsafe archive ({len(violations)} violation(s)): {summary}")
 
 
+class ArchiveBoundExceededError(ValueError):
+    """Raised the instant a resource bound is exceeded while scanning —
+    a distinct, truthful outcome from an unsafe-member-shape violation or
+    a genuinely corrupt archive, so callers can report it as its own
+    code rather than folding it into either."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(f"release archive exceeded a resource bound: {reason}")
+
+
 def inspect_archive_members(
     archive_path: Path, *, expected_root: str
 ) -> list[ArchiveSafetyViolation]:
     """Never raises for an unsafe archive — returns the full list of
     violations found so callers can report every offending member, not
-    just the first. Raises only for a genuinely unreadable/corrupt
-    archive file (a distinct, infrastructure-level failure)."""
+    just the first. Raises `ArchiveBoundExceededError` the moment a
+    resource bound above is exceeded, and otherwise raises only for a
+    genuinely unreadable/corrupt archive file (a distinct,
+    infrastructure-level failure)."""
     violations: list[ArchiveSafetyViolation] = []
+    member_count = 0
+    aggregate_size = 0
     with tarfile.open(archive_path, mode="r:*") as archive:
-        for member in archive.getmembers():
+        while True:
+            member = archive.next()
+            if member is None:
+                break
+            member_count += 1
+            if member_count > MAX_ARCHIVE_MEMBER_COUNT:
+                raise ArchiveBoundExceededError(
+                    f"member count exceeds bound of {MAX_ARCHIVE_MEMBER_COUNT}"
+                )
+            if len(member.name) > MAX_MEMBER_NAME_LENGTH:
+                raise ArchiveBoundExceededError(
+                    f"member name length exceeds bound of {MAX_MEMBER_NAME_LENGTH} characters"
+                )
+            aggregate_size += max(member.size, 0)
+            if aggregate_size > MAX_AGGREGATE_UNCOMPRESSED_SIZE:
+                raise ArchiveBoundExceededError(
+                    "aggregate declared uncompressed member size exceeds bound of "
+                    f"{MAX_AGGREGATE_UNCOMPRESSED_SIZE} bytes"
+                )
             violations.extend(_check_member(member, expected_root=expected_root))
     return violations
 

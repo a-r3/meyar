@@ -22,6 +22,7 @@ from meyar.embedding.dependency import get_embedding_provider
 from meyar.llm.dependency import get_llm_provider
 from meyar.ops.alembic_introspect import (
     AlembicIntrospectionError,
+    AlembicRevisionQueryError,
     get_code_alembic_heads,
     get_db_alembic_revision,
 )
@@ -153,7 +154,19 @@ async def _check_db_revision(builder: OpsResultBuilder, code_heads: list[str] | 
     engine = make_engine(settings.database_url)
     try:
         try:
-            revision = await get_db_alembic_revision(engine)
+            db_result = await get_db_alembic_revision(engine)
+        except AlembicRevisionQueryError as exc:
+            # A genuine query/permission failure is never reported as "no
+            # revision" — status stays observational (FAIL, not WARN) but
+            # truthfully distinct from both connectivity failure and a
+            # real pre-migration database.
+            builder.add(
+                component="db_current_revision",
+                status=FindingStatus.FAIL,
+                code="ALEMBIC_REVISION_QUERY_FAILED",
+                message=f"alembic revision query failed: {safe_exception_text(exc)}",
+            )
+            return
         except (SQLAlchemyError, OSError) as exc:
             builder.add(
                 component="db_current_revision",
@@ -165,7 +178,7 @@ async def _check_db_revision(builder: OpsResultBuilder, code_heads: list[str] | 
     finally:
         await engine.dispose()
 
-    if revision is None:
+    if not db_result.table_exists or not db_result.revisions:
         builder.add(
             component="db_current_revision",
             status=FindingStatus.WARN,
@@ -173,6 +186,15 @@ async def _check_db_revision(builder: OpsResultBuilder, code_heads: list[str] | 
             message="database reachable but has no recorded Alembic revision yet",
         )
         return
+    if len(db_result.revisions) > 1:
+        builder.add(
+            component="db_current_revision",
+            status=FindingStatus.WARN,
+            code="MULTIPLE_DB_REVISIONS",
+            message=f"database has {len(db_result.revisions)} Alembic revision rows",
+        )
+        return
+    revision = db_result.revisions[0]
     matches_code = code_heads is not None and revision in code_heads
     builder.add(
         component="db_current_revision",

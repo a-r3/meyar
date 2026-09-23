@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 from alembic.config import Config
@@ -18,6 +19,30 @@ class AlembicIntrospectionError(Exception):
     connectivity problem, which callers handle separately."""
 
 
+class AlembicRevisionQueryError(Exception):
+    """Raised when the database connection itself succeeded but the
+    `alembic_version` table-existence check or revision query failed for
+    a genuine reason (permission denied, malformed table, a corrupted
+    catalog, ...). Never raised for a connectivity failure — that
+    surfaces as an unwrapped `SQLAlchemyError` from `engine.connect()`,
+    which callers already handle separately as database-unreachable. This
+    distinction exists so a real query/permission failure is never
+    reported as "no revision" (see issue #35 PR1 corrective review)."""
+
+
+@dataclass(frozen=True)
+class DbAlembicRevisionResult:
+    """`table_exists=False` means `alembic_version` has never been
+    created — a truthful, expected pre-migration state, not an error.
+    `revisions` holds every `version_num` row found (normally exactly
+    one); a count other than 1 while `table_exists` is True is its own
+    truthful, distinct outcome for the caller to report — never silently
+    collapsed to "current" or "no revision" by reading only `.first()`."""
+
+    table_exists: bool
+    revisions: list[str]
+
+
 def get_code_alembic_heads(alembic_ini_path: Path) -> list[str]:
     config = Config(str(alembic_ini_path))
     try:
@@ -30,20 +55,29 @@ def get_code_alembic_heads(alembic_ini_path: Path) -> list[str]:
     return heads
 
 
-async def get_db_alembic_revision(engine: AsyncEngine) -> str | None:
-    """Returns the single current revision row, or None if the
-    `alembic_version` table does not exist yet (pre-migration database —
-    a truthful, expected state, not an error). Raises SQLAlchemyError
-    (unwrapped) for a genuine connectivity failure; callers decide how to
-    report that."""
+async def get_db_alembic_revision(engine: AsyncEngine) -> DbAlembicRevisionResult:
+    """PostgreSQL-specific table-existence probe (MEYAR's only supported
+    database) followed by reading *every* `version_num` row, never just
+    the first. A connectivity failure at `engine.connect()` is never
+    caught here — it propagates to the caller unwrapped, exactly as
+    before. A failure of either query *after* a successful connection
+    (permission denied, a malformed table, ...) is wrapped as
+    `AlembicRevisionQueryError` so callers can tell a genuine query
+    failure apart from both a connectivity failure and a truthful
+    "table does not exist yet"."""
     async with engine.connect() as conn:
         try:
-            result = await conn.execute(text("SELECT version_num FROM alembic_version"))
-        except SQLAlchemyError:
-            # Table absence surfaces as a DBAPI/programming error; treat
-            # any execution failure here as "no revision recorded yet"
-            # rather than re-raising, since a real connectivity failure
-            # would already have failed engine.connect() above.
-            return None
-        row = result.first()
-        return str(row[0]) if row is not None else None
+            exists_result = await conn.execute(
+                text(
+                    "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_tables "
+                    "WHERE schemaname = current_schema() AND tablename = 'alembic_version')"
+                )
+            )
+            table_exists = bool(exists_result.scalar())
+            if not table_exists:
+                return DbAlembicRevisionResult(table_exists=False, revisions=[])
+            rows = await conn.execute(text("SELECT version_num FROM alembic_version"))
+            revisions = [str(row[0]) for row in rows.fetchall()]
+        except SQLAlchemyError as exc:
+            raise AlembicRevisionQueryError(str(exc)) from exc
+    return DbAlembicRevisionResult(table_exists=True, revisions=revisions)

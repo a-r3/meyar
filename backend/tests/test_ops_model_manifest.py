@@ -97,3 +97,40 @@ def test_model_manifest_entry_rejects_empty_model_name() -> None:
             model_name="",
             approval_status=ModelApprovalStatus.DEVELOPMENT_INTEGRATION,
         )
+
+
+def test_development_integration_does_not_require_benchmark_reference() -> None:
+    entry = ModelManifestEntry(
+        role=ModelRole.LLM,
+        model_name="qwen3:0.6b",
+        approval_status=ModelApprovalStatus.DEVELOPMENT_INTEGRATION,
+    )
+    assert entry.benchmark_reference is None
+
+
+def test_benchmarked_pending_approval_requires_benchmark_reference() -> None:
+    with pytest.raises(ValidationError, match="benchmark_reference"):
+        ModelManifestEntry(
+            role=ModelRole.LLM,
+            model_name="candidate-model",
+            approval_status=ModelApprovalStatus.BENCHMARKED_PENDING_APPROVAL,
+        )
+
+
+def test_production_approved_requires_benchmark_reference() -> None:
+    with pytest.raises(ValidationError, match="benchmark_reference"):
+        ModelManifestEntry(
+            role=ModelRole.LLM,
+            model_name="candidate-model",
+            approval_status=ModelApprovalStatus.PRODUCTION_APPROVED,
+        )
+
+
+def test_benchmarked_pending_approval_rejects_blank_benchmark_reference() -> None:
+    with pytest.raises(ValidationError, match="benchmark_reference"):
+        ModelManifestEntry(
+            role=ModelRole.LLM,
+            model_name="candidate-model",
+            approval_status=ModelApprovalStatus.BENCHMARKED_PENDING_APPROVAL,
+            benchmark_reference="   ",
+        )

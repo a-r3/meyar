@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 import meyar.ops.readiness as readiness_module
 from meyar.config import Settings
-from meyar.ops.alembic_introspect import get_code_alembic_heads
+from meyar.ops.alembic_introspect import AlembicRevisionQueryError, get_code_alembic_heads
 from meyar.ops.config import resolve_alembic_ini_path
 from meyar.ops.result import FindingStatus
 
@@ -233,6 +233,7 @@ async def test_storage_probe_leaves_no_temp_file_behind(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     root = tmp_path / "storage"
+    root.mkdir()
     settings = Settings(database_url=TEST_DATABASE_URL, storage_root=str(root))
     monkeypatch.setattr(readiness_module, "get_settings", lambda: settings)
     _patch_healthy_providers(monkeypatch)
@@ -242,6 +243,88 @@ async def test_storage_probe_leaves_no_temp_file_behind(
     finding = _by_component(result, "storage_write")
     assert finding.status is FindingStatus.OK
     assert list(root.iterdir()) == []
+
+
+async def test_missing_storage_root_fails_readiness_and_is_never_created(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Readiness must not provision storage: a never-provisioned root
+    fails truthfully, and neither it nor any parent directory is created
+    as a side effect of running readiness."""
+    root = tmp_path / "not" / "provisioned" / "yet"
+    settings = Settings(database_url=TEST_DATABASE_URL, storage_root=str(root))
+    monkeypatch.setattr(readiness_module, "get_settings", lambda: settings)
+    _patch_healthy_providers(monkeypatch)
+
+    async with _alembic_version_row(_real_code_head()):
+        result = await readiness_module.run_readiness()
+    finding = _by_component(result, "storage_write")
+    assert finding.status is FindingStatus.FAIL
+    assert finding.code == "STORAGE_NOT_WRITABLE"
+    assert not root.exists()
+    assert not root.parent.exists()
+    assert result.ok is False
+
+
+async def test_multiple_db_revisions_fails_migration_check_with_distinct_code(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    settings = Settings(database_url=TEST_DATABASE_URL, storage_root=str(tmp_path))
+    monkeypatch.setattr(readiness_module, "get_settings", lambda: settings)
+    _patch_healthy_providers(monkeypatch)
+
+    engine = create_async_engine(TEST_DATABASE_URL)
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS alembic_version "
+                "(version_num VARCHAR(32) NOT NULL PRIMARY KEY)"
+            )
+        )
+        await conn.execute(text("DELETE FROM alembic_version"))
+        await conn.execute(
+            text("INSERT INTO alembic_version (version_num) VALUES (:r)"),
+            {"r": _real_code_head()},
+        )
+        await conn.execute(
+            text("INSERT INTO alembic_version (version_num) VALUES (:r)"), {"r": "0" * 12}
+        )
+    try:
+        result = await readiness_module.run_readiness()
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
+        await engine.dispose()
+
+    finding = _by_component(result, "db_migration")
+    assert finding.status is FindingStatus.FAIL
+    assert finding.code == "MULTIPLE_DB_REVISIONS"
+    assert result.ok is False
+
+
+async def test_alembic_revision_query_failure_is_distinct_from_database_unreachable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A genuine query/permission failure reading alembic_version must
+    never be reported as DATABASE_UNREACHABLE (connectivity was fine) or
+    as NO_DB_REVISION (that would hide a real failure as an expected
+    pre-migration state)."""
+    settings = Settings(database_url=TEST_DATABASE_URL, storage_root=str(tmp_path))
+    monkeypatch.setattr(readiness_module, "get_settings", lambda: settings)
+    _patch_healthy_providers(monkeypatch)
+
+    async def _boom(engine: object) -> None:
+        raise AlembicRevisionQueryError("simulated permission-denied reading alembic_version")
+
+    monkeypatch.setattr(readiness_module, "get_db_alembic_revision", _boom)
+
+    result = await readiness_module.run_readiness()
+    finding = _by_component(result, "db_migration")
+    assert finding.status is FindingStatus.FAIL
+    assert finding.code == "ALEMBIC_REVISION_QUERY_FAILED"
+    database_finding = _by_component(result, "database")
+    assert database_finding.status is FindingStatus.OK
+    assert result.ok is False
 
 
 async def test_readiness_never_exposes_database_credentials(

@@ -60,13 +60,19 @@ Component-level local operator readiness, composed from the same
 primitives as `status` plus one write probe. **Not** the HTTP `/ready`
 route — that is issue #46's scope; this is a CLI-only, human/operator-run
 check. Six independently reported components: `database` (connectivity),
-`db_migration` (DB current revision vs. exactly one code Alembic head),
+`db_migration` (DB current revision(s) vs. exactly one code Alembic
+head — a genuine revision-query/permission failure is reported as its
+own truthful `ALEMBIC_REVISION_QUERY_FAILED`, never folded into "no
+revision"; more than one DB revision row is its own truthful
+`MULTIPLE_DB_REVISIONS`, never silently collapsed to the first row),
 `storage_write` (a bounded, self-cleaning write probe under the
-configured storage root — never overwrites an existing file, always
-cleans up, fails safely on an unwritable root), `ollama` (daemon
-reachability), `llm_model`, and `embedding_model` (configured-model
-availability). Every component's `Finding` is preserved even when another
-component fails. No candidate data is read to determine readiness.
+*already-provisioned* storage root — never creates the root or any
+parent directory, never overwrites an existing file, always cleans up,
+fails safely — truthfully "not writable" — on a missing or unwritable
+root), `ollama` (daemon reachability), `llm_model`, and `embedding_model`
+(configured-model availability). Every component's `Finding` is preserved
+even when another component fails. No candidate data is read to
+determine readiness.
 
 ### `verify-release`
 
@@ -75,16 +81,28 @@ Verifies: the release manifest's schema; the full 40-character
 `source_sha` format; the manifest's declared `release_id` against the
 deterministic `(release_version, source_sha)` identity (and, if
 `--expected-release-id` is given, against that too); the external
-`SHA256SUMS` file's format; the artifact's actual SHA-256 against that
-external checksum (a **hard failure** on mismatch); archive member safety
-(rejects absolute paths, `..` traversal, symlinks, hard links,
-device/special files, and any path escaping the expected `release_id/`
-root — `extractall`/`extract` are never called anywhere in this
-command); and, if the archive carries an embedded
-`release_id/release_manifest.json`, that its identity is consistent with
-the external manifest. Release-artifact *building* is deferred to a
-later #35 PR — this PR's tests use synthetic fixtures built on the fly,
-never real repository binaries.
+`SHA256SUMS` file's format (a filename with more than one well-formed
+digest entry is rejected as ambiguous, never resolved last-write-wins);
+the artifact's actual SHA-256 against that external checksum (a **hard
+failure** on mismatch); archive member safety (rejects absolute paths,
+`..` traversal, symlinks, hard links, device/special files, and any path
+escaping the expected `release_id/` root — `extractall`/`extract` are
+never called anywhere in this command); that the archive's
+`release_id/backend/uv.lock` member is present exactly once, is a
+regular file, and its SHA-256 matches `ReleaseManifest.uv_lock_sha256`
+(binding the manifest's declared lockfile digest to the artifact's actual
+contents, not just to hex-string syntax); and, if the archive carries an
+embedded `release_id/release_manifest.json`, that it is **fully**
+consistent with the external manifest — every field, via typed model
+equality, not only `release_id`/`release_version`/`source_sha`. Archive
+inspection is bounded (member count, member-name length, aggregate
+declared uncompressed size — see `meyar.ops.archive_safety`), and the two
+specific members read by name each have their own declared-size bound
+checked before any byte is read (`meyar.ops.verify_release`) — inspection
+stops the instant a bound is exceeded, reported as its own
+`ARCHIVE_RESOURCE_BOUND_EXCEEDED`/`*_TOO_LARGE` finding. Release-artifact
+*building* is deferred to a later #35 PR — this PR's tests use synthetic
+fixtures built on the fly, never real repository binaries.
 
 ## JSON result contract
 
@@ -149,7 +167,12 @@ never flip `ok`. Every component's finding is always present in the list
   artifact against fixtures).
 - No production model approval — `meyar.ops.model_manifest` supports
   `PRODUCTION_APPROVED` as a schema value but nothing in this PR
-  instantiates it.
+  instantiates it. The schema itself requires a non-empty
+  `benchmark_reference` for any entry claiming `BENCHMARKED_PENDING_APPROVAL`
+  or `PRODUCTION_APPROVED` — a review claim always has to point somewhere
+  — but does not invent any stronger cross-field requirement beyond that;
+  further governance rules are for issue #36 to define once real
+  benchmark evidence exists.
 - No PostgreSQL/Homebrew/Docker production provisioning topology choice.
 - No comprehensive production config fail-closed hardening or SQL/
   exception logging hardening beyond what already exists — that is

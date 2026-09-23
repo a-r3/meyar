@@ -15,8 +15,9 @@ See docs/MEYAR_OPS.md and docs/DECISIONS.md.
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Self
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ModelRole(StrEnum):
@@ -50,6 +51,22 @@ class ModelManifestEntry(BaseModel):
     # A pointer/id (e.g. a docs/DECISIONS.md entry, a benchmark report
     # path) — never raw benchmark data or candidate content.
     benchmark_reference: str | None = Field(default=None, max_length=300)
+
+    @model_validator(mode="after")
+    def _require_benchmark_reference_once_reviewed(self) -> Self:
+        # Any status beyond DEVELOPMENT_INTEGRATION claims some form of
+        # benchmark review happened — the schema enforces that claim
+        # always points somewhere, never floats unverifiable.
+        requires_reference = {
+            ModelApprovalStatus.BENCHMARKED_PENDING_APPROVAL,
+            ModelApprovalStatus.PRODUCTION_APPROVED,
+        }
+        has_reference = bool((self.benchmark_reference or "").strip())
+        if self.approval_status in requires_reference and not has_reference:
+            raise ValueError(
+                f"{self.approval_status.value} requires a non-empty benchmark_reference"
+            )
+        return self
 
 
 class ModelManifest(BaseModel):

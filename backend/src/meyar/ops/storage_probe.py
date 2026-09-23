@@ -1,7 +1,12 @@
-"""Storage-root write probe shared by `readiness`. Never overwrites an
-existing file, always cleans up after itself, and never trusts anything
-derived from outside this process (the probe filename is always a fresh
-UUID — there is no user/candidate-supplied path segment anywhere here)."""
+"""Storage-root write probe shared by `readiness`. A readiness probe must
+never provision host state — it truthfully reports whether the
+*already-provisioned* storage root is writable, never creates the root
+or any parent directory. It never overwrites an existing file, and
+always cleans up after itself. It never trusts anything derived from
+outside this process (the probe filename is always a fresh UUID — there
+is no user/candidate-supplied path segment anywhere here). Provisioning
+the storage root belongs to a later #35 provisioning step, not
+readiness."""
 
 from __future__ import annotations
 
@@ -21,11 +26,14 @@ class StorageProbeResult:
 
 def probe_storage_writable(root: str | Path) -> StorageProbeResult:
     root_path = Path(root)
-    try:
-        root_path.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
+
+    if not root_path.exists():
         return StorageProbeResult(
-            writable=False, message=f"storage root not creatable: {safe_exception_text(exc)}"
+            writable=False, message="storage root does not exist (not yet provisioned)"
+        )
+    if not root_path.is_dir():
+        return StorageProbeResult(
+            writable=False, message="storage root exists but is not a directory"
         )
 
     probe_path = root_path / f".meyar-ops-probe-{uuid.uuid4().hex}"

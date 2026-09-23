@@ -8,13 +8,23 @@ import json
 import tarfile
 from pathlib import Path
 
+import pytest
+
+from meyar.ops.archive_safety import MAX_ARCHIVE_MEMBER_COUNT
 from meyar.ops.release_manifest import compute_release_id
-from meyar.ops.verify_release import parse_sha256sums, verify_release
+from meyar.ops.verify_release import (
+    _MAX_EMBEDDED_MANIFEST_SIZE,
+    _MAX_UV_LOCK_SIZE,
+    parse_sha256sums,
+    verify_release,
+)
 
 VALID_SHA = "a" * 40
-VALID_LOCK_SHA = "b" * 64
 RELEASE_VERSION = "0.1.0"
 RELEASE_ID = compute_release_id(release_version=RELEASE_VERSION, source_sha=VALID_SHA)
+
+UV_LOCK_CONTENT = b"# synthetic backend/uv.lock fixture content\nversion = 1\n"
+UV_LOCK_SHA256 = hashlib.sha256(UV_LOCK_CONTENT).hexdigest()
 
 
 def _manifest_dict(**overrides: object) -> dict:
@@ -25,7 +35,7 @@ def _manifest_dict(**overrides: object) -> dict:
         "source_sha": VALID_SHA,
         "built_at": "2026-09-23T00:00:00Z",
         "required_python_version": ">=3.12",
-        "uv_lock_sha256": VALID_LOCK_SHA,
+        "uv_lock_sha256": UV_LOCK_SHA256,
         "alembic_heads": ["6f4c2a9d8e10"],
         "rollback_compatibility": "BACKUP_RESTORE_REQUIRED",
         "model_manifest": {
@@ -45,28 +55,45 @@ def _write_manifest(path: Path, **overrides: object) -> dict:
     return data
 
 
+def _add_file_member(tf: tarfile.TarFile, name: str, data: bytes) -> None:
+    info = tarfile.TarInfo(name=name)
+    info.size = len(data)
+    tf.addfile(info, io.BytesIO(data))
+
+
 def _build_artifact(
     tmp_path: Path,
     *,
     root: str = RELEASE_ID,
     embed_manifest: dict | None | bool = True,
     extra_members: dict[str, bytes] | None = None,
+    uv_lock: bytes | None = UV_LOCK_CONTENT,
+    duplicate_uv_lock: bool = False,
+    uv_lock_as_directory: bool = False,
+    archive_name: str = "meyar-release.tar.gz",
 ) -> Path:
     """embed_manifest: True embeds `_manifest_dict()`, a dict embeds that
-    exact dict, False/None embeds nothing."""
-    artifact_path = tmp_path / "meyar-release.tar.gz"
+    exact dict, False/None embeds nothing. uv_lock: bytes embeds
+    `{root}/backend/uv.lock` with that content (defaults to the fixture
+    content whose digest matches `_manifest_dict()`'s uv_lock_sha256);
+    None omits it entirely."""
+    artifact_path = tmp_path / archive_name
     with tarfile.open(artifact_path, mode="w:gz") as tf:
         if embed_manifest:
             payload = json.dumps(
                 embed_manifest if isinstance(embed_manifest, dict) else _manifest_dict()
             ).encode()
-            info = tarfile.TarInfo(name=f"{root}/release_manifest.json")
-            info.size = len(payload)
-            tf.addfile(info, io.BytesIO(payload))
+            _add_file_member(tf, f"{root}/release_manifest.json", payload)
+        if uv_lock_as_directory:
+            info = tarfile.TarInfo(name=f"{root}/backend/uv.lock")
+            info.type = tarfile.DIRTYPE
+            tf.addfile(info)
+        elif uv_lock is not None:
+            _add_file_member(tf, f"{root}/backend/uv.lock", uv_lock)
+            if duplicate_uv_lock:
+                _add_file_member(tf, f"{root}/backend/uv.lock", uv_lock)
         for name, data in (extra_members or {f"{root}/app/main.py": b"hello"}).items():
-            info = tarfile.TarInfo(name=name)
-            info.size = len(data)
-            tf.addfile(info, io.BytesIO(data))
+            _add_file_member(tf, name, data)
     return artifact_path
 
 
@@ -92,6 +119,7 @@ def test_fully_valid_release_verifies_ok(tmp_path: Path) -> None:
     assert codes["release_identity"] == "OK"
     assert codes["artifact_checksum"] == "OK"
     assert codes["archive_safety"] == "OK"
+    assert codes["uv_lock_binding"] == "OK"
     assert codes["internal_manifest_consistency"] == "OK"
 
 
@@ -187,11 +215,27 @@ def test_missing_sha256sums_entry_fails(tmp_path: Path) -> None:
     assert by_component["artifact_checksum"].code == "CHECKSUM_ENTRY_MISSING"
 
 
+def test_duplicate_sha256sums_entry_for_artifact_is_rejected_as_ambiguous(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path)
+    artifact_path = _build_artifact(tmp_path)
+    digest = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+    sums_path = tmp_path / "SHA256SUMS"
+    sums_path.write_text(f"{digest}  {artifact_path.name}\n{digest}  {artifact_path.name}\n")
+
+    result = verify_release(
+        manifest_path=manifest_path, sha256sums_path=sums_path, artifact_path=artifact_path
+    )
+    assert result.ok is False
+    by_component = {f.component: f for f in result.findings}
+    assert by_component["artifact_checksum"].code == "CHECKSUM_ENTRY_AMBIGUOUS"
+
+
 def test_unsafe_archive_absolute_path_rejected(tmp_path: Path) -> None:
     manifest_path = tmp_path / "manifest.json"
     _write_manifest(manifest_path)
     artifact_path = _build_artifact(
-        tmp_path, embed_manifest=False, extra_members={"/etc/passwd": b"evil"}
+        tmp_path, embed_manifest=False, uv_lock=None, extra_members={"/etc/passwd": b"evil"}
     )
     sums_path = _write_sha256sums(tmp_path, artifact_path)
 
@@ -202,6 +246,7 @@ def test_unsafe_archive_absolute_path_rejected(tmp_path: Path) -> None:
     by_component = {f.component: f for f in result.findings}
     assert by_component["archive_safety"].code == "UNSAFE_ARCHIVE_MEMBER"
     assert by_component["internal_manifest_consistency"].status.value == "SKIPPED"
+    assert by_component["uv_lock_binding"].status.value == "SKIPPED"
 
 
 def test_unsafe_archive_traversal_rejected(tmp_path: Path) -> None:
@@ -210,6 +255,7 @@ def test_unsafe_archive_traversal_rejected(tmp_path: Path) -> None:
     artifact_path = _build_artifact(
         tmp_path,
         embed_manifest=False,
+        uv_lock=None,
         extra_members={f"{RELEASE_ID}/../../escape.txt": b"evil"},
     )
     sums_path = _write_sha256sums(tmp_path, artifact_path)
@@ -220,21 +266,6 @@ def test_unsafe_archive_traversal_rejected(tmp_path: Path) -> None:
     assert result.ok is False
     by_component = {f.component: f for f in result.findings}
     assert by_component["archive_safety"].code == "UNSAFE_ARCHIVE_MEMBER"
-
-
-def test_internal_manifest_mismatch_fails(tmp_path: Path) -> None:
-    manifest_path = tmp_path / "manifest.json"
-    _write_manifest(manifest_path)
-    mismatched_internal = _manifest_dict(release_version="9.9.9")
-    artifact_path = _build_artifact(tmp_path, embed_manifest=mismatched_internal)
-    sums_path = _write_sha256sums(tmp_path, artifact_path)
-
-    result = verify_release(
-        manifest_path=manifest_path, sha256sums_path=sums_path, artifact_path=artifact_path
-    )
-    assert result.ok is False
-    by_component = {f.component: f for f in result.findings}
-    assert by_component["internal_manifest_consistency"].code == "INTERNAL_MANIFEST_MISMATCH"
 
 
 def test_no_internal_manifest_is_skipped_not_failed(tmp_path: Path) -> None:
@@ -250,6 +281,225 @@ def test_no_internal_manifest_is_skipped_not_failed(tmp_path: Path) -> None:
     by_component = {f.component: f for f in result.findings}
     assert by_component["internal_manifest_consistency"].code == "NO_INTERNAL_MANIFEST"
     assert by_component["internal_manifest_consistency"].status.value == "SKIPPED"
+    assert by_component["uv_lock_binding"].status.value == "OK"
+
+
+# ---------------------------------------------------------------------
+# Blocker 1 — full internal manifest consistency (issue #35 PR1
+# corrective review): metamorphic regressions proving that changing ONLY
+# one critical field of the *embedded* manifest is caught, not just the
+# previous release_id/release_version/source_sha identity subset.
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "field,override",
+    [
+        ("uv_lock_sha256", "c" * 64),
+        ("alembic_heads", ["deadbeefcafe"]),
+        ("rollback_compatibility", "APP_ONLY"),
+        (
+            "model_manifest",
+            {"reference": "docs/DECISIONS.md#D-999", "status": "DEVELOPMENT_INTEGRATION"},
+        ),
+        ("required_python_version", ">=3.13"),
+        ("artifact_format", "zip"),
+        ("artifact_format_version", 2),
+    ],
+)
+def test_internal_manifest_single_field_mismatch_fails(
+    tmp_path: Path, field: str, override: object
+) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path)
+    mismatched_internal = _manifest_dict(**{field: override})
+    artifact_path = _build_artifact(tmp_path, embed_manifest=mismatched_internal)
+    sums_path = _write_sha256sums(tmp_path, artifact_path)
+
+    result = verify_release(
+        manifest_path=manifest_path, sha256sums_path=sums_path, artifact_path=artifact_path
+    )
+    assert result.ok is False
+    by_component = {f.component: f for f in result.findings}
+    assert by_component["internal_manifest_consistency"].code == "INTERNAL_MANIFEST_MISMATCH", (
+        f"field {field!r} mismatch was not caught"
+    )
+
+
+def test_internal_manifest_matching_on_only_identity_fields_still_fails(tmp_path: Path) -> None:
+    """The previous (defective) behaviour only compared release_id/
+    release_version/source_sha. Prove a manifest that agrees on exactly
+    those three but differs elsewhere is still a hard failure."""
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path)
+    mismatched_internal = _manifest_dict(rollback_compatibility="PROHIBITED_PENDING_PROCEDURE")
+    assert mismatched_internal["release_id"] == RELEASE_ID
+    assert mismatched_internal["release_version"] == RELEASE_VERSION
+    assert mismatched_internal["source_sha"] == VALID_SHA
+    artifact_path = _build_artifact(tmp_path, embed_manifest=mismatched_internal)
+    sums_path = _write_sha256sums(tmp_path, artifact_path)
+
+    result = verify_release(
+        manifest_path=manifest_path, sha256sums_path=sums_path, artifact_path=artifact_path
+    )
+    assert result.ok is False
+    by_component = {f.component: f for f in result.findings}
+    assert by_component["internal_manifest_consistency"].code == "INTERNAL_MANIFEST_MISMATCH"
+
+
+def test_internal_manifest_too_large_fails(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path)
+    oversized_payload = b"{" + b" " * (_MAX_EMBEDDED_MANIFEST_SIZE + 1) + b"}"
+    artifact_path = tmp_path / "meyar-release.tar.gz"
+    with tarfile.open(artifact_path, mode="w:gz") as tf:
+        _add_file_member(tf, f"{RELEASE_ID}/release_manifest.json", oversized_payload)
+        _add_file_member(tf, f"{RELEASE_ID}/backend/uv.lock", UV_LOCK_CONTENT)
+        _add_file_member(tf, f"{RELEASE_ID}/app/main.py", b"hello")
+    sums_path = _write_sha256sums(tmp_path, artifact_path)
+
+    result = verify_release(
+        manifest_path=manifest_path, sha256sums_path=sums_path, artifact_path=artifact_path
+    )
+    assert result.ok is False
+    by_component = {f.component: f for f in result.findings}
+    assert by_component["internal_manifest_consistency"].code == "INTERNAL_MANIFEST_TOO_LARGE"
+
+
+# ---------------------------------------------------------------------
+# Blocker 2 — bind uv_lock_sha256 to the actual artifact.
+# ---------------------------------------------------------------------
+
+
+def test_uv_lock_wrong_digest_fails(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path)
+    artifact_path = _build_artifact(tmp_path, uv_lock=b"a completely different uv.lock body\n")
+    sums_path = _write_sha256sums(tmp_path, artifact_path)
+
+    result = verify_release(
+        manifest_path=manifest_path, sha256sums_path=sums_path, artifact_path=artifact_path
+    )
+    assert result.ok is False
+    by_component = {f.component: f for f in result.findings}
+    assert by_component["uv_lock_binding"].code == "UV_LOCK_SHA256_MISMATCH"
+
+
+def test_uv_lock_missing_member_fails(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path)
+    artifact_path = _build_artifact(tmp_path, uv_lock=None)
+    sums_path = _write_sha256sums(tmp_path, artifact_path)
+
+    result = verify_release(
+        manifest_path=manifest_path, sha256sums_path=sums_path, artifact_path=artifact_path
+    )
+    assert result.ok is False
+    by_component = {f.component: f for f in result.findings}
+    assert by_component["uv_lock_binding"].code == "UV_LOCK_MEMBER_MISSING"
+
+
+def test_uv_lock_duplicate_member_is_ambiguous_fail(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path)
+    artifact_path = _build_artifact(tmp_path, duplicate_uv_lock=True)
+    sums_path = _write_sha256sums(tmp_path, artifact_path)
+
+    result = verify_release(
+        manifest_path=manifest_path, sha256sums_path=sums_path, artifact_path=artifact_path
+    )
+    assert result.ok is False
+    by_component = {f.component: f for f in result.findings}
+    assert by_component["uv_lock_binding"].code == "UV_LOCK_MEMBER_AMBIGUOUS"
+
+
+def test_uv_lock_non_regular_member_fails(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path)
+    artifact_path = _build_artifact(tmp_path, uv_lock_as_directory=True)
+    sums_path = _write_sha256sums(tmp_path, artifact_path)
+
+    result = verify_release(
+        manifest_path=manifest_path, sha256sums_path=sums_path, artifact_path=artifact_path
+    )
+    assert result.ok is False
+    by_component = {f.component: f for f in result.findings}
+    assert by_component["uv_lock_binding"].code == "UV_LOCK_MEMBER_NOT_REGULAR_FILE"
+
+
+def test_uv_lock_correct_digest_passes(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path)
+    artifact_path = _build_artifact(tmp_path)
+    sums_path = _write_sha256sums(tmp_path, artifact_path)
+
+    result = verify_release(
+        manifest_path=manifest_path, sha256sums_path=sums_path, artifact_path=artifact_path
+    )
+    by_component = {f.component: f for f in result.findings}
+    assert by_component["uv_lock_binding"].code == "UV_LOCK_SHA256_MATCHES"
+    assert result.ok is True
+
+
+def test_uv_lock_too_large_fails(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    oversized = b"x" * (_MAX_UV_LOCK_SIZE + 1)
+    digest = hashlib.sha256(oversized).hexdigest()
+    _write_manifest(manifest_path, uv_lock_sha256=digest)
+    artifact_path = _build_artifact(tmp_path, uv_lock=oversized)
+    sums_path = _write_sha256sums(tmp_path, artifact_path)
+
+    result = verify_release(
+        manifest_path=manifest_path, sha256sums_path=sums_path, artifact_path=artifact_path
+    )
+    assert result.ok is False
+    by_component = {f.component: f for f in result.findings}
+    assert by_component["uv_lock_binding"].code == "UV_LOCK_MEMBER_TOO_LARGE"
+
+
+# ---------------------------------------------------------------------
+# Blocker 5 — bounded release-archive inspection.
+# ---------------------------------------------------------------------
+
+
+def test_excessive_member_count_fails(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path)
+    extra_members = {
+        f"{RELEASE_ID}/app/file-{i}.txt": b"x" for i in range(MAX_ARCHIVE_MEMBER_COUNT + 1)
+    }
+    artifact_path = _build_artifact(
+        tmp_path, embed_manifest=False, uv_lock=None, extra_members=extra_members
+    )
+    sums_path = _write_sha256sums(tmp_path, artifact_path)
+
+    result = verify_release(
+        manifest_path=manifest_path, sha256sums_path=sums_path, artifact_path=artifact_path
+    )
+    assert result.ok is False
+    by_component = {f.component: f for f in result.findings}
+    assert by_component["archive_safety"].code == "ARCHIVE_RESOURCE_BOUND_EXCEEDED"
+
+
+def test_excessive_declared_aggregate_size_fails(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path)
+    # A header can declare a huge size without that many bytes actually
+    # following — the bound check reads only header metadata, never
+    # member content, so a raw header-only file (no real gzip stream) is
+    # enough to prove it never tries to read that far.
+    artifact_path = tmp_path / "meyar-release.tar"
+    info = tarfile.TarInfo(name=f"{RELEASE_ID}/app/huge.bin")
+    info.size = 2 * 1024 * 1024 * 1024  # 2 GiB declared, 0 bytes actually written
+    artifact_path.write_bytes(info.tobuf(format=tarfile.GNU_FORMAT))
+    sums_path = _write_sha256sums(tmp_path, artifact_path)
+
+    result = verify_release(
+        manifest_path=manifest_path, sha256sums_path=sums_path, artifact_path=artifact_path
+    )
+    assert result.ok is False
+    by_component = {f.component: f for f in result.findings}
+    assert by_component["archive_safety"].code == "ARCHIVE_RESOURCE_BOUND_EXCEEDED"
 
 
 def test_parse_sha256sums_ignores_malformed_lines() -> None:
@@ -263,7 +513,22 @@ def test_parse_sha256sums_ignores_malformed_lines() -> None:
         ]
     )
     parsed = parse_sha256sums(text)
-    assert parsed == {"good-file.tar.gz": "a" * 64}
+    assert parsed.digests == {"good-file.tar.gz": "a" * 64}
+    assert parsed.ambiguous_filenames == frozenset()
+
+
+def test_parse_sha256sums_flags_duplicate_filename_as_ambiguous() -> None:
+    text = "\n".join(
+        [
+            f"{'a' * 64}  dup-file.tar.gz",
+            f"{'b' * 64}  dup-file.tar.gz",
+            f"{'c' * 64}  unique-file.tar.gz",
+        ]
+    )
+    parsed = parse_sha256sums(text)
+    assert "dup-file.tar.gz" not in parsed.digests
+    assert parsed.ambiguous_filenames == {"dup-file.tar.gz"}
+    assert parsed.digests == {"unique-file.tar.gz": "c" * 64}
 
 
 def test_command_never_extracts_to_disk(tmp_path: Path, monkeypatch) -> None:

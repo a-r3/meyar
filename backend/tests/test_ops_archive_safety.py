@@ -9,7 +9,13 @@ from pathlib import Path
 
 import pytest
 
-from meyar.ops.archive_safety import inspect_archive_members
+from meyar.ops.archive_safety import (
+    MAX_AGGREGATE_UNCOMPRESSED_SIZE,
+    MAX_ARCHIVE_MEMBER_COUNT,
+    MAX_MEMBER_NAME_LENGTH,
+    ArchiveBoundExceededError,
+    inspect_archive_members,
+)
 
 EXPECTED_ROOT = "meyar-0.1.0+abcdef012345"
 
@@ -111,3 +117,34 @@ def test_multiple_violations_all_reported_not_just_first(tmp_path: Path) -> None
     archive = _make_archive(tmp_path, members)
     violations = inspect_archive_members(archive, expected_root=EXPECTED_ROOT)
     assert len(violations) >= 3
+
+
+def test_excessive_member_count_raises_bound_exceeded(tmp_path: Path) -> None:
+    members = [
+        _file_member(f"{EXPECTED_ROOT}/f{i}.txt") for i in range(MAX_ARCHIVE_MEMBER_COUNT + 1)
+    ]
+    archive = _make_archive(tmp_path, members)
+    with pytest.raises(ArchiveBoundExceededError, match="member count"):
+        inspect_archive_members(archive, expected_root=EXPECTED_ROOT)
+
+
+def test_excessive_member_name_length_raises_bound_exceeded(tmp_path: Path) -> None:
+    long_name = f"{EXPECTED_ROOT}/" + ("x" * (MAX_MEMBER_NAME_LENGTH + 1))
+    archive = _make_archive(tmp_path, [_file_member(long_name)])
+    with pytest.raises(ArchiveBoundExceededError, match="name length"):
+        inspect_archive_members(archive, expected_root=EXPECTED_ROOT)
+
+
+def test_excessive_declared_aggregate_size_raises_bound_exceeded(tmp_path: Path) -> None:
+    # A header can *declare* a huge size without that many bytes actually
+    # following — exactly what a hostile archive would do. `TarFile.
+    # addfile` insists on reading real bytes matching the declared size,
+    # so this writes just the raw header block: the bound check only
+    # ever reads header metadata (`TarFile.next()`), never the member
+    # body, so it must catch this before attempting to read anything.
+    info = tarfile.TarInfo(name=f"{EXPECTED_ROOT}/huge.bin")
+    info.size = MAX_AGGREGATE_UNCOMPRESSED_SIZE + 1
+    archive_path = tmp_path / "artifact.tar"
+    archive_path.write_bytes(info.tobuf(format=tarfile.GNU_FORMAT))
+    with pytest.raises(ArchiveBoundExceededError, match="aggregate declared"):
+        inspect_archive_members(archive_path, expected_root=EXPECTED_ROOT)
