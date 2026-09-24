@@ -38,12 +38,14 @@ def _shape(text: str):
     ("text", "expected", "limit"),
     [
         (
-            "Ən az 5 il Python təcrübəsi olan və ingilis dili B2 və ya daha yüksək olan 5 namizəd göstər.",
+            "Ən az 5 il Python təcrübəsi olan və ingilis dili B2 "
+            "və ya daha yüksək olan 5 namizəd göstər.",
             [("SKILL_EXPERIENCE", "Python", 5.0, None), ("LANGUAGE", "English", None, "B2")],
             5,
         ),
         (
-            "En az 5 il Python tecrubesi olan ve ingilis dili B2 ve ya daha yuksek olan 5 namized goster.",
+            "En az 5 il Python tecrubesi olan ve ingilis dili B2 "
+            "ve ya daha yuksek olan 5 namized goster.",
             [("SKILL_EXPERIENCE", "Python", 5.0, None), ("LANGUAGE", "English", None, "B2")],
             5,
         ),
@@ -53,7 +55,8 @@ def _shape(text: str):
             20,
         ),
         (
-            "Show 5 candidates with at least 5 years of Python experience and English B2 or higher.",
+            "Show 5 candidates with at least 5 years of Python experience "
+            "and English B2 or higher.",
             [("SKILL_EXPERIENCE", "Python", 5.0, None), ("LANGUAGE", "English", None, "B2")],
             5,
         ),
@@ -79,6 +82,14 @@ def test_skill_duration_and_separate_total_career_are_distinct() -> None:
             for item in separate.requirements] == [
         ("SKILL", "Python", None), ("EXPERIENCE", "ümumi", 5.0)
     ]
+
+
+def test_unresolved_multi_requirement_span_is_review_only() -> None:
+    analysis = analyze_hr_text(
+        "Python bilən və Java bilən və ingilis dili B2 olan namizədləri göstər."
+    )
+    assert any(span.segmentation_needs_review for span in analysis.spans)
+    assert all(item.state != SemanticRequirementState.SCORABLE for item in analysis.requirements)
 
 
 @pytest.mark.parametrize(

@@ -25,7 +25,10 @@ from meyar.search.planner_schemas import (
 )
 from meyar.search.planner_service import plan_and_search_candidates, plan_candidate_search
 from meyar.search.schemas import (
+    CandidateSearchRequest,
     EmbeddingSearchConfig,
+    LanguageLevelFilter,
+    NamedDurationFilter,
     PreferredFilters,
     RequiredFilters,
     SearchMode,
@@ -33,6 +36,11 @@ from meyar.search.schemas import (
 from meyar.services.tenant_repo import create_tenant
 
 AS_OF_DATE = date(2026, 8, 23)
+OWNER_AS_OF_DATE = date(2026, 9, 24)
+OWNER_QUERY = (
+    "Ən az 5 il Python təcrübəsi olan və ingilis dili B2 "
+    "və ya daha yüksək olan 5 namizəd göstər."
+)
 _EVIDENCE = [{"page": 1, "block_index": 0, "quote": "synthetic evidence"}]
 
 
@@ -80,6 +88,355 @@ async def _latest_plan_event(db_session: AsyncSession, tenant_id: uuid.UUID) -> 
     event = result.scalars().first()
     assert event is not None
     return event
+
+
+async def test_owner_compound_query_keeps_both_hard_filters_without_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def no_audit(*args, **kwargs) -> None:
+        pass
+
+    monkeypatch.setattr(planner_service, "_audit_plan_result", no_audit)
+    llm = FakeLLMProvider()
+    result = await plan_candidate_search(
+        None,  # type: ignore[arg-type]  # Audit boundary is replaced above.
+        llm,
+        tenant_id=uuid.uuid4(),
+        natural_language_request=OWNER_QUERY,
+        as_of_date=OWNER_AS_OF_DATE,
+        embedding_config=_config(),
+    )
+    assert result.outcome == PlannerOutcome.EXECUTABLE
+    assert result.attempt_count == llm.call_count == 0
+    request = result.search_request
+    assert request is not None
+    assert request.mode == SearchMode.STRUCTURED_ONLY
+    assert request.limit == 5
+    assert request.as_of_date == OWNER_AS_OF_DATE
+    assert [(item.value, item.min_years) for item in request.required_filters.skill_experience] == [
+        ("Python", 5.0)
+    ]
+    assert [
+        (item.value, item.required_level) for item in request.required_filters.language_levels
+    ] == [
+        ("English", "B2")
+    ]
+    assert request.preferred_filters.skill_experience == []
+    assert request.preferred_filters.language_levels == []
+
+
+async def test_unresolved_material_coordination_fails_closed_before_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def no_audit(*args, **kwargs) -> None:
+        pass
+
+    monkeypatch.setattr(planner_service, "_audit_plan_result", no_audit)
+    llm = FakeLLMProvider()
+    result = await plan_candidate_search(
+        None,  # type: ignore[arg-type]
+        llm,
+        tenant_id=uuid.uuid4(),
+        natural_language_request=(
+            "Python bilən və Java bilən və ingilis dili B2 olan namizədləri göstər."
+        ),
+        as_of_date=OWNER_AS_OF_DATE,
+        embedding_config=_config(),
+    )
+    assert result.outcome == PlannerOutcome.AMBIGUOUS_REQUEST
+    assert result.search_request is None
+    assert llm.call_count == 0
+
+
+async def test_model_path_cannot_execute_when_a_source_bound_skill_is_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dataclasses import replace
+
+    from meyar.agent.schemas import SemanticRequirementState
+    from meyar.agent.semantic_requirements import analyze_hr_text
+
+    async def no_audit(*args, **kwargs) -> None:
+        pass
+
+    analysis = analyze_hr_text(OWNER_QUERY)
+    # A future parser may require review on one part and invoke the model.
+    # The other scorable, hard requirement must still bind the final plan.
+    mixed = replace(
+        analysis,
+        requirements=[
+            analysis.requirements[0],
+            analysis.requirements[1].model_copy(
+                update={"state": SemanticRequirementState.NEEDS_HUMAN_REVIEW}
+            ),
+        ],
+    )
+    monkeypatch.setattr(planner_service, "analyze_hr_text", lambda _text: mixed)
+    monkeypatch.setattr(planner_service, "_audit_plan_result", no_audit)
+    llm = FakeLLMProvider(
+        planner_draft=PlannerDraft(required_filters=RequiredFilters(languages=["English"]))
+    )
+    result = await plan_candidate_search(
+        None,  # type: ignore[arg-type]
+        llm,
+        tenant_id=uuid.uuid4(),
+        natural_language_request=OWNER_QUERY,
+        as_of_date=OWNER_AS_OF_DATE,
+        embedding_config=_config(),
+    )
+    assert llm.call_count == 1
+    assert result.outcome == PlannerOutcome.VALIDATION_FAILURE
+    assert result.search_request is None
+
+
+async def test_compound_service_search_excludes_each_single_criterion_counterexample(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await _tenant(db_session, "CompoundSearch")
+
+    def profile(*, python: bool, b2: bool, skill_years: bool, long_career: bool = False):
+        content = _profile(["Python"] if python else [])
+        if b2:
+            content["languages"] = [
+                {
+                    "language": "English",
+                    "proficiency": "B2",
+                    "evidence": synthetic_evidence("English B2"),
+                }
+            ]
+        if skill_years or long_career:
+            start = "2019" if skill_years else "2010"
+            content["employment_history"] = [
+                {
+                    "title": "Engineer",
+                    "organization": "Synthetic Co",
+                    "start_date": start,
+                    "end_date": "2025",
+                    "is_current": False,
+                    "evidence": synthetic_evidence("Engineer", "Synthetic Co", start, "2025"),
+                }
+            ]
+        if skill_years:
+            content["skill_experience"] = [
+                {
+                    "skill_name": "Python",
+                    "employment_index": 0,
+                    "start_date": "2019",
+                    "end_date": "2025",
+                    "is_current": False,
+                    "evidence": synthetic_evidence(
+                        "Python Engineer Synthetic Co 2019 - 2025"
+                    ),
+                }
+            ]
+        return content
+
+    candidates = {}
+    versions = {}
+    aml_certified = _profile(["AML"])
+    aml_certified["certifications"] = [
+        {
+            "name": "ACAMS Certified Anti-Money Laundering Specialist",
+            "issuer": "ACAMS",
+            "date": None,
+            "evidence": synthetic_evidence("ACAMS Certified Anti-Money Laundering Specialist"),
+        }
+    ]
+    for label, content in (
+        ("both", profile(python=True, b2=True, skill_years=True)),
+        ("b2_only", profile(python=False, b2=True, skill_years=False)),
+        ("python_only", profile(python=True, b2=False, skill_years=True)),
+        ("unrelated_career", profile(python=True, b2=True, skill_years=False, long_career=True)),
+        ("java_a", _profile(["Java"])),
+        ("java_b", _profile(["Java"])),
+        ("aml_certified", aml_certified),
+        ("aml_other", _profile(["AML"])),
+    ):
+        candidate, version = await seed_candidate_with_profile(
+            db_session, tenant_id=tenant.id, profile_content=content
+        )
+        candidates[label] = candidate.id
+        versions[label] = version
+    await db_session.commit()
+
+    from meyar.services.profile_authority import authorize_profile_version
+
+    await authorize_profile_version(db_session, version=versions["both"])
+
+    llm = FakeLLMProvider()
+    owner = await plan_and_search_candidates(
+        db_session,
+        llm,
+        tenant_id=tenant.id,
+        natural_language_request=OWNER_QUERY,
+        as_of_date=OWNER_AS_OF_DATE,
+        embedding_config=_config(),
+    )
+    assert owner.plan.outcome == PlannerOutcome.EXECUTABLE
+    assert owner.plan.search_request is not None
+    assert owner.plan.search_request.limit == 5
+    assert owner.plan.search_request.as_of_date == OWNER_AS_OF_DATE
+    assert owner.search_response is not None
+    assert {item.candidate_id for item in owner.search_response.results} == {candidates["both"]}, (
+        owner.search_response.eligible_profile_count,
+        owner.search_response.result_count,
+    )
+    assert llm.call_count == 0
+
+    simple = await plan_and_search_candidates(
+        db_session,
+        llm,
+        tenant_id=tenant.id,
+        natural_language_request=(
+            "Python bilən və ingilis dili B2 və ya daha yüksək olan namizədləri göstər."
+        ),
+        as_of_date=OWNER_AS_OF_DATE,
+        embedding_config=_config(),
+    )
+    assert simple.plan.outcome == PlannerOutcome.EXECUTABLE
+    assert simple.plan.search_request is not None
+    assert simple.plan.search_request.required_filters.skills == ["Python"]
+    assert simple.search_response is not None
+    matched = {item.candidate_id for item in simple.search_response.results}
+    assert candidates["both"] in matched
+    assert candidates["b2_only"] not in matched
+    assert candidates["python_only"] not in matched
+
+    matrix = (
+        (
+            "Python bilən namizədləri göstər.",
+            {"both", "python_only", "unrelated_career"},
+        ),
+        (
+            "Python üzrə 5 il təcrübəsi olan namizədləri göstər.",
+            {"both", "python_only"},
+        ),
+        (
+            "ingilis dili B2 və ya daha yüksək olan namizədləri göstər.",
+            {"both", "b2_only", "unrelated_career"},
+        ),
+        ("Python bilən və ingilis dili C2 olan namizədləri göstər.", set()),
+        ("Java bilən namizədləri göstər.", {"java_a", "java_b"}),
+        ("AML bilən namizədləri göstər.", {"aml_certified", "aml_other"}),
+        ("ACAMS sertifikatı olan namizədləri göstər.", {"aml_certified"}),
+        (
+            "ACAMS Certified Anti-Money Laundering Specialist sertifikatı olan "
+            "namizədləri göstər.",
+            {"aml_certified"},
+        ),
+        ("Python üzrə 20 il təcrübəsi olan namizədləri göstər.", set()),
+    )
+    for query, expected_labels in matrix:
+        result = await plan_and_search_candidates(
+            db_session,
+            llm,
+            tenant_id=tenant.id,
+            natural_language_request=query,
+            as_of_date=OWNER_AS_OF_DATE,
+            embedding_config=_config(),
+        )
+        assert result.plan.outcome == PlannerOutcome.EXECUTABLE
+        assert result.search_response is not None
+        assert {item.candidate_id for item in result.search_response.results} == {
+            candidates[label] for label in expected_labels
+        }
+    assert llm.call_count == 0
+
+
+async def test_acams_shorthand_and_full_name_share_bounded_search_identity(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await _tenant(db_session, "CertificationAlias")
+    named = _profile(["AML"])
+    named["certifications"] = [
+        {
+            "name": "ACAMS Certified Anti-Money Laundering Specialist",
+            "issuer": "ACAMS",
+            "date": None,
+            "evidence": synthetic_evidence("ACAMS Certified Anti-Money Laundering Specialist"),
+        }
+    ]
+    nigar, _ = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=named
+    )
+    other = _profile(["AML"])
+    other["certifications"] = [
+        {
+            "name": "ACAMS Advanced CAMS-Risk Management",
+            "issuer": "ACAMS",
+            "date": None,
+            "evidence": synthetic_evidence("ACAMS Advanced CAMS-Risk Management"),
+        }
+    ]
+    await seed_candidate_with_profile(db_session, tenant_id=tenant.id, profile_content=other)
+    await db_session.commit()
+
+    llm = FakeLLMProvider()
+    for query in (
+        "ACAMS sertifikatı olan namizədləri göstər.",
+        "ACAMS Certified Anti-Money Laundering Specialist sertifikatı olan namizədləri göstər.",
+    ):
+        result = await plan_and_search_candidates(
+            db_session,
+            llm,
+            tenant_id=tenant.id,
+            natural_language_request=query,
+            as_of_date=OWNER_AS_OF_DATE,
+            embedding_config=_config(),
+        )
+        assert result.plan.outcome == PlannerOutcome.EXECUTABLE
+        assert result.search_response is not None
+        assert {item.candidate_id for item in result.search_response.results} == {nigar.id}
+    assert llm.call_count == 0
+
+
+@pytest.mark.parametrize(
+    "filters",
+    [
+        RequiredFilters(
+            language_levels=[LanguageLevelFilter(value="English", required_level="B2")]
+        ),
+        RequiredFilters(skill_experience=[NamedDurationFilter(value="Python", min_years=5)]),
+        RequiredFilters(
+            skills=["Python"],
+            min_total_experience_years=5,
+            language_levels=[LanguageLevelFilter(value="English", required_level="B2")],
+        ),
+        RequiredFilters(
+            skill_experience=[NamedDurationFilter(value="Python", min_years=4)],
+            language_levels=[LanguageLevelFilter(value="English", required_level="B2")],
+        ),
+    ],
+)
+def test_final_source_bound_guard_rejects_dropped_or_weakened_requirements(filters) -> None:
+    from meyar.agent.semantic_requirements import analyze_hr_text
+    from meyar.search.planner_policy import PlannerPolicyError
+
+    request = CandidateSearchRequest(
+        mode=SearchMode.STRUCTURED_ONLY,
+        required_filters=filters,
+        as_of_date=OWNER_AS_OF_DATE,
+        limit=5,
+    )
+    with pytest.raises(PlannerPolicyError):
+        planner_service._require_complete_material_plan(analyze_hr_text(OWNER_QUERY), request)
+
+
+def test_final_source_bound_guard_rejects_required_to_preferred_downgrade() -> None:
+    from meyar.agent.semantic_requirements import analyze_hr_text
+    from meyar.search.planner_policy import PlannerPolicyError
+
+    request = CandidateSearchRequest(
+        mode=SearchMode.STRUCTURED_ONLY,
+        preferred_filters=PreferredFilters(
+            skill_experience=[NamedDurationFilter(value="Python", min_years=5)],
+            language_levels=[LanguageLevelFilter(value="English", required_level="B2")],
+        ),
+        as_of_date=OWNER_AS_OF_DATE,
+        limit=5,
+    )
+    with pytest.raises(PlannerPolicyError):
+        planner_service._require_complete_material_plan(analyze_hr_text(OWNER_QUERY), request)
 
 
 @pytest.mark.parametrize(
