@@ -1,11 +1,9 @@
-import hashlib
 import uuid
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.models.candidate_photo_version import PHOTO_AVAILABLE, CandidatePhotoVersion
-from meyar.photo.policy import MAX_DERIVED_BYTES
 from meyar.services.audit_repo import ACTOR_API_KEY, record_event
 from meyar.services.candidate_document_repo import list_candidate_documents
 from meyar.services.candidate_repo import delete_candidate_row, get_candidate
@@ -37,25 +35,28 @@ async def delete_candidate_cascade(
             CandidatePhotoVersion.status == PHOTO_AVAILABLE,
         )
     )
-    # Validate and snapshot every derived asset before removing any file.
-    # The snapshot is bounded by the extraction policy per photo and permits
-    # exact-key compensation if a later filesystem or DB step fails.
-    photo_bytes: dict[str, bytes] = {}
+    # Snapshot the state that exists before deleting anything. An absent or
+    # hash-mismatched presentation asset cannot veto core candidate deletion.
+    # None means it was already absent and must not be fabricated on failure.
+    photo_snapshots: dict[str, bytes | None] = {}
     for row in photo_rows:
         key = row.derived_storage_key
         if key is None or row.derived_sha256 is None:
             raise OSError("Invalid AVAILABLE photo provenance")
-        content = await photo_storage.read(tenant_id=tenant_id, storage_key=key)
-        if (
-            len(content) > MAX_DERIVED_BYTES
-            or hashlib.sha256(content).hexdigest() != row.derived_sha256
-        ):
-            raise OSError("Derived photo integrity check failed")
-        photo_bytes[key] = content
+        try:
+            photo_snapshots[key] = await photo_storage.read(
+                tenant_id=tenant_id, storage_key=key
+            )
+        except FileNotFoundError:
+            photo_snapshots[key] = None
+    attempted_photo_keys: list[str] = []
     try:
         # Delete photo assets first so a photo failure cannot touch an
         # original CV; exact-key compensation covers every later failure.
-        for key in photo_bytes:
+        for key, content in photo_snapshots.items():
+            if content is None:
+                continue
+            attempted_photo_keys.append(key)
             await photo_storage.delete(tenant_id=tenant_id, storage_key=key)
         for document in documents:
             await storage.delete(storage_key=document.storage_key)
@@ -70,7 +71,9 @@ async def delete_candidate_cascade(
         try:
             await db.rollback()
         finally:
-            for key, content in photo_bytes.items():
+            for key in attempted_photo_keys:
+                content = photo_snapshots[key]
+                assert content is not None
                 await photo_storage.restore_exact(
                     tenant_id=tenant_id, storage_key=key, content=content
                 )
