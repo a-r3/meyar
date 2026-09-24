@@ -19,7 +19,11 @@ from datetime import date
 
 from meyar.evaluation.evaluators import evaluate_criterion
 from meyar.evaluation.experience import ranges_overlap
-from meyar.evaluation.normalization import normalize_skill_name, normalize_text
+from meyar.evaluation.normalization import (
+    normalize_certification_name,
+    normalize_skill_name,
+    normalize_text,
+)
 from meyar.schemas.candidate_profile import CandidateProfileExtraction
 from meyar.schemas.criteria import CriterionIn, CriterionKind, CriterionType
 from meyar.schemas.evaluation import CRITERION_STATUS_MATCH
@@ -86,7 +90,7 @@ def _skill_present(profile: CandidateProfileExtraction, skill_name: str) -> bool
 
 
 def _certification_present(profile: CandidateProfileExtraction, cert_name: str) -> bool:
-    target = normalize_text(cert_name)
+    target = normalize_certification_name(cert_name)
     return any(normalize_text(item.name) == target for item in profile.certifications)
 
 

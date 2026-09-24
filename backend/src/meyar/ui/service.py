@@ -17,6 +17,7 @@ from meyar.core.text import (
     slugify_criterion_label,
 )
 from meyar.evaluation.evaluators import evaluate_criterion
+from meyar.evaluation.normalization import normalize_certification_name, normalize_text
 from meyar.ingestion.parser import CanonicalDocumentContent
 from meyar.models.candidate import Candidate
 from meyar.models.candidate_document import (
@@ -600,6 +601,8 @@ def _profile_item_matches_value(category: str, item: object, folded_value: str) 
         title = item.language  # type: ignore[attr-defined]
     else:
         title = combine_degree_and_field(item.degree, item.field_of_study) or ""  # type: ignore[attr-defined]
+    if category == "certifications":
+        return normalize_text(title) == folded_value
     return fold_az_ascii(normalize_azerbaijani_case(title)) == folded_value
 
 
@@ -624,7 +627,11 @@ def _requirement_attributable_evidence(
         category = _FILTER_MATCH_PROFILE_CATEGORY.get(match.category)
         if category is None:
             continue
-        folded_value = fold_az_ascii(normalize_azerbaijani_case(match.value))
+        folded_value = (
+            normalize_certification_name(match.value)
+            if category == "certifications"
+            else fold_az_ascii(normalize_azerbaijani_case(match.value))
+        )
         for entry in getattr(profile, category):
             if _profile_item_matches_value(category, entry, folded_value):
                 refs.extend(entry.evidence)

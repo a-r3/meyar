@@ -12,9 +12,18 @@ from meyar.agent.schemas import (
     SemanticRequirementState,
     SupportedInputLanguage,
 )
-from meyar.agent.semantic_requirements import analyze_hr_text
+from meyar.agent.semantic_requirements import (
+    SemanticAnalysis,
+    analyze_hr_text,
+    has_unsupported_cefr_comparator,
+)
 from meyar.core.result_count import ResultCountState
 from meyar.embedding.provider import EmbeddingProvider
+from meyar.evaluation.normalization import (
+    normalize_certification_name,
+    normalize_skill_name,
+    normalize_text,
+)
 from meyar.llm.provider import (
     LLMProvider,
     LLMProviderError,
@@ -63,6 +72,84 @@ DETERMINISTIC_PLANNER_PROVENANCE = LLMResultProvenance(
     model_name="meyar-deterministic-parser-v1",
     model_revision="",
 )
+
+
+def _require_complete_material_plan(
+    semantic: SemanticAnalysis, search_request: CandidateSearchRequest
+) -> None:
+    """Bind every scorable source fact to a filter of the same family and modality.
+
+    The model path and deterministic path share this final gate. A semantic
+    relevance query, a bare skill, or total career years cannot stand in for
+    a required skill-specific duration or language level.
+    """
+    for item in semantic.requirements:
+        if item.state != SemanticRequirementState.SCORABLE:
+            continue
+        if item.criterion_type is None or item.criterion_family is None:
+            raise PlannerPolicyError(
+                PlannerOutcome.VALIDATION_FAILURE,
+                PlannerReasonCode.MANDATORY_REQUIREMENT_DOWNGRADED,
+            )
+        filters = (
+            search_request.required_filters
+            if item.criterion_type.value == "MUST_HAVE"
+            else search_request.preferred_filters
+        )
+        subject = item.normalized_subject or ""
+        family = item.criterion_family
+        if family == JDDraftCriterionKind.SKILL:
+            preserved = normalize_skill_name(subject) in {
+                normalize_skill_name(value) for value in filters.skills
+            }
+        elif family == JDDraftCriterionKind.CERTIFICATION:
+            preserved = normalize_certification_name(subject) in {
+                normalize_certification_name(value) for value in filters.certifications
+            }
+        elif family == JDDraftCriterionKind.EDUCATION:
+            preserved = normalize_text(subject) in {
+                normalize_text(value) for value in filters.education
+            }
+        elif family == JDDraftCriterionKind.LANGUAGE:
+            level = item.required_level
+            if level is not None:
+                preserved = any(
+                    normalize_text(value.value) == normalize_text(subject)
+                    and value.required_level is not None
+                    and value.required_level.upper() == level.upper()
+                    for value in filters.language_levels
+                )
+            else:
+                preserved = normalize_text(subject) in {
+                    normalize_text(value) for value in filters.languages
+                }
+        elif family in (
+            JDDraftCriterionKind.SKILL_EXPERIENCE,
+            JDDraftCriterionKind.DOMAIN_EXPERIENCE,
+        ):
+            values = (
+                filters.skill_experience
+                if family == JDDraftCriterionKind.SKILL_EXPERIENCE
+                else filters.domain_experience
+            )
+            normalize = (
+                normalize_skill_name
+                if family == JDDraftCriterionKind.SKILL_EXPERIENCE
+                else normalize_text
+            )
+            preserved = any(
+                normalize(value.value) == normalize(subject) and value.min_years == item.min_years
+                for value in values
+            )
+        elif family == JDDraftCriterionKind.EXPERIENCE:
+            preserved = filters.min_total_experience_years == item.min_years
+        else:
+            preserved = False
+        if not preserved:
+            raise PlannerPolicyError(
+                PlannerOutcome.VALIDATION_FAILURE,
+                PlannerReasonCode.MANDATORY_REQUIREMENT_DOWNGRADED,
+            )
 
 
 def _request_sha256(natural_language_request: str) -> str:
@@ -179,6 +266,19 @@ async def plan_candidate_search(
         await _audit_plan_result(db, tenant_id=tenant_id, result=result)
         return result
 
+    if has_unsupported_cefr_comparator(natural_language_request):
+        # A typed language level is a minimum. Do not let either parser or
+        # model turn an explicit maximum into that opposite requirement.
+        result = _result(
+            outcome=PlannerOutcome.UNSUPPORTED_SEMANTICS,
+            request_sha256=request_hash,
+            provenance=DETERMINISTIC_PLANNER_PROVENANCE,
+            attempt_count=0,
+            reason_codes=[PlannerReasonCode.LANGUAGE_PROFICIENCY_UNSUPPORTED],
+        )
+        await _audit_plan_result(db, tenant_id=tenant_id, result=result)
+        return result
+
     semantic = analyze_hr_text(natural_language_request)
     if semantic.language == SupportedInputLanguage.UNSUPPORTED:
         result = _result(
@@ -198,6 +298,17 @@ async def plan_candidate_search(
             provenance=DETERMINISTIC_PLANNER_PROVENANCE,
             attempt_count=0,
             reason_codes=[PlannerReasonCode.RESULT_LIMIT_OMITTED],
+        )
+        await _audit_plan_result(db, tenant_id=tenant_id, result=result)
+        return result
+
+    if any(span.segmentation_needs_review for span in semantic.spans):
+        result = _result(
+            outcome=PlannerOutcome.AMBIGUOUS_REQUEST,
+            request_sha256=request_hash,
+            provenance=DETERMINISTIC_PLANNER_PROVENANCE,
+            attempt_count=0,
+            reason_codes=[PlannerReasonCode.MANDATORY_REQUIREMENT_DOWNGRADED],
         )
         await _audit_plan_result(db, tenant_id=tenant_id, result=result)
         return result
@@ -278,6 +389,18 @@ async def plan_candidate_search(
             as_of_date=as_of_date if uses_duration else None,
             limit=semantic.result_count.effective,
         )
+        try:
+            _require_complete_material_plan(semantic, search_request)
+        except PlannerPolicyError as exc:
+            result = _result(
+                outcome=exc.outcome,
+                request_sha256=request_hash,
+                provenance=DETERMINISTIC_PLANNER_PROVENANCE,
+                attempt_count=0,
+                reason_codes=exc.reason_codes,
+            )
+            await _audit_plan_result(db, tenant_id=tenant_id, result=result)
+            return result
         semantic_draft = PlannerDraft(
             required_filters=required_filters,
             preferred_filters=preferred_filters,
@@ -310,6 +433,7 @@ async def plan_candidate_search(
                 as_of_date=as_of_date,
                 embedding_config=embedding_config,
             )
+            _require_complete_material_plan(semantic, deterministic_request)
         except PlannerPolicyError:
             # The parser's own extraction did not survive the same
             # fidelity validation the LLM path is held to — decline
@@ -388,6 +512,7 @@ async def plan_candidate_search(
                 as_of_date=as_of_date,
                 embedding_config=embedding_config,
             )
+            _require_complete_material_plan(semantic, search_request)
         except PlannerPolicyError as exc:
             result = _result(
                 outcome=exc.outcome,

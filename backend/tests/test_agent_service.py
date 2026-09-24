@@ -24,6 +24,10 @@ from meyar.services.agent_conversation_repo import get_or_create_conversation
 from meyar.services.browser_session_repo import create_browser_session
 
 AS_OF_DATE = date(2026, 1, 1)
+OWNER_COMPOUND_QUERY = (
+    "Ən az 5 il Python təcrübəsi olan və ingilis dili B2 "
+    "və ya daha yüksək olan 5 namizəd göstər."
+)
 EMPTY_PROFILE = {
     "skills": [],
     "employment_history": [],
@@ -75,6 +79,97 @@ def _embedding_config() -> EmbeddingSearchConfig:
         serializer_version="v1",
         embedding_dimensions=8,
     )
+
+
+async def test_agent_owner_compound_search_preserves_filters_and_returns_positive_profile(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    from sqlalchemy import select
+
+    from meyar.models.audit_event import AuditEvent
+
+    tenant, user, _password, membership = tenant_and_user
+    content = _profile("Python")
+    content["employment_history"] = [
+        {
+            "title": "Engineer",
+            "organization": "Synthetic Co",
+            "start_date": "2019",
+            "end_date": "2025",
+            "is_current": False,
+            "evidence": [
+                {"page": 1, "block_index": 0, "quote": "Engineer Synthetic Co 2019 2025"}
+            ],
+        }
+    ]
+    content["skill_experience"] = [
+        {
+            "skill_name": "Python",
+            "employment_index": 0,
+            "start_date": "2019",
+            "end_date": "2025",
+            "is_current": False,
+            "evidence": [
+                {"page": 1, "block_index": 0, "quote": "Python Engineer Synthetic Co 2019 - 2025"}
+            ],
+        }
+    ]
+    content["languages"] = [
+        {
+            "language": "English",
+            "proficiency": "B2",
+            "evidence": [{"page": 1, "block_index": 0, "quote": "English B2"}],
+        }
+    ]
+    candidate, _ = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=content
+    )
+    await db_session.commit()
+
+    llm = FakeLLMProvider(
+        agent_decisions=[
+            AgentDecision(
+                action=AgentActionType.SEARCH_CANDIDATES, search_query=OWNER_COMPOUND_QUERY
+            ),
+            AgentDecision(
+                action=AgentActionType.FINAL_ANSWER,
+                response_code=AgentResponseCode.ACKNOWLEDGEMENT,
+            ),
+        ]
+    )
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    result = await _run(
+        db_session,
+        llm,
+        tenant_id=tenant.id,
+        conversation=conversation,
+        message=OWNER_COMPOUND_QUERY,
+    )
+    search = result.tool_results[0].search
+    assert search is not None
+    planned = search.response
+    assert planned.plan.executable
+    assert planned.plan.reason_codes == []
+    request = planned.plan.search_request
+    assert request is not None
+    assert request.limit == 5
+    assert request.as_of_date == AS_OF_DATE
+    assert [(item.value, item.min_years) for item in request.required_filters.skill_experience] == [
+        ("Python", 5.0)
+    ]
+    assert [
+        (item.value, item.required_level) for item in request.required_filters.language_levels
+    ] == [
+        ("English", "B2")
+    ]
+    assert planned.search_response is not None
+    assert {item.candidate_id for item in planned.search_response.results} == {candidate.id}
+    assert "MANDATORY_REQUIREMENT_DOWNGRADED" not in (result.message or "")
+
+    events = await db_session.scalars(select(AuditEvent).where(AuditEvent.tenant_id == tenant.id))
+    metadata = " ".join(str(event.event_metadata) for event in events)
+    assert OWNER_COMPOUND_QUERY not in metadata
+    assert "Python Engineer Synthetic Co" not in metadata
 
 
 async def _new_conversation(db_session: AsyncSession, tenant, user, membership):

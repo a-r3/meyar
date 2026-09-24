@@ -13,6 +13,7 @@ from datetime import date
 from pydantic import ValidationError
 
 from meyar.core.text import fold_az_ascii, normalize_azerbaijani_case
+from meyar.evaluation.normalization import accepted_certification_terms
 from meyar.schemas.criteria import ProhibitedCriterionError, find_prohibited_term
 from meyar.search.planner_schemas import (
     PlanInterpretationSummary,
@@ -384,6 +385,8 @@ def _filter_values(draft: PlannerDraft) -> list[tuple[str, str, bool]]:
 
 
 def _value_variants(category: str, value: str) -> tuple[str, ...]:
+    if category == "certifications":
+        return tuple(sorted(accepted_certification_terms(value)))
     if category == "languages":
         for english_name, variants in _LANGUAGE_ALIASES.items():
             aliases = (english_name, *variants)

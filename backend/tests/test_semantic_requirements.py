@@ -35,6 +35,64 @@ def _shape(text: str):
 
 
 @pytest.mark.parametrize(
+    ("text", "expected", "limit"),
+    [
+        (
+            "Ən az 5 il Python təcrübəsi olan və ingilis dili B2 "
+            "və ya daha yüksək olan 5 namizəd göstər.",
+            [("SKILL_EXPERIENCE", "Python", 5.0, None), ("LANGUAGE", "English", None, "B2")],
+            5,
+        ),
+        (
+            "En az 5 il Python tecrubesi olan ve ingilis dili B2 "
+            "ve ya daha yuksek olan 5 namized goster.",
+            [("SKILL_EXPERIENCE", "Python", 5.0, None), ("LANGUAGE", "English", None, "B2")],
+            5,
+        ),
+        (
+            "Python bilən və ingilis dili B2 və ya daha yüksək olan namizədləri göstər.",
+            [("SKILL", "Python", None, None), ("LANGUAGE", "English", None, "B2")],
+            20,
+        ),
+        (
+            "Show 5 candidates with at least 5 years of Python experience "
+            "and English B2 or higher.",
+            [("SKILL_EXPERIENCE", "Python", 5.0, None), ("LANGUAGE", "English", None, "B2")],
+            5,
+        ),
+    ],
+)
+def test_compound_search_preserves_each_required_source_fact(text, expected, limit) -> None:
+    analysis = analyze_hr_text(text)
+    assert analysis.result_count.effective == limit
+    assert [
+        (item.criterion_family.value, item.normalized_subject, item.min_years, item.required_level)
+        for item in analysis.requirements
+    ] == expected
+    assert all(item.state == SemanticRequirementState.SCORABLE for item in analysis.requirements)
+    assert all(item.criterion_type == CriterionType.MUST_HAVE for item in analysis.requirements)
+
+
+def test_skill_duration_and_separate_total_career_are_distinct() -> None:
+    duration = analyze_hr_text("Python üzrə 5 il təcrübəsi olan namizədləri göstər.")
+    separate = analyze_hr_text("Python bilən və ümumi iş təcrübəsi 5 il olan namizədləri göstər.")
+    assert [(item.criterion_family.value, item.normalized_subject, item.min_years)
+            for item in duration.requirements] == [("SKILL_EXPERIENCE", "Python", 5.0)]
+    assert [(item.criterion_family.value, item.normalized_subject, item.min_years)
+            for item in separate.requirements] == [
+        ("SKILL", "Python", None), ("EXPERIENCE", "ümumi", 5.0)
+    ]
+
+
+def test_unresolved_multi_requirement_span_is_review_only() -> None:
+    analysis = analyze_hr_text(
+        "Python bilən və Java bilən və ingilis dili B2 olan namizədləri göstər."
+    )
+    assert any(span.segmentation_needs_review for span in analysis.spans)
+    assert all(item.state != SemanticRequirementState.SCORABLE for item in analysis.requirements)
+
+
+@pytest.mark.parametrize(
     "text",
     [
         "Namizəd qadın olmalıdır.",

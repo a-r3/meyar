@@ -90,7 +90,7 @@ _REQUIRED_RE = re.compile(
     re.I,
 )
 _MINIMUM_RE = re.compile(
-    rf"\b(?:at\s+least|minimum|min\.?|en\s+azi)\s+(?P<number>{_NUMBER_TOKEN})\s*"
+    rf"\b(?:at\s+least|minimum|min\.?|en\s+az(?:i)?)\s+(?P<number>{_NUMBER_TOKEN})\s*"
     r"(?:years?|yrs?|il)\b|"
     rf"\b(?P<plus>{_NUMBER_TOKEN})\s*\+\s*(?:years?|yrs?|il)\b|"
     rf"\b(?P<not_less>{_NUMBER_TOKEN})\s*(?:years?|yrs?|il)(?:den)?\s+az\s+olmasin\b",
@@ -176,7 +176,7 @@ _GENERIC_SEARCH_SUBJECT_RE = re.compile(
 _PROFESSIONAL_CUE_RE = re.compile(
     r"(?i)\b(?:knowledge(?:\s+of)?|command\s+of|proficien(?:t|cy)\s+in|familiar(?:ity)?\s+with|"
     r"skilled\s+in|competence\s+in|bilik\w*|biliy\w*|bilm\w*|bils\w*|bacariq\w*|"
-    r"istifade\w*)\b"
+    r"istifade\w*|bilen\w*)\b"
 )
 _COUNT_ENTITY_RE = re.compile(
     rf"(?i)\b(?:top\s*)?{_NUMBER_TOKEN}\s+"
@@ -267,6 +267,14 @@ _PREFERRED_CONTRAST_RE = re.compile(
 _BOUNDARY_RE = re.compile(r"(?:\r?\n)+|(?<=[.!?;])\s+")
 _BULLET_RE = re.compile(r"\s*(?:[-*•]|\d+[.)])\s*")
 _COORD_RE = re.compile(r"\s+(?:and|ve(?:\s+ya)?|or|while|whereas)\s+", re.I)
+_LEVEL_COMPARATOR_TAIL_RE = re.compile(
+    r"(?i)^(?:daha\s+(?:yuksek|asagi)|higher|lower|above|below)\b"
+)
+_DOWNWARD_LEVEL_COMPARATOR_RE = re.compile(
+    r"(?i)\b(?:a1|a2|b1|b2|c1|c2)\s+(?:and|or|ve(?:\s+ya)?)\s+"
+    r"(?:lower|below|daha\s+asagi)\b"
+)
+_CEFR_BEFORE_COORD_RE = re.compile(r"(?i)\b(?:a1|a2|b1|b2|c1|c2)\s*$")
 _RESULT_TAIL_RE = re.compile(
     r"\s+(?:(?:olan|bilen)\w*\s+)?(?:namized\w*\s+)?"
     r"(?:\d+\s+)?(?:nefer\s+)?(?:namized\w*\s+)?"
@@ -410,6 +418,28 @@ def _material(text: str) -> bool:
     )
 
 
+def _coordinated_matches(clause: str) -> list[re.Match[str]]:
+    """Only top-level connectors; a CEFR comparator is one language fact."""
+    folded = _fold(clause)
+    if re.search(r"(?i)\bve\s+plus\s+sayilir\b", folded) or re.search(
+        r"(?i)\b(?:and|ve)\s+it\s+is\s+(?:preferred|required|optional)\b", folded
+    ):
+        return []
+    return [
+        item
+        for item in _COORD_RE.finditer(folded)
+        if not (
+            _CEFR_BEFORE_COORD_RE.search(folded[: item.start()])
+            and _LEVEL_COMPARATOR_TAIL_RE.match(folded[item.end() :])
+        )
+    ]
+
+
+def has_unsupported_cefr_comparator(text: str) -> bool:
+    """A maximum CEFR level cannot be represented by the minimum-only filter."""
+    return _DOWNWARD_LEVEL_COMPARATOR_RE.search(_fold(text)) is not None
+
+
 def _split_units(text: str) -> list[tuple[int, int, tuple[int, int] | None]]:
     """Return clause offsets plus a sentence-level shared modality occurrence."""
     units: list[tuple[int, int, tuple[int, int] | None]] = []
@@ -529,18 +559,7 @@ def _split_units(text: str) -> list[tuple[int, int, tuple[int, int] | None]]:
                     clause_start + local_match.end(),
                 )
 
-            coordinated = [
-                item
-                for item in _COORD_RE.finditer(_fold(clause))
-                if not re.match(r"(?i)higher\b", _fold(clause)[item.end() :])
-            ]
-            if re.search(r"(?i)\bve\s+plus\s+sayilir\b", _fold(clause)):
-                coordinated = []
-            if re.search(
-                r"(?i)\b(?:and|ve)\s+it\s+is\s+(?:preferred|required|optional)\b",
-                _fold(clause),
-            ):
-                coordinated = []
+            coordinated = _coordinated_matches(clause)
             def _side_authorized(
                 piece: str, *, _shared: tuple[int, int] | None = local_shared
             ) -> bool:
@@ -1257,9 +1276,30 @@ def analyze_hr_text(jd_text: str) -> SemanticAnalysis:
             else None
         )
         required_level = level_match.group(0).upper() if level_match else None
+        remaining_coordination = _coordinated_matches(source)
+        parts: list[str] = []
+        cursor = 0
+        for separator in remaining_coordination:
+            parts.append(source[cursor : separator.start()])
+            cursor = separator.end()
+        if remaining_coordination:
+            parts.append(source[cursor:])
+
+        def _review_side_authorized(
+            piece: str, *, _shared: tuple[int, int] | None = shared
+        ) -> bool:
+            return _material(piece) or _shared is not None
+
+        segmentation_needs_review = bool(remaining_coordination) and coordinated_split_authorized(
+            parts, _review_side_authorized
+        )
 
         if prohibited:
             state = SemanticRequirementState.PROHIBITED
+        elif segmentation_needs_review:
+            # More than one independently material side survived as a single
+            # source span. It cannot authorize one executable merged subject.
+            state = SemanticRequirementState.NEEDS_HUMAN_REVIEW
         elif negated:
             state = SemanticRequirementState.UNSUPPORTED
         elif _COUNT_ENTITY_RE.search(_fold(source)) and not (
@@ -1332,7 +1372,7 @@ def analyze_hr_text(jd_text: str) -> SemanticAnalysis:
             end_offset=end,
             text=source,
             normalized=_fold(source),
-            segmentation_needs_review=False,
+            segmentation_needs_review=segmentation_needs_review,
         )
         spans.append(span)
         requirements.append(

@@ -15,6 +15,13 @@ SKILL_ALIASES: dict[str, str] = {
     "golang": "go",
 }
 
+# Curated credential identities. An issuer name is not generally a credential
+# alias; this single shorthand is an explicit product contract for the named
+# certification. Other ACAMS credentials remain distinct.
+CERTIFICATION_ALIASES: dict[str, str] = {
+    "acams": "acams certified anti-money laundering specialist",
+}
+
 
 def normalize_text(value: str) -> str:
     return _WHITESPACE_RE.sub(" ", value).strip().lower()
@@ -23,6 +30,23 @@ def normalize_text(value: str) -> str:
 def normalize_skill_name(value: str) -> str:
     normalized = normalize_text(value)
     return SKILL_ALIASES.get(normalized, normalized)
+
+
+def normalize_certification_name(value: str) -> str:
+    normalized = normalize_text(value)
+    return CERTIFICATION_ALIASES.get(normalized, normalized)
+
+
+def accepted_certification_terms(value: str) -> frozenset[str]:
+    canonical = normalize_certification_name(value)
+    return frozenset(
+        {canonical}
+        | {
+            alias
+            for alias, alias_canonical in CERTIFICATION_ALIASES.items()
+            if alias_canonical == canonical
+        }
+    )
 
 
 def accepted_skill_terms(value: str) -> frozenset[str]:

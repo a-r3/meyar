@@ -111,6 +111,23 @@ def test_certification_absent_is_unknown() -> None:
     assert result.status == CRITERION_STATUS_UNKNOWN
 
 
+def test_acams_criterion_matches_only_canonical_profile_fact() -> None:
+    canonical = "ACAMS Certified Anti-Money Laundering Specialist"
+    criterion = _criterion(id="cams", kind=CriterionKind.CERTIFICATION, value="ACAMS")
+    for value in ("ACAMS", canonical):
+        configured = criterion.model_copy(update={"value": value})
+        profile = _empty_profile(certifications=[CertificationItem(name=canonical, evidence=_EV)])
+        result = evaluate_criterion(configured, profile)
+        assert result.status == CRITERION_STATUS_MATCH
+        assert result.evidence == _EV
+
+    for unrelated in ("ACAMS Advanced CAMS-Risk Management", "ACAMS"):
+        profile = _empty_profile(certifications=[CertificationItem(name=unrelated, evidence=_EV)])
+        result = evaluate_criterion(criterion, profile)
+        assert result.status == CRITERION_STATUS_UNKNOWN
+        assert result.evidence == []
+
+
 # --- EDUCATION -------------------------------------------------------------
 
 

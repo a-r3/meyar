@@ -14,14 +14,18 @@ from search_helpers import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meyar.schemas.candidate_profile import CandidateProfileExtraction
 from meyar.search.schemas import (
     CandidateSearchRequest,
     PreferredFilters,
+    RequiredFilterMatch,
     RequiredFilters,
     SearchMode,
 )
 from meyar.search.service import search_candidates
+from meyar.search.structured import _certification_present
 from meyar.services.tenant_repo import create_tenant
+from meyar.ui.service import _requirement_attributable_evidence
 
 
 def _evidence():
@@ -61,6 +65,27 @@ def _profile(
         ],
         "projects": [],
     }
+
+
+def test_curated_acams_alias_matches_only_the_canonical_certification() -> None:
+    canonical = CandidateProfileExtraction.model_validate(
+        _profile(certifications=["ACAMS Certified Anti-Money Laundering Specialist"])
+    )
+    unrelated = CandidateProfileExtraction.model_validate(
+        _profile(certifications=["ACAMS Advanced CAMS-Risk Management"])
+    )
+    unproven = CandidateProfileExtraction.model_validate(_profile(certifications=["ACAMS"]))
+    assert _certification_present(canonical, "ACAMS")
+    assert _certification_present(canonical, "ACAMS Certified Anti-Money Laundering Specialist")
+    assert not _certification_present(unrelated, "ACAMS")
+    assert not _certification_present(unproven, "ACAMS")
+    assert not _certification_present(canonical, "Money Laundering")
+    assert _requirement_attributable_evidence(
+        canonical, [RequiredFilterMatch(category="certification", value="ACAMS")]
+    ) == canonical.certifications[0].evidence
+    assert _requirement_attributable_evidence(
+        unproven, [RequiredFilterMatch(category="certification", value="ACAMS")]
+    ) == []
 
 
 def _employment(title: str, start: str, end: str | None, *, is_current: bool = False) -> dict:
