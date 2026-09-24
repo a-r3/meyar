@@ -72,3 +72,9 @@ jobs:
 
       - name: pytest
         run: uv run pytest -q
+
+      - name: local demo wrapper tests
+        run: |
+          bash -n ../scripts/demo-up.sh
+          bash -n ../scripts/demo-down.sh
+          python3 ../scripts/tests/test_demo_scripts.py

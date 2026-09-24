@@ -9,15 +9,6 @@
 # manual fallback and credential-handling notes.
 set -euo pipefail
 
-REPO_ROOT="$(git rev-parse --show-toplevel)"
-cd "$REPO_ROOT"
-
-BACKEND_DIR="$REPO_ROOT/backend"
-HOST="127.0.0.1"
-PORT="8000"
-HEALTH_URL="http://$HOST:$PORT/api/v1/health"
-LOGIN_URL="http://$HOST:$PORT/ui/login"
-
 SKIP_SYNC=false
 for arg in "$@"; do
   case "$arg" in
@@ -67,7 +58,23 @@ docker info >/dev/null 2>&1 \
 docker compose version >/dev/null 2>&1 \
   || fail "Docker Compose plugin not available ('docker compose version' failed)."
 
-### 2. backend/.env handling ##################################################
+### 2. Repo root discovery ####################################################
+# Anchored to this script's own location (BASH_SOURCE), never the caller's
+# current working directory — so demo-up.sh behaves identically whether
+# invoked from a non-Git directory or from inside an unrelated Git checkout.
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null)" \
+  || fail "This script's directory ($SCRIPT_DIR) is not inside a Git working tree."
+cd "$REPO_ROOT"
+
+BACKEND_DIR="$REPO_ROOT/backend"
+HOST="127.0.0.1"
+PORT="8000"
+HEALTH_URL="http://$HOST:$PORT/api/v1/health"
+LOGIN_URL="http://$HOST:$PORT/ui/login"
+
+### 3. backend/.env handling ##################################################
 
 ENV_FILE="$BACKEND_DIR/.env"
 ENV_EXAMPLE="$BACKEND_DIR/.env.example"
@@ -80,7 +87,7 @@ else
   log "Created backend/.env from backend/.env.example (local non-production defaults)."
 fi
 
-### 3. Dependencies ###########################################################
+### 4. Dependencies ###########################################################
 
 if [[ "$SKIP_SYNC" == true ]]; then
   log "Skipping dependency sync (--skip-sync)."
@@ -89,7 +96,7 @@ else
   (cd "$BACKEND_DIR" && uv sync --locked) || fail "uv sync --locked failed. Not continuing."
 fi
 
-### 4. PostgreSQL #############################################################
+### 5. PostgreSQL #############################################################
 
 log "Starting PostgreSQL (docker compose up -d postgres)..."
 docker compose up -d postgres || fail "docker compose up -d postgres failed."
@@ -115,7 +122,7 @@ if [[ "$pg_health" != "healthy" ]]; then
 fi
 log "postgres is healthy."
 
-### 5. Database migrations ####################################################
+### 6. Database migrations ####################################################
 
 log "Applying database migrations (alembic upgrade head)..."
 (cd "$BACKEND_DIR" && uv run alembic upgrade head) \
@@ -129,7 +136,7 @@ if [[ "$head_count" -ne 1 ]]; then
 fi
 log "Alembic: exactly one head confirmed."
 
-### 6. Demo credential seeding (authoritative: meyar seed-demo) ##############
+### 7. Demo credential seeding (authoritative: meyar seed-demo) ##############
 
 log "Seeding synthetic demo dataset and rotating demo credentials (meyar seed-demo)..."
 seed_status=0
@@ -156,7 +163,7 @@ if [[ -n "$human_username" && -n "$human_password" ]]; then
   credentials_extracted=true
 fi
 
-### 7. Ollama status (optional, best-effort, read-only) #######################
+### 8. Ollama status (optional, best-effort, read-only) #######################
 
 ollama_status="NOT AVAILABLE"
 if command -v ollama >/dev/null 2>&1 && ollama list >/dev/null 2>&1; then
@@ -171,7 +178,7 @@ if [[ "$ollama_status" == "NOT AVAILABLE" ]]; then
   log "Natural-language / semantic / hybrid AI actions require local Ollama."
 fi
 
-### 8. Server start ############################################################
+### 9. Server start ############################################################
 
 already_running=false
 
@@ -215,7 +222,7 @@ if [[ "$already_running" == false ]]; then
   fi
 fi
 
-### 9. Ready banner #############################################################
+### 10. Ready banner ############################################################
 
 git_sha="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 

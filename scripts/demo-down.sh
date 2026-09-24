@@ -10,19 +10,28 @@
 # try. See docs/LOCAL_DEMO.md.
 set -euo pipefail
 
-REPO_ROOT="$(git rev-parse --show-toplevel)"
+log() { printf '%s\n' "$*"; }
+fail() {
+  printf 'ERROR: %s\n' "$*" >&2
+  exit 1
+}
+
+for cmd in git docker; do
+  command -v "$cmd" >/dev/null 2>&1 \
+    || fail "Required command not found on PATH: $cmd. Install it and re-run."
+done
+
+# Anchored to this script's own location (BASH_SOURCE), never the caller's
+# current working directory — see scripts/demo-up.sh for the same pattern
+# and rationale.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null)" \
+  || fail "This script's directory ($SCRIPT_DIR) is not inside a Git working tree."
 cd "$REPO_ROOT"
 
 HOST="127.0.0.1"
 PORT="8000"
 HEALTH_URL="http://$HOST:$PORT/api/v1/health"
-
-log() { printf '%s\n' "$*"; }
-
-command -v docker >/dev/null 2>&1 || {
-  printf 'ERROR: docker not found on PATH.\n' >&2
-  exit 1
-}
 
 log "Stopping PostgreSQL (docker compose stop postgres)..."
 docker compose stop postgres

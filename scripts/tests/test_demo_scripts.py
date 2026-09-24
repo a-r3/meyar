@@ -32,10 +32,19 @@ import urllib.request
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEMO_UP = REPO_ROOT / "scripts" / "demo-up.sh"
-DEMO_DOWN = REPO_ROOT / "scripts" / "demo-down.sh"
+# Source of truth for the scripts under test. Each test copies these into a
+# fixture Git checkout (self.repo) so tests can independently control (a)
+# the repository that *contains* the script and (b) the caller's cwd at
+# invocation time — the two things demo-up.sh/demo-down.sh must never
+# conflate. See ScriptRepoAnchoringTestCase below.
+SOURCE_DEMO_UP = REPO_ROOT / "scripts" / "demo-up.sh"
+SOURCE_DEMO_DOWN = REPO_ROOT / "scripts" / "demo-down.sh"
 HOST = "127.0.0.1"
 PORT = 8000
+# Absolute path so subprocess execution never depends on PATH lookup for the
+# bash interpreter itself — needed by the missing-Git-prerequisite tests,
+# which deliberately run with a PATH that excludes real system directories.
+BASH_BIN = shutil.which("bash") or "/bin/bash"
 
 
 def _write_executable(path: Path, content: str) -> None:
@@ -48,7 +57,7 @@ FAKE_DOCKER = textwrap.dedent(
     #!/usr/bin/env bash
     set -euo pipefail
     if [[ -n "${DEMO_TEST_CALL_LOG:-}" ]]; then
-      printf 'docker %s\n' "$*" >> "$DEMO_TEST_CALL_LOG"
+      printf 'PWD=%s docker %s\n' "$PWD" "$*" >> "$DEMO_TEST_CALL_LOG"
     fi
     if [[ "$1" == "info" ]]; then
       exit "${FAKE_DOCKER_INFO_EXIT:-0}"
@@ -93,7 +102,7 @@ FAKE_UV = textwrap.dedent(
     #!/usr/bin/env bash
     set -euo pipefail
     if [[ -n "${DEMO_TEST_CALL_LOG:-}" ]]; then
-      printf 'uv %s\n' "$*" >> "$DEMO_TEST_CALL_LOG"
+      printf 'PWD=%s uv %s\n' "$PWD" "$*" >> "$DEMO_TEST_CALL_LOG"
     fi
     if [[ "$1" == "sync" ]]; then
       exit "${FAKE_UV_SYNC_EXIT:-0}"
@@ -257,7 +266,13 @@ class _RunningDemo:
         return "".join(self.lines)
 
 
-class DemoScriptsTestCase(unittest.TestCase):
+class _DemoScriptsFixtureTestCase(unittest.TestCase):
+    """Shared fixture/helpers for scripts under test. Not collected directly
+    (no test_* methods here) — see DemoScriptsTestCase for the original
+    behavioral tests and ScriptRepoAnchoringTestCase for repo-root-anchoring
+    regression tests; both subclass this so the fixture setup runs once per
+    test method without either suite re-running the other's assertions."""
+
     def setUp(self) -> None:
         if not _port_free():
             self.skipTest(f"port {PORT} is already in use on this machine; cannot safely test")
@@ -270,9 +285,20 @@ class DemoScriptsTestCase(unittest.TestCase):
         _write_executable(self.fake_bin / "docker", FAKE_DOCKER)
         _write_executable(self.fake_bin / "uv", FAKE_UV)
 
+        # self.repo is the fixture "script-containing repo" — the checkout
+        # demo-up.sh/demo-down.sh must anchor to via their own on-disk
+        # location, regardless of the caller's cwd at invocation time. The
+        # scripts under test are copied INTO it (not run from REPO_ROOT)
+        # precisely so tests can vary the caller's cwd independently of
+        # "which repo owns the script".
         self.repo = self.tmp / "repo"
         (self.repo / "backend").mkdir(parents=True)
         (self.repo / "backend" / ".env.example").write_text("MEYAR_ENV=development\n")
+        (self.repo / "scripts").mkdir()
+        self.demo_up = self.repo / "scripts" / "demo-up.sh"
+        self.demo_down = self.repo / "scripts" / "demo-down.sh"
+        _write_executable(self.demo_up, SOURCE_DEMO_UP.read_text())
+        _write_executable(self.demo_down, SOURCE_DEMO_DOWN.read_text())
         subprocess.run(["git", "init", "-q"], cwd=self.repo, check=True)
         subprocess.run(
             ["git", "config", "user.email", "test@example.invalid"], cwd=self.repo, check=True
@@ -322,14 +348,14 @@ class DemoScriptsTestCase(unittest.TestCase):
 
     # -- helpers --------------------------------------------------------
 
-    def run_up(self, extra_env=None, args=None, background=False, timeout=20):
+    def run_up(self, extra_env=None, args=None, background=False, timeout=20, cwd=None):
         env = dict(self.base_env)
         env.update(extra_env or {})
-        cmd = ["bash", str(DEMO_UP), *(args or [])]
+        cmd = [BASH_BIN, str(self.demo_up), *(args or [])]
         if background:
             return subprocess.Popen(
                 cmd,
-                cwd=self.repo,
+                cwd=cwd or self.repo,
                 env=env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -337,7 +363,7 @@ class DemoScriptsTestCase(unittest.TestCase):
             )
         return subprocess.run(
             cmd,
-            cwd=self.repo,
+            cwd=cwd or self.repo,
             env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -345,12 +371,12 @@ class DemoScriptsTestCase(unittest.TestCase):
             timeout=timeout,
         )
 
-    def run_down(self, extra_env=None, timeout=15):
+    def run_down(self, extra_env=None, timeout=15, cwd=None):
         env = dict(self.base_env)
         env.update(extra_env or {})
         return subprocess.run(
-            ["bash", str(DEMO_DOWN)],
-            cwd=self.repo,
+            [BASH_BIN, str(self.demo_down)],
+            cwd=cwd or self.repo,
             env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -366,11 +392,11 @@ class DemoScriptsTestCase(unittest.TestCase):
         out, _ = proc.communicate(timeout=timeout)
         return out
 
-    def run_up_until_ready(self, extra_env=None, args=None, timeout=15) -> _RunningDemo:
+    def run_up_until_ready(self, extra_env=None, args=None, timeout=15, cwd=None) -> _RunningDemo:
         """Start demo-up.sh in the background and block until its own
         readiness banner appears (steady state), not merely until the port
         answers — see _RunningDemo."""
-        proc = self.run_up(extra_env=extra_env, args=args, background=True)
+        proc = self.run_up(extra_env=extra_env, args=args, background=True, cwd=cwd)
         demo = _RunningDemo(proc)
         ready = demo.wait_for_ready(timeout=timeout)
         if not ready:
@@ -381,6 +407,8 @@ class DemoScriptsTestCase(unittest.TestCase):
             )
         return demo
 
+
+class DemoScriptsTestCase(_DemoScriptsFixtureTestCase):
     # -- env handling -----------------------------------------------------
 
     def test_env_created_when_missing(self):
@@ -557,6 +585,105 @@ class DemoScriptsTestCase(unittest.TestCase):
             server.wait(timeout=5)
 
 
+class ScriptRepoAnchoringTestCase(_DemoScriptsFixtureTestCase):
+    """Repo-root discovery must anchor to the script's own on-disk location
+    (BASH_SOURCE), never to the caller's current working directory at
+    invocation time. Reuses the shared fixture (self.repo is the
+    "script-containing repo"; self.demo_up/self.demo_down live inside it)
+    and adds a caller cwd that is deliberately NOT self.repo."""
+
+    def _make_nongit_cwd(self) -> Path:
+        d = self.tmp / "nongit-cwd"
+        d.mkdir()
+        return d
+
+    def _make_unrelated_git_repo(self) -> Path:
+        other = self.tmp / "unrelated-repo"
+        other.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=other, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.invalid"], cwd=other, check=True
+        )
+        subprocess.run(["git", "config", "user.name", "demo-script-tests"], cwd=other, check=True)
+        (other / "README.md").write_text("unrelated repo — must never be touched\n")
+        subprocess.run(["git", "add", "-A"], cwd=other, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "seed"], cwd=other, check=True)
+        return other
+
+    # -- non-Git caller cwd ---------------------------------------------------
+
+    def test_demo_up_works_from_nongit_cwd(self):
+        nongit = self._make_nongit_cwd()
+        env_path = self.repo / "backend" / ".env"
+        self.assertFalse(env_path.exists())
+        demo = self.run_up_until_ready(cwd=nongit)
+        demo.stop()
+        self.assertTrue(env_path.exists(), "demo-up.sh must operate on its own repo even from a non-Git cwd")
+        self.assertIn("MEYAR_ENV=development", env_path.read_text())
+
+    def test_demo_down_works_from_nongit_cwd(self):
+        nongit = self._make_nongit_cwd()
+        result = self.run_down(cwd=nongit)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("compose stop postgres", self.calls())
+
+    # -- unrelated Git repo as caller cwd --------------------------------------
+
+    def test_demo_up_anchors_to_script_repo_not_unrelated_git_cwd(self):
+        other = self._make_unrelated_git_repo()
+        env_path = self.repo / "backend" / ".env"
+        demo = self.run_up_until_ready(cwd=other)
+        demo.stop()
+        # Wrote into the script-containing repo (self.repo)...
+        self.assertTrue(env_path.exists())
+        # ...and never created/touched anything in the unrelated repo the
+        # caller happened to be standing in.
+        self.assertFalse((other / "backend").exists())
+        self.assertFalse((other / ".env").exists())
+
+    def test_demo_down_anchors_to_script_repo_not_unrelated_git_cwd(self):
+        other = self._make_unrelated_git_repo()
+        result = self.run_down(cwd=other)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        calls = self.calls()
+        # The fake docker stub logs its own $PWD — it must show the
+        # script-containing repo, never the unrelated caller cwd.
+        self.assertIn(f"PWD={self.repo} docker compose stop postgres", calls)
+        self.assertNotIn(str(other), calls)
+
+    # -- missing Git prerequisite -----------------------------------------------
+
+    def _run_without_git(self, script: Path) -> subprocess.CompletedProcess:
+        # PATH deliberately contains only the fake docker/uv stubs — no
+        # directory that could provide a real `git` (or `curl`) — so the
+        # prerequisite loop's "git" check is the one that must fail, before
+        # the script ever tries to invoke git.
+        env = dict(self.base_env)
+        env["PATH"] = str(self.fake_bin)
+        return subprocess.run(
+            [BASH_BIN, str(script)],
+            cwd=self.repo,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=10,
+        )
+
+    def test_demo_up_missing_git_prerequisite_fails_cleanly(self):
+        result = self._run_without_git(self.demo_up)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Required command not found on PATH: git", result.stdout)
+        self.assertNotIn("compose stop postgres", self.calls())
+        self.assertNotIn("run uvicorn", self.calls())
+
+    def test_demo_down_missing_git_prerequisite_fails_cleanly(self):
+        result = self._run_without_git(self.demo_down)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Required command not found on PATH: git", result.stdout)
+        self.assertNotIn("compose stop postgres", self.calls())
+
+
 class ScriptContentStaticChecksTestCase(unittest.TestCase):
     """Forbidden-pattern checks that don't need runtime simulation."""
 
@@ -564,39 +691,39 @@ class ScriptContentStaticChecksTestCase(unittest.TestCase):
         return path.read_text()
 
     def test_no_destructive_docker_compose_down_v(self):
-        for script in (DEMO_UP, DEMO_DOWN):
+        for script in (SOURCE_DEMO_UP, SOURCE_DEMO_DOWN):
             self.assertNotIn("compose down", self._read(script))
 
     def test_no_broad_process_kill(self):
-        for script in (DEMO_UP, DEMO_DOWN):
+        for script in (SOURCE_DEMO_UP, SOURCE_DEMO_DOWN):
             content = self._read(script)
             for forbidden in ("pkill", "killall", "kill -9 0", "kill 0"):
                 self.assertNotIn(forbidden, content)
 
     def test_no_sudo(self):
-        for script in (DEMO_UP, DEMO_DOWN):
+        for script in (SOURCE_DEMO_UP, SOURCE_DEMO_DOWN):
             self.assertNotIn("sudo", self._read(script))
 
     def test_no_eval(self):
-        for script in (DEMO_UP, DEMO_DOWN):
+        for script in (SOURCE_DEMO_UP, SOURCE_DEMO_DOWN):
             content = self._read(script)
             self.assertNotRegex(content, r"(^|\s)eval(\s|$)")
 
     def test_no_reset_flag(self):
-        self.assertNotIn("--reset", self._read(DEMO_UP))
+        self.assertNotIn("--reset", self._read(SOURCE_DEMO_UP))
 
     def test_uses_set_euo_pipefail(self):
-        for script in (DEMO_UP, DEMO_DOWN):
+        for script in (SOURCE_DEMO_UP, SOURCE_DEMO_DOWN):
             self.assertIn("set -euo pipefail", self._read(script))
 
     def test_no_lan_bind(self):
-        self.assertNotIn("0.0.0.0", self._read(DEMO_UP))
+        self.assertNotIn("0.0.0.0", self._read(SOURCE_DEMO_UP))
 
     def test_no_uvicorn_reload_flag(self):
-        self.assertNotIn("--reload", self._read(DEMO_UP))
+        self.assertNotIn("--reload", self._read(SOURCE_DEMO_UP))
 
     def test_scripts_are_executable(self):
-        for script in (DEMO_UP, DEMO_DOWN):
+        for script in (SOURCE_DEMO_UP, SOURCE_DEMO_DOWN):
             self.assertTrue(os.access(script, os.X_OK), f"{script} must be executable")
 
 
