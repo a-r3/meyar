@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import uuid
 from datetime import date
@@ -40,6 +41,8 @@ from meyar.services.browser_session_repo import (
     revoke_browser_session_by_id,
 )
 from meyar.services.candidate_document_repo import get_candidate_document
+from meyar.services.candidate_photo_service import PLACEHOLDER_JPEG, current_presentable_photo
+from meyar.services.candidate_repo import get_candidate
 from meyar.services.job_criteria_repo import create_criteria_version, get_criteria_version_by_id
 from meyar.services.job_repo import archive_job, create_job, find_active_duplicate_job
 from meyar.services.tenant_membership_repo import (
@@ -49,7 +52,8 @@ from meyar.services.tenant_membership_repo import (
 from meyar.services.tenant_repo import get_tenant
 from meyar.services.user_repo import get_user_by_username, set_password
 from meyar.storage.base import DocumentStorage
-from meyar.storage.dependency import get_document_storage
+from meyar.storage.dependency import get_document_storage, get_photo_storage
+from meyar.storage.photo import LocalPhotoStorage
 from meyar.ui.auth import (
     UI_SESSION_COOKIE,
     UIAccessError,
@@ -773,6 +777,41 @@ async def candidate_document_original(
         content=content,
         media_type=document.mime_type,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/candidates/{candidate_id}/photo", include_in_schema=False)
+async def candidate_photo(
+    candidate_id: uuid.UUID,
+    ctx: UIContext = Depends(require_ui_scopes("candidates:read")),
+    db: AsyncSession = Depends(get_db),
+    photo_storage: LocalPhotoStorage = Depends(get_photo_storage),
+) -> Response:
+    candidate = await get_candidate(db, tenant_id=ctx.tenant_id, candidate_id=candidate_id)
+    if candidate is None:
+        return Response(status_code=status.HTTP_404_NOT_FOUND)
+    photo = await current_presentable_photo(
+        db, tenant_id=ctx.tenant_id, candidate_id=candidate_id
+    )
+    content = PLACEHOLDER_JPEG
+    if photo is not None and photo.derived_storage_key is not None:
+        try:
+            stored = await photo_storage.read(
+                tenant_id=ctx.tenant_id, storage_key=photo.derived_storage_key
+            )
+            if hashlib.sha256(stored).hexdigest() == photo.derived_sha256:
+                content = stored
+            else:
+                logger.warning("Derived candidate photo integrity check failed")
+        except (OSError, ValueError):
+            logger.warning("Derived candidate photo could not be read")
+    return Response(
+        content=content, media_type="image/jpeg",
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "no-store",
+            "Content-Security-Policy": "default-src 'none'; img-src 'self'",
+        },
     )
 
 

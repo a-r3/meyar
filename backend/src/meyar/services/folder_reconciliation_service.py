@@ -22,12 +22,14 @@ from meyar.services.candidate_embedding_service import (
     embed_candidate_profile,
 )
 from meyar.services.candidate_identity_repo import get_latest_identity_version_for_document
+from meyar.services.candidate_photo_service import process_photo_for_document
 from meyar.services.candidate_profile_repo import get_latest_profile_version_for_document
 from meyar.services.folder_indexed_file_repo import list_folder_indexed_files
 from meyar.services.folder_indexer_service import FolderScanSummary, index_folder
 from meyar.services.identity_authority import authorize_identity_version
 from meyar.services.profile_authority import get_current_authorized_profile
 from meyar.storage.base import DocumentStorage
+from meyar.storage.dependency import get_photo_storage
 
 
 @dataclass(frozen=True)
@@ -341,6 +343,24 @@ async def reconcile_folder(
     # results are durable even if a later candidate's processing fails
     # unexpectedly before its own commit.
     await db.commit()
+
+    # Independent, idempotent photo pass. Every document has its own commit;
+    # any image failure is terminal and cannot make professional readiness fail.
+    photo_storage = get_photo_storage()
+    rows = await list_folder_indexed_files(
+        db, tenant_id=tenant_id, folder_source_id=scan_summary.folder_source_id
+    )
+    seen_photo_documents: set[uuid.UUID] = set()
+    for row in rows:
+        if row.candidate_id is None or row.candidate_document_id is None:
+            continue
+        if row.candidate_document_id in seen_photo_documents:
+            continue
+        seen_photo_documents.add(row.candidate_document_id)
+        await process_photo_for_document(
+            db, storage, photo_storage, tenant_id=tenant_id,
+            candidate_id=row.candidate_id, document_id=row.candidate_document_id,
+        )
 
     reconciliation_summary = await process_pending_candidates(
         db,

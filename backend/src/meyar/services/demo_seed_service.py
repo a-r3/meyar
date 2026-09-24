@@ -24,6 +24,8 @@ from dataclasses import dataclass, field
 from datetime import date
 
 from docx import Document
+from docx.shared import Inches
+from PIL import Image, ImageDraw
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -625,10 +627,38 @@ def _demo_candidates() -> list[_DemoCandidate]:
     ]
 
 
-def _build_docx(lines: list[str]) -> bytes:
+def _synthetic_portrait(index: int) -> bytes:
+    """Nine deterministic geometric illustrations; no person, font, or network asset."""
+    backgrounds = [
+        "#DCEBE4", "#E6E3F2", "#E2ECF2", "#F0E7DD", "#E2E9D8",
+        "#EDE1E7", "#DFE6EF", "#E8E7D9", "#E5E0ED",
+    ]
+    jackets = [
+        "#285B57", "#4E4678", "#355E77", "#795845", "#526E40",
+        "#794D63", "#365278", "#68633B", "#594F76",
+    ]
+    skin = ["#D79B75", "#B77D5D", "#E1AC84", "#A66F55", "#C98968"]
+    image = Image.new("RGB", (320, 420), backgrounds[index % 9])
+    draw = ImageDraw.Draw(image)
+    draw.ellipse((18, 245, 302, 535), fill=jackets[index % 9])
+    draw.rectangle((139, 211, 181, 286), fill=skin[index % 5])
+    draw.ellipse((75, 54, 245, 258), fill="#36333D")
+    draw.ellipse((91, 75, 229, 245), fill=skin[index % 5])
+    draw.pieslice((78, 53, 246, 172), 180, 360, fill="#36333D")
+    draw.ellipse((128, 157, 134, 163), fill="#36333D")
+    draw.ellipse((185, 157, 191, 163), fill="#36333D")
+    draw.arc((145, 180, 177, 202), 0, 180, fill="#7B4D49", width=2)
+    output = io.BytesIO()
+    image.save(output, format="PNG")
+    return output.getvalue()
+
+
+def _build_docx(lines: list[str], portrait_index: int | None = None) -> bytes:
     document = Document()
     for line in lines:
         document.add_paragraph(line)
+    if portrait_index is not None:
+        document.add_picture(io.BytesIO(_synthetic_portrait(portrait_index)), width=Inches(1.35))
     buffer = io.BytesIO()
     document.save(buffer)
     return buffer.getvalue()
@@ -1057,7 +1087,7 @@ async def seed_demo(
     documents_created = profiles_created = identities_created = embeddings_created = 0
     created_candidate_ids: list[uuid.UUID] = []
 
-    for spec in _demo_candidates():
+    for portrait_index, spec in enumerate(_demo_candidates()):
         candidate = await create_candidate(db, tenant_id=tenant.id)
         created_candidate_ids.append(candidate.id)
 
@@ -1071,7 +1101,7 @@ async def seed_demo(
             content_type=(
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             ),
-            data=_build_docx(spec.lines),
+            data=_build_docx(spec.lines, portrait_index),
             max_bytes=max_bytes,
         )
         documents_created += 1

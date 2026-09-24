@@ -67,10 +67,10 @@ def _profile(*skills: str, quote: str | None = None) -> dict:
 
 
 def _visible_text(html: str) -> str:
-    """Strips href/action/value URL-ish attribute contents so assertions
+    """Strips navigation and image URL attributes so assertions
     about 'not shown in visible content' aren't defeated by an id that
     necessarily appears inside a link's href for navigation to work."""
-    return re.sub(r'(?:href|action)="[^"]*"', "", html)
+    return re.sub(r'(?:href|action|src)="[^"]*"', "", html)
 
 
 async def _login_and_csrf(client: AsyncClient, username: str, password: str) -> str:

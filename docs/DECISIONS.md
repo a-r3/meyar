@@ -5653,3 +5653,26 @@ D-022) behind two scripts:
 commands were required before a demo. **Reversibility:** fully additive
 (two new scripts, one new test file, `docs/LOCAL_DEMO.md`/`README.md`
 pointer updates); no schema, API, or existing-command behavior changed.
+
+## D-070 — Candidate photo as identity-only presentation data (issue #60)
+
+Photo processing is a best-effort stage after a CandidateDocument commits.
+The original CV ingestion policy is unchanged. A disposable local worker
+uses bounded DOCX body-media relationship inspection or first-two-page
+pypdf XObject inspection plus Pillow; only one plausible static JPEG/PNG
+is accepted, sanitized, and re-encoded as a deterministic JPEG. Ambiguous,
+unsafe, missing, and failed results are immutable terminal
+`CandidatePhotoVersion` rows. The photo-only `photo/<tenant>/<opaque-id>`
+namespace is under the existing backed-up storage root, and the photo
+row has an exact tenant/candidate/document composite FK. The UI route
+checks the current authorized identity on the newest stored document
+(`created_at DESC, id DESC`) and the photo result for that document and
+extractor version. It never falls back to an older photo. No photo value
+enters professional facts, embeddings, search, planning, scoring,
+ranking, or LLM/VLM input. The nine demo portraits are locally generated
+geometric illustrations embedded in fresh synthetic DOCX files.
+
+Pillow is the only new image dependency. Issue #35 owns offline Apple
+Silicon wheel bundling; macOS worker memory behavior remains a deployment
+validation item. Deterministic shape heuristics cannot prove human
+identity: a large portrait-shaped logo is a residual presentation risk.

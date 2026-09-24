@@ -24,10 +24,12 @@ from meyar.services.candidate_document_repo import (
     list_candidate_documents,
 )
 from meyar.services.candidate_document_service import ingest_candidate_document
+from meyar.services.candidate_photo_service import process_photo_for_document
 from meyar.services.candidate_repo import create_candidate, get_candidate
 from meyar.services.candidate_service import delete_candidate_cascade
 from meyar.storage.base import DocumentStorage
-from meyar.storage.dependency import get_document_storage
+from meyar.storage.dependency import get_document_storage, get_photo_storage
+from meyar.storage.photo import LocalPhotoStorage
 from meyar.ui.service import get_candidate_detail_view
 
 router = APIRouter(tags=["candidates"])
@@ -132,9 +134,11 @@ async def delete_candidate(
     ctx: TenantContext = Depends(require_scope("candidates:write")),
     db: AsyncSession = Depends(get_db),
     storage: DocumentStorage = Depends(get_document_storage),
+    photo_storage: LocalPhotoStorage = Depends(get_photo_storage),
 ) -> None:
     deleted_count = await delete_candidate_cascade(
-        db, storage, tenant_id=ctx.tenant_id, candidate_id=candidate_id
+        db, storage, tenant_id=ctx.tenant_id, candidate_id=candidate_id,
+        photo_storage=photo_storage,
     )
     if deleted_count is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Candidate not found.")
@@ -160,6 +164,7 @@ async def post_candidate_document(
     ctx: TenantContext = Depends(require_scope("candidates:write")),
     db: AsyncSession = Depends(get_db),
     storage: DocumentStorage = Depends(get_document_storage),
+    photo_storage: LocalPhotoStorage = Depends(get_photo_storage),
     parser: DocumentParser = Depends(get_document_parser),
     settings: Settings = Depends(get_settings),
 ) -> CandidateDocumentOut:
@@ -188,7 +193,16 @@ async def post_candidate_document(
         ) from exc
 
     await db.commit()
-    return await _document_out(db, document, tenant_id=ctx.tenant_id)
+    document_id = document.id
+    await process_photo_for_document(
+        db, storage, photo_storage, tenant_id=ctx.tenant_id,
+        candidate_id=candidate_id, document_id=document_id,
+    )
+    durable_document = await get_candidate_document(
+        db, tenant_id=ctx.tenant_id, candidate_id=candidate_id, document_id=document_id
+    )
+    assert durable_document is not None
+    return await _document_out(db, durable_document, tenant_id=ctx.tenant_id)
 
 
 @router.get("/candidates/{candidate_id}/documents", response_model=list[CandidateDocumentOut])

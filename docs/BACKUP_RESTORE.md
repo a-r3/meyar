@@ -12,11 +12,12 @@ Two things must be backed up together, consistently, or a restore is
 incomplete:
 
 1. **PostgreSQL** — tenants, API-key metadata/hash, jobs/criteria,
-   candidate/document metadata, identity/profile versions, embedding
+   candidate/document metadata, identity/profile/photo versions, embedding
    metadata + vectors (pgvector), evaluations, audit events.
-2. **Document storage** — the raw CV bytes on disk under
-   `MEYAR_STORAGE_ROOT` (`LocalFilesystemStorage`), addressed by the
-   opaque `storage_key` values recorded in `candidate_documents`.
+2. **Storage root** — raw CV bytes (`LocalFilesystemStorage`) and sanitized
+   derived JPEGs in the `photo/<tenant>/<opaque-id>` namespace
+   (`LocalPhotoStorage`), both under `MEYAR_STORAGE_ROOT`. Photo keys and
+   SHA-256 values live only in `candidate_photo_versions`.
 
 A database-only or storage-only backup is not sufficient: a restored
 database with no matching storage directory has `candidate_documents`
@@ -82,10 +83,13 @@ At minimum, confirm:
 - expected row counts per tenant-scoped table (tenants, api_keys, jobs,
   job_criteria_versions, candidates, candidate_documents,
   candidate_profile_versions, candidate_identity_versions,
+  candidate_photo_versions,
   candidate_embedding_versions, evaluations, audit_events)
 - a known candidate's original CV opens via
   `GET /ui/candidates/{id}/documents/{id}/original` and its bytes are
   unchanged (`sha256` match)
+- the current authorized candidate photo row and its derived JPEG survive
+  restore with matching SHA-256; a foreign tenant cannot resolve the photo
 - a known `job_criteria_version_id` + `candidate_profile_version_id` +
   `evaluation_as_of_date` score request against the restore reuses the
   original `Evaluation` (`reused=true`) with the same `numeric_score` —

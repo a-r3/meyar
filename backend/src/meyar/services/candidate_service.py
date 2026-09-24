@@ -1,10 +1,13 @@
 import uuid
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meyar.models.candidate_photo_version import CandidatePhotoVersion
 from meyar.services.candidate_document_repo import list_candidate_documents
 from meyar.services.candidate_repo import delete_candidate_row, get_candidate
 from meyar.storage.base import DocumentStorage
+from meyar.storage.photo import LocalPhotoStorage
 
 
 async def delete_candidate_cascade(
@@ -13,6 +16,7 @@ async def delete_candidate_cascade(
     *,
     tenant_id: uuid.UUID,
     candidate_id: uuid.UUID,
+    photo_storage: LocalPhotoStorage,
 ) -> int | None:
     """Hard-deletes a candidate: removes every stored document's bytes
     from DocumentStorage, then deletes the DB rows (CandidateDocument and
@@ -24,6 +28,16 @@ async def delete_candidate_cascade(
         return None
 
     documents = await list_candidate_documents(db, tenant_id=tenant_id, candidate_id=candidate_id)
+    photo_keys = await db.scalars(
+        select(CandidatePhotoVersion.derived_storage_key).where(
+            CandidatePhotoVersion.tenant_id == tenant_id,
+            CandidatePhotoVersion.candidate_id == candidate_id,
+            CandidatePhotoVersion.derived_storage_key.is_not(None),
+        )
+    )
+    for key in photo_keys:
+        if key is not None:
+            await photo_storage.delete(tenant_id=tenant_id, storage_key=key)
     for document in documents:
         await storage.delete(storage_key=document.storage_key)
 

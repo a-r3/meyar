@@ -8,6 +8,14 @@ host, deploying an update, migrating a database, backing up and restoring,
 moving development to a new workstation, and handing the repository over to
 a new owner.
 
+Issue #60 adds Pillow to the locked backend runtime for local candidate
+photo extraction. The later issue #35 offline Mac package must include a
+compatible Apple Silicon Pillow wheel and verify it on the target host;
+this branch does not build that package. PDF raster decoding has a worker
+timeout and byte/pixel caps. Its Linux address-space limit is not a
+verified macOS production memory guarantee, so the target-Mac runtime
+rehearsal must validate resource behavior before deployment acceptance.
+
 Authority model:
 
 - The canonical application source is the approved Git repository

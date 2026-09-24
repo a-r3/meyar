@@ -4,6 +4,8 @@ import getpass
 import uuid
 from datetime import date
 
+from sqlalchemy import select
+
 from meyar.config import get_settings
 from meyar.core.business_date import resolve_business_date
 from meyar.core.roles import VALID_ROLES
@@ -19,6 +21,7 @@ from meyar.extraction.service import ExtractionPreconditionError, extract_candid
 from meyar.ingestion.dependency import get_document_parser
 from meyar.ingestion.folder_scanner import InvalidSourceRootError
 from meyar.llm.dependency import get_llm_provider
+from meyar.models.candidate_document import CandidateDocument
 from meyar.scoring.batch import BatchRankingError, rank_candidates_for_job
 from meyar.scoring.policy import ScoringPolicyError
 from meyar.search.planner_schemas import PlannerOutcome
@@ -32,6 +35,7 @@ from meyar.services.candidate_embedding_service import (
     EmbeddingPreconditionError,
     embed_candidate_profile,
 )
+from meyar.services.candidate_photo_service import process_photo_for_document
 from meyar.services.candidate_profile_repo import get_current_profile_version
 from meyar.services.demo_seed_service import DemoTenantAmbiguousError, reset_demo, seed_demo
 from meyar.services.folder_indexer_service import index_folder
@@ -49,7 +53,7 @@ from meyar.services.user_repo import (
     set_password,
     set_user_active,
 )
-from meyar.storage.dependency import get_document_storage
+from meyar.storage.dependency import get_document_storage, get_photo_storage
 
 
 async def _create_tenant(name: str) -> None:
@@ -521,6 +525,15 @@ async def _seed_demo(reset: bool) -> None:
                 evaluation_as_of_date=resolve_business_date(settings.business_timezone),
             )
             await db.commit()
+            documents = await db.scalars(
+                select(CandidateDocument).where(CandidateDocument.tenant_id == summary.tenant_id)
+            )
+            photo_storage = get_photo_storage()
+            for document in documents:
+                await process_photo_for_document(
+                    db, storage, photo_storage, tenant_id=summary.tenant_id,
+                    candidate_id=document.candidate_id, document_id=document.id,
+                )
     except DemoTenantAmbiguousError as exc:
         print(f"Refusing to proceed: {exc}")
         raise SystemExit(2) from exc

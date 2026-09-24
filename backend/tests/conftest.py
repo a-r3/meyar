@@ -15,8 +15,9 @@ from meyar.services.api_key_repo import create_api_key
 from meyar.services.tenant_membership_repo import create_membership
 from meyar.services.tenant_repo import create_tenant
 from meyar.services.user_repo import create_user
-from meyar.storage.dependency import get_document_storage
+from meyar.storage.dependency import get_document_storage, get_photo_storage
 from meyar.storage.local import LocalFilesystemStorage
+from meyar.storage.photo import LocalPhotoStorage
 
 DEFAULT_TEST_PASSWORD = "correct-horse-battery-staple-1"
 
@@ -78,6 +79,9 @@ async def client(db_session: AsyncSession, tmp_path: Path) -> AsyncGenerator[Asy
 
     app.dependency_overrides[get_db] = _override_get_db
     app.dependency_overrides[get_document_storage] = lambda: storage
+    app.dependency_overrides[get_photo_storage] = lambda: LocalPhotoStorage(
+        root=str(tmp_path / "storage")
+    )
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac

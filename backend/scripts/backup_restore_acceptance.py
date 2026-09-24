@@ -70,7 +70,9 @@ def _run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
 
 
 def _require_tools() -> None:
-    missing = [t for t in ("docker", "pg_dump", "pg_restore") if shutil.which(t) is None]
+    missing = [
+        t for t in ("docker", "pg_dump", "pg_restore", "pg_isready") if shutil.which(t) is None
+    ]
     if missing:
         print(
             f"ENVIRONMENTAL GATE: required tool(s) not available on this host: {missing}. "
@@ -107,7 +109,11 @@ def _start_disposable_postgres(name: str, port: int) -> None:
             ["docker", "exec", name, "pg_isready", "-U", PG_USER, "-d", PG_DB],
             capture_output=True,
         )
-        if result.returncode == 0:
+        host_ready = subprocess.run(
+            ["pg_isready", "-h", "localhost", "-p", str(port), "-U", PG_USER, "-d", PG_DB],
+            capture_output=True,
+        )
+        if result.returncode == 0 and host_ready.returncode == 0:
             return
         time.sleep(1)
     raise RuntimeError(f"disposable Postgres container {name!r} never became ready")
@@ -129,16 +135,19 @@ async def _seed_source(storage_root: Path) -> dict:
     )
     from meyar.services.candidate_embedding_repo import create_embedding_version
     from meyar.services.candidate_identity_repo import create_identity_version
+    from meyar.services.candidate_photo_service import process_photo_for_document
     from meyar.services.candidate_profile_repo import create_profile_version
     from meyar.services.candidate_repo import create_candidate
+    from meyar.services.demo_seed_service import _build_docx
     from meyar.services.job_criteria_repo import create_criteria_version
     from meyar.services.job_repo import create_job
     from meyar.services.tenant_repo import create_tenant
     from meyar.storage.local import LocalFilesystemStorage
+    from meyar.storage.photo import LocalPhotoStorage
 
     engine = create_async_engine(SOURCE_URL_ASYNC)
     storage = LocalFilesystemStorage(root=str(storage_root))
-    cv_bytes = b"%PDF-1.4 synthetic backup/restore acceptance fixture, not a real CV.\n"
+    cv_bytes = _build_docx(["Skills: Python, SQL", "Synthetic Backup Candidate"], 0)
 
     async with AsyncSession(engine, expire_on_commit=False) as db:
         tenant = await create_tenant(db, name="Backup-Restore-Acceptance-Tenant")
@@ -147,8 +156,14 @@ async def _seed_source(storage_root: Path) -> dict:
             tenant_id=tenant.id,
             prefix=prefix,
             key_hash=key_hash,
-            scopes=["jobs:read", "jobs:write", "candidates:read", "candidates:write",
-                    "evaluations:read", "evaluations:write"],
+            scopes=[
+                "jobs:read",
+                "jobs:write",
+                "candidates:read",
+                "candidates:write",
+                "evaluations:read",
+                "evaluations:write",
+            ],
             created_at=datetime.now(UTC),
         )
         db.add(api_key)
@@ -160,8 +175,8 @@ async def _seed_source(storage_root: Path) -> dict:
             db,
             tenant_id=tenant.id,
             candidate_id=candidate.id,
-            original_filename="synthetic.pdf",
-            mime_type="application/pdf",
+            original_filename="synthetic.docx",
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             byte_size=len(cv_bytes),
             sha256_hash=hashlib.sha256(cv_bytes).hexdigest(),
             storage_key=storage_key,
@@ -175,7 +190,13 @@ async def _seed_source(storage_root: Path) -> dict:
             language=None,
             content={
                 "pages": [
-                    {"page": 1, "blocks": [{"index": 0, "text": "Skills: Python, SQL"}]}
+                    {
+                        "page": 1,
+                        "blocks": [
+                            {"index": 0, "text": "Skills: Python, SQL"},
+                            {"index": 1, "text": "Synthetic Backup Candidate"},
+                        ],
+                    }
                 ]
             },
         )
@@ -222,7 +243,9 @@ async def _seed_source(storage_root: Path) -> dict:
             identity_content={
                 "full_name": {
                     "value": "Synthetic Backup Candidate",
-                    "evidence": [{"page": 1, "block_index": 0, "quote": "Skills: Python"}],
+                    "evidence": [
+                        {"page": 1, "block_index": 1, "quote": "Synthetic Backup Candidate"}
+                    ],
                 },
                 "email": None,
                 "phone": None,
@@ -272,6 +295,15 @@ async def _seed_source(storage_root: Path) -> dict:
             metadata={"candidate_id": str(candidate.id)},
         )
         await db.commit()
+        photo = await process_photo_for_document(
+            db,
+            storage,
+            LocalPhotoStorage(str(storage_root)),
+            tenant_id=tenant.id,
+            candidate_id=candidate.id,
+            document_id=document.id,
+        )
+        assert photo is not None and photo.status == "AVAILABLE"
 
         seeded = {
             "tenant_id": str(tenant.id),
@@ -279,6 +311,8 @@ async def _seed_source(storage_root: Path) -> dict:
             "candidate_id": str(candidate.id),
             "document_id": str(document.id),
             "storage_key": storage_key,
+            "photo_version_id": str(photo.id),
+            "photo_sha256": photo.derived_sha256,
             "cv_bytes_sha256": hashlib.sha256(cv_bytes).hexdigest(),
             "profile_version_id": str(profile_version.id),
             "identity_version_id": str(identity_version.id),
@@ -301,10 +335,13 @@ async def _verify_restored(storage_root: Path, seeded: dict) -> None:
     from meyar.models.candidate_document import CandidateDocument
     from meyar.models.candidate_embedding_version import CandidateEmbeddingVersion
     from meyar.models.candidate_identity_version import CandidateIdentityVersion
+    from meyar.models.candidate_photo_version import CandidatePhotoVersion
     from meyar.models.candidate_profile_version import CandidateProfileVersion
     from meyar.models.evaluation import Evaluation
     from meyar.models.tenant import Tenant
+    from meyar.services.candidate_photo_service import current_presentable_photo
     from meyar.storage.local import LocalFilesystemStorage
+    from meyar.storage.photo import LocalPhotoStorage
 
     engine = create_async_engine(DEST_URL_ASYNC)
     storage = LocalFilesystemStorage(root=str(storage_root))
@@ -318,6 +355,7 @@ async def _verify_restored(storage_root: Path, seeded: dict) -> None:
             ("candidate_documents", CandidateDocument),
             ("candidate_profile_versions", CandidateProfileVersion),
             ("candidate_identity_versions", CandidateIdentityVersion),
+            ("candidate_photo_versions", CandidatePhotoVersion),
             ("candidate_embedding_versions", CandidateEmbeddingVersion),
             ("evaluations", Evaluation),
             ("audit_events", AuditEvent),
@@ -349,6 +387,23 @@ async def _verify_restored(storage_root: Path, seeded: dict) -> None:
             "restored original-CV bytes do not match the seeded bytes"
         )
         print("original-CV bytes verified byte-identical via DocumentStorage (sha256 match)")
+        photo = await current_presentable_photo(
+            db, tenant_id=tenant_id, candidate_id=uuid.UUID(seeded["candidate_id"])
+        )
+        assert photo is not None and str(photo.id) == seeded["photo_version_id"]
+        assert photo.derived_storage_key is not None
+        derived = await LocalPhotoStorage(str(storage_root)).read(
+            tenant_id=tenant_id, storage_key=photo.derived_storage_key
+        )
+        assert hashlib.sha256(derived).hexdigest() == photo.derived_sha256
+        assert photo.derived_sha256 == seeded["photo_sha256"]
+        assert (
+            await current_presentable_photo(
+                db, tenant_id=uuid.uuid4(), candidate_id=uuid.UUID(seeded["candidate_id"])
+            )
+            is None
+        )
+        print("derived photo row, SHA, current authority and tenant isolation verified")
 
         profile_version = (
             await db.execute(
@@ -407,7 +462,7 @@ def main() -> None:
 
         print("== seeding synthetic tenant into disposable source database ==")
         seeded = asyncio.run(_seed_source(source_storage))
-        print(f"seeded: {seeded}")
+        print("seeded: synthetic tenant, candidate, document, and derived photo")
 
         print("== pg_dump (custom format) ==")
         _run(

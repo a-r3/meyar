@@ -44,6 +44,21 @@
 }
 
 * { box-sizing: border-box; }
+.candidate-avatar {
+  display: block;
+  width: 72px;
+  height: 72px;
+  flex: 0 0 auto;
+  object-fit: cover;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  background: var(--status-neutral-bg);
+  margin-bottom: 12px;
+}
+.candidate-avatar-large { width: 112px; height: 112px; margin: 0 18px 0 0; }
+@media (max-width: 640px) {
+  .candidate-avatar-large { width: 82px; height: 82px; margin-right: 10px; }
+}
 body {
   margin: 0;
   background: var(--canvas);
