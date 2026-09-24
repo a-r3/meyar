@@ -56,6 +56,8 @@
   margin-bottom: 12px;
 }
 .candidate-avatar-large { width: 112px; height: 112px; margin: 0 18px 0 0; }
+.candidate-profile-identity { display: flex; align-items: center; min-width: 0; }
+.candidate-profile-identity > div { min-width: 0; overflow-wrap: anywhere; }
 @media (max-width: 640px) {
   .candidate-avatar-large { width: 82px; height: 82px; margin-right: 10px; }
 }
@@ -479,6 +481,7 @@ tbody tr:hover { background: var(--surface-subtle); }
   }
   .quick-links, .card-grid, .two-column, .filter-grid { grid-template-columns: 1fr; }
   .page-heading, .card-heading { display: block; }
+  .candidate-profile-heading .status-badge { display: inline-block; margin-top: 12px; }
   .score-pill { margin-bottom: 10px; }
   .result-card { grid-template-columns: 44px minmax(0, 1fr); }
   .result-body, .panel { padding: 18px; }

@@ -921,6 +921,36 @@ async def test_candidate_detail_does_not_expose_version_identifiers(
     assert "Hazır" in response.text  # readiness badge, derived from profile_status
 
 
+async def test_candidate_detail_groups_photo_and_name_before_status(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
+) -> None:
+    tenant, user, password, _membership = tenant_and_user
+    candidate, profile = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=_profile("Python")
+    )
+    await _identity(
+        db_session, tenant_id=tenant.id, candidate=candidate, profile=profile, name="Synthetic"
+    )
+    await db_session.commit()
+    await _login_and_csrf(client, user.username, password)
+
+    response = await client.get(f"/ui/candidates/{candidate.id}")
+    assert response.status_code == 200
+    assert re.search(
+        rf'<div class="page-heading candidate-profile-heading">\s*'
+        rf'<div class="candidate-profile-identity">\s*'
+        rf'<img class="candidate-avatar candidate-avatar-large" '
+        rf'src="/ui/candidates/{candidate.id}/photo"[^>]*>\s*'
+        rf'<div>.*?<h1>Synthetic</h1>.*?</div>\s*</div>\s*'
+        rf'<span class="status-badge"',
+        response.text,
+        re.DOTALL,
+    )
+
+
 async def test_evaluation_history_resolves_human_readable_job_title(
     client: AsyncClient,
     db_session: AsyncSession,
