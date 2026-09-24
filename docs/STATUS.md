@@ -78,6 +78,12 @@ dependency provisioning, host install layout, plist
 come); issue #36 remains OPEN and not started; issue #46 remains OPEN and
 separate.
 
+**Chore (D-069, not a #35/#36/#46 slice):** `scripts/demo-up.sh`/
+`scripts/demo-down.sh` — a one-command wrapper around the existing,
+unmodified local-demo flow (`docs/LOCAL_DEMO.md`, issue #25, D-022) for
+presentation operator UX. No backend/product/`seed-demo` behavior
+changed. See D-069 for full detail.
+
 **Next phase: issue #36 — Real Target-Mac Model Selection & Benchmark
 (M9).** Executes `backend/scripts/target_mac_benchmark.py` on the actual
 confirmed reference hardware (Mac mini M4 Pro, 12-core CPU/16-core

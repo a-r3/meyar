@@ -285,6 +285,11 @@ git config --get core.hooksPath  # must print .githooks
 
 ## Local backend setup
 
+For a one-command local demo/presentation bootstrap (Docker Postgres,
+migrations, synthetic seed data, and a loopback server) see
+`docs/LOCAL_DEMO.md` — `./scripts/demo-up.sh` / `./scripts/demo-down.sh`.
+The manual step-by-step setup below remains the full/general path.
+
 From the repository root:
 
 ```bash

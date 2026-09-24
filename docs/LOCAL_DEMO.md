@@ -6,9 +6,92 @@ beginner tutorial — see `README.md` for full setup detail and `docs/
 DEPLOYMENT_AND_OPERATIONS.md` for the deployment-host runbook. This document
 does not replace either.
 
-Chore-level, presentation-readiness work only (issue #25) — it changes no
-search/matching/scoring behavior and adds no production code path. See
-`meyar.services.demo_seed_service` for the exact implementation.
+Chore-level, presentation-readiness work only (issue #25, and the
+`scripts/demo-up.sh`/`scripts/demo-down.sh` one-command wrapper below) — it
+changes no search/matching/scoring behavior and adds no production code
+path. See `meyar.services.demo_seed_service` for the exact seeding
+implementation.
+
+## 0. One command (recommended)
+
+```bash
+./scripts/demo-up.sh
+```
+
+This wraps the exact manual flow in §1–§8 below: prerequisite checks,
+`backend/.env` bootstrap, `uv sync --locked`, `docker compose up -d
+postgres` with a bounded health-wait, `alembic upgrade head` (+ a
+single-head check), `uv run meyar seed-demo`, a best-effort read-only
+Ollama status check, and a loopback-only Uvicorn server — then prints a
+concise summary and keeps the server running in the foreground:
+
+```
+MEYAR LOCAL DEMO READY
+
+Login:
+  http://127.0.0.1:8000/ui/login
+
+Username:
+  demo.hr
+
+Temporary password (shown once):
+  <fresh password printed by seed-demo>
+
+Candidate Library:
+  http://127.0.0.1:8000/ui/library
+...
+Ollama:
+  AVAILABLE
+  (or: NOT AVAILABLE — structured/demo screens still work)
+
+Stop:
+  Ctrl+C
+```
+
+Notes:
+
+- **The password is rotated every run** (`seed-demo` behavior, unchanged —
+  see §5) and **shown once**; the wrapper never persists it to a file, and
+  never writes it to `backend/.env` or anywhere else on disk.
+- The API key printed by `seed-demo` is a separate **machine** credential
+  for REST API/Swagger testing — it is not the UI password and is not
+  repeated in the wrapper's final summary.
+- If the wrapper cannot safely isolate just the human password from
+  `seed-demo`'s output (e.g. its format changes unexpectedly), it falls
+  back to printing `seed-demo`'s full authoritative credential block
+  verbatim rather than guessing — never silently degraded.
+- `backend/.env` is created from `backend/.env.example` only if missing;
+  an existing `backend/.env` (including any owner customization) is never
+  touched.
+- Ollama is optional. If unavailable, the wrapper prints a truthful
+  warning and continues — every screen listed in §9 below still works.
+- **Ctrl+C** stops exactly the Uvicorn process `demo-up.sh` started (no
+  broad process kill). Docker/Postgres are deliberately left running —
+  data persists between demo sessions.
+- If MEYAR is already running and healthy on `127.0.0.1:8000`, the
+  wrapper detects and reuses it instead of starting a duplicate. If an
+  *unrelated* process holds the port, it fails with a clear message
+  rather than guessing or killing anything.
+- `./scripts/demo-up.sh --skip-sync` skips `uv sync --locked` for a
+  faster repeat run when dependencies haven't changed.
+- This is a **local presentation convenience only** — not a production
+  deployment path. It never binds beyond loopback and never runs
+  `--reload`.
+
+To stop Postgres afterward (non-destructive — no volume deletion, no data
+reset):
+
+```bash
+./scripts/demo-down.sh
+```
+
+If MEYAR itself is still running (e.g. a previous `demo-up.sh` foreground
+session you haven't Ctrl+C'd yet), `demo-down.sh` reports that rather than
+guessing which process to stop — see §12 for why.
+
+The rest of this document is the manual, step-by-step fallback — useful
+for troubleshooting, or when you want to run/inspect an individual step
+(e.g. re-running migrations only).
 
 ## 1. Prerequisites
 

@@ -5574,3 +5574,82 @@ clean, `git diff --check` clean, focused `test_ops_build_release.py` +
 backend suite (1,895 tests) green. PR #56 remains open for re-audit;
 issue #36 and issue #46 remain untouched and unstarted; no merge, no
 force push, no history rewrite performed.
+
+## D-069 — One-command local demo bootstrap: `demo-up.sh`/`demo-down.sh`
+
+**Date:** 2026-09-24
+**Decision:** Chore-level operator-UX work (presentation convenience, not a
+Slice/issue-#35 deployment artifact, not #36, not #46) wrapping the
+already-accepted manual local-demo flow (`docs/LOCAL_DEMO.md`, issue #25,
+D-022) behind two scripts:
+1. **`scripts/demo-up.sh`** sequences, and fails closed at, the exact
+   existing manual steps: prerequisite checks (git/docker/uv/curl,
+   `docker info`, `docker compose version`; no auto-install, no sudo) →
+   `backend/.env` bootstrap only if missing (an existing file, including
+   owner customization, is never touched or overwritten) → `uv sync
+   --locked` → `docker compose up -d postgres` with a bounded
+   `docker compose ps --format '{{.Health}}'` poll (default 60s; no fixed
+   `sleep` substitute) → `alembic upgrade head` + an `alembic heads`
+   single-head check → the existing, unmodified `uv run meyar seed-demo`
+   (rotates both credentials every run, as already documented) → a
+   best-effort, read-only `ollama list` status check (never a hard
+   prerequisite, never auto-pulls/starts anything) → a loopback-only
+   (`127.0.0.1`, no `--reload`) Uvicorn child process, health-polled via
+   `/api/v1/health` before printing a concise ready banner. Any step
+   failing stops the sequence before the next one runs (e.g. a migration
+   failure never reaches seeding or server start).
+2. **No backend/product behavior changed.** `meyar seed-demo` itself is
+   untouched — the wrapper only captures its stdout in a shell variable
+   (never a file) to extract just the human `demo.hr` username/password
+   for a concise banner; if that extraction ever fails for any reason, it
+   falls back to printing `seed-demo`'s full authoritative credential
+   block verbatim rather than guessing at a shorter summary. The API key
+   secret is never repeated in the wrapper's own banner.
+3. **Port-conflict handling never guesses or kills.** If `127.0.0.1:8000`
+   already answers `/api/v1/health` successfully, the existing process is
+   reused (no duplicate server). If the port is held by anything else,
+   `demo-up.sh` fails with a clear message and touches nothing.
+4. **Signal handling targets only the PID this invocation started.** The
+   Uvicorn child is launched via `(cd backend && exec uv run uvicorn ...) &`
+   so `$!` tracks the exact process through both `exec` hops; Ctrl+C
+   sends `SIGTERM` to only that PID and waits for it — no `pkill`,
+   `killall`, or process-group-wide signal. `docker`/Postgres are left
+   running on exit (not stopped automatically) since demo data is meant
+   to persist between sessions.
+5. **`scripts/demo-down.sh` is deliberately narrow:** `docker compose
+   stop postgres` only — no `-v`, no volume/database reset, no `.env`
+   deletion, no process killing by pattern. If MEYAR still appears to be
+   answering on port 8000, it reports that truthfully rather than
+   guessing which host process to stop (a foreground `demo-up.sh` session
+   already owns its own child directly; nothing else can identify it
+   safely).
+6. **Test harness (`scripts/tests/test_demo_scripts.py`):** a standalone
+   Python `unittest` harness (not wired into backend `pytest`, whose
+   `testpaths` is scoped to `backend/tests`) stubs `docker`/`uv`/`ollama`
+   via an isolated fake `PATH` entry — no real Docker daemon, Postgres, or
+   Python backend is touched — while using real `git`/`curl`/`bash`/
+   coreutils. Covers: env-file create-only-if-missing/never-overwritten,
+   missing-prerequisite failure, Postgres-unhealthy timeout blocking
+   migration, migration/multi-head/seed failures each blocking every
+   later step, exactly-once credential printing with the API key never
+   repeated, Ollama-unavailable-is-warning-only (and available-is-
+   reported), both port-conflict branches (unrelated process left
+   untouched; already-healthy MEYAR reused), Ctrl+C cleanup targeting
+   only the owned PID while an unrelated process survives, no secret ever
+   written to a file by the wrapper, and static-content checks (no
+   `sudo`/`eval`/`pkill`/`killall`/`compose down`/`0.0.0.0`/`--reload`/
+   `--reset`). One real timing bug was found and fixed *in the test
+   harness itself* during this work, not in the scripts: an external
+   TCP/HTTP probe from the test process could observe the Uvicorn stub as
+   healthy a moment before `demo-up.sh`'s own internal readiness loop
+   completed its own check; sending Ctrl+C in that narrow window raced
+   the script's own cleanup trap against its own next poll iteration and
+   surfaced a confusing (but still safe — the process was still correctly
+   stopped, nothing leaked) "exited before becoming healthy" message.
+   Fixed by having the harness wait for the script's own literal
+   "MEYAR LOCAL DEMO READY" banner (steady state) before signaling,
+   rather than racing a side-channel probe against it.
+**Why:** presentation-readiness operator UX only — too many manual
+commands were required before a demo. **Reversibility:** fully additive
+(two new scripts, one new test file, `docs/LOCAL_DEMO.md`/`README.md`
+pointer updates); no schema, API, or existing-command behavior changed.
