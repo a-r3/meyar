@@ -398,12 +398,15 @@ SHA256SUMS
 ```
 
 `SHA256SUMS` binds both the artifact and the external manifest, in the
-exact format `verify-release`/`parse_sha256sums` already expects. Each
-of the three files is created with `O_CREAT | O_EXCL` relative to a
-dir-fd anchored to `--output-dir` — never a `Path.exists()` pre-check, so
-no overwrite race. If any of the three targets already exists, the build
-fails (`OUTPUT_TARGET_EXISTS`) before anything is replaced, and a
-pre-existing file at that path is never touched. If a later step fails
+exact format `verify-release`/`parse_sha256sums` already expects. An
+early `Path.exists()` check against all three targets gives a fast,
+clear `OUTPUT_TARGET_EXISTS` failure before any build work happens, but
+that check is never trusted as the race/security boundary: every actual
+file creation still goes through `O_CREAT | O_EXCL` relative to a dir-fd
+anchored to `--output-dir`. If a race introduces one of the three
+targets after the early check passes, `O_EXCL` still refuses the
+create — so no overwrite race exists either way. A pre-existing file at
+that path is never touched. If a later step fails
 after this invocation has already created one or more of the three
 files, only the file(s) *this invocation itself created* are removed
 (identity-checked via `(st_dev, st_ino)`, mirroring
