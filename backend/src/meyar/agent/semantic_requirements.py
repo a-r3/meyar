@@ -270,6 +270,10 @@ _COORD_RE = re.compile(r"\s+(?:and|ve(?:\s+ya)?|or|while|whereas)\s+", re.I)
 _LEVEL_COMPARATOR_TAIL_RE = re.compile(
     r"(?i)^(?:daha\s+(?:yuksek|asagi)|higher|lower|above|below)\b"
 )
+_DOWNWARD_LEVEL_COMPARATOR_RE = re.compile(
+    r"(?i)\b(?:a1|a2|b1|b2|c1|c2)\s+(?:or|ve\s+ya)\s+"
+    r"(?:lower|below|daha\s+asagi)\b"
+)
 _CEFR_BEFORE_COORD_RE = re.compile(r"(?i)\b(?:a1|a2|b1|b2|c1|c2)\s*$")
 _RESULT_TAIL_RE = re.compile(
     r"\s+(?:(?:olan|bilen)\w*\s+)?(?:namized\w*\s+)?"
@@ -429,6 +433,11 @@ def _coordinated_matches(clause: str) -> list[re.Match[str]]:
             and _LEVEL_COMPARATOR_TAIL_RE.match(folded[item.end() :])
         )
     ]
+
+
+def has_unsupported_cefr_comparator(text: str) -> bool:
+    """A maximum CEFR level cannot be represented by the minimum-only filter."""
+    return _DOWNWARD_LEVEL_COMPARATOR_RE.search(_fold(text)) is not None
 
 
 def _split_units(text: str) -> list[tuple[int, int, tuple[int, int] | None]]:

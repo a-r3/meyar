@@ -125,6 +125,103 @@ async def test_owner_compound_query_keeps_both_hard_filters_without_model(
     assert request.preferred_filters.language_levels == []
 
 
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Show candidates with English B2 or higher.",
+        "Show candidates with English B2 or above.",
+        "İngilis dili B2 və ya daha yüksək olan namizədləri göstər.",
+    ],
+)
+async def test_upward_cefr_comparator_preserves_minimum_b2(
+    query: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def no_audit(*args, **kwargs) -> None:
+        pass
+
+    monkeypatch.setattr(planner_service, "_audit_plan_result", no_audit)
+    llm = FakeLLMProvider()
+    result = await plan_candidate_search(
+        None,  # type: ignore[arg-type]
+        llm,
+        tenant_id=uuid.uuid4(),
+        natural_language_request=query,
+        as_of_date=OWNER_AS_OF_DATE,
+        embedding_config=_config(),
+    )
+    assert result.outcome == PlannerOutcome.EXECUTABLE
+    assert result.search_request is not None
+    assert result.search_request.mode == SearchMode.STRUCTURED_ONLY
+    levels = result.search_request.required_filters.language_levels
+    assert [(item.value, item.required_level) for item in levels] == [
+        ("English", "B2")
+    ]
+    assert llm.call_count == 0
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "English B2 or lower",
+        "English B2 or below",
+        "İngilis dili B2 və ya daha aşağı",
+    ],
+)
+async def test_downward_cefr_comparator_fails_closed_before_model_repair(
+    query: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def no_audit(*args, **kwargs) -> None:
+        pass
+
+    monkeypatch.setattr(planner_service, "_audit_plan_result", no_audit)
+    llm = FakeLLMProvider(
+        planner_draft=PlannerDraft(
+            required_filters=RequiredFilters(
+                language_levels=[LanguageLevelFilter(value="English", required_level="B2")]
+            )
+        )
+    )
+    result = await plan_candidate_search(
+        None,  # type: ignore[arg-type]
+        llm,
+        tenant_id=uuid.uuid4(),
+        natural_language_request=query,
+        as_of_date=OWNER_AS_OF_DATE,
+        embedding_config=_config(),
+    )
+    assert result.outcome == PlannerOutcome.UNSUPPORTED_SEMANTICS
+    assert PlannerReasonCode.LANGUAGE_PROFICIENCY_UNSUPPORTED in result.reason_codes
+    assert result.search_request is None
+    assert llm.call_count == 0
+
+
+async def test_downward_cefr_never_searches_c1_or_c2_profiles(db_session: AsyncSession) -> None:
+    tenant = await _tenant(db_session, "DownwardCEFR")
+    for level in ("C1", "C2"):
+        profile = _profile([])
+        profile["languages"] = [
+            {"language": "English", "proficiency": level, "evidence": synthetic_evidence(level)}
+        ]
+        await seed_candidate_with_profile(
+            db_session, tenant_id=tenant.id, profile_content=profile
+        )
+    await db_session.commit()
+
+    llm = FakeLLMProvider()
+    result = await plan_and_search_candidates(
+        db_session,
+        llm,
+        tenant_id=tenant.id,
+        natural_language_request="English B2 or lower",
+        as_of_date=OWNER_AS_OF_DATE,
+        embedding_config=_config(),
+    )
+    assert result.plan.outcome == PlannerOutcome.UNSUPPORTED_SEMANTICS
+    assert result.plan.search_request is None
+    assert result.search_response is None
+    assert llm.call_count == 0
+
+
 async def test_unresolved_material_coordination_fails_closed_before_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

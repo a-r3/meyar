@@ -3,7 +3,11 @@ from datetime import date
 
 from meyar.core.domain_terms import canonicalize_domain
 from meyar.evaluation.experience import merge_and_sum_years, parse_year, ranges_overlap
-from meyar.evaluation.normalization import normalize_skill_name, normalize_text
+from meyar.evaluation.normalization import (
+    normalize_certification_name,
+    normalize_skill_name,
+    normalize_text,
+)
 from meyar.schemas.candidate_profile import CandidateProfileExtraction, EvidenceRef
 from meyar.schemas.criteria import CriterionIn, CriterionKind
 from meyar.schemas.evaluation import (
@@ -70,7 +74,7 @@ def evaluate_skill(
 def evaluate_certification(
     criterion: CriterionIn, profile: CandidateProfileExtraction
 ) -> CriterionResult:
-    target = normalize_text(criterion.value or "")
+    target = normalize_certification_name(criterion.value or "")
     for cert in profile.certifications:
         if normalize_text(cert.name) == target:
             return _finalize(

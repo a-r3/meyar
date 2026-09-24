@@ -12,7 +12,11 @@ from meyar.agent.schemas import (
     SemanticRequirementState,
     SupportedInputLanguage,
 )
-from meyar.agent.semantic_requirements import SemanticAnalysis, analyze_hr_text
+from meyar.agent.semantic_requirements import (
+    SemanticAnalysis,
+    analyze_hr_text,
+    has_unsupported_cefr_comparator,
+)
 from meyar.core.result_count import ResultCountState
 from meyar.embedding.provider import EmbeddingProvider
 from meyar.evaluation.normalization import (
@@ -258,6 +262,19 @@ async def plan_candidate_search(
             provenance=configured_provenance,
             attempt_count=0,
             reason_codes=exc.reason_codes,
+        )
+        await _audit_plan_result(db, tenant_id=tenant_id, result=result)
+        return result
+
+    if has_unsupported_cefr_comparator(natural_language_request):
+        # A typed language level is a minimum. Do not let either parser or
+        # model turn an explicit maximum into that opposite requirement.
+        result = _result(
+            outcome=PlannerOutcome.UNSUPPORTED_SEMANTICS,
+            request_sha256=request_hash,
+            provenance=DETERMINISTIC_PLANNER_PROVENANCE,
+            attempt_count=0,
+            reason_codes=[PlannerReasonCode.LANGUAGE_PROFICIENCY_UNSUPPORTED],
         )
         await _audit_plan_result(db, tenant_id=tenant_id, result=result)
         return result

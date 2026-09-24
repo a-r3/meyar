@@ -12,9 +12,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 import meyar.scoring.batch as batch_module
 from meyar.models.audit_event import AuditEvent
+from meyar.models.evaluation import Evaluation
 from meyar.schemas.criteria import CriterionIn, CriterionKind, CriterionType
 from meyar.scoring.batch import rank_candidates_for_job
 from meyar.scoring.policy import ScoringPolicyError
+from meyar.search.schemas import CandidateSearchRequest, RequiredFilters, SearchMode
+from meyar.search.service import search_candidates
 from meyar.services.candidate_identity_repo import create_identity_version
 from meyar.services.candidate_profile_repo import list_current_profile_versions_for_tenant
 from meyar.services.candidate_repo import create_candidate, list_candidates_for_tenant
@@ -58,6 +61,60 @@ def _profile(*skills: str) -> dict:
         **EMPTY,
         "skills": [{"name": skill, "evidence": synthetic_evidence(skill)} for skill in skills],
     }
+
+
+async def test_acams_ranking_uses_same_bounded_identity_as_structured_search(
+    db_session: AsyncSession, tenant_and_key
+) -> None:
+    tenant, _key, _plaintext = tenant_and_key
+    canonical = "ACAMS Certified Anti-Money Laundering Specialist"
+    seeded = {}
+    for name in (canonical, "ACAMS Advanced CAMS-Risk Management", "ACAMS"):
+        content = {
+            **EMPTY,
+            "certifications": [{"name": name, "evidence": synthetic_evidence(name)}],
+        }
+        candidate, _version = await seed_candidate_with_profile(
+            db_session, tenant_id=tenant.id, profile_content=content
+        )
+        seeded[name] = candidate.id
+    criteria = await _criteria(
+        db_session,
+        tenant.id,
+        [
+            CriterionIn(
+                id="cams",
+                kind=CriterionKind.CERTIFICATION,
+                type=CriterionType.MUST_HAVE,
+                label="ACAMS",
+                value="ACAMS",
+                weight=1,
+            )
+        ],
+        eligible_only=True,
+    )
+    ranking = await rank_candidates_for_job(
+        db_session,
+        tenant_id=tenant.id,
+        job_criteria_version_id=criteria.id,
+        evaluation_as_of_date=AS_OF,
+    )
+    search = await search_candidates(
+        db_session,
+        tenant_id=tenant.id,
+        request=CandidateSearchRequest(
+            mode=SearchMode.STRUCTURED_ONLY,
+            required_filters=RequiredFilters(certifications=["ACAMS"]),
+        ),
+    )
+    expected = {seeded[canonical]}
+    assert {item.candidate_id for item in search.results} == expected
+    assert {item.candidate_id for item in ranking.results} == expected
+    assert ranking.results[0].numeric_score == Decimal("100.00")
+    evaluation = await db_session.get(Evaluation, ranking.results[0].evaluation_id)
+    assert evaluation is not None
+    assert evaluation.criterion_results[0]["status"] == "MATCH"
+    assert evaluation.criterion_results[0]["evidence"] == synthetic_evidence(canonical)
 
 
 async def _criteria(
