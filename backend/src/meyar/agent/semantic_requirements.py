@@ -271,7 +271,7 @@ _LEVEL_COMPARATOR_TAIL_RE = re.compile(
     r"(?i)^(?:daha\s+(?:yuksek|asagi)|higher|lower|above|below)\b"
 )
 _DOWNWARD_LEVEL_COMPARATOR_RE = re.compile(
-    r"(?i)\b(?:a1|a2|b1|b2|c1|c2)\s+(?:or|ve\s+ya)\s+"
+    r"(?i)\b(?:a1|a2|b1|b2|c1|c2)\s+(?:and|or|ve(?:\s+ya)?)\s+"
     r"(?:lower|below|daha\s+asagi)\b"
 )
 _CEFR_BEFORE_COORD_RE = re.compile(r"(?i)\b(?:a1|a2|b1|b2|c1|c2)\s*$")

@@ -164,7 +164,10 @@ async def test_upward_cefr_comparator_preserves_minimum_b2(
     [
         "English B2 or lower",
         "English B2 or below",
+        "English B2 and lower",
+        "English B2 and below",
         "İngilis dili B2 və ya daha aşağı",
+        "İngilis dili B2 və daha aşağı",
     ],
 )
 async def test_downward_cefr_comparator_fails_closed_before_model_repair(
@@ -217,6 +220,51 @@ async def test_downward_cefr_never_searches_c1_or_c2_profiles(db_session: AsyncS
         embedding_config=_config(),
     )
     assert result.plan.outcome == PlannerOutcome.UNSUPPORTED_SEMANTICS
+    assert result.plan.search_request is None
+    assert result.search_response is None
+    assert llm.call_count == 0
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "English B2 and lower",
+        "İngilis dili B2 və daha aşağı",
+    ],
+)
+async def test_downward_cefr_and_connector_never_searches_c1_or_c2_profiles(
+    query: str, db_session: AsyncSession
+) -> None:
+    """`and`/plain `və` downward forms must fail closed exactly like `or`/`və ya`.
+
+    Regression for the P0 where `_DOWNWARD_LEVEL_COMPARATOR_RE` only rejected
+    `or`/`ve ya` connectors while `_coordinated_matches()` already treated
+    `and`/bare `ve` as an equivalent connector for the CEFR comparator tail —
+    an unguarded `and`/`ve` form could silently become `required_level=B2`
+    (a minimum), falsely matching C1/C2 candidates.
+    """
+    tenant = await _tenant(db_session, "DownwardCEFRAndConnector")
+    for level in ("C1", "C2"):
+        profile = _profile([])
+        profile["languages"] = [
+            {"language": "English", "proficiency": level, "evidence": synthetic_evidence(level)}
+        ]
+        await seed_candidate_with_profile(
+            db_session, tenant_id=tenant.id, profile_content=profile
+        )
+    await db_session.commit()
+
+    llm = FakeLLMProvider()
+    result = await plan_and_search_candidates(
+        db_session,
+        llm,
+        tenant_id=tenant.id,
+        natural_language_request=query,
+        as_of_date=OWNER_AS_OF_DATE,
+        embedding_config=_config(),
+    )
+    assert result.plan.outcome == PlannerOutcome.UNSUPPORTED_SEMANTICS
+    assert PlannerReasonCode.LANGUAGE_PROFICIENCY_UNSUPPORTED in result.plan.reason_codes
     assert result.plan.search_request is None
     assert result.search_response is None
     assert llm.call_count == 0
