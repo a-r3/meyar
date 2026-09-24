@@ -30,8 +30,11 @@ class LocalPhotoStorage:
         path = self._path_for(key, tenant_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
-        temporary.write_bytes(content)
-        os.replace(temporary, path)
+        try:
+            temporary.write_bytes(content)
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
         return key
 
     async def read(self, *, tenant_id: uuid.UUID, storage_key: str) -> bytes:
@@ -39,3 +42,20 @@ class LocalPhotoStorage:
 
     async def delete(self, *, tenant_id: uuid.UUID, storage_key: str) -> None:
         self._path_for(storage_key, tenant_id).unlink(missing_ok=True)
+
+    async def restore_exact(
+        self, *, tenant_id: uuid.UUID, storage_key: str, content: bytes
+    ) -> None:
+        """Compensate a failed hard delete without changing immutable provenance."""
+        path = self._path_for(storage_key, tenant_id)
+        if path.exists():
+            if path.read_bytes() != content:
+                raise OSError("Derived photo key contains different bytes")
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            temporary.write_bytes(content)
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)

@@ -93,22 +93,22 @@ async def process_photo_for_document(
     A terminal result is reused for this exact document/extractor. Failure
     never changes the original CV or professional processing state.
     """
-    document = await get_candidate_document(
-        db, tenant_id=tenant_id, candidate_id=candidate_id, document_id=document_id
-    )
-    if document is None:
-        return None
-    existing = await get_photo_for_document(
-        db,
-        tenant_id=tenant_id,
-        candidate_id=candidate_id,
-        document_id=document_id,
-        extractor_version=PHOTO_EXTRACTOR_VERSION,
-    )
-    if existing is not None:
-        return existing
     derived_key: str | None = None
     try:
+        document = await get_candidate_document(
+            db, tenant_id=tenant_id, candidate_id=candidate_id, document_id=document_id
+        )
+        if document is None:
+            return None
+        existing = await get_photo_for_document(
+            db,
+            tenant_id=tenant_id,
+            candidate_id=candidate_id,
+            document_id=document_id,
+            extractor_version=PHOTO_EXTRACTOR_VERSION,
+        )
+        if existing is not None:
+            return existing
         original = await document_storage.read(storage_key=document.storage_key)
         kind = "PDF" if document.mime_type == "application/pdf" else "DOCX"
         outcome = await _extract_isolated(original, kind)
@@ -132,11 +132,14 @@ async def process_photo_for_document(
         await db.commit()
         return row
     except Exception:
-        await db.rollback()
+        try:
+            await db.rollback()
+        except Exception:
+            logger.warning("Photo transaction rollback failed")
         if derived_key is not None:
             try:
                 await photo_storage.delete(tenant_id=tenant_id, storage_key=derived_key)
-            except OSError:
+            except Exception:
                 logger.warning("New derived photo cleanup failed")
         logger.warning("Photo processing failed for a stored candidate document")
         try:

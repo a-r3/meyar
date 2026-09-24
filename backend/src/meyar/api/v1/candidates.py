@@ -1,3 +1,4 @@
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
@@ -33,6 +34,7 @@ from meyar.storage.photo import LocalPhotoStorage
 from meyar.ui.service import get_candidate_detail_view
 
 router = APIRouter(tags=["candidates"])
+logger = logging.getLogger(__name__)
 
 
 def _candidate_out(candidate) -> CandidateOut:
@@ -138,19 +140,10 @@ async def delete_candidate(
 ) -> None:
     deleted_count = await delete_candidate_cascade(
         db, storage, tenant_id=ctx.tenant_id, candidate_id=candidate_id,
-        photo_storage=photo_storage,
+        photo_storage=photo_storage, actor_id=ctx.api_key_id,
     )
     if deleted_count is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Candidate not found.")
-    await record_event(
-        db,
-        tenant_id=ctx.tenant_id,
-        event_type="CANDIDATE_DELETED",
-        metadata={"candidate_id": str(candidate_id), "document_count": deleted_count},
-        actor_type=ACTOR_API_KEY,
-        actor_id=ctx.api_key_id,
-    )
-    await db.commit()
 
 
 @router.post(
@@ -194,10 +187,14 @@ async def post_candidate_document(
 
     await db.commit()
     document_id = document.id
-    await process_photo_for_document(
-        db, storage, photo_storage, tenant_id=ctx.tenant_id,
-        candidate_id=candidate_id, document_id=document_id,
-    )
+    try:
+        await process_photo_for_document(
+            db, storage, photo_storage, tenant_id=ctx.tenant_id,
+            candidate_id=candidate_id, document_id=document_id,
+        )
+    except Exception:
+        await db.rollback()
+        logger.warning("Unexpected photo-only failure after durable document upload")
     durable_document = await get_candidate_document(
         db, tenant_id=ctx.tenant_id, candidate_id=candidate_id, document_id=document_id
     )

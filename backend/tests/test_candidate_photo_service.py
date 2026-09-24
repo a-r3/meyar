@@ -16,8 +16,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meyar.config import Settings, get_settings
 from meyar.ingestion.parsers.local_text_parser import LocalTextParser
 from meyar.main import app
+from meyar.models.candidate import Candidate
 from meyar.models.candidate_document import CandidateDocument
 from meyar.models.candidate_photo_version import CandidatePhotoVersion
+from meyar.models.canonical_document import CanonicalDocument
 from meyar.models.folder_indexed_file import FolderIndexedFile
 from meyar.models.folder_source import FolderSource
 from meyar.services.candidate_document_repo import (
@@ -50,6 +52,21 @@ from meyar.storage.local import LocalFilesystemStorage
 from meyar.storage.photo import LocalPhotoStorage
 
 MAX_BYTES = 10 * 1024 * 1024
+
+
+async def test_photo_save_failure_cleans_temporary_asset(tmp_path: Path, monkeypatch) -> None:
+    from meyar.storage import photo as photo_module
+
+    tenant_id = uuid.uuid4()
+    photos = LocalPhotoStorage(str(tmp_path / "storage"))
+
+    def fail_replace(*args, **kwargs):
+        raise OSError("synthetic atomic photo write failure")
+
+    monkeypatch.setattr(photo_module.os, "replace", fail_replace)
+    with pytest.raises(OSError):
+        await photos.save(tenant_id=tenant_id, content=b"synthetic derived bytes")
+    assert not list((tmp_path / "storage" / "photo" / tenant_id.hex).glob("*"))
 
 
 async def _seed(db: AsyncSession, tmp_path: Path):
@@ -285,6 +302,80 @@ async def test_failed_photo_upload_keeps_durable_document(
     )
 
 
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "document_lookup", "existing_photo_lookup", "original_read",
+        "worker", "photo_save", "photo_insert", "photo_commit",
+    ],
+)
+async def test_upload_photo_faults_never_undo_durable_ingestion(
+    client: AsyncClient, db_session: AsyncSession, tmp_path: Path, monkeypatch, fault: str
+) -> None:
+    from meyar.services import candidate_photo_service
+
+    summary, storage, original = await _seed(db_session, tmp_path)
+
+    async def fail(*args, **kwargs):
+        raise OSError(f"synthetic {fault} failure")
+
+    if fault == "document_lookup":
+        monkeypatch.setattr(candidate_photo_service, "get_candidate_document", fail)
+    elif fault == "existing_photo_lookup":
+        monkeypatch.setattr(candidate_photo_service, "get_photo_for_document", fail)
+    elif fault == "original_read":
+        monkeypatch.setattr(storage, "read", fail)
+        from meyar.storage.dependency import get_document_storage
+        app.dependency_overrides[get_document_storage] = lambda: storage
+    elif fault == "worker":
+        monkeypatch.setattr(candidate_photo_service, "_extract_isolated", fail)
+    elif fault == "photo_save":
+        monkeypatch.setattr(LocalPhotoStorage, "save", fail)
+    elif fault == "photo_insert":
+        monkeypatch.setattr(candidate_photo_service, "create_photo_version", fail)
+    else:
+        original_worker = candidate_photo_service._extract_isolated
+
+        async def arm_photo_commit_failure(data: bytes, kind: str) -> dict:
+            outcome = await original_worker(data, kind)
+            original_commit = db_session.commit
+            fail_once = True
+
+            async def fail_photo_commit():
+                nonlocal fail_once
+                if fail_once:
+                    fail_once = False
+                    raise OSError("synthetic photo commit failure")
+                await original_commit()
+
+            monkeypatch.setattr(db_session, "commit", fail_photo_commit)
+            return outcome
+
+        monkeypatch.setattr(candidate_photo_service, "_extract_isolated", arm_photo_commit_failure)
+
+    response = await client.post(
+        f"/api/v1/candidates/{original.candidate_id}/documents",
+        headers={"Authorization": f"Bearer {summary.api_key_plaintext}"},
+        files={"file": (
+            "synthetic-changed.docx", _build_docx(_demo_candidates()[0].lines, 1),
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )},
+    )
+    assert response.status_code == 201
+    document_id = uuid.UUID(response.json()["id"])
+    assert response.json()["parser_status"] == "PARSED"
+    document = await db_session.get(CandidateDocument, document_id)
+    assert document is not None
+    canonical = await db_session.scalar(
+        select(CanonicalDocument).where(CanonicalDocument.candidate_document_id == document_id)
+    )
+    assert canonical is not None
+    assert await LocalFilesystemStorage(str(tmp_path / "storage")).read(
+        storage_key=document.storage_key
+    )
+    assert not list((tmp_path / "storage" / "photo" / document.tenant_id.hex).glob("*"))
+
+
 async def test_candidate_hard_delete_removes_derived_asset(
     client: AsyncClient, db_session: AsyncSession, tmp_path: Path
 ) -> None:
@@ -300,16 +391,191 @@ async def test_candidate_hard_delete_removes_derived_asset(
     )
     assert row is not None and row.derived_storage_key is not None
     photo_key, original_key = row.derived_storage_key, document.storage_key
+    photo_id, candidate_id = row.id, document.candidate_id
     assert await photos.read(tenant_id=document.tenant_id, storage_key=photo_key)
     response = await client.delete(
         f"/api/v1/candidates/{document.candidate_id}",
         headers={"Authorization": f"Bearer {summary.api_key_plaintext}"},
     )
     assert response.status_code == 204
+    assert await db_session.get(Candidate, candidate_id) is None
+    assert await db_session.scalar(
+        select(CandidatePhotoVersion).where(CandidatePhotoVersion.id == photo_id)
+    ) is None
     with pytest.raises(FileNotFoundError):
         await photos.read(tenant_id=document.tenant_id, storage_key=photo_key)
     with pytest.raises(FileNotFoundError):
         await storage.read(storage_key=original_key)
+
+
+@pytest.mark.parametrize("fault", ["original_delete", "photo_delete"])
+async def test_failed_hard_delete_preserves_valid_photo_and_retry(
+    client: AsyncClient, db_session: AsyncSession, tmp_path: Path, monkeypatch, fault: str
+) -> None:
+    app.dependency_overrides[get_settings] = lambda: Settings(ui_cookie_secure=False)
+    summary, storage, document = await _seed(db_session, tmp_path)
+    photos = LocalPhotoStorage(str(tmp_path / "storage"))
+    row = await process_photo_for_document(
+        db_session, storage, photos, tenant_id=document.tenant_id,
+        candidate_id=document.candidate_id, document_id=document.id,
+    )
+    assert row is not None and row.derived_storage_key is not None
+    tenant_id, candidate_id, document_key, photo_id = (
+        document.tenant_id, document.candidate_id, document.storage_key, row.id
+    )
+    photo_key = row.derived_storage_key
+    photo_bytes = await photos.read(tenant_id=tenant_id, storage_key=photo_key)
+    original_bytes = await storage.read(storage_key=document_key)
+    original_delete = LocalFilesystemStorage.delete
+    photo_delete = LocalPhotoStorage.delete
+    enabled = True
+
+    async def fail_original(self, *, storage_key: str) -> None:
+        if enabled:
+            raise OSError("synthetic original delete failure")
+        await original_delete(self, storage_key=storage_key)
+
+    async def fail_photo(self, *, tenant_id: uuid.UUID, storage_key: str) -> None:
+        if enabled:
+            raise OSError("synthetic photo delete failure")
+        await photo_delete(self, tenant_id=tenant_id, storage_key=storage_key)
+
+    monkeypatch.setattr(
+        LocalFilesystemStorage if fault == "original_delete" else LocalPhotoStorage,
+        "delete", fail_original if fault == "original_delete" else fail_photo,
+    )
+    url = f"/api/v1/candidates/{candidate_id}"
+    auth = {"Authorization": f"Bearer {summary.api_key_plaintext}"}
+    with pytest.raises(OSError):
+        await client.delete(url, headers=auth)
+    assert await db_session.get(Candidate, candidate_id) is not None
+    assert await db_session.get(CandidatePhotoVersion, photo_id) is not None
+    assert await photos.read(tenant_id=tenant_id, storage_key=photo_key) == photo_bytes
+    assert await storage.read(storage_key=document_key) == original_bytes
+    login = await client.post(
+        "/ui/login",
+        data={"username": summary.human_username, "password": summary.human_temp_password},
+        follow_redirects=False,
+    )
+    assert login.status_code == 303
+    rendered = await client.get(f"/ui/candidates/{candidate_id}/photo")
+    assert rendered.status_code == 200 and rendered.content == photo_bytes
+    enabled = False
+    assert (await client.delete(url, headers=auth)).status_code == 204
+    assert await db_session.get(Candidate, candidate_id) is None
+    with pytest.raises(FileNotFoundError):
+        await photos.read(tenant_id=tenant_id, storage_key=photo_key)
+
+
+async def test_multi_photo_partial_delete_restores_every_available_asset(
+    client: AsyncClient, db_session: AsyncSession, tmp_path: Path, monkeypatch
+) -> None:
+    summary, storage, old = await _seed(db_session, tmp_path)
+    photos = LocalPhotoStorage(str(tmp_path / "storage"))
+    first = await process_photo_for_document(
+        db_session, storage, photos, tenant_id=old.tenant_id,
+        candidate_id=old.candidate_id, document_id=old.id,
+    )
+    changed = await _changed(db_session, storage, old, portrait_index=1)
+    second = await process_photo_for_document(
+        db_session, storage, photos, tenant_id=changed.tenant_id,
+        candidate_id=changed.candidate_id, document_id=changed.id,
+    )
+    assert first is not None and second is not None
+    assert first.derived_storage_key and second.derived_storage_key
+    tenant_id, candidate_id = old.tenant_id, old.candidate_id
+    expected = {
+        key: await photos.read(tenant_id=tenant_id, storage_key=key)
+        for key in (first.derived_storage_key, second.derived_storage_key)
+    }
+    original_delete = LocalPhotoStorage.delete
+    attempts = 0
+    enabled = True
+
+    async def fail_second(self, *, tenant_id: uuid.UUID, storage_key: str) -> None:
+        nonlocal attempts
+        attempts += 1
+        if enabled and attempts == 2:
+            raise OSError("synthetic second photo delete failure")
+        await original_delete(self, tenant_id=tenant_id, storage_key=storage_key)
+
+    monkeypatch.setattr(LocalPhotoStorage, "delete", fail_second)
+    url = f"/api/v1/candidates/{candidate_id}"
+    auth = {"Authorization": f"Bearer {summary.api_key_plaintext}"}
+    with pytest.raises(OSError):
+        await client.delete(url, headers=auth)
+    assert await db_session.get(Candidate, candidate_id) is not None
+    for key, content in expected.items():
+        assert await photos.read(tenant_id=tenant_id, storage_key=key) == content
+    enabled = False
+    assert (await client.delete(url, headers=auth)).status_code == 204
+    for key in expected:
+        with pytest.raises(FileNotFoundError):
+            await photos.read(tenant_id=tenant_id, storage_key=key)
+
+
+async def test_photo_assets_recover_when_candidate_db_commit_fails(
+    client: AsyncClient, db_session: AsyncSession, tmp_path: Path, monkeypatch
+) -> None:
+    summary, storage, document = await _seed(db_session, tmp_path)
+    photos = LocalPhotoStorage(str(tmp_path / "storage"))
+    row = await process_photo_for_document(
+        db_session, storage, photos, tenant_id=document.tenant_id,
+        candidate_id=document.candidate_id, document_id=document.id,
+    )
+    assert row is not None and row.derived_storage_key is not None
+    tenant_id, candidate_id, photo_key = (
+        document.tenant_id, document.candidate_id, row.derived_storage_key
+    )
+    photo_bytes = await photos.read(tenant_id=tenant_id, storage_key=photo_key)
+    original_commit = db_session.commit
+    fail_once = True
+
+    async def fail_commit():
+        nonlocal fail_once
+        if fail_once:
+            fail_once = False
+            raise OSError("synthetic candidate DB commit failure")
+        await original_commit()
+
+    monkeypatch.setattr(db_session, "commit", fail_commit)
+    url = f"/api/v1/candidates/{candidate_id}"
+    auth = {"Authorization": f"Bearer {summary.api_key_plaintext}"}
+    with pytest.raises(OSError):
+        await client.delete(url, headers=auth)
+    assert await db_session.get(Candidate, candidate_id) is not None
+    assert await photos.read(tenant_id=tenant_id, storage_key=photo_key) == photo_bytes
+    assert (await client.delete(url, headers=auth)).status_code == 204
+
+
+async def test_hard_delete_rejects_foreign_tenant_photo_key_before_any_delete(
+    client: AsyncClient, db_session: AsyncSession, tmp_path: Path
+) -> None:
+    summary, storage, document = await _seed(db_session, tmp_path)
+    photos = LocalPhotoStorage(str(tmp_path / "storage"))
+    row = await process_photo_for_document(
+        db_session, storage, photos, tenant_id=document.tenant_id,
+        candidate_id=document.candidate_id, document_id=document.id,
+    )
+    assert row is not None and row.derived_storage_key is not None
+    candidate_id, document_key = document.candidate_id, document.storage_key
+    original = await storage.read(storage_key=document_key)
+    foreign = await create_tenant(db_session, name="Foreign photo-key tenant")
+    await db_session.commit()
+    foreign_key = await photos.save(tenant_id=foreign.id, content=b"foreign synthetic asset")
+    row.derived_storage_key = foreign_key
+    await db_session.commit()
+    with pytest.raises(ValueError, match="Invalid derived photo key"):
+        await client.delete(
+            f"/api/v1/candidates/{candidate_id}",
+            headers={"Authorization": f"Bearer {summary.api_key_plaintext}"},
+        )
+    assert await db_session.get(Candidate, candidate_id) is not None
+    assert await storage.read(storage_key=document_key) == original
+    assert (
+        await photos.read(tenant_id=foreign.id, storage_key=foreign_key)
+        == b"foreign synthetic asset"
+    )
 
 
 async def test_dedup_linked_folder_paths_diverge_without_stale_photo(

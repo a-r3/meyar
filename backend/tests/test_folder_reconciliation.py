@@ -5,6 +5,7 @@ tests/fakes.py and .claude/rules/testing.md."""
 
 from pathlib import Path
 
+import pytest
 from fakes import FakeEmbeddingProvider, FakeLLMProvider
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -507,6 +508,71 @@ async def test_reconcile_folder_full_flow(db_session: AsyncSession, tmp_path: Pa
     assert scan_summary_2.unchanged == 1
     assert recon_summary_2.already_ready == 1
     assert recon_summary_2.processed == 0
+
+
+@pytest.mark.parametrize("fault", ["document_lookup", "existing_photo_lookup", "unexpected_call"])
+async def test_photo_preflight_failure_does_not_stop_folder_professional_pipeline(
+    db_session: AsyncSession, tmp_path: Path, monkeypatch, fault: str
+) -> None:
+    from meyar.services import candidate_photo_service, folder_reconciliation_service
+
+    tenant = await create_tenant(db_session, name=f"T-photo-{fault}")
+    await db_session.commit()
+    tenant_id = tenant.id
+    root = tmp_path / "cvs"
+    _copy_fixture("valid_cv.pdf", root / "one.pdf")
+    _copy_fixture("valid_cv.pdf", root / "two.pdf")
+    (root / "two.pdf").write_bytes((root / "two.pdf").read_bytes() + b"\n")
+    original = (
+        folder_reconciliation_service.process_photo_for_document
+        if fault == "unexpected_call"
+        else getattr(candidate_photo_service, "get_candidate_document" if fault == "document_lookup"
+                     else "get_photo_for_document")
+    )
+    attempts = 0
+
+    async def fail_first(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("synthetic photo-only preflight failure")
+        return await original(*args, **kwargs)
+
+    if fault == "unexpected_call":
+        monkeypatch.setattr(folder_reconciliation_service, "process_photo_for_document", fail_first)
+    else:
+        monkeypatch.setattr(
+            candidate_photo_service,
+            "get_candidate_document" if fault == "document_lookup" else "get_photo_for_document",
+            fail_first,
+        )
+    scan, recon = await reconcile_folder(
+        db_session, _storage(tmp_path), _parser(),
+        FakeLLMProvider(
+            extraction=_profile_extraction(), identity_extraction=_identity_extraction()
+        ),
+        FakeEmbeddingProvider(), tenant_id=tenant_id, root_path=str(root), max_bytes=MAX_BYTES,
+        stability_window_seconds=0, model_provider_name="fake",
+        max_profile_input_chars=MAX_INPUT_CHARS, max_identity_input_chars=MAX_INPUT_CHARS,
+        max_embedding_input_chars=MAX_INPUT_CHARS, limit=None,
+    )
+    assert scan.successful == 2
+    assert recon.ready_after == 2 and recon.failed == 0
+    rows = await list_folder_indexed_files(
+        db_session, tenant_id=tenant_id, folder_source_id=scan.folder_source_id
+    )
+    assert len({row.candidate_id for row in rows}) == 2
+    for row in rows:
+        assert row.candidate_document_id is not None
+        assert await db_session.scalar(select(CandidateProfileVersion).where(
+            CandidateProfileVersion.candidate_document_id == row.candidate_document_id
+        )) is not None
+        assert await db_session.scalar(select(CandidateIdentityVersion).where(
+            CandidateIdentityVersion.candidate_document_id == row.candidate_document_id
+        )) is not None
+        assert await db_session.scalar(select(CandidateEmbeddingVersion).where(
+            CandidateEmbeddingVersion.candidate_id == row.candidate_id
+        )) is not None
 
 
 async def test_changed_cv_reconciliation_updates_search_no_stale_state(

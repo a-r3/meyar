@@ -1,3 +1,4 @@
+import logging
 import uuid
 from dataclasses import dataclass
 
@@ -30,6 +31,8 @@ from meyar.services.identity_authority import authorize_identity_version
 from meyar.services.profile_authority import get_current_authorized_profile
 from meyar.storage.base import DocumentStorage
 from meyar.storage.dependency import get_photo_storage
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -350,17 +353,22 @@ async def reconcile_folder(
     rows = await list_folder_indexed_files(
         db, tenant_id=tenant_id, folder_source_id=scan_summary.folder_source_id
     )
+    photo_documents = [(row.candidate_id, row.candidate_document_id) for row in rows]
     seen_photo_documents: set[uuid.UUID] = set()
-    for row in rows:
-        if row.candidate_id is None or row.candidate_document_id is None:
+    for photo_candidate_id, photo_document_id in photo_documents:
+        if photo_candidate_id is None or photo_document_id is None:
             continue
-        if row.candidate_document_id in seen_photo_documents:
+        if photo_document_id in seen_photo_documents:
             continue
-        seen_photo_documents.add(row.candidate_document_id)
-        await process_photo_for_document(
-            db, storage, photo_storage, tenant_id=tenant_id,
-            candidate_id=row.candidate_id, document_id=row.candidate_document_id,
-        )
+        seen_photo_documents.add(photo_document_id)
+        try:
+            await process_photo_for_document(
+                db, storage, photo_storage, tenant_id=tenant_id,
+                candidate_id=photo_candidate_id, document_id=photo_document_id,
+            )
+        except Exception:
+            await db.rollback()
+            logger.warning("Unexpected photo-only failure during folder reconciliation")
 
     reconciliation_summary = await process_pending_candidates(
         db,
