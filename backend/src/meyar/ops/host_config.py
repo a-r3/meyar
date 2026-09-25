@@ -34,6 +34,7 @@ _FAILURE_CODES = frozenset(
     {
         "INSTALL_ROOT_UNSAFE",
         "HOST_LAYOUT_UNSAFE",
+        "CONFIG_PERMISSIONS_UNSAFE",
         "CONFIG_UNAVAILABLE",
         "CONFIG_NOT_REGULAR",
         "CONFIG_TOO_LARGE",
@@ -73,6 +74,35 @@ def _read_config(root: Path) -> str:
         _real_directory(root / "shared" / "storage")
     except InstallFailure:
         raise ValueError("HOST_LAYOUT_UNSAFE") from None
+    try:
+        root_stat = root.stat()
+        shared_stat = (root / "shared").stat()
+        config_stat = (root / "shared" / "config").stat()
+    except OSError:
+        raise ValueError("HOST_LAYOUT_UNSAFE") from None
+    owner_uid = root_stat.st_uid  # PR4 requires the install operator to own root.
+    service_gid = config_stat.st_gid
+    for parent in root.parents:
+        metadata = parent.stat()
+        # A root-owned sticky temporary directory protects entries owned by
+        # the operator; otherwise an unrelated owner/writer could swap root.
+        root_owned_sticky = (
+            metadata.st_uid == 0 and metadata.st_mode & stat.S_ISVTX
+        )
+        if metadata.st_uid not in (0, owner_uid) or (
+            metadata.st_mode & 0o022 and not root_owned_sticky
+        ):
+            raise ValueError("HOST_LAYOUT_UNSAFE")
+    for directory in (root_stat, shared_stat, config_stat):
+        if (
+            directory.st_uid != owner_uid
+            or directory.st_gid != service_gid
+            or directory.st_mode & 0o022
+            or not directory.st_mode & 0o010
+        ):
+            raise ValueError("HOST_LAYOUT_UNSAFE")
+    if config_stat.st_mode & 0o007:
+        raise ValueError("HOST_LAYOUT_UNSAFE")
     path = root / "shared" / "config" / ".env"
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -82,6 +112,14 @@ def _read_config(root: Path) -> str:
         metadata = os.fstat(fd)
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
             raise ValueError("CONFIG_NOT_REGULAR")
+        if (
+            metadata.st_uid != owner_uid
+            or metadata.st_gid != service_gid
+            or metadata.st_mode & 0o137  # owner execute, group write/execute, any other access
+            or not metadata.st_mode & 0o400  # install operator can read
+            or not metadata.st_mode & 0o040  # dedicated service group can read
+        ):
+            raise ValueError("CONFIG_PERMISSIONS_UNSAFE")
         if metadata.st_size > MAX_CONFIG_BYTES:
             raise ValueError("CONFIG_TOO_LARGE")
         chunks: list[bytes] = []

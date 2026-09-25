@@ -182,6 +182,24 @@ database credentials and pending-login secret, Secure cookies, local
 Ollama providers and loopback endpoint, and exact absolute
 `<root>/shared/storage`. The production model remains TBD until #36.
 
+The PR4 install-root owner is the trusted operator identity. That same UID
+must own `<root>`, `shared`, `shared/config`, and `.env`. These three
+directories and `.env` must have the same GID, reserved for the dedicated
+MEYAR service account; the account must be a member of that group. The
+directories must be group-traversable and neither group- nor other-writable;
+`shared/config` grants no access to other users. `.env` must be
+owner-readable and group-readable, with no owner execute, group
+write/execute, or other access (for example, mode `0640`). This gives the
+non-root service a read path without exposing plaintext secrets to unrelated
+local users. Ancestors of `<root>` must be owned by root or the install
+operator and not group/other-writable, except a root-owned sticky temporary
+directory. `config-verify` checks filesystem UID/GID/mode relationships;
+it cannot establish that the bank has restricted group membership or that
+the selected `UserName` belongs to that group. PR6 must provision and
+verify those principal assignments before installing or starting a daemon.
+PR4's root-owned-by-installer and non-group-writable directory rules remain
+in force; do not make `shared/config` group-writable to provision `.env`.
+
 ### `service-render`
 
 ```bash
@@ -204,7 +222,8 @@ from its verified PR4 layout.
 - **UserName:** rejected if empty or `root`. `meyar-ops` only references
   this account in the plist; it never creates it.
 - **Install root:** absolute and normalized. PR4's activation chain,
-  installed tree, release-local Python and application source must verify.
+  installed tree, executable release-local Python and application source
+  must verify.
 - **Executable:** exactly `<root>/current/.venv/bin/python`, never a
   bare `uv`/PATH-resolved name or version-stale release path.
   `ProgramArguments` is always a real argv array: `[executable, "-m",
@@ -222,6 +241,16 @@ from its verified PR4 layout.
   restart-after-abnormal-exit semantics. No explicit `RunAtLoad` (already
   implied) and no `ThrottleInterval` (would only restate launchd's own
   default) are emitted.
+
+Rendering verifies the active interpreter's execute bits for owner, group,
+and other (PR4 installs it as `0555`); it does not run the service. PR6 must
+also establish service-account traversal through the immutable release,
+write access to `shared/storage` and `shared/logs`, and log-file ownership
+and permissions. PR4 currently requires those shared directories to remain
+owned by the install operator and not group/other-writable, so PR6 must
+provide a compatible protected write mechanism or explicitly revise that
+installer contract. Render/verify does not claim those deferred principal
+and runtime checks have passed.
 
 Writes only to the explicit `--output` path — never
 `/Library/LaunchDaemons`, never `launchctl`, never `sudo`. The output

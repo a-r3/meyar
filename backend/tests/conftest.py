@@ -53,6 +53,9 @@ def ops_host_root(tmp_path: Path) -> Path:
         "MEYAR_EMBEDDING_PROVIDER=ollama\n"
         "MEYAR_OLLAMA_BASE_URL=http://127.0.0.1:11434\n"
     )
+    for directory in (root, root / "shared", root / "shared/config"):
+        directory.chmod(0o750)
+    (root / "shared/config/.env").chmod(0o640)
     release_id = "meyar-test+abcdef123456"
     release = root / "releases" / release_id
     python = release / ".venv/bin/python"

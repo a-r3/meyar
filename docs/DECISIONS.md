@@ -5822,6 +5822,26 @@ application `Settings` validation without ambient shell overrides.
 Findings use fixed codes and never include values. The host-specific
 storage path must exactly match `<root>/shared/storage`.
 
+Independent review found two fail-open metadata gaps: a world-readable or
+wrong-owned secret file passed `config-verify`, and an active Python with
+its execute bits removed passed service rendering because PR4's content
+digest does not cover mode bits. The corrective contract ties `.env` and
+its `root/shared/config` directory chain to the PR4 install-root owner UID;
+all use the dedicated service GID, directories are group-traversable and
+not group/other-writable, `shared/config` excludes other users, and `.env`
+is owner/group-readable with no group write/execute or other access (e.g.
+`0640`). Ancestors of the install root must also resist replacement by
+unrelated users (root/operator owned, non-group/other-writable, with a
+root-owned sticky temporary-directory exception). The service account must
+belong to that dedicated group; bank operator provisioning and membership
+verification remain PR6 work. Active
+Python must have owner, group and other execute bits, matching PR4's `0555`
+installed interpreter. This is metadata validation, not a claim that a
+daemon has launched or can write its runtime paths. PR6 must establish
+service-account traversal, protected write access to `shared/storage` and
+`shared/logs`, and log-file ownership while honoring or explicitly revising
+PR4's install-operator ownership/non-group-writable directory checks.
+
 Application lifespan startup now calls `get_settings()` before serving
 requests, so bypassing `config-verify` cannot defer a bad production
 configuration until the first dependent request. When launched from the

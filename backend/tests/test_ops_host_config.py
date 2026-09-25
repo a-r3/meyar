@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -26,6 +28,74 @@ def test_valid_production_config(ops_host_root: Path) -> None:
     result = verify_host_config(ops_host_root)
     assert result.ok
     assert result.findings[0].code == "CONFIG_VERIFIED"
+
+
+def test_config_group_read_is_available_to_dedicated_runtime_group(ops_host_root: Path) -> None:
+    root = ops_host_root
+    file_stat = config(root).stat()
+    service_gid = (root / "shared/config").stat().st_gid
+    assert file_stat.st_uid == root.stat().st_uid
+    assert file_stat.st_gid == service_gid
+    assert file_stat.st_mode & 0o040
+    assert not file_stat.st_mode & 0o037
+    for directory in (root, root / "shared", root / "shared/config"):
+        metadata = directory.stat()
+        assert metadata.st_gid == service_gid
+        assert metadata.st_mode & 0o010
+        assert not metadata.st_mode & 0o022
+    assert verify_host_config(root).ok
+
+
+@pytest.mark.parametrize("mode", [0o644, 0o660, 0o666])
+def test_insecure_file_modes_rejected(ops_host_root: Path, mode: int) -> None:
+    config(ops_host_root).chmod(mode)
+    result = verify_host_config(ops_host_root)
+    assert not result.ok
+    assert result.findings[0].code == "CONFIG_PERMISSIONS_UNSAFE"
+
+
+def test_config_with_untrusted_owner_rejected(
+    ops_host_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import meyar.ops.host_config as host_config
+
+    original_fstat = os.fstat
+
+    def untrusted_owner(fd: int) -> SimpleNamespace:
+        metadata = original_fstat(fd)
+        return SimpleNamespace(
+            st_mode=metadata.st_mode,
+            st_nlink=metadata.st_nlink,
+            st_size=metadata.st_size,
+            st_uid=metadata.st_uid + 1,
+            st_gid=metadata.st_gid,
+        )
+
+    monkeypatch.setattr(host_config.os, "fstat", untrusted_owner)
+    result = verify_host_config(ops_host_root)
+    assert not result.ok
+    assert result.findings[0].code == "CONFIG_PERMISSIONS_UNSAFE"
+
+
+@pytest.mark.parametrize("relative", [".", "shared", "shared/config"])
+def test_writable_config_parent_rejected(ops_host_root: Path, relative: str) -> None:
+    directory = ops_host_root / relative
+    directory.chmod(directory.stat().st_mode | 0o020)
+    result = verify_host_config(ops_host_root)
+    assert not result.ok
+    assert result.findings[0].code == "HOST_LAYOUT_UNSAFE"
+
+
+def test_writable_install_root_parent_rejected(ops_host_root: Path) -> None:
+    parent = ops_host_root.parent
+    original_mode = parent.stat().st_mode
+    try:
+        parent.chmod(original_mode | 0o020)
+        result = verify_host_config(ops_host_root)
+        assert not result.ok
+        assert result.findings[0].code == "HOST_LAYOUT_UNSAFE"
+    finally:
+        parent.chmod(original_mode)
 
 
 def test_missing_config(ops_host_root: Path) -> None:

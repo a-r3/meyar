@@ -633,7 +633,10 @@ def verify_active_release(root: Path) -> str:
         raise InstallFailure("ACTIVE_RELEASE_MISSING")
     _verify_install(root, release_id)
     release = root / "releases" / release_id
-    _regular_file(release / ".venv" / "bin" / "python")
+    python = release / ".venv" / "bin" / "python"
+    _regular_file(python)
+    if python.stat().st_mode & 0o111 != 0o111:
+        raise InstallFailure("ACTIVE_PYTHON_NOT_EXECUTABLE")
     _regular_file(release / "backend" / "src" / "meyar" / "main.py")
     return release_id
 

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from meyar.ops.offline_host import InstallFailure, verify_active_release
 from meyar.ops.service_plist import (
     REQUIRED_PLIST_KEYS,
     ServiceRenderOutputExistsError,
@@ -67,6 +68,21 @@ def test_render_uses_verified_active_release_and_shared_paths(ops_host_root: Pat
     assert not (root / "current/backend/.env").exists()
     assert render_service_plist(spec(root)) == render_service_plist(spec(root))
     assert checked(root, value, expected_label="meyar.application").ok
+
+
+def test_active_python_must_remain_executable(ops_host_root: Path) -> None:
+    python = (ops_host_root / "current/.venv/bin/python").resolve()
+    output = ops_host_root.parent / "nonexecutable.plist"
+    assert verify_active_release(ops_host_root)
+    python.chmod(0o444)
+    with pytest.raises(InstallFailure, match="ACTIVE_PYTHON_NOT_EXECUTABLE"):
+        verify_active_release(ops_host_root)
+    assert not run_service_render(spec(ops_host_root), output).ok
+    assert not output.exists()
+    python.chmod(0o555)
+    assert verify_active_release(ops_host_root)
+    assert run_service_render(spec(ops_host_root), output).ok
+    assert output.exists()
 
 
 @pytest.mark.parametrize("port", [0, -1, 65536])
