@@ -9,6 +9,7 @@ field into the ranking path. See docs/DECISIONS.md (meyar-search-v1)."""
 import uuid
 from datetime import date
 from enum import StrEnum
+from typing import Annotated
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -196,12 +197,21 @@ class RequiredFilterMatch(BaseModel):
     model_config = {"extra": "forbid"}
     category: str
     value: str
+    # Positions in the authorized profile version, captured by the
+    # deterministic evaluator. No evidence text or database identity is
+    # copied into the search result. None means provenance is unavailable.
+    matched_fact_indices: list[Annotated[int, Field(ge=0, le=99)]] | None = Field(
+        default=None, max_length=100
+    )
 
 
 class PreferredFilterMatch(BaseModel):
     model_config = {"extra": "forbid"}
     category: str
     value: str
+    matched_fact_indices: list[Annotated[int, Field(ge=0, le=99)]] | None = Field(
+        default=None, max_length=100
+    )
 
 
 class CandidateSearchResult(BaseModel):

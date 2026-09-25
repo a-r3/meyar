@@ -17,7 +17,11 @@ from meyar.core.text import (
     slugify_criterion_label,
 )
 from meyar.evaluation.evaluators import evaluate_criterion
-from meyar.evaluation.normalization import normalize_certification_name, normalize_text
+from meyar.evaluation.normalization import (
+    normalize_certification_name,
+    normalize_skill_name,
+    normalize_text,
+)
 from meyar.ingestion.parser import CanonicalDocumentContent
 from meyar.models.candidate import Candidate
 from meyar.models.candidate_document import (
@@ -620,6 +624,22 @@ def _requirement_attributable_evidence(
     category's evidence."""
     refs: list[EvidenceRef] = []
     for match in matched:
+        if match.category == "skill_experience":
+            for index in match.matched_fact_indices or []:
+                if index >= len(profile.skill_experience):
+                    continue
+                skill_item = profile.skill_experience[index]
+                if normalize_skill_name(skill_item.skill_name) == normalize_skill_name(match.value):
+                    refs.extend(skill_item.evidence)
+            continue
+        if match.category == "language_level":
+            for index in match.matched_fact_indices or []:
+                if index >= len(profile.languages):
+                    continue
+                language_item = profile.languages[index]
+                if normalize_text(language_item.language) == normalize_text(match.value):
+                    refs.extend(language_item.evidence)
+            continue
         if match.category == "min_total_experience_years":
             for entry in profile.employment_history:
                 refs.extend(entry.evidence)
