@@ -23,6 +23,8 @@ def change(root: Path, old: str, new: str) -> None:
 
 
 def test_valid_production_config(ops_host_root: Path) -> None:
+    assert ops_host_root.stat().st_uid == os.geteuid()
+    assert config(ops_host_root).stat().st_mode & 0o777 == 0o640
     with config(ops_host_root).open("a") as stream:
         stream.write("# operator note with no secret\n")
     result = verify_host_config(ops_host_root)
@@ -75,6 +77,52 @@ def test_config_with_untrusted_owner_rejected(
     result = verify_host_config(ops_host_root)
     assert not result.ok
     assert result.findings[0].code == "CONFIG_PERMISSIONS_UNSAFE"
+
+
+def test_coherent_layout_owned_by_other_operator_rejected(
+    ops_host_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import meyar.ops.host_config as host_config
+
+    invoking_uid = os.geteuid()
+    other_uid = invoking_uid + 1
+    assert other_uid != invoking_uid
+    root = ops_host_root
+    # Simulate a complete, internally consistent tree owned by another UID.
+    # Its operator-owned ancestors must agree too, so the existing ancestor
+    # check cannot accidentally make this regression pass.
+    other_owned = {root, root / "shared", root / "shared/config"}
+    other_owned.update(parent for parent in root.parents if parent.stat().st_uid == invoking_uid)
+    original_stat = Path.stat
+    original_fstat = os.fstat
+
+    def stat_as_other_owner(
+        path: Path, *args: object, **kwargs: object
+    ) -> SimpleNamespace | os.stat_result:
+        metadata = original_stat(path, *args, **kwargs)
+        if path not in other_owned:
+            return metadata
+        return SimpleNamespace(
+            st_mode=metadata.st_mode,
+            st_uid=other_uid,
+            st_gid=metadata.st_gid,
+        )
+
+    def fstat_as_other_owner(fd: int) -> SimpleNamespace:
+        metadata = original_fstat(fd)
+        return SimpleNamespace(
+            st_mode=metadata.st_mode,
+            st_nlink=metadata.st_nlink,
+            st_size=metadata.st_size,
+            st_uid=other_uid,
+            st_gid=metadata.st_gid,
+        )
+
+    monkeypatch.setattr(host_config.Path, "stat", stat_as_other_owner)
+    monkeypatch.setattr(host_config.os, "fstat", fstat_as_other_owner)
+    result = verify_host_config(root)
+    assert not result.ok
+    assert result.findings[0].code == "HOST_LAYOUT_UNSAFE"
 
 
 @pytest.mark.parametrize("relative", [".", "shared", "shared/config"])

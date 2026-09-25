@@ -80,7 +80,9 @@ def _read_config(root: Path) -> str:
         config_stat = (root / "shared" / "config").stat()
     except OSError:
         raise ValueError("HOST_LAYOUT_UNSAFE") from None
-    owner_uid = root_stat.st_uid  # PR4 requires the install operator to own root.
+    if root_stat.st_uid != os.geteuid():  # Same trusted operator identity as PR4.
+        raise ValueError("HOST_LAYOUT_UNSAFE")
+    owner_uid = root_stat.st_uid
     service_gid = config_stat.st_gid
     for parent in root.parents:
         metadata = parent.stat()
