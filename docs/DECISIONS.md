@@ -5162,7 +5162,9 @@ topology chosen.
 
 **Date:** 2026-09-23. **Status:** Local implementation on
 `feat/macos-launchd-service-foundation`, branched from accepted `main`
-`e868632cca457d69c99e8454d0cc35f85023dae1`; PR not yet merged.
+`e868632cca457d69c99e8454d0cc35f85023dae1`; subsequently merged
+as PR #54. Its original path policy below is historical and superseded
+by D-073/D-074.
 
 **Scope.** Second bounded PR for issue #35 (Slice 6 — Agentless Mac
 Deployment Readiness, M9), following PR1 (#52, D-066). Adds three
@@ -5741,9 +5743,9 @@ policy versions, so no migration is required.
 
 ## D-073 — Offline macOS arm64 dependency and filesystem activation foundation (issue #35 PR4)
 
-**Date:** 2026-09-25. **Status:** PR4 implementation for independent
-review on `feat/issue-35-offline-install-foundation`, based on accepted
-`main` `9b234a2c8ea0b4a3be533dfd0c382564016191d6`.
+**Date:** 2026-09-25. **Status:** Merged as PR #66, squash SHA
+`860357e1bc6a63e38553ab65119adfd67109056b`; implementation was
+based on `9b234a2c8ea0b4a3be533dfd0c382564016191d6`.
 
 The accepted PR3 artifact is source and migrations, not a deployable
 Python environment. PR4 binds an offline dependency directory to that
@@ -5792,3 +5794,50 @@ relative to the reviewed artifact and lock, not publisher identity; the
 accepted commit and handoff remain operator trust inputs. Linux tests
 simulate platform/filesystem contracts. Real Apple-Silicon import,
 service, and reboot behavior remains unconfirmed.
+
+## D-074 — Host production config and active-release service binding (issue #35 PR5)
+
+**Date:** 2026-09-26. **Status:** Implementation for independent review
+on `feat/issue-35-production-config-service-binding`, from accepted
+`main` `860357e1bc6a63e38553ab65119adfd67109056b`.
+
+PR2's original operator-supplied interpreter and working directory
+could point to a pre-PR4 venv or cause `Settings(env_file=".env")` to
+load config from an immutable release. PR4 established the release-local
+venv and mutable `shared/` layout. PR5 resolves that mismatch with one
+install-root-derived service contract: `<root>/current/.venv/bin/python`
+invokes `-m uvicorn meyar.main:app --host 127.0.0.1 --port <port>`;
+`WorkingDirectory` is `<root>/shared/config`; stdout/stderr logs are under
+`<root>/shared/logs`. No `EnvironmentVariables`, shell wrapper, bare
+executable or release-internal `.env` is accepted. The existing seven-key
+plist shape and render-only output safety remain.
+
+The service imports PR4's stdlib-only host verifier and checks the public
+activation generation, installed tree, release-local Python and matching
+backend source before rendering or accepting a plist. The copied offline
+installer never imports the normal application package. Host config is
+read with no symlink following and a 64 KiB limit; dotenv syntax,
+duplicate critical keys and interpolation are checked before applying
+application `Settings` validation without ambient shell overrides.
+Findings use fixed codes and never include values. The host-specific
+storage path must exactly match `<root>/shared/storage`.
+
+Application lifespan startup now calls `get_settings()` before serving
+requests, so bypassing `config-verify` cannot defer a bad production
+configuration until the first dependent request. When launched from the
+canonical `shared/config` working directory, startup also validates the
+host file independently and rejects any ambient `MEYAR_*` override that
+would change effective Settings. Direct production
+`Settings` requires an explicitly supplied,
+nonblank DB URL without the known development credential, an explicit
+nonblank non-default pending-login secret, Secure UI cookies, local
+Ollama LLM and embedding providers, and a loopback Ollama endpoint.
+Environment mode typos fail schema validation. Development/test behavior
+remains compatible. Production model selection remains TBD until #36;
+this decision makes no model approval claim. Issue #46 remains OPEN;
+only its deployment-blocking production-config item is advanced.
+
+Immutable code/runtime != mutable host configuration != mutable
+candidate/document storage. PR5 performs no LaunchDaemon mutation,
+service lifecycle, migration, model provisioning, or target-Mac
+acceptance. Issue #35 remains OPEN.

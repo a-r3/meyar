@@ -3,13 +3,19 @@ from typing import Literal
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import ArgumentError
+
+from meyar.llm.loopback import require_loopback_url
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="MEYAR_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="MEYAR_", env_file=".env", extra="ignore", hide_input_in_errors=True
+    )
 
     database_url: str = "postgresql+asyncpg://meyar:meyar_dev_password@localhost:5432/meyar"
-    env: str = "development"
+    env: Literal["development", "test", "production"] = "development"
     ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_model: str = "qwen3:0.6b"
     max_upload_bytes: int = 10 * 1024 * 1024
@@ -68,20 +74,34 @@ class Settings(BaseSettings):
     business_timezone: str = "Asia/Baku"
 
     @model_validator(mode="after")
-    def _production_ui_cookie_must_be_secure(self) -> "Settings":
-        if self.env == "production" and not self.ui_cookie_secure:
+    def _production_safety(self) -> "Settings":
+        if self.env != "production":
+            return self
+        if not self.ui_cookie_secure:
             raise ValueError("Production UI cookies must be Secure.")
-        return self
-
-    @model_validator(mode="after")
-    def _production_needs_real_pending_login_secret(self) -> "Settings":
         if (
-            self.env == "production"
-            and self.pending_login_secret == "dev-insecure-pending-login-secret-change-me"
+            "pending_login_secret" not in self.model_fields_set
+            or not self.pending_login_secret.strip()
+            or self.pending_login_secret.strip() == "dev-insecure-pending-login-secret-change-me"
         ):
-            raise ValueError(
-                "Production requires MEYAR_PENDING_LOGIN_SECRET to be set explicitly."
-            )
+            raise ValueError("Production requires a non-default MEYAR_PENDING_LOGIN_SECRET.")
+        if "database_url" not in self.model_fields_set or not self.database_url.strip():
+            raise ValueError("Production requires an explicit nonblank MEYAR_DATABASE_URL.")
+        if "meyar_dev_password" in self.database_url:
+            raise ValueError("Production cannot use the development database URL.")
+        try:
+            database = make_url(self.database_url)
+        except ArgumentError:
+            raise ValueError("Production database URL is invalid.") from None
+        if database.drivername != "postgresql+asyncpg" or not database.database:
+            raise ValueError("Production requires a PostgreSQL asyncpg database URL.")
+        if self.embedding_provider != "ollama":
+            raise ValueError("Production requires the local Ollama embedding provider.")
+        # The same local-only boundary used by request-serving providers.
+        try:
+            require_loopback_url(self.ollama_base_url, setting_name="MEYAR_OLLAMA_BASE_URL")
+        except ValueError:
+            raise ValueError("Production requires a loopback Ollama endpoint.") from None
         return self
 
     @property

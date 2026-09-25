@@ -593,6 +593,9 @@ def verify_install(root: Path, release_id: str) -> str:
 
 
 def _current_release(root: Path) -> str | None:
+    _real_directory(root)
+    _real_directory(root / "activations")
+    _real_directory(root / "releases")
     pointer = root / "current"
     if not os.path.lexists(pointer):
         return None
@@ -616,6 +619,22 @@ def _current_release(root: Path) -> str | None:
     link = root / "activations" / generation / "current"
     if not link.is_symlink() or os.readlink(link) != f"../../releases/{release_id}":
         raise InstallFailure("ACTIVATION_POINTER_UNSAFE")
+    return release_id
+
+
+def verify_active_release(root: Path) -> str:
+    """Verify PR4's public activation chain and its installed release.
+
+    This remains stdlib-only for the copied offline installer. The normal
+    meyar-ops service module imports this authority, never the reverse.
+    """
+    release_id = _current_release(root)
+    if release_id is None:
+        raise InstallFailure("ACTIVE_RELEASE_MISSING")
+    _verify_install(root, release_id)
+    release = root / "releases" / release_id
+    _regular_file(release / ".venv" / "bin" / "python")
+    _regular_file(release / "backend" / "src" / "meyar" / "main.py")
     return release_id
 
 

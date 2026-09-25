@@ -45,8 +45,8 @@ canonical references it points to — read this alongside, not instead of:
 - [`docs/TARGET_MAC_BENCHMARK.md`](TARGET_MAC_BENCHMARK.md) — reference
   hardware, benchmark harness, model-approval gate.
 - [`docs/MEYAR_OPS.md`](MEYAR_OPS.md) — the `meyar-ops` operator CLI
-  (issue #35), including PR4's offline bundle and host filesystem
-  install/activation foundation. It does not yet provision or start the
+  (issue #35), including PR4's offline bundle/activation and PR5's host
+  production-config and service-binding contracts. It does not yet start the
   full target service; see its #35/#46 boundary.
 - [`docs/DECISIONS.md`](DECISIONS.md) — the full decision log, including
   D-020 (tested security/acceptance boundary) and D-066 (`meyar-ops`
@@ -110,7 +110,7 @@ Never deploy arbitrary unreviewed developer working-tree state as the
 canonical release. A deployment always corresponds to a specific,
 identifiable commit on `main` that went through PR review and CI.
 
-**Issue #35 PR4 offline path, once independently accepted:** build the
+**Issue #35 PR4 accepted offline path:** build the
 application artifact from an accepted commit, build and transport its
 hash-bound offline deployment directory, then run the bundled stdlib-only
 `meyar-ops.py` using the bank-provisioned Python interpreter to install,
@@ -120,6 +120,18 @@ the exact commands and layout. The diagram above is the older manual
 source-checkout procedure, not the final bank-host method. PR4 does not
 start the service or constitute target-Mac acceptance.
 
+**PR5 host-service boundary, pending independent acceptance:** run
+`meyar-ops config-verify --install-root <root>` against the operator-owned
+`<root>/shared/config/.env`, then render/verify the plist with the same
+install root. The application reads that file from its
+`WorkingDirectory=<root>/shared/config`; it runs via
+`<root>/current/.venv/bin/python` against the verified active release.
+Storage remains `<root>/shared/storage`; logs remain `<root>/shared/logs`.
+Immutable code/runtime != mutable host configuration != mutable
+candidate/document storage. Neither config verification nor plist
+render/verify installs or starts a LaunchDaemon. Real Apple-Silicon
+execution and production-model selection remain unverified.
+
 ## 4. Fresh host provisioning
 
 The `git clone`/`git pull` sequence below is the current, manual,
@@ -127,7 +139,9 @@ source-checkout-based runbook — it is not the final intended bank
 production mechanism. Issue #35's target production path is an immutable,
 owner-accepted release artifact (built, verified, installed, and updated
 by `meyar-ops` tooling). PR3 built the application artifact and PR4
-defines its offline dependency/install foundation; service lifecycle,
+defines its offline dependency/install foundation; PR5 binds the service
+plist to that active release and host-local production config. Service
+lifecycle,
 database/model provisioning, and target-Mac acceptance remain later #35
 work. This source-checkout runbook describes the older manual dev/demo
 path and must not be used as the final bank-host deployment method.

@@ -15,6 +15,7 @@ import asyncio
 from pathlib import Path
 
 from meyar.ops.build_release import BuildReleaseRequest, build_release
+from meyar.ops.host_config import verify_host_config
 from meyar.ops.model_manifest import ModelApprovalStatus
 from meyar.ops.offline_bundle import BundleBuildRequest, build_deployment_bundle
 from meyar.ops.preflight import run_preflight
@@ -58,23 +59,26 @@ def _build_parser() -> argparse.ArgumentParser:
     verify_parser.add_argument("--artifact", type=Path, required=True)
     verify_parser.add_argument("--expected-release-id", type=str, default=None)
 
+    config_parser = sub.add_parser(
+        "config-verify", help="Verify host-local production configuration without exposing values."
+    )
+    config_parser.add_argument("--install-root", type=Path, required=True)
+
     render_parser = sub.add_parser(
         "service-render",
         help="Render a macOS LaunchDaemon plist for the MEYAR application process.",
     )
     render_parser.add_argument("--label", type=str, required=True)
     render_parser.add_argument("--user-name", type=str, required=True)
-    render_parser.add_argument("--working-directory", type=str, required=True)
-    render_parser.add_argument("--executable", type=str, required=True)
+    render_parser.add_argument("--install-root", type=Path, required=True)
     render_parser.add_argument("--port", type=int, required=True)
-    render_parser.add_argument("--stdout-path", type=str, required=True)
-    render_parser.add_argument("--stderr-path", type=str, required=True)
     render_parser.add_argument("--output", type=Path, required=True)
 
     verify_plist_parser = sub.add_parser(
         "service-verify", help="Verify a rendered LaunchDaemon plist's shape/security contract."
     )
     verify_plist_parser.add_argument("--plist", type=Path, required=True)
+    verify_plist_parser.add_argument("--install-root", type=Path, required=True)
     verify_plist_parser.add_argument("--expected-label", type=str, default=None)
 
     status_plist_parser = sub.add_parser(
@@ -130,19 +134,20 @@ def _run_command(args: argparse.Namespace) -> OpsResult:
             artifact_path=args.artifact,
             expected_release_id=args.expected_release_id,
         )
+    if args.command == "config-verify":
+        return verify_host_config(args.install_root)
     if args.command == "service-render":
         spec = ServiceSpec(
             label=args.label,
             user_name=args.user_name,
-            working_directory=args.working_directory,
-            executable=args.executable,
+            install_root=args.install_root,
             port=args.port,
-            stdout_path=args.stdout_path,
-            stderr_path=args.stderr_path,
         )
         return run_service_render(spec, args.output)
     if args.command == "service-verify":
-        return verify_service_plist(args.plist, expected_label=args.expected_label)
+        return verify_service_plist(
+            args.plist, install_root=args.install_root, expected_label=args.expected_label
+        )
     if args.command == "service-status":
         return run_service_status(label=args.label)
     if args.command == "build-release":

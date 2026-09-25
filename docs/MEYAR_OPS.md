@@ -3,8 +3,9 @@
 Operator tooling for agentless deployment readiness (issue #35 — Slice 6,
 M9). This document covers PR1 (`preflight`/`status`/`readiness`/
 `verify-release` — `docs/DECISIONS.md` D-066), PR2 (`service-render`/
-`service-verify`/`service-status` — D-067), and PR3 (`build-release` —
-D-068). See §11 below for the exact #35/#46 boundary.
+`service-verify`/`service-status` — D-067), PR3 (`build-release` —
+D-068), PR4 (offline bundle/activation — D-073), and PR5 (host config
+and service binding — D-074). See §11 below for the #35/#46 boundary.
 
 **PR3 scope reminder — read before assuming this means "deployable":**
 `build-release` produces an immutable MEYAR APPLICATION release
@@ -162,9 +163,24 @@ orchestration: no command in this section writes to
 target service model (not yet installed by any command here) is: system
 LaunchDaemon -> dedicated non-root `UserName` -> MEYAR application
 process -> loopback-bound Uvicorn. PostgreSQL and Ollama remain local
-external dependencies, unmanaged by these commands. There is no accepted
-immutable release/install filesystem layout yet, and these commands do
-not invent one. See `docs/DECISIONS.md` D-067.
+external dependencies, unmanaged by these commands. PR5 binds them to
+PR4's accepted immutable release and shared host layout (D-073/D-074).
+
+### `config-verify` (PR5)
+
+```bash
+uv run meyar-ops config-verify --install-root <root>
+```
+
+Read-only verification of `<root>/shared/config/.env`: safe directory
+chain; regular, non-symlink file; 64 KiB bounded read; well-formed
+dotenv; no duplicate critical keys or interpolation; production values
+validated through application `Settings`, without ambient shell values.
+Fixed finding codes never include secrets. The config is operator-owned
+and outside the immutable release. Production requires explicit safe
+database credentials and pending-login secret, Secure cookies, local
+Ollama providers and loopback endpoint, and exact absolute
+`<root>/shared/storage`. The production model remains TBD until #36.
 
 ### `service-render`
 
@@ -172,34 +188,33 @@ not invent one. See `docs/DECISIONS.md` D-067.
 uv run meyar-ops service-render \
   --label <launchd-label> \
   --user-name <dedicated-non-root-account> \
-  --working-directory <absolute-path> \
-  --executable <absolute-path-to-interpreter> \
+  --install-root <root> \
   --port <1-65535> \
-  --stdout-path <absolute-path> \
-  --stderr-path <absolute-path> \
   --output <path-to-write>
 ```
 
 Renders a deterministic LaunchDaemon plist (`plistlib`, `sort_keys=True`)
 with exactly seven keys: `Label`, `UserName`, `WorkingDirectory`,
 `ProgramArguments`, `StandardOutPath`, `StandardErrorPath`, `KeepAlive`.
-Every typed input is required and operator-supplied — no bank-specific or
-otherwise hardcoded default for any field.
+The root is operator-supplied; runtime, config and log paths are derived
+from its verified PR4 layout.
 
 - **Label:** rejected if empty, containing `/`, or containing any
   whitespace/control character.
 - **UserName:** rejected if empty or `root`. `meyar-ops` only references
   this account in the plist; it never creates it.
-- **WorkingDirectory / Executable / StandardOutPath / StandardErrorPath:**
-  each must be an absolute path, free of NUL/control characters, free of
-  a lexical `..` traversal component. Symlink path components are
-  deliberately **not** blanket-rejected — no final immutable-release-path
-  contract exists yet.
-- **Executable:** never a bare `uv`/PATH-resolved name — an absolute
-  interpreter path. `ProgramArguments` is always constructed as a real
-  argv array: `[executable, "-m", "uvicorn", "meyar.main:app", "--host",
+- **Install root:** absolute and normalized. PR4's activation chain,
+  installed tree, release-local Python and application source must verify.
+- **Executable:** exactly `<root>/current/.venv/bin/python`, never a
+  bare `uv`/PATH-resolved name or version-stale release path.
+  `ProgramArguments` is always a real argv array: `[executable, "-m",
+  "uvicorn", "meyar.main:app", "--host",
   "127.0.0.1", "--port", str(port)]`. Never a shell command string, never
   `shell=True`.
+- **WorkingDirectory:** exactly `<root>/shared/config`, where `Settings`
+  loads `.env`; no `.env` enters the immutable release.
+- **Logs:** exactly `<root>/shared/logs/meyar.stdout.log` and
+  `meyar.stderr.log`.
 - **Port:** validated 1–65535.
 - **EnvironmentVariables:** never emitted — secrets stay outside the
   plist in host-local configuration.
@@ -219,7 +234,7 @@ failure during the write removes the partial file it created.
 ### `service-verify`
 
 ```bash
-uv run meyar-ops service-verify --plist <path> [--expected-label <label>]
+uv run meyar-ops service-verify --plist <path> --install-root <root> [--expected-label <label>]
 ```
 
 Bounded read (1 MiB cap, enforced by the read call itself — never a
@@ -239,9 +254,10 @@ the seven keys `service-render` emits — any other key (a tampered
 unrecognized key) is rejected as `UNSUPPORTED_KEY`, never silently
 accepted. A malformed (non-plist) file and a well-formed-but-tampered
 plist are both rejected with distinct, truthful finding codes — never
-folded into one generic failure. No final install-root containment rule
-is invented (no final immutable release layout exists yet), and symlinked
-path components are not blanket-rejected, matching `service-render`.
+folded into one generic failure. It also verifies the active PR4 release,
+host production config and exact canonical executable, working directory
+and log paths. Stale/external interpreters and release-internal config
+working directories fail.
 
 ### `service-status`
 
@@ -569,8 +585,8 @@ never flip `ok`. Every component's finding is always present in the list
   `kickstart` is ever called, no `sudo`/privilege escalation, no service
   account is created. `service-render`/`service-verify`/`service-status`
   are foundation-only (D-067).
-- No final immutable release/install filesystem layout — path fields are
-  operator-supplied and validated lexically only.
+- PR4's immutable release/install layout exists; PR5 binds the service
+  plist to it. Privileged installation remains pending.
 - No update/rollback orchestration (the `RollbackCompatibility` enum is a
   typed classification for a future human-operated runbook, not an
   executable mechanism — no automatic Alembic downgrade).
@@ -578,9 +594,8 @@ never flip `ok`. Every component's finding is always present in the list
   wheelhouse, Ollama, model, or PostgreSQL payload in the `build-release`
   artifact — application/source release-artifact *building* now exists
   (D-068), but it is not yet a complete offline deployment bundle.
-- No host install layout, extraction, or activation for a built release
-  artifact — `build-release` only ever writes the three release-bundle
-  files to `--output-dir`.
+- `build-release` alone only builds an artifact; PR4 separately supplies
+  offline host installation and activation.
 - No production model approval — `meyar.ops.model_manifest` supports
   `PRODUCTION_APPROVED` as a schema value but nothing in this PR
   instantiates it. The schema itself requires a non-empty
@@ -590,9 +605,8 @@ never flip `ok`. Every component's finding is always present in the list
   further governance rules are for issue #36 to define once real
   benchmark evidence exists.
 - No PostgreSQL/Homebrew/Docker production provisioning topology choice.
-- No comprehensive production config fail-closed hardening or SQL/
-  exception logging hardening beyond what already exists — that is
-  issue #46.
+- PR5 covers only the deployment-blocking production config boundary;
+  remaining #46 work, including SQL/exception logging, stays open.
 
 ## #35 / #46 boundary
 
@@ -604,8 +618,8 @@ contracts, and release-artifact *verification*.
 (typed plist generation), `service-verify` (bounded plist shape/security
 verification), `service-status` (read-only `launchctl print
 system/<label>` probe). No plist installation, no `launchctl` mutation,
-no service-account creation, no PostgreSQL/Ollama lifecycle. No final
-immutable release/install path is chosen.
+no service-account creation, no PostgreSQL/Ollama lifecycle. Its original
+operator path inputs were superseded by PR5 after PR4 fixed the layout.
 
 **#35 PR3:** `build-release` — builds an immutable MEYAR
 **application** release artifact (source, migrations, `pyproject.toml`/
@@ -622,9 +636,16 @@ install/update/rollback/service-lifecycle orchestration.
 an immutable install/atomic activation layout. No LaunchDaemon mutation,
 database migration, model installation, or full rollback is performed.
 
+**#35 PR5 (D-074):** `config-verify` and canonical service render/verify
+binding. Direct production `Settings` rejects blank/default secrets,
+development DB credentials, insecure cookies, invalid provider selection
+and non-loopback Ollama. The service consumes active-release code and
+shared configuration, storage and logs. No LaunchDaemon mutation or
+target-Mac acceptance is performed. #35 and #46 remain open.
+
 **Deferred to #46:** authenticated HTTP `/ready`, in-application
-degraded-state semantics, comprehensive production config fail-closed
-hardening, SQL/exception logging hardening, application recovery/
+  degraded-state semantics, remaining production config policy,
+  SQL/exception logging hardening, application recovery/
 concurrency semantics.
 
 **Deferred to #36:** real Target-Mac model selection & benchmark on the
@@ -772,7 +793,9 @@ activation over an existing release until a later workflow supplies the
 required procedure or verified backup/restore gate. `APP_ONLY` and
 `FORWARD_COMPATIBLE_SCHEMA` are recorded with the previous identity.
 There is no Alembic downgrade, service restart, or automatic
-rollback in PR4. PR5 may use `<root>/current/backend` and
-`<root>/current/.venv/bin/python` in the already accepted plist command
-contract. Real Mac execution, native-extension import checks, and
+rollback in PR4. PR5 binds the service executable to
+`<root>/current/.venv/bin/python` and loads config from
+`<root>/shared/config`, with storage and logs under `shared/`.
+Immutable code/runtime != mutable host configuration != mutable
+candidate/document storage. Real Mac execution, native-extension import checks, and
 service/reboot rehearsal remain **UNCONFIRMED**.
