@@ -4,6 +4,8 @@ testable without Ollama." """
 
 from datetime import date
 
+import pytest
+
 from meyar.evaluation.evaluators import evaluate_criterion as _evaluate_criterion
 from meyar.evaluation.policy import compute_overall_result
 from meyar.schemas.candidate_profile import (
@@ -183,6 +185,75 @@ def test_language_no_level_required_matches_on_presence() -> None:
     profile = _empty_profile(languages=[LanguageItem(language="English", evidence=_EV)])
     result = evaluate_criterion(criterion, profile)
     assert result.status == CRITERION_STATUS_MATCH
+
+
+@pytest.mark.parametrize(
+    ("levels", "expected_status", "expected_evidence"),
+    [
+        (("B1", "C1"), CRITERION_STATUS_MATCH, ["English C1"]),
+        (("C1", "B1"), CRITERION_STATUS_MATCH, ["English C1"]),
+        (("A2", "B1"), CRITERION_STATUS_NOT_MATCHED, ["English A2", "English B1"]),
+        ((None, "C1"), CRITERION_STATUS_MATCH, ["English C1"]),
+        (("C1", None), CRITERION_STATUS_MATCH, ["English C1"]),
+        (("Fluent", "C1"), CRITERION_STATUS_MATCH, ["English C1"]),
+        (("C1", "Fluent"), CRITERION_STATUS_MATCH, ["English C1"]),
+        (("B1", "Fluent"), CRITERION_STATUS_UNKNOWN, ["English B1", "English Fluent"]),
+        (("Fluent", "B1"), CRITERION_STATUS_UNKNOWN, ["English B1", "English Fluent"]),
+        (("B2", "C1"), CRITERION_STATUS_MATCH, ["English B2", "English C1"]),
+        (("C1", "B2"), CRITERION_STATUS_MATCH, ["English B2", "English C1"]),
+    ],
+)
+def test_language_level_aggregates_all_same_name_facts_independent_of_order(
+    levels: tuple[str | None, ...], expected_status: str, expected_evidence: list[str]
+) -> None:
+    criterion = _criterion(
+        id="english", kind=CriterionKind.LANGUAGE, value="English", required_level="B2"
+    )
+    profile = _empty_profile(
+        languages=[
+            LanguageItem(
+                language="ENGLISH",
+                proficiency=level,
+                evidence=[
+                    EvidenceRef(
+                        page=1,
+                        block_index={"A2": 1, "B1": 2, "B2": 3, "C1": 4,
+                                     "Fluent": 5, None: 6}[level],
+                        quote=f"English {level or 'unset'}",
+                    )
+                ],
+            )
+            for level in levels
+        ]
+    )
+    result = evaluate_criterion(criterion, profile)
+    assert result.status == expected_status
+    assert [ref.quote for ref in result.evidence] == expected_evidence
+
+
+def test_non_cefr_level_retains_exact_match_without_cefr_mapping() -> None:
+    criterion = _criterion(
+        id="english", kind=CriterionKind.LANGUAGE, value="English", required_level="Fluent"
+    )
+    fluent = _empty_profile(
+        languages=[LanguageItem(language="English", proficiency="Fluent", evidence=_EV)]
+    )
+    b1 = _empty_profile(
+        languages=[LanguageItem(language="English", proficiency="B1", evidence=_EV)]
+    )
+    assert evaluate_criterion(criterion, fluent).status == CRITERION_STATUS_MATCH
+    assert evaluate_criterion(criterion, b1).status == CRITERION_STATUS_UNKNOWN
+
+
+def test_bare_language_with_duplicate_levels_keeps_presence_semantics() -> None:
+    criterion = _criterion(id="english", kind=CriterionKind.LANGUAGE, value="English")
+    profile = _empty_profile(
+        languages=[
+            LanguageItem(language="English", proficiency="B1", evidence=_EV),
+            LanguageItem(language="English", proficiency="C1", evidence=_EV),
+        ]
+    )
+    assert evaluate_criterion(criterion, profile).status == CRITERION_STATUS_MATCH
 
 
 # --- EXPERIENCE --------------------------------------------------------------

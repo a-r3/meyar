@@ -116,7 +116,7 @@ distinct behaviors:
    reviewed draft is a dedicated, idempotent server operation, distinct
    from ordinary vacancy creation, that locks in the exact confirmed
    requirement set. Only after that commit does deterministic evaluation
-   run: `meyar-policy-v2` per-criterion status, `meyar-score-v1` 0–100
+   run: `meyar-policy-v3` per-criterion status, `meyar-score-v1` 0–100
    Decimal scoring, and fit-tier/score-ordered ranking with per-candidate
    evidence.
 
@@ -153,7 +153,7 @@ Structured / semantic / hybrid retrieval
 Accepted CandidateProfile facts + evidence
   (claim-specific, quote-attributed — never CandidateIdentity)
         |
-Deterministic evaluation / ranking (meyar-policy-v2, meyar-score-v1)
+Deterministic evaluation / ranking (meyar-policy-v3, meyar-score-v1)
         |
 Evidence-backed explanation
         |

@@ -1,4 +1,6 @@
 import asyncio
+import uuid
+from copy import deepcopy
 from datetime import date
 from decimal import Decimal
 
@@ -12,12 +14,16 @@ from search_helpers import (
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from meyar.evaluation.evaluators import evaluate_criterion
+from meyar.evaluation.policy import compute_overall_result
 from meyar.evaluation.service import evaluate_and_score_candidate
 from meyar.models.audit_event import AuditEvent
 from meyar.models.evaluation import Evaluation
+from meyar.schemas.candidate_profile import CandidateProfileExtraction
 from meyar.schemas.criteria import CriterionIn, CriterionKind, CriterionType
-from meyar.scoring.policy import ScoringPolicyError
+from meyar.scoring.policy import SCORING_POLICY_VERSION, ScoringPolicyError, score_results
 from meyar.services.candidate_identity_repo import create_identity_version
+from meyar.services.evaluation_repo import create_evaluation
 from meyar.services.job_criteria_repo import create_criteria_version
 from meyar.services.job_repo import create_job
 
@@ -73,6 +79,134 @@ async def _score(db, tenant_id, candidate, profile, job, criteria, as_of):
     )
 
 
+def _language_profile(*levels: str) -> dict:
+    return {
+        **EMPTY_PROFILE,
+        "languages": [
+            {
+                "language": "English",
+                "proficiency": level,
+                "evidence": synthetic_evidence("English", level),
+            }
+            for level in levels
+        ],
+    }
+
+
+async def test_language_policy_v3_creates_new_scored_row_without_mutating_v2(
+    db_session: AsyncSession, tenant_and_key
+) -> None:
+    tenant, _key, _plaintext = tenant_and_key
+    as_of = date(2026, 6, 15)
+    candidate, profile = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=_language_profile("B1", "C1")
+    )
+    profile_id = profile.id
+    criterion = CriterionIn(
+        id="english_b2",
+        kind=CriterionKind.LANGUAGE,
+        type=CriterionType.MUST_HAVE,
+        label="English B2",
+        value="English",
+        required_level="B2",
+        weight=1,
+    )
+    job, criteria = await _job_with_criteria(db_session, tenant.id, [criterion])
+
+    # A B1-only input reproduces the old first-fact outcome for B1 -> C1.
+    old_result = evaluate_criterion(
+        criterion, CandidateProfileExtraction.model_validate(_language_profile("B1")),
+        evaluation_as_of_date=as_of,
+    )
+    assert old_result.status == "NOT_MATCHED"
+    old_overall = compute_overall_result([old_result])
+    old_id = uuid.uuid4()
+    old_score, old_explanation = score_results(
+        [old_result],
+        fit_band=old_overall,
+        evaluation_id=old_id,
+        candidate_profile_version_id=profile.id,
+        job_criteria_version_id=criteria.id,
+        evaluation_as_of_date=as_of,
+        evaluation_policy_version="meyar-policy-v2",
+    )
+    old_evaluation = await create_evaluation(
+        db_session,
+        tenant_id=tenant.id,
+        candidate_id=candidate.id,
+        candidate_profile_version_id=profile.id,
+        job_id=job.id,
+        job_criteria_version_id=criteria.id,
+        status="COMPLETED",
+        evaluation_id=old_id,
+        policy_engine_version="meyar-policy-v2",
+        evaluation_as_of_date=as_of,
+        numeric_score=old_score,
+        scoring_policy_version="meyar-score-v1",
+        score_explanation=old_explanation.model_dump(mode="json"),
+        overall_result=old_overall,
+        criterion_results=[old_result.model_dump(mode="json")],
+    )
+    assert old_score == Decimal("0.00")
+    old_snapshot = deepcopy(
+        (
+            old_evaluation.policy_engine_version,
+            old_evaluation.scoring_policy_version,
+            old_evaluation.criterion_results,
+            old_evaluation.numeric_score,
+            old_evaluation.overall_result,
+            old_evaluation.score_explanation,
+        )
+    )
+    await db_session.commit()
+
+    assert SCORING_POLICY_VERSION == "meyar-score-v1"
+    fresh = await _score(db_session, tenant.id, candidate, profile, job, criteria, as_of)
+    assert fresh.reused is False
+    assert fresh.evaluation.id != old_id
+    assert fresh.evaluation.policy_engine_version == "meyar-policy-v3"
+    assert fresh.evaluation.scoring_policy_version == SCORING_POLICY_VERSION
+    assert fresh.evaluation.criterion_results[0]["status"] == "MATCH"
+    assert fresh.evaluation.numeric_score == Decimal("100.00")
+    assert fresh.evaluation.overall_result == "STRONG_MATCH"
+    assert fresh.evaluation.score_explanation["evaluation_policy_version"] == "meyar-policy-v3"
+    fresh_score = fresh.evaluation.numeric_score
+    fresh_band = fresh.evaluation.overall_result
+
+    reverse_candidate, reverse_profile = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=_language_profile("C1", "B1")
+    )
+    reversed_score = await _score(
+        db_session, tenant.id, reverse_candidate, reverse_profile, job, criteria, as_of
+    )
+    assert reversed_score.evaluation.policy_engine_version == "meyar-policy-v3"
+    assert reversed_score.evaluation.criterion_results[0]["status"] == "MATCH"
+    assert reversed_score.evaluation.numeric_score == fresh_score
+    assert reversed_score.evaluation.overall_result == fresh_band
+
+    repeated = await _score(db_session, tenant.id, candidate, profile, job, criteria, as_of)
+    assert repeated.reused is True
+    assert repeated.evaluation.id == fresh.evaluation.id
+    await db_session.commit()
+    db_session.expire_all()
+    rows = (
+        await db_session.scalars(
+            select(Evaluation).where(Evaluation.candidate_profile_version_id == profile_id)
+        )
+    ).all()
+    assert len(rows) == 2
+    assert {row.policy_engine_version for row in rows} == {"meyar-policy-v2", "meyar-policy-v3"}
+    historical = await db_session.get(Evaluation, old_id)
+    assert historical is not None
+    assert (
+        historical.policy_engine_version,
+        historical.scoring_policy_version,
+        historical.criterion_results,
+        historical.numeric_score,
+        historical.overall_result,
+        historical.score_explanation,
+    ) == old_snapshot
+
 async def test_scored_evaluation_persists_complete_provenance_and_safe_explanation(
     db_session: AsyncSession, tenant_and_key
 ) -> None:
@@ -96,7 +230,7 @@ async def test_scored_evaluation_persists_complete_provenance_and_safe_explanati
     assert result.reused is False
     assert evaluation.evaluation_as_of_date == date(2026, 6, 15)
     assert evaluation.numeric_score == Decimal("100.00")
-    assert evaluation.policy_engine_version == "meyar-policy-v2"
+    assert evaluation.policy_engine_version == "meyar-policy-v3"
     assert evaluation.scoring_policy_version == "meyar-score-v1"
     assert evaluation.score_explanation["evaluation_id"] == str(evaluation.id)
     assert evaluation.score_explanation["numeric_score"] == "100.00"

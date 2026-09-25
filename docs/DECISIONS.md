@@ -5705,3 +5705,36 @@ The current language evaluator is order-sensitive when duplicate same-name
 facts disagree: its first same-name fact determines eligibility. Issue #63
 tracks that separate search-semantic change; #62 preserves membership and
 attributes evidence only to the fact that actually matched today.
+
+## D-072 — Order-independent duplicate language-level evaluation (issue #63)
+
+For a language-level requirement, the evaluator collects every fact with
+the same normalized language name. The existing CEFR order
+`A1 < A2 < B1 < B2 < C1 < C2` is the only threshold scale. Exact matching
+of the same normalized non-CEFR label remains supported, but labels such
+as `Fluent` are never mapped onto CEFR. If any comparable fact meets the
+requirement, the result is `MATCH`. Its evidence and the structured
+search `matched_fact_indices` contain **all and only** satisfying facts,
+sorted by source evidence location rather than extraction-list order.
+If none meets the requirement, an unstated or incomparable same-language
+fact makes the aggregate `UNKNOWN`, even alongside below-threshold facts;
+only a complete set of comparable below-threshold facts is
+`NOT_MATCHED`. Absent language remains `UNKNOWN`. Bare language presence
+behavior is unchanged.
+
+`evaluate_language_with_fact_indices` is the sole decision and provenance
+authority for both ordinary criterion evaluation and structured required/
+preferred language-level filters. Direct Search and Agent continue to
+use the shared result view. Single same-language facts retain their
+existing status, reason, explanation, and evidence. Only previously
+order-sensitive duplicate-fact eligibility may change. This semantic
+change bumps deterministic `POLICY_ENGINE_VERSION` from `meyar-policy-v2`
+to `meyar-policy-v3`: a scored evaluation with the same profile version,
+criteria version, and date gets a separate v3 row, while historical v2
+rows remain immutable. The ranking algorithm and numeric scoring formula
+are unchanged (`SCORING_POLICY_VERSION` remains `meyar-score-v1`), but
+changed criterion outcomes can legitimately change scores, fit bands,
+eligibility, and ranking for this duplicate-fact case. Request/plan,
+other filter kinds, embeddings, tenant/auth, and photo functionality
+are unchanged. The existing scored-provenance unique index includes both
+policy versions, so no migration is required.

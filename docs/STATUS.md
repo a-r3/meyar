@@ -2,14 +2,17 @@
 
 ## Current phase
 
-**Issue #62 (Search/Agent evidence attribution for skill experience and
-language level) is under implementation on
-`fix/issue-62-search-evidence-attribution`, based on accepted `main`
-`35ef79e0007b6796030d1d8b0095f25f348732ce`.** PR #61 (candidate
-photo extraction and identity-only presentation, issue #60) is merged.
-This corrective preserves search eligibility, ranking, and scoring;
-issue #63 separately tracks order-sensitive duplicate language facts.
-Owner independent acceptance remains required before any #62 merge.
+**Issue #63 (order-independent duplicate same-language level eligibility)
+is under implementation on `fix/issue-63-language-fact-order`, based on
+accepted `main` `4d232c6ae972575690e50e1ef4eb3f98963267d6`.** PR #64
+(issue #62 evidence attribution) is merged and issue #62 is closed.
+This corrective changes language-level criterion outcomes when duplicate
+same-name facts disagree. Deterministic evaluations now use
+`meyar-policy-v3`; historical v2 rows remain immutable and the same
+profile/criteria/date creates a separate v3 row. The ranking algorithm
+and `meyar-score-v1` numeric formula are unchanged, but changed criterion
+outcomes can change scores, fit bands, eligibility, and ranking in this
+case. Owner independent acceptance remains required before any #63 merge.
 
 **PR #42 (M8 Slice 4 — Agent Product UX & JD Matching, issue #33) is
 MERGED — squash SHA `584eb3584f10abf13db03046d32f85041b4df2ab` on `main`.**

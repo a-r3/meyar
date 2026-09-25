@@ -225,7 +225,7 @@ honest empty state.
    against each stored criterion (exact normalized-string match + curated
    alias table; deterministic date-overlap detection for experience) →
    raw per-criterion status — implemented, Slice 5.
-4. Deterministic policy engine (`meyar-policy-v2`, D-010/D-058): applies
+4. Deterministic policy engine (`meyar-policy-v3`, D-010/D-058/D-072): applies
    must-have/preferred rules to raw per-criterion statuses → overall fit
    band. Pure Python, unit tested independent of the LLM — implemented,
    Slice 5.
