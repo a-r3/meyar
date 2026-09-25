@@ -16,6 +16,7 @@ from pathlib import Path
 
 from meyar.ops.build_release import BuildReleaseRequest, build_release
 from meyar.ops.model_manifest import ModelApprovalStatus
+from meyar.ops.offline_bundle import BundleBuildRequest, build_deployment_bundle
 from meyar.ops.preflight import run_preflight
 from meyar.ops.readiness import run_readiness
 from meyar.ops.redact import safe_exception_text
@@ -94,6 +95,16 @@ def _build_parser() -> argparse.ArgumentParser:
         required=True,
         choices=[member.value for member in RollbackCompatibility],
     )
+
+    bundle_parser = sub.add_parser(
+        "bundle-build", help="Build a hash-bound offline macOS arm64 deployment directory."
+    )
+    bundle_parser.add_argument("--artifact", type=Path, required=True)
+    bundle_parser.add_argument("--manifest", type=Path, required=True)
+    bundle_parser.add_argument("--sha256sums", type=Path, required=True)
+    bundle_parser.add_argument("--output-dir", type=Path, required=True)
+    bundle_parser.add_argument("--runtime-version", type=str, required=True)
+    bundle_parser.add_argument("--runtime-executable-sha256", type=str, required=True)
     build_release_parser.add_argument("--model-manifest-reference", type=str, required=True)
     build_release_parser.add_argument(
         "--model-approval-status",
@@ -142,6 +153,17 @@ def _run_command(args: argparse.Namespace) -> OpsResult:
                 rollback_compatibility=RollbackCompatibility(args.rollback_compatibility),
                 model_manifest_reference=args.model_manifest_reference,
                 model_approval_status=ModelApprovalStatus(args.model_approval_status),
+            )
+        )
+    if args.command == "bundle-build":
+        return build_deployment_bundle(
+            BundleBuildRequest(
+                artifact_path=args.artifact,
+                release_manifest_path=args.manifest,
+                sha256sums_path=args.sha256sums,
+                output_dir=args.output_dir,
+                runtime_version=args.runtime_version,
+                runtime_executable_sha256=args.runtime_executable_sha256,
             )
         )
     raise AssertionError(f"unreachable: unknown command {args.command!r}")  # argparse enforces this

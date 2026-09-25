@@ -2,17 +2,14 @@
 
 ## Current phase
 
-**Issue #63 (order-independent duplicate same-language level eligibility)
-is under implementation on `fix/issue-63-language-fact-order`, based on
-accepted `main` `4d232c6ae972575690e50e1ef4eb3f98963267d6`.** PR #64
-(issue #62 evidence attribution) is merged and issue #62 is closed.
-This corrective changes language-level criterion outcomes when duplicate
-same-name facts disagree. Deterministic evaluations now use
-`meyar-policy-v3`; historical v2 rows remain immutable and the same
-profile/criteria/date creates a separate v3 row. The ranking algorithm
-and `meyar-score-v1` numeric formula are unchanged, but changed criterion
-outcomes can change scores, fit bands, eligibility, and ranking in this
-case. Owner independent acceptance remains required before any #63 merge.
+**Accepted `main` is `9b234a2c8ea0b4a3be533dfd0c382564016191d6`.**
+PR #65 (issue #63, order-independent duplicate same-language level
+eligibility) is merged and issue #63 is CLOSED. PR #64 (issue #62 evidence
+attribution) is merged and issue #62 is CLOSED. Deterministic evaluations
+use `meyar-policy-v3`; historical v2 rows remain immutable. The ranking
+algorithm and `meyar-score-v1` numeric formula remain unchanged, while
+corrected criterion outcomes can change scores and rankings in that case.
+**Issue #35 is the active engineering phase.**
 
 **PR #42 (M8 Slice 4 — Agent Product UX & JD Matching, issue #33) is
 MERGED — squash SHA `584eb3584f10abf13db03046d32f85041b4df2ab` on `main`.**
@@ -83,6 +80,19 @@ See `docs/MEYAR_OPS.md` and `docs/DECISIONS.md` D-068. Verified on Linux
 only, against real throwaway Git repositories and this repository's own
 real HEAD commit (read-only); Apple-Silicon runtime acceptance remains
 **UNCONFIRMED** and the production model remains **TBD**.
+
+**PR4 for #35 (offline dependency bundle + host install/activation
+foundation, D-073) is under implementation on
+`feat/issue-35-offline-install-foundation` from accepted `main`
+`9b234a2c8ea0b4a3be533dfd0c382564016191d6`.** It defines a
+hash-bound CPython 3.12/macOS arm64 wheel payload, a bank-provisioned
+Python executable identity check, a stdlib-only bundled host installer,
+immutable versioned release directories, operation locking, and atomic
+filesystem activation with previous-release identity. It does not
+install/start/stop LaunchDaemons, provision PostgreSQL/Ollama/models,
+perform Alembic downgrades, or claim real Apple-Silicon execution. No
+production model is approved. PR review/CI status is not yet accepted
+`main`; see `docs/MEYAR_OPS.md` for the bounded contract.
 
 Issue #35 remains OPEN as the current active engineering phase (offline
 dependency provisioning, host install layout, plist

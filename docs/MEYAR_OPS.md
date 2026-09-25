@@ -607,7 +607,7 @@ system/<label>` probe). No plist installation, no `launchctl` mutation,
 no service-account creation, no PostgreSQL/Ollama lifecycle. No final
 immutable release/install path is chosen.
 
-**#35 PR3 (this PR):** `build-release` — builds an immutable MEYAR
+**#35 PR3:** `build-release` — builds an immutable MEYAR
 **application** release artifact (source, migrations, `pyproject.toml`/
 `uv.lock`, release identity/integrity metadata) from an exact Git commit,
 allowlist-driven, with an embedded + external `ReleaseManifest` and a
@@ -615,6 +615,12 @@ allowlist-driven, with an embedded + external `ReleaseManifest` and a
 Not yet a complete offline deployment bundle (see the "PR3 scope
 reminder" and "PR3 commands" sections above), no host install layout, no
 install/update/rollback/service-lifecycle orchestration.
+
+**#35 PR4 (D-073):** `bundle-build` and the bundled, stdlib-only
+`meyar-ops.py` host commands (`install-release`, `verify-install`,
+`activate-release`). This establishes an exact offline wheel payload and
+an immutable install/atomic activation layout. No LaunchDaemon mutation,
+database migration, model installation, or full rollback is performed.
 
 **Deferred to #46:** authenticated HTTP `/ready`, in-application
 degraded-state semantics, comprehensive production config fail-closed
@@ -647,3 +653,126 @@ depends on this tooling first being reviewed and merged.
 development/integration setting, `qwen3:1.7b` is a recent local
 acceptance/browser-runtime override; neither is benchmarked or
 production-approved. See `docs/TARGET_MAC_BENCHMARK.md` and issue #36.
+
+## PR4 — offline dependency bundle and host install foundation
+
+PR4 is a **contract implementation verified on Linux**. It does not claim
+that downloaded macOS wheels execute on Apple Silicon or that the bank
+host has been rehearsed. The reference target is macOS arm64, CPython
+3.12, with a minimum wheel platform tag of `macosx_11_0_arm64`. The
+target's exact 3.12 patch version and SHA-256 of its resolved interpreter
+executable must be supplied by the bank operator. A different version,
+OS, architecture, or executable hash fails before host mutation.
+
+**Runtime model.** The bank provisions and approves CPython 3.12 with
+working `venv` and `pip`. The bundle contains no Python runtime and
+neither builder nor host installer requires `uv`. There is no Homebrew
+or target-host internet fallback. The host creates a release-local venv
+with `--copies`; its `pip` installs only the bundle's selected, hashed
+wheels using `--isolated --no-index --no-deps --require-hashes` and
+`--only-binary=:all:`. Failure to create the venv or use pip fails the
+install. The development-side `bundle-build` reads the selected
+application archive's `uv.lock` directly; it downloads exact wheel URLs
+and SHA-256 values from that lock, checks wheel tags for CPython 3.12
+macOS arm64, and never executes or installs a foreign wheel on Linux.
+`greenlet` is an explicit direct dependency because SQLAlchemy's
+conditional dependency marker does not select macOS `arm64`; Pillow is
+also a direct, required runtime dependency. PostgreSQL's application
+driver is `asyncpg`; `pgvector` is the Python integration package. This
+runtime lock has no `psycopg` dependency.
+
+**Build command** (on a trusted development/build machine, against a
+previously created and verified `build-release` output):
+
+```bash
+cd backend
+uv run --locked meyar-ops bundle-build \
+  --artifact <release-id>.tar.gz \
+  --manifest <release-id>.release-manifest.json \
+  --sha256sums SHA256SUMS \
+  --output-dir <existing-output-directory> \
+  --runtime-version <approved-exact-3.12.x-version> \
+  --runtime-executable-sha256 <approved-64-hex-sha256>
+```
+
+The builder consumes an exact application artifact, copies the three
+inputs into a temporary directory, runs the existing `verify-release`
+checks on those stable copies, enforces the application path allowlist,
+selects the lock's target-compatible binary wheels, downloads each
+locked URL once, checks its hash and ZIP member safety, and atomically
+publishes `<release-id>.deployment/` without overwriting an existing
+directory. The directory contains the application artifact, its two
+sidecars, `requirements.txt`, `wheels/`, `meyar-ops.py` copied from that
+exact application archive, and `deployment_manifest.json`. The manifest
+binds format version, release id/full source SHA, artifact and sidecar
+hashes, `uv.lock` SHA, runtime version/executable SHA, target OS/arch/tag,
+each wheel name/version/file/SHA, aggregate dependency identity, Alembic
+heads, model reference/status, rollback classification, and installer
+hash. This is an integrity contract, **not** publisher signing; the
+handoff channel and accepted source commit remain operator trust inputs.
+No candidate/CV/storage file, tests, `.env`, credentials, model artifact,
+or database dump is read or included.
+
+**Host commands** (run the bundled script using the approved Python
+interpreter; `<root>` must already exist, be owned by the invoking
+operator, and reject group/other writes; normally `/opt/meyar`):
+
+```bash
+<approved-python3.12> <bundle>/meyar-ops.py install-release \
+  --bundle-dir <bundle> --install-root <root>
+<approved-python3.12> <bundle>/meyar-ops.py verify-install \
+  --install-root <root> --release-id <release-id>
+<approved-python3.12> <bundle>/meyar-ops.py activate-release \
+  --install-root <root> --release-id <release-id>
+```
+
+These use the existing `OpsResult` JSON shape and exit 0 on success,
+1 on a failed check, 2 for invalid invocation, and 3 for an unexpected
+infrastructure failure. The script never prints
+input paths, subprocess output, candidate content, or secrets. All
+subprocesses use fixed argv; no shell, Git, `uv`, external AI, or target
+network call is made. Any filesystem mutation is under a non-blocking
+`flock` on `<root>/.meyar-ops.lock`; competing operations fail
+`OPERATION_BUSY`. The OS releases a stale lock when its process dies.
+The lock file contains no owner identity or secret.
+
+**Canonical layout:**
+
+```
+<root>/
+  releases/<release-id>/    # immutable source, migrations, release-local venv
+  activations/g-<id>/       # exact current and previous release identities
+  current                   # atomic symlink to activations/g-<id>/current
+  shared/config/            # bank-owned configuration/secrets, outside release
+  shared/storage/           # mutable candidate/CV data, outside release
+  shared/backups/
+  shared/logs/
+```
+
+Extraction is streamed into a disposable staging directory, with member
+count, declared-size, path, type, duplicate, and allowlist checks; no
+`extractall` call is used. A complete install is renamed into its
+versioned release path only after the lock, manifest, wheel, dependency,
+venv, and tree checks pass. A failed or killed pre-rename install cannot
+change `current`. Reinstalling identical bytes verifies the installed
+tree and succeeds idempotently; different or tampered bytes under the
+same release id fail. The release-local source path is checked during
+`verify-install`. No mutable data enters release directories.
+
+Activation verifies the installed tree first, then creates a generation
+record containing the exact new release id, previous release id, and
+rollback classification. The sole active-release pointer is
+`<root>/current`; `activations/current` is not created. An atomic
+replacement of `<root>/current` publishes the complete generation.
+Failure or process death before replacement leaves the previous public
+state unchanged, including no `current` entry on first activation. A
+process killed after replacement leaves a complete new generation.
+`PROHIBITED_PENDING_PROCEDURE` and `BACKUP_RESTORE_REQUIRED` block
+activation over an existing release until a later workflow supplies the
+required procedure or verified backup/restore gate. `APP_ONLY` and
+`FORWARD_COMPATIBLE_SCHEMA` are recorded with the previous identity.
+There is no Alembic downgrade, service restart, or automatic
+rollback in PR4. PR5 may use `<root>/current/backend` and
+`<root>/current/.venv/bin/python` in the already accepted plist command
+contract. Real Mac execution, native-extension import checks, and
+service/reboot rehearsal remain **UNCONFIRMED**.

@@ -45,10 +45,9 @@ canonical references it points to — read this alongside, not instead of:
 - [`docs/TARGET_MAC_BENCHMARK.md`](TARGET_MAC_BENCHMARK.md) — reference
   hardware, benchmark harness, model-approval gate.
 - [`docs/MEYAR_OPS.md`](MEYAR_OPS.md) — the `meyar-ops` operator CLI
-  (issue #35): local preflight/status/readiness checks and release-
-  artifact verification. PR1 foundation only — see its own #35/#46
-  boundary section; it does not yet replace any manual step in this
-  runbook.
+  (issue #35), including PR4's offline bundle and host filesystem
+  install/activation foundation. It does not yet provision or start the
+  full target service; see its #35/#46 boundary.
 - [`docs/DECISIONS.md`](DECISIONS.md) — the full decision log, including
   D-020 (tested security/acceptance boundary) and D-066 (`meyar-ops`
   foundation).
@@ -111,17 +110,27 @@ Never deploy arbitrary unreviewed developer working-tree state as the
 canonical release. A deployment always corresponds to a specific,
 identifiable commit on `main` that went through PR review and CI.
 
+**Issue #35 PR4 offline path, once independently accepted:** build the
+application artifact from an accepted commit, build and transport its
+hash-bound offline deployment directory, then run the bundled stdlib-only
+`meyar-ops.py` using the bank-provisioned Python interpreter to install,
+verify, and activate the filesystem release. The target host does not
+pull Git or resolve packages on the internet. `docs/MEYAR_OPS.md` gives
+the exact commands and layout. The diagram above is the older manual
+source-checkout procedure, not the final bank-host method. PR4 does not
+start the service or constitute target-Mac acceptance.
+
 ## 4. Fresh host provisioning
 
 The `git clone`/`git pull` sequence below is the current, manual,
 source-checkout-based runbook — it is not the final intended bank
 production mechanism. Issue #35's target production path is an immutable,
 owner-accepted release artifact (built, verified, installed, and updated
-by `meyar-ops` tooling); `meyar-ops verify-release` (PR1, D-066) exists
-today, but the corresponding artifact build/install/update tooling is not
-yet implemented and lands in later #35 PRs. Until then, this
-source-checkout runbook is the accurate description of how a host is
-actually provisioned.
+by `meyar-ops` tooling). PR3 built the application artifact and PR4
+defines its offline dependency/install foundation; service lifecycle,
+database/model provisioning, and target-Mac acceptance remain later #35
+work. This source-checkout runbook describes the older manual dev/demo
+path and must not be used as the final bank-host deployment method.
 
 Prerequisites (from `README.md` §Prerequisites, unchanged here):
 

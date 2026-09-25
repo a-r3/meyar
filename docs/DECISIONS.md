@@ -5738,3 +5738,57 @@ eligibility, and ranking for this duplicate-fact case. Request/plan,
 other filter kinds, embeddings, tenant/auth, and photo functionality
 are unchanged. The existing scored-provenance unique index includes both
 policy versions, so no migration is required.
+
+## D-073 — Offline macOS arm64 dependency and filesystem activation foundation (issue #35 PR4)
+
+**Date:** 2026-09-25. **Status:** PR4 implementation for independent
+review on `feat/issue-35-offline-install-foundation`, based on accepted
+`main` `9b234a2c8ea0b4a3be533dfd0c382564016191d6`.
+
+The accepted PR3 artifact is source and migrations, not a deployable
+Python environment. PR4 binds an offline dependency directory to that
+artifact's full source SHA, `ReleaseManifest`, `uv.lock`, target tags,
+exact wheel bytes, and a bank-provisioned Python 3.12 patch-version and
+interpreter-executable SHA. The build side selects compatible macOS arm64
+wheels from exact URLs and hashes in the selected artifact's lockfile;
+it downloads and inspects but never runs foreign wheels. The target
+installer uses no `uv`, PyPI, Homebrew, Git, coding agent, or network
+resolution. It requires an approved CPython 3.12 installation with
+`venv`/`pip`; absence or identity mismatch fails closed. No Python
+runtime is redistributed. The build side can use `uv` for its own
+development environment, but `bundle-build` itself does not invoke or
+ship a `uv` binary. `greenlet` is an explicit dependency because the
+SQLAlchemy lock marker excludes macOS `arm64`; Pillow remains explicit.
+The lock uses `asyncpg` plus Python `pgvector`, not `psycopg`.
+
+The install root must preexist; `/opt/meyar` is the canonical production
+example. `releases/<id>` holds read-only source, migrations, and a
+release-local venv; `shared/config`, `shared/storage`, `shared/backups`,
+and `shared/logs` hold all mutable and secret material. The stdlib-only
+installer copied from the exact application artifact verifies the
+manifest and wheel hashes, rebinds every wheel to `uv.lock`, extracts
+only allowlisted regular archive members into a disposable staging
+directory, installs dependencies with fixed argv and `pip --no-index
+--require-hashes`, verifies the resulting tree, and renames a complete
+release into place. A non-blocking local `flock` serializes install and
+activation; a process death releases a stale lock. Identical reinstall
+is idempotent; a conflicting/tampered release id is refused. No real
+candidate data is inspected or copied.
+
+Activation creates a generation with exact current/previous release ids
+and rollback classification, then atomically replaces `<root>/current`
+with a symlink to that generation's release link. This public symlink is
+the sole active-release pointer; `activations/current` is not created.
+Before the replacement, a first activation has no public current entry;
+after it, the link resolves to a complete generation. The already accepted
+LaunchDaemon argv can later target its venv Python.
+`PROHIBITED_PENDING_PROCEDURE` and `BACKUP_RESTORE_REQUIRED` prevent
+replacing an existing release until a later workflow can supply the
+declared procedure or verified backup/restore gate.
+No service lifecycle, Alembic downgrade, schema rollback, PostgreSQL,
+Ollama/model provisioning, production-model approval, #36 benchmark,
+or #46 runtime/ingestion hardening is performed. Hashes prove integrity
+relative to the reviewed artifact and lock, not publisher identity; the
+accepted commit and handoff remain operator trust inputs. Linux tests
+simulate platform/filesystem contracts. Real Apple-Silicon import,
+service, and reboot behavior remains unconfirmed.
