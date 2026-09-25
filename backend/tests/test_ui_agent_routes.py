@@ -233,11 +233,13 @@ async def test_search_candidates_turn_renders_grounded_results_not_model_text(
     assert 'class="empty-state"' not in response.text
 
 
+@pytest.mark.parametrize("levels", [("B2",), ("B1", "C1"), ("C1", "B1")])
 async def test_owner_duration_and_level_evidence_matches_direct_search_and_agent(
     client: AsyncClient,
     db_session: AsyncSession,
     tenant_and_user,
     local_ui_settings: Settings,
+    levels: tuple[str, ...],
 ) -> None:
     tenant, user, password, _membership = tenant_and_user
     python_ref = {
@@ -245,7 +247,11 @@ async def test_owner_duration_and_level_evidence_matches_direct_search_and_agent
         "block_index": 1,
         "quote": "Python Engineer Synthetic Bank 2019 - 2025",
     }
-    english_ref = {"page": 1, "block_index": 2, "quote": "English B2"}
+    english_refs = {
+        level: {"page": 1, "block_index": block, "quote": f"English {level}"}
+        for level, block in (("B1", 2), ("B2", 3), ("C1", 4))
+    }
+    expected_english_ref = english_refs["C1" if "C1" in levels else "B2"]
     candidate, pv = await seed_candidate_with_profile(
         db_session,
         tenant_id=tenant.id,
@@ -276,7 +282,12 @@ async def test_owner_duration_and_level_evidence_matches_direct_search_and_agent
                 }
             ],
             "languages": [
-                {"language": "English", "proficiency": "B2", "evidence": [english_ref]}
+                {
+                    "language": "English",
+                    "proficiency": level,
+                    "evidence": [english_refs[level]],
+                }
+                for level in levels
             ],
         },
     )
@@ -311,7 +322,10 @@ async def test_owner_duration_and_level_evidence_matches_direct_search_and_agent
         assert "Python" in response.text and "English" in response.text
         assert "Sübut yerləri" in response.text
         assert python_ref["quote"] in response.text
-        assert english_ref["quote"] in response.text
+        assert expected_english_ref["quote"] in response.text
+        for level in levels:
+            if level != ("C1" if "C1" in levels else "B2"):
+                assert english_refs[level]["quote"] not in response.text
         assert "Engineer at Synthetic Bank" not in response.text
     simple = await client.post(
         "/ui/search",

@@ -368,6 +368,78 @@ async def test_language_filter(db_session: AsyncSession) -> None:
     assert response.results[0].candidate_id == candidate.id
 
 
+async def test_duplicate_language_fact_order_does_not_change_search_or_evidence(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await _tenant(db_session, "LanguageOrder")
+    profile = _profile(languages=[("English", "B1"), ("English", "C1")])
+    candidate, _ = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=profile
+    )
+    await db_session.commit()
+    required_request = CandidateSearchRequest(
+        mode=SearchMode.STRUCTURED_ONLY,
+        required_filters=RequiredFilters(
+            language_levels=[LanguageLevelFilter(value="English", required_level="B2")]
+        ),
+    )
+    preferred_request = CandidateSearchRequest(
+        mode=SearchMode.STRUCTURED_ONLY,
+        preferred_filters=PreferredFilters(
+            language_levels=[LanguageLevelFilter(value="English", required_level="B2")]
+        ),
+    )
+    bare_request = CandidateSearchRequest(
+        mode=SearchMode.STRUCTURED_ONLY,
+        required_filters=RequiredFilters(languages=["English"]),
+    )
+
+    async def assert_same_result() -> None:
+        required = await search_candidates(
+            db_session, tenant_id=tenant.id, request=required_request
+        )
+        preferred = await search_candidates(
+            db_session, tenant_id=tenant.id, request=preferred_request
+        )
+        bare = await search_candidates(db_session, tenant_id=tenant.id, request=bare_request)
+        assert [item.candidate_id for item in required.results] == [candidate.id]
+        assert [item.candidate_id for item in preferred.results] == [candidate.id]
+        assert [item.candidate_id for item in bare.results] == [candidate.id]
+        assert preferred.results[0].structured_score == 1.0
+        assert [item.category for item in preferred.results[0].preferred_filters_matched] == [
+            "language_level"
+        ]
+        from meyar.services.profile_authority import get_current_authorized_profile
+
+        current = await get_current_authorized_profile(
+            db_session, tenant_id=tenant.id, candidate_id=candidate.id
+        )
+        assert current is not None
+        _, authorized_profile = current
+        refs = _requirement_attributable_evidence(
+            authorized_profile, required.results[0].required_filters_matched
+        )
+        assert [ref.quote for ref in refs] == ["English C1"]
+        preferred_refs = _requirement_attributable_evidence(
+            authorized_profile, preferred.results[0].preferred_filters_matched
+        )
+        assert [ref.quote for ref in preferred_refs] == ["English C1"]
+        bare_refs = _requirement_attributable_evidence(
+            authorized_profile, bare.results[0].required_filters_matched
+        )
+        assert {ref.quote for ref in bare_refs} == {"English B1", "English C1"}
+
+    await assert_same_result()
+    await seed_next_profile_version(
+        db_session,
+        tenant_id=tenant.id,
+        candidate=candidate,
+        profile_content=_profile(languages=[("English", "C1"), ("English", "B1")]),
+    )
+    await db_session.commit()
+    await assert_same_result()
+
+
 async def test_education_filter(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session)
     candidate, _ = await seed_candidate_with_profile(

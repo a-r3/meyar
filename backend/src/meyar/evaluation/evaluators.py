@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from datetime import date
+from typing import Literal
 
 from meyar.core.domain_terms import canonicalize_domain
 from meyar.evaluation.experience import merge_and_sum_years, parse_year, ranges_overlap
@@ -8,7 +9,7 @@ from meyar.evaluation.normalization import (
     normalize_skill_name,
     normalize_text,
 )
-from meyar.schemas.candidate_profile import CandidateProfileExtraction, EvidenceRef
+from meyar.schemas.candidate_profile import CandidateProfileExtraction, EvidenceRef, LanguageItem
 from meyar.schemas.criteria import CriterionIn, CriterionKind
 from meyar.schemas.evaluation import (
     CRITERION_STATUS_CONFLICTING_EVIDENCE,
@@ -119,80 +120,173 @@ def evaluate_education(
     )
 
 
-def evaluate_language(
-    criterion: CriterionIn, profile: CandidateProfileExtraction
-) -> CriterionResult:
-    target_lang = normalize_text(criterion.value or "")
-    required_level = normalize_text(criterion.required_level) if criterion.required_level else None
-    cefr_order = {level: index for index, level in enumerate(("a1", "a2", "b1", "b2", "c1", "c2"))}
+_CEFR_ORDER = {level: index for index, level in enumerate(("a1", "a2", "b1", "b2", "c1", "c2"))}
+_LanguageComparison = Literal[
+    "threshold_met", "below", "explicit_match", "unstated", "incompatible"
+]
 
-    for lang in profile.languages:
-        if normalize_text(lang.language) != target_lang:
-            continue
-        if required_level is None:
-            return _finalize(
+
+def _compare_language_level(
+    proficiency: str | None, required_level: str
+) -> _LanguageComparison:
+    """One comparison authority for both single and duplicate language facts."""
+    if not proficiency:
+        return "unstated"
+    candidate_level = normalize_text(proficiency)
+    if required_level in _CEFR_ORDER and candidate_level in _CEFR_ORDER:
+        return (
+            "threshold_met"
+            if _CEFR_ORDER[candidate_level] >= _CEFR_ORDER[required_level]
+            else "below"
+        )
+    if candidate_level == required_level:
+        return "explicit_match"
+    return "incompatible"
+
+
+def _language_fact_order(entry: tuple[int, LanguageItem]) -> tuple:
+    """Stable source order even if extraction's language list is permuted."""
+    _index, item = entry
+    return (
+        tuple((ref.page, ref.block_index, ref.quote) for ref in item.evidence),
+        normalize_text(item.proficiency or ""),
+    )
+
+
+def evaluate_language_with_fact_indices(
+    criterion: CriterionIn, profile: CandidateProfileExtraction
+) -> tuple[CriterionResult, list[int]]:
+    """Evaluate all same-name level facts and return only positive provenance.
+
+    A supported satisfying fact wins. Without one, any unstated or
+    incompatible fact leaves the level UNKNOWN; only a complete set of
+    comparable below-threshold facts is NOT_MATCHED. No scale conversion
+    is inferred for unsupported words such as "Fluent" against CEFR.
+    """
+    target_lang = normalize_text(criterion.value or "")
+    matching = [
+        (index, item)
+        for index, item in enumerate(profile.languages)
+        if normalize_text(item.language) == target_lang
+    ]
+    if not matching:
+        return (
+            _finalize(
+                criterion,
+                CRITERION_STATUS_UNKNOWN,
+                "LANGUAGE_NOT_FOUND_IN_PROFILE",
+                f"No profile evidence found for required language '{criterion.value}'.",
+            ),
+            [],
+        )
+
+    # Preserve existing bare-language presence behavior, including its
+    # first-fact evaluator evidence. Ordinary search shows every same-name
+    # fact through its separate bare-language presentation path.
+    first_index, first_item = matching[0]
+    if not criterion.required_level:
+        return (
+            _finalize(
                 criterion,
                 CRITERION_STATUS_MATCH,
                 "LANGUAGE_PRESENT",
-                f"Profile lists language '{lang.language}' (no proficiency level required).",
-                evidence=lang.evidence,
+                f"Profile lists language '{first_item.language}' (no proficiency level required).",
+                evidence=first_item.evidence,
                 confidence=1.0,
-            )
-        if not lang.proficiency:
-            return _finalize(
-                criterion,
-                CRITERION_STATUS_UNKNOWN,
-                "LANGUAGE_LEVEL_UNSTATED",
-                f"Profile lists '{lang.language}' but has no supported proficiency evidence "
-                f"to compare with required '{criterion.required_level}'.",
-                evidence=lang.evidence,
-            )
-        candidate_level = normalize_text(lang.proficiency)
-        if required_level in cefr_order and candidate_level in cefr_order:
-            if cefr_order[candidate_level] >= cefr_order[required_level]:
-                return _finalize(
-                    criterion,
-                    CRITERION_STATUS_MATCH,
-                    "LANGUAGE_LEVEL_THRESHOLD_MET",
-                    f"Profile states '{lang.language}' at CEFR {lang.proficiency}, meeting "
-                    f"the required CEFR {criterion.required_level} threshold.",
-                    evidence=lang.evidence,
-                    confidence=1.0,
-                )
-            return _finalize(
-                criterion,
-                CRITERION_STATUS_NOT_MATCHED,
-                "LANGUAGE_LEVEL_THRESHOLD_NOT_MET",
-                f"Profile states '{lang.language}' at CEFR {lang.proficiency}, below "
-                f"the required CEFR {criterion.required_level} threshold.",
-                evidence=lang.evidence,
-                confidence=1.0,
-            )
-        if candidate_level == required_level:
-            return _finalize(
-                criterion,
-                CRITERION_STATUS_MATCH,
-                "LANGUAGE_LEVEL_EXPLICIT_MATCH",
-                f"Profile states '{lang.language}' at proficiency '{lang.proficiency}', "
-                f"meeting the required '{criterion.required_level}'.",
-                evidence=lang.evidence,
-                confidence=1.0,
-            )
-        return _finalize(
-            criterion,
-            CRITERION_STATUS_UNKNOWN,
-            "LANGUAGE_LEVEL_SCALE_INCOMPATIBLE",
-            f"Profile states '{lang.language}' proficiency as '{lang.proficiency}', which "
-            f"cannot be deterministically compared with '{criterion.required_level}'.",
-            evidence=lang.evidence,
+            ),
+            [first_index],
         )
 
-    return _finalize(
-        criterion,
-        CRITERION_STATUS_UNKNOWN,
-        "LANGUAGE_NOT_FOUND_IN_PROFILE",
-        f"No profile evidence found for required language '{criterion.value}'.",
+    required_level = normalize_text(criterion.required_level)
+    compared = [
+        (index, item, _compare_language_level(item.proficiency, required_level))
+        for index, item in matching
+    ]
+    satisfying = [
+        (index, item)
+        for index, item, outcome in compared
+        if outcome in ("threshold_met", "explicit_match")
+    ]
+    if satisfying:
+        ordered = sorted(satisfying, key=_language_fact_order)
+        single = len(matching) == 1
+        item = ordered[0][1]
+        threshold = required_level in _CEFR_ORDER
+        return (
+            _finalize(
+                criterion,
+                CRITERION_STATUS_MATCH,
+                "LANGUAGE_LEVEL_THRESHOLD_MET" if threshold else "LANGUAGE_LEVEL_EXPLICIT_MATCH",
+                (
+                    f"Profile states '{item.language}' at CEFR {item.proficiency}, meeting "
+                    f"the required CEFR {criterion.required_level} threshold."
+                    if threshold and single
+                    else f"Profile states '{item.language}' at proficiency '{item.proficiency}', "
+                    f"meeting the required '{criterion.required_level}'."
+                    if single
+                    else f"Profile has supported '{criterion.value}' proficiency evidence "
+                    f"meeting the required '{criterion.required_level}'."
+                ),
+                evidence=[ref for _, fact in ordered for ref in fact.evidence],
+                confidence=1.0,
+            ),
+            [index for index, _ in ordered],
+        )
+
+    ordered_all = sorted(matching, key=_language_fact_order)
+    evidence = [ref for _, fact in ordered_all for ref in fact.evidence]
+    if any(outcome in ("unstated", "incompatible") for _, _, outcome in compared):
+        incompatible = any(outcome == "incompatible" for _, _, outcome in compared)
+        reason = (
+            "LANGUAGE_LEVEL_SCALE_INCOMPATIBLE" if incompatible else "LANGUAGE_LEVEL_UNSTATED"
+        )
+        if len(matching) == 1:
+            item = matching[0][1]
+            explanation = (
+                f"Profile states '{item.language}' proficiency as '{item.proficiency}', which "
+                f"cannot be deterministically compared with '{criterion.required_level}'."
+                if incompatible
+                else f"Profile lists '{item.language}' but has no supported proficiency evidence "
+                f"to compare with required '{criterion.required_level}'."
+            )
+        else:
+            explanation = (
+                f"Not all '{criterion.value}' proficiency facts can be deterministically "
+                f"compared with required '{criterion.required_level}'."
+            )
+        return (
+            _finalize(
+                criterion, CRITERION_STATUS_UNKNOWN, reason, explanation, evidence=evidence
+            ),
+            [],
+        )
+
+    item = matching[0][1]
+    explanation = (
+        f"Profile states '{item.language}' at CEFR {item.proficiency}, below "
+        f"the required CEFR {criterion.required_level} threshold."
+        if len(matching) == 1
+        else f"All supported '{criterion.value}' proficiency facts are below "
+        f"the required CEFR {criterion.required_level} threshold."
     )
+    return (
+        _finalize(
+            criterion,
+            CRITERION_STATUS_NOT_MATCHED,
+            "LANGUAGE_LEVEL_THRESHOLD_NOT_MET",
+            explanation,
+            evidence=evidence,
+            confidence=1.0,
+        ),
+        [],
+    )
+
+
+def evaluate_language(
+    criterion: CriterionIn, profile: CandidateProfileExtraction
+) -> CriterionResult:
+    result, _indices = evaluate_language_with_fact_indices(criterion, profile)
+    return result
 
 
 def evaluate_experience(

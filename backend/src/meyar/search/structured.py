@@ -17,7 +17,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import date
 
-from meyar.evaluation.evaluators import evaluate_criterion
+from meyar.evaluation.evaluators import evaluate_criterion, evaluate_language_with_fact_indices
 from meyar.evaluation.experience import ranges_overlap
 from meyar.evaluation.normalization import (
     normalize_certification_name,
@@ -143,26 +143,26 @@ def _typed_filter_match(
         min_years=min_years,
         required_level=required_level,
     )
-    result = evaluate_criterion(
-        criterion,
-        profile,
-        # Non-date-aware evaluators ignore this value. Duration filters are
-        # schema-gated to carry the caller's real as_of_date.
-        evaluation_as_of_date=as_of_date or date(1970, 1, 1),
-    )
+    if kind == CriterionKind.LANGUAGE:
+        # The evaluator owns both eligibility and the exact satisfying
+        # language facts. Never reconstruct CEFR provenance in search.
+        result, fact_indices = evaluate_language_with_fact_indices(criterion, profile)
+    else:
+        result = evaluate_criterion(
+            criterion,
+            profile,
+            # Non-date-aware evaluators ignore this value. Duration filters
+            # are schema-gated to carry the caller's real as_of_date.
+            evaluation_as_of_date=as_of_date or date(1970, 1, 1),
+        )
+        fact_indices = []
     if result.status != CRITERION_STATUS_MATCH:
         return False, []
     # Capture the exact profile facts consumed by the evaluator while the
     # authoritative profile and explicit evaluation date are in scope. A
-    # language-level match uses the evaluator's first same-name fact; a
     # skill-duration match consumes every same-skill interval in its union.
     if kind == CriterionKind.LANGUAGE:
-        target = normalize_text(value)
-        return True, [
-            index
-            for index, item in enumerate(profile.languages)
-            if normalize_text(item.language) == target
-        ][:1]
+        return True, fact_indices
     if kind == CriterionKind.SKILL_EXPERIENCE:
         target = normalize_skill_name(value)
         return True, [
