@@ -5776,9 +5776,12 @@ is idempotent; a conflicting/tampered release id is refused. No real
 candidate data is inspected or copied.
 
 Activation creates a generation with exact current/previous release ids
-and rollback classification, then atomically swaps the generation
-pointer. The stable `<root>/current` link resolves through that pointer;
-the already accepted LaunchDaemon argv can later target its venv Python.
+and rollback classification, then atomically replaces `<root>/current`
+with a symlink to that generation's release link. This public symlink is
+the sole active-release pointer; `activations/current` is not created.
+Before the replacement, a first activation has no public current entry;
+after it, the link resolves to a complete generation. The already accepted
+LaunchDaemon argv can later target its venv Python.
 `PROHIBITED_PENDING_PROCEDURE` and `BACKUP_RESTORE_REQUIRED` prevent
 replacing an existing release until a later workflow can supply the
 declared procedure or verified backup/restore gate.

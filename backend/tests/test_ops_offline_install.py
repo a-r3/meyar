@@ -238,7 +238,7 @@ def test_unsafe_archive_leaves_no_release(
     monkeypatch.setattr(host, "_install_dependencies", fake_dependency_install)
     with pytest.raises(host.InstallFailure, match="ARCHIVE_UNSAFE"):
         host.install_release(bundle, root)
-    assert not (root / "current").exists()
+    assert not os.path.lexists(root / "current")
     assert not (root / "releases" / RELEASE_ID).exists()
 
 
@@ -253,7 +253,7 @@ def test_candidate_storage_file_in_application_archive_rejected(
     monkeypatch.setattr(host, "_check_host_runtime", lambda _manifest: None)
     with pytest.raises(host.InstallFailure, match="APPLICATION_CONTENT_UNEXPECTED"):
         host.install_release(bundle, root)
-    assert not (root / "current").exists()
+    assert not os.path.lexists(root / "current")
 
 
 def test_conflicting_release_and_tampering_rejected(installed: tuple[Path, Path]) -> None:
@@ -296,7 +296,7 @@ def test_partial_install_never_activates(tmp_path: Path, monkeypatch: pytest.Mon
     with pytest.raises(host.InstallFailure, match="SYNTHETIC_INSTALL_FAILURE"):
         host.install_release(bundle, root)
     assert not (root / "releases" / RELEASE_ID).exists()
-    assert not (root / "current").exists()
+    assert not os.path.lexists(root / "current")
 
 
 def test_atomic_activation_and_previous_identity(
@@ -331,9 +331,35 @@ def test_atomic_activation_and_previous_identity(
     monkeypatch.setattr(host.os, "replace", original_replace)
     assert host.activate_release(root, second) == "RELEASE_ACTIVATED"
     assert (root / "current").resolve() == other
-    generation = os.readlink(root / "activations" / "current")
+    generation = Path(os.readlink(root / "current")).parts[1]
     activation_state = json.loads((root / "activations" / generation / "state.json").read_text())
     assert activation_state["previous_release_id"] == RELEASE_ID
+
+
+def test_first_activation_replace_failure_leaves_no_public_current(
+    installed: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _bundle, root = installed
+    public = root / "current"
+    generation_pointer = root / "activations" / "current"
+    assert host._current_release(root) is None
+    assert not os.path.lexists(public)
+    assert not os.path.lexists(generation_pointer)
+
+    original_replace = host.os.replace
+
+    def fail_replace(_source: object, _destination: object) -> None:
+        raise OSError("synthetic pointer replacement failure")
+
+    monkeypatch.setattr(host.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="synthetic pointer replacement failure"):
+        host.activate_release(root, RELEASE_ID)
+    assert not os.path.lexists(public)
+    assert not os.path.lexists(generation_pointer)
+
+    monkeypatch.setattr(host.os, "replace", original_replace)
+    assert host.activate_release(root, RELEASE_ID) == "RELEASE_ACTIVATED"
+    assert public.resolve(strict=True) == root / "releases" / RELEASE_ID
 
 
 def test_operation_lock_prevents_concurrent_activation(installed: tuple[Path, Path]) -> None:

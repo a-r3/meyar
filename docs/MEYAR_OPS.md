@@ -742,8 +742,7 @@ The lock file contains no owner identity or secret.
 <root>/
   releases/<release-id>/    # immutable source, migrations, release-local venv
   activations/g-<id>/       # exact current and previous release identities
-  activations/current       # atomic generation pointer
-  current                   # stable symlink to activations/current/current
+  current                   # atomic symlink to activations/g-<id>/current
   shared/config/            # bank-owned configuration/secrets, outside release
   shared/storage/           # mutable candidate/CV data, outside release
   shared/backups/
@@ -762,8 +761,11 @@ same release id fail. The release-local source path is checked during
 
 Activation verifies the installed tree first, then creates a generation
 record containing the exact new release id, previous release id, and
-rollback classification. Replacing the generation pointer is the atomic
-activation step; failed replacement retains the prior `current`. A
+rollback classification. The sole active-release pointer is
+`<root>/current`; `activations/current` is not created. An atomic
+replacement of `<root>/current` publishes the complete generation.
+Failure or process death before replacement leaves the previous public
+state unchanged, including no `current` entry on first activation. A
 process killed after replacement leaves a complete new generation.
 `PROHIBITED_PENDING_PROCEDURE` and `BACKUP_RESTORE_REQUIRED` block
 activation over an existing release until a later workflow supplies the

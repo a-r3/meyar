@@ -593,14 +593,21 @@ def verify_install(root: Path, release_id: str) -> str:
 
 
 def _current_release(root: Path) -> str | None:
-    pointer = root / "activations" / "current"
-    if not pointer.exists() and not pointer.is_symlink():
+    pointer = root / "current"
+    if not os.path.lexists(pointer):
         return None
     if not pointer.is_symlink():
         raise InstallFailure("ACTIVATION_POINTER_UNSAFE")
-    generation = os.readlink(pointer)
-    if not _safe_component(generation) or not generation.startswith("g-"):
+    parts = PurePosixPath(os.readlink(pointer)).parts
+    if (
+        len(parts) != 3
+        or parts[0] != "activations"
+        or parts[2] != "current"
+        or not _safe_component(parts[1])
+        or not parts[1].startswith("g-")
+    ):
         raise InstallFailure("ACTIVATION_POINTER_UNSAFE")
+    generation = parts[1]
     _real_directory(root / "activations" / generation)
     state = _load_json(root / "activations" / generation / "state.json")
     release_id = _required_text(state.get("release_id"), limit=128)
@@ -626,11 +633,6 @@ def activate_release(root: Path, release_id: str) -> str:
             if state.get("rollback_compatibility") == "BACKUP_RESTORE_REQUIRED":
                 raise InstallFailure("ACTIVATION_REQUIRES_BACKUP_WORKFLOW")
         public = root / "current"
-        if public.is_symlink():
-            if os.readlink(public) != "activations/current/current":
-                raise InstallFailure("ACTIVATION_POINTER_UNSAFE")
-        elif public.exists():
-            raise InstallFailure("ACTIVATION_POINTER_UNSAFE")
         generation = "g-" + uuid.uuid4().hex
         directory = root / "activations" / generation
         directory.mkdir(mode=0o750)
@@ -647,13 +649,10 @@ def activate_release(root: Path, release_id: str) -> str:
                 + "\n"
             )
             os.symlink(f"../../releases/{release_id}", directory / "current")
-            if not public.is_symlink():
-                os.symlink("activations/current/current", public)
-            pointer = root / "activations" / "current"
-            temporary = root / "activations" / (".next-" + uuid.uuid4().hex)
-            os.symlink(generation, temporary)
+            temporary = root / (".next-current-" + uuid.uuid4().hex)
+            os.symlink(f"activations/{generation}/current", temporary)
             try:
-                os.replace(temporary, pointer)
+                os.replace(temporary, public)
             finally:
                 if temporary.is_symlink():
                     temporary.unlink()
