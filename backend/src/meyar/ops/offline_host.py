@@ -25,6 +25,7 @@ import tomllib
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
+from typing import Never
 
 MAX_MANIFEST = 1024 * 1024
 MAX_MEMBERS = 5000
@@ -90,6 +91,13 @@ def _regular_file(path: Path, *, maximum: int = MAX_FILE) -> None:
         raise InstallFailure("FILE_UNAVAILABLE") from exc
     if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > maximum:
         raise InstallFailure("UNSAFE_FILE")
+
+
+def _owned_directory(path: Path) -> None:
+    _real_directory(path)
+    metadata = path.stat()
+    if metadata.st_uid != os.geteuid() or metadata.st_mode & 0o022:
+        raise InstallFailure("INSTALL_ROOT_PERMISSIONS_UNSAFE")
 
 
 def _load_json(path: Path) -> dict[str, object]:
@@ -268,7 +276,7 @@ def _check_host_runtime(manifest: dict[str, object]) -> None:
 
 @contextlib.contextmanager
 def _operation_lock(root: Path):
-    _real_directory(root)
+    _owned_directory(root)
     descriptor = os.open(root / ".meyar-ops.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
         lock_stat = os.fstat(descriptor)
@@ -276,6 +284,7 @@ def _operation_lock(root: Path):
             not stat.S_ISREG(lock_stat.st_mode)
             or lock_stat.st_nlink != 1
             or lock_stat.st_uid != os.geteuid()
+            or lock_stat.st_mode & 0o022
         ):
             raise InstallFailure("LOCK_UNSAFE")
         try:
@@ -288,7 +297,7 @@ def _operation_lock(root: Path):
 
 
 def _ensure_layout(root: Path) -> None:
-    _real_directory(root)
+    _owned_directory(root)
     for relative in (
         "releases",
         "activations",
@@ -303,7 +312,7 @@ def _ensure_layout(root: Path) -> None:
             path.mkdir(mode=0o750)
         except FileExistsError:
             pass
-        _real_directory(path)
+        _owned_directory(path)
 
 
 def _extract_application(
@@ -360,6 +369,10 @@ def _extract_application(
                     relative_text not in allowed_files
                     and not relative_text.startswith("backend/src/meyar/")
                     and not relative_text.startswith("backend/alembic/")
+                ):
+                    raise InstallFailure("APPLICATION_CONTENT_UNEXPECTED")
+                if relative_text.startswith("backend/src/meyar/") and not relative_text.endswith(
+                    (".py", ".html", ".js", ".css")
                 ):
                     raise InstallFailure("APPLICATION_CONTENT_UNEXPECTED")
                 if "/tests/" in relative_text or relative_text.endswith(".env"):
@@ -478,15 +491,13 @@ def _install_dependencies(
     if requirements.read_bytes() != expected_requirements:
         raise InstallFailure("REQUIREMENTS_MISMATCH")
     venv = stage / ".venv"
-    environment = os.environ.copy()
-    environment.update(
-        {
-            "PIP_CONFIG_FILE": os.devnull,
-            "PIP_NO_INDEX": "1",
-            "PIP_DISABLE_PIP_VERSION_CHECK": "1",
-            "PYTHONNOUSERSITE": "1",
-        }
-    )
+    environment = {
+        "PATH": "/usr/bin:/bin",
+        "PIP_CONFIG_FILE": os.devnull,
+        "PIP_NO_INDEX": "1",
+        "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+        "PYTHONNOUSERSITE": "1",
+    }
     commands = [
         [sys.executable, "-m", "venv", "--copies", str(venv)],
         [
@@ -653,8 +664,13 @@ def activate_release(root: Path, release_id: str) -> str:
         return "RELEASE_ACTIVATED"
 
 
+class _SafeArgumentParser(argparse.ArgumentParser):
+    def error(self, _message: str) -> Never:
+        raise InstallFailure("INVALID_INVOCATION")
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="meyar-ops.py")
+    parser = _SafeArgumentParser(prog="meyar-ops.py")
     commands = parser.add_subparsers(dest="command", required=True)
     install = commands.add_parser("install-release")
     install.add_argument("--bundle-dir", type=Path, required=True)
@@ -665,9 +681,12 @@ def main(argv: list[str] | None = None) -> int:
     activate = commands.add_parser("activate-release")
     activate.add_argument("--install-root", type=Path, required=True)
     activate.add_argument("--release-id", required=True)
-    args = parser.parse_args(argv)
     started = datetime.now(UTC)
+    action = "invalid-invocation"
+    exit_code = 0
     try:
+        args = parser.parse_args(argv)
+        action = args.command
         if args.command == "install-release":
             code = install_release(args.bundle_dir, args.install_root)
         elif args.command == "verify-install":
@@ -677,16 +696,18 @@ def main(argv: list[str] | None = None) -> int:
         ok = True
     except InstallFailure as exc:
         code, ok = exc.code, False
-    except (OSError, ValueError, tarfile.TarError, subprocess.TimeoutExpired):
+        exit_code = 2 if exc.code == "INVALID_INVOCATION" else 1
+    except Exception:  # noqa: BLE001 - no raw exception/path/secret may escape the CLI
         code, ok = "INSTALL_INFRASTRUCTURE_FAILURE", False
+        exit_code = 3
     result = {
-        "action": args.command,
+        "action": action,
         "ok": ok,
         "started_at": started.isoformat(),
         "finished_at": datetime.now(UTC).isoformat(),
         "findings": [
             {
-                "component": args.command,
+                "component": action,
                 "status": "OK" if ok else "FAIL",
                 "code": code,
                 "message": code.replace("_", " ").capitalize() + ".",
@@ -694,7 +715,7 @@ def main(argv: list[str] | None = None) -> int:
         ],
     }
     print(json.dumps(result, separators=(",", ":")))
-    return 0 if ok else 1
+    return exit_code
 
 
 if __name__ == "__main__":

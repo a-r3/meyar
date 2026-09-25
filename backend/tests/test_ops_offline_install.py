@@ -146,7 +146,7 @@ def fake_dependency_install(
 def installed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
     bundle = bundle_fixture(tmp_path)
     root = tmp_path / "host"
-    root.mkdir()
+    root.mkdir(mode=0o700)
     monkeypatch.setattr(host, "_check_host_runtime", lambda _manifest: None)
     monkeypatch.setattr(host, "_install_dependencies", fake_dependency_install)
     assert host.install_release(bundle, root) == "RELEASE_INSTALLED"
@@ -176,6 +176,16 @@ def test_missing_dependency_wheel_rejected(tmp_path: Path) -> None:
     (bundle / "wheels" / "pillow-12.3.0-py3-none-any.whl").unlink()
     with pytest.raises(host.InstallFailure):
         host._verify_bundle(bundle)
+
+
+def test_insecure_install_root_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    bundle = bundle_fixture(tmp_path)
+    root = tmp_path / "host"
+    root.mkdir(mode=0o700)
+    root.chmod(0o777)
+    monkeypatch.setattr(host, "_check_host_runtime", lambda _manifest: None)
+    with pytest.raises(host.InstallFailure, match="INSTALL_ROOT_PERMISSIONS_UNSAFE"):
+        host.install_release(bundle, root)
 
 
 @pytest.mark.parametrize(
@@ -223,13 +233,27 @@ def test_unsafe_archive_leaves_no_release(
 ) -> None:
     bundle = bundle_fixture(tmp_path, extra=entry)
     root = tmp_path / "host"
-    root.mkdir()
+    root.mkdir(mode=0o700)
     monkeypatch.setattr(host, "_check_host_runtime", lambda _manifest: None)
     monkeypatch.setattr(host, "_install_dependencies", fake_dependency_install)
     with pytest.raises(host.InstallFailure, match="ARCHIVE_UNSAFE"):
         host.install_release(bundle, root)
     assert not (root / "current").exists()
     assert not (root / "releases" / RELEASE_ID).exists()
+
+
+def test_candidate_storage_file_in_application_archive_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = bundle_fixture(
+        tmp_path, extra=("backend/src/meyar/candidate_storage.pdf", b"synthetic-only", b"0")
+    )
+    root = tmp_path / "host"
+    root.mkdir(mode=0o700)
+    monkeypatch.setattr(host, "_check_host_runtime", lambda _manifest: None)
+    with pytest.raises(host.InstallFailure, match="APPLICATION_CONTENT_UNEXPECTED"):
+        host.install_release(bundle, root)
+    assert not (root / "current").exists()
 
 
 def test_conflicting_release_and_tampering_rejected(installed: tuple[Path, Path]) -> None:
@@ -262,7 +286,7 @@ def test_same_release_id_different_bundle_rejected(
 def test_partial_install_never_activates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     bundle = bundle_fixture(tmp_path)
     root = tmp_path / "host"
-    root.mkdir()
+    root.mkdir(mode=0o700)
     monkeypatch.setattr(host, "_check_host_runtime", lambda _manifest: None)
 
     def fail_install(*_args: object) -> None:
@@ -335,6 +359,15 @@ def test_result_never_emits_input_secret(
     output = capsys.readouterr()
     assert "secret-db-password" not in output.out + output.err
     assert json.loads(output.out)["ok"] is False
+
+
+def test_invalid_invocation_never_echoes_secret(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert host.main(["install-release", "--password=top-secret"]) == 2
+    output = capsys.readouterr()
+    assert "top-secret" not in output.out + output.err
+    assert json.loads(output.out)["findings"][0]["code"] == "INVALID_INVOCATION"
 
 
 def test_wrong_runtime_executable_identity_rejected(

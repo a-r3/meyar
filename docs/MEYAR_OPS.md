@@ -714,7 +714,8 @@ No candidate/CV/storage file, tests, `.env`, credentials, model artifact,
 or database dump is read or included.
 
 **Host commands** (run the bundled script using the approved Python
-interpreter; `<root>` must already exist, normally `/opt/meyar`):
+interpreter; `<root>` must already exist, be owned by the invoking
+operator, and reject group/other writes; normally `/opt/meyar`):
 
 ```bash
 <approved-python3.12> <bundle>/meyar-ops.py install-release \
@@ -726,7 +727,8 @@ interpreter; `<root>` must already exist, normally `/opt/meyar`):
 ```
 
 These use the existing `OpsResult` JSON shape and exit 0 on success,
-1 on a failed check, 2 for invalid invocation. The script never prints
+1 on a failed check, 2 for invalid invocation, and 3 for an unexpected
+infrastructure failure. The script never prints
 input paths, subprocess output, candidate content, or secrets. All
 subprocesses use fixed argv; no shell, Git, `uv`, external AI, or target
 network call is made. Any filesystem mutation is under a non-blocking

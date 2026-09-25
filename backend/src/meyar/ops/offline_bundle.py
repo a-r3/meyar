@@ -109,7 +109,7 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _target_environment() -> dict[str, str]:
+def _target_environment(runtime_version: str) -> dict[str, str]:
     return {
         "implementation_name": "cpython",
         "implementation_version": TARGET_PYTHON,
@@ -119,14 +119,16 @@ def _target_environment() -> dict[str, str]:
         "platform_release": "",
         "platform_system": "Darwin",
         "platform_version": "",
-        "python_full_version": "3.12.0",
+        "python_full_version": runtime_version,
         "python_version": TARGET_PYTHON,
         "sys_platform": "darwin",
         "extra": "",
     }
 
 
-def _locked_runtime_packages(lock_bytes: bytes) -> list[dict[str, object]]:
+def _locked_runtime_packages(
+    lock_bytes: bytes, *, runtime_version: str = "3.12.0"
+) -> list[dict[str, object]]:
     lock = tomllib.loads(lock_bytes.decode("utf-8"))
     if lock.get("version") != 1 or lock.get("requires-python") != ">=3.12":
         raise ValueError("unsupported uv.lock format or Python requirement")
@@ -146,7 +148,9 @@ def _locked_runtime_packages(lock_bytes: bytes) -> list[dict[str, object]]:
     selected: set[str] = set()
     queue: list[tuple[str, frozenset[str]]] = [("meyar", frozenset())]
     seen: set[tuple[str, frozenset[str]]] = set()
-    environment = _target_environment()
+    if not re.fullmatch(r"3\.12\.[0-9]+", runtime_version):
+        raise ValueError("unsupported target Python runtime version")
+    environment = _target_environment(runtime_version)
     while queue:
         name, extras = queue.pop()
         if (name, extras) in seen:
@@ -292,6 +296,10 @@ def _application_allowlist(artifact_path: Path, release_id: str) -> None:
                 and not relative.startswith("backend/alembic/")
             ):
                 raise ValueError("application archive includes non-application data")
+            if relative.startswith("backend/src/meyar/") and not relative.endswith(
+                (".py", ".html", ".js", ".css")
+            ):
+                raise ValueError("application archive includes unsupported source asset")
             if "/tests/" in relative or relative.endswith(".env"):
                 raise ValueError("application archive includes excluded data")
 
@@ -374,7 +382,7 @@ def build_deployment_bundle(request: BundleBuildRequest) -> OpsResult:
             lock_bytes = _application_member(artifact_path, release.release_id, "backend/uv.lock")
             if hashlib.sha256(lock_bytes).hexdigest() != release.uv_lock_sha256:
                 raise ValueError("application uv.lock identity mismatch")
-            packages = _locked_runtime_packages(lock_bytes)
+            packages = _locked_runtime_packages(lock_bytes, runtime_version=request.runtime_version)
             installer = _application_member(
                 artifact_path, release.release_id, "backend/src/meyar/ops/offline_host.py"
             )
