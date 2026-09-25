@@ -12,6 +12,16 @@ changes no search/matching/scoring behavior and adds no production code
 path. See `meyar.services.demo_seed_service` for the exact seeding
 implementation.
 
+Issue #60 adds nine deterministic geometric portrait PNGs to freshly
+generated synthetic DOCX source files. `seed-demo` processes them through
+the real post-ingestion photo service after the documents commit; photo
+bytes are never sent to a model. The existing demo tenant is idempotent:
+re-running `seed-demo` there rotates credentials but does not replace
+older CV bytes with photo-enabled versions. Use a **fresh isolated
+database and storage root** for photo visual review; never reset an
+owner's existing demo tenant to preview this feature. See the issue #60
+review command in the PR description.
+
 ## 0. One command (recommended)
 
 ```bash

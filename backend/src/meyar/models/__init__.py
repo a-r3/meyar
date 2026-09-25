@@ -7,6 +7,7 @@ from meyar.models.candidate import Candidate
 from meyar.models.candidate_document import CandidateDocument
 from meyar.models.candidate_embedding_version import CandidateEmbeddingVersion
 from meyar.models.candidate_identity_version import CandidateIdentityVersion
+from meyar.models.candidate_photo_version import CandidatePhotoVersion
 from meyar.models.candidate_profile_version import CandidateProfileVersion
 from meyar.models.canonical_document import CanonicalDocument
 from meyar.models.evaluation import Evaluation
@@ -28,6 +29,7 @@ __all__ = [
     "CandidateDocument",
     "CandidateEmbeddingVersion",
     "CandidateIdentityVersion",
+    "CandidatePhotoVersion",
     "CandidateProfileVersion",
     "CanonicalDocument",
     "Evaluation",

@@ -2,6 +2,13 @@
 
 ## Current phase
 
+**Issue #60 (candidate photo extraction and identity-only presentation)
+is under implementation on `feat/candidate-photo-identity-presentation`,
+based on accepted `9489fcdf32d34a72074a7f4484292efa7b104a81`.**
+This additive presentation slice follows merged search-correctness PR
+#59. It does not start #49, #35 PR4, #36, or #46. Owner visual review
+and independent acceptance remain required before any merge.
+
 **PR #42 (M8 Slice 4 — Agent Product UX & JD Matching, issue #33) is
 MERGED — squash SHA `584eb3584f10abf13db03046d32f85041b4df2ab` on `main`.**
 Issue #33 is CLOSED. PR #42 carried the full issue #44 AZ/EN

@@ -14,6 +14,15 @@
   extracted into `CandidateProfile` and never influence evaluation — the
   extraction schema simply has no fields for them, so the LLM cannot smuggle
   them in without failing Pydantic validation.
+- Issue #60 stores a CV's plausible embedded portrait only as a sanitized
+  JPEG in a separate `CandidatePhotoVersion` presentation boundary. This
+  data is never a professional fact, search filter, embedding input,
+  prompt, score, ranking signal, biometric identifier, or demographic
+  inference. Extraction is local, bounded, and best effort after durable
+  CV ingestion. Ambiguous, missing, unsafe, and failed states show a
+  neutral placeholder. The UI route requires `candidates:read`, tenant
+  authorization, current-document identity evidence, and a derived SHA
+  check; responses are same-origin, `no-store` JPEGs only.
 - CV content never leaves the bank's internal network to a cloud LLM.
   This applies equally to the local embedding model once it exists
   (Slice 7): local-only, never an external embedding API.

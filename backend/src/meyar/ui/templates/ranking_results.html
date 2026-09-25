@@ -30,6 +30,7 @@
   <article class="result-card">
     <div class="rank">{{ item.rank }}</div>
     <div class="result-body">
+      <img class="candidate-avatar" src="/ui/candidates/{{ item.candidate_id }}/photo" alt="Namizəd üçün təqdimat şəkli" loading="lazy">
       <div class="card-heading">
         <div><h2>{{ item.full_name or "Ad məlumatı yoxdur" }}</h2></div>
         <span class="score-pill">{{ item.numeric_score }} / 100</span>

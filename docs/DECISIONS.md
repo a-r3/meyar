@@ -5653,3 +5653,36 @@ D-022) behind two scripts:
 commands were required before a demo. **Reversibility:** fully additive
 (two new scripts, one new test file, `docs/LOCAL_DEMO.md`/`README.md`
 pointer updates); no schema, API, or existing-command behavior changed.
+
+## D-070 — Candidate photo as identity-only presentation data (issue #60)
+
+Photo processing is a best-effort stage after a CandidateDocument commits.
+The original CV ingestion policy is unchanged. A disposable local worker
+uses bounded DOCX body-media relationship inspection or first-two-page
+pypdf XObject inspection plus Pillow; only one plausible static JPEG/PNG
+is accepted, sanitized, and re-encoded as a deterministic JPEG. Ambiguous,
+unsafe, missing, and failed results are immutable terminal
+`CandidatePhotoVersion` rows. The photo-only `photo/<tenant>/<opaque-id>`
+namespace is under the existing backed-up storage root, and the photo
+row has an exact tenant/candidate/document composite FK. The UI route
+checks the current authorized identity on the newest stored document
+(`created_at DESC, id DESC`) and the photo result for that document and
+extractor version. It never falls back to an older photo. No photo value
+enters professional facts, embeddings, search, planning, scoring,
+ranking, or LLM/VLM input. The nine demo portraits are locally generated
+geometric illustrations embedded in fresh synthetic DOCX files.
+
+Pillow is the only new image dependency. Issue #35 owns offline Apple
+Silicon wheel bundling; macOS worker memory behavior remains a deployment
+validation item. Deterministic shape heuristics cannot prove human
+identity: a large portrait-shaped logo is a residual presentation risk.
+
+Hard-delete compensation snapshots the exact bytes of every present
+AVAILABLE photo before deleting files. A pre-existing missing photo is
+recorded as absent, and a readable hash-mismatched photo is retained as
+the same corrupt bytes if deletion later fails; neither blocks successful
+candidate deletion. This currently holds all present photo bytes in
+memory at once. There is no independently verified bound on the number
+of candidate documents or photo versions, so aggregate memory use during
+deletion remains a P2 resource concern for #46 runtime hardening. No
+arbitrary deletion-blocking count or byte threshold is introduced here.

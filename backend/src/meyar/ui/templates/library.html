@@ -13,6 +13,7 @@
 <div class="card-grid">
   {% for item in library.items %}
   <article class="candidate-card">
+    <img class="candidate-avatar" src="/ui/candidates/{{ item.candidate_id }}/photo" alt="Namizəd üçün təqdimat şəkli" loading="lazy">
     <div class="card-heading">
       <h2>{{ item.full_name or "Ad məlumatı yoxdur" }}</h2>
       <span class="status-badge" data-state="{{ readiness_state(item.current_profile_status) }}">{{ readiness_label(item.current_profile_status) }}</span>

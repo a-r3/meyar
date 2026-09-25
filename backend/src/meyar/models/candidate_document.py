@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, func
+from sqlalchemy import DateTime, ForeignKey, Integer, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from meyar.db import Base
@@ -20,6 +20,11 @@ class CandidateDocument(Base):
     display only; it never influences storage or parsing behavior."""
 
     __tablename__ = "candidate_documents"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "candidate_id", "id", name="uq_candidate_document_photo_parent"
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     tenant_id: Mapped[uuid.UUID] = mapped_column(

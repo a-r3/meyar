@@ -10,11 +10,14 @@
 {% endmacro %}
 {% block content %}
 <a class="back-link" href="/ui/library">← Namizədlər</a>
-<div class="page-heading">
-  <div>
-    <p class="eyebrow">Namizəd profili</p>
-    <h1>{{ candidate.full_name or "Ad məlumatı yoxdur" }}</h1>
-    {% if candidate.current_role %}<p class="lede">{{ candidate.current_role }}</p>{% endif %}
+<div class="page-heading candidate-profile-heading">
+  <div class="candidate-profile-identity">
+    <img class="candidate-avatar candidate-avatar-large" src="/ui/candidates/{{ candidate.candidate_id }}/photo" alt="Namizəd üçün təqdimat şəkli">
+    <div>
+      <p class="eyebrow">Namizəd profili</p>
+      <h1>{{ candidate.full_name or "Ad məlumatı yoxdur" }}</h1>
+      {% if candidate.current_role %}<p class="lede">{{ candidate.current_role }}</p>{% endif %}
+    </div>
   </div>
   <span class="status-badge" data-state="{{ readiness_state(candidate.profile_status) }}">{{ readiness_label(candidate.profile_status) }}</span>
 </div>
