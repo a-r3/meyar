@@ -125,7 +125,7 @@ class PreferredFilterEvaluation:
     matches: list[PreferredFilterMatch] = field(default_factory=list)
 
 
-def _typed_filter_matches(
+def _typed_filter_match(
     profile: CandidateProfileExtraction,
     *,
     kind: CriterionKind,
@@ -133,7 +133,7 @@ def _typed_filter_matches(
     min_years: float | None = None,
     required_level: str | None = None,
     as_of_date: date | None,
-) -> bool:
+) -> tuple[bool, list[int]]:
     criterion = CriterionIn(
         id="search_filter",
         kind=kind,
@@ -150,7 +150,27 @@ def _typed_filter_matches(
         # schema-gated to carry the caller's real as_of_date.
         evaluation_as_of_date=as_of_date or date(1970, 1, 1),
     )
-    return result.status == CRITERION_STATUS_MATCH
+    if result.status != CRITERION_STATUS_MATCH:
+        return False, []
+    # Capture the exact profile facts consumed by the evaluator while the
+    # authoritative profile and explicit evaluation date are in scope. A
+    # language-level match uses the evaluator's first same-name fact; a
+    # skill-duration match consumes every same-skill interval in its union.
+    if kind == CriterionKind.LANGUAGE:
+        target = normalize_text(value)
+        return True, [
+            index
+            for index, item in enumerate(profile.languages)
+            if normalize_text(item.language) == target
+        ][:1]
+    if kind == CriterionKind.SKILL_EXPERIENCE:
+        target = normalize_skill_name(value)
+        return True, [
+            index
+            for index, item in enumerate(profile.skill_experience)
+            if normalize_skill_name(item.skill_name) == target
+        ]
+    return True, []
 
 
 def evaluate_required_filters(
@@ -186,30 +206,44 @@ def evaluate_required_filters(
         matches.append(RequiredFilterMatch(category="education", value=education))
 
     for language_item in filters.language_levels:
-        if not _typed_filter_matches(
+        satisfied, fact_indices = _typed_filter_match(
             profile,
             kind=CriterionKind.LANGUAGE,
             value=language_item.value,
             required_level=language_item.required_level,
             as_of_date=as_of_date,
-        ):
+        )
+        if not satisfied:
             return RequiredFilterEvaluation(satisfied=False)
-        matches.append(RequiredFilterMatch(category="language_level", value=language_item.value))
+        matches.append(
+            RequiredFilterMatch(
+                category="language_level",
+                value=language_item.value,
+                matched_fact_indices=fact_indices,
+            )
+        )
 
     for category, kind, items in (
         ("skill_experience", CriterionKind.SKILL_EXPERIENCE, filters.skill_experience),
         ("domain_experience", CriterionKind.DOMAIN_EXPERIENCE, filters.domain_experience),
     ):
         for duration_item in items:
-            if not _typed_filter_matches(
+            satisfied, fact_indices = _typed_filter_match(
                 profile,
                 kind=kind,
                 value=duration_item.value,
                 min_years=duration_item.min_years,
                 as_of_date=as_of_date,
-            ):
+            )
+            if not satisfied:
                 return RequiredFilterEvaluation(satisfied=False)
-            matches.append(RequiredFilterMatch(category=category, value=duration_item.value))
+            matches.append(
+                RequiredFilterMatch(
+                    category=category,
+                    value=duration_item.value,
+                    matched_fact_indices=fact_indices if category == "skill_experience" else None,
+                )
+            )
 
     if filters.min_total_experience_years is not None:
         if as_of_year is None:
@@ -270,16 +304,21 @@ def evaluate_preferred_filters(
 
     for language_item in filters.language_levels:
         total += 1
-        if _typed_filter_matches(
+        satisfied, fact_indices = _typed_filter_match(
             profile,
             kind=CriterionKind.LANGUAGE,
             value=language_item.value,
             required_level=language_item.required_level,
             as_of_date=as_of_date,
-        ):
+        )
+        if satisfied:
             matched += 1
             matches.append(
-                PreferredFilterMatch(category="language_level", value=language_item.value)
+                PreferredFilterMatch(
+                    category="language_level",
+                    value=language_item.value,
+                    matched_fact_indices=fact_indices,
+                )
             )
 
     for category, kind, items in (
@@ -288,15 +327,24 @@ def evaluate_preferred_filters(
     ):
         for duration_item in items:
             total += 1
-            if _typed_filter_matches(
+            satisfied, fact_indices = _typed_filter_match(
                 profile,
                 kind=kind,
                 value=duration_item.value,
                 min_years=duration_item.min_years,
                 as_of_date=as_of_date,
-            ):
+            )
+            if satisfied:
                 matched += 1
-                matches.append(PreferredFilterMatch(category=category, value=duration_item.value))
+                matches.append(
+                    PreferredFilterMatch(
+                        category=category,
+                        value=duration_item.value,
+                        matched_fact_indices=fact_indices
+                        if category == "skill_experience"
+                        else None,
+                    )
+                )
 
     if filters.min_total_experience_years is not None:
         total += 1

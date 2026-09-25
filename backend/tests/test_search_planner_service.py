@@ -34,6 +34,7 @@ from meyar.search.schemas import (
     SearchMode,
 )
 from meyar.services.tenant_repo import create_tenant
+from meyar.ui.service import build_search_result_views
 
 AS_OF_DATE = date(2026, 8, 23)
 OWNER_AS_OF_DATE = date(2026, 9, 24)
@@ -426,6 +427,19 @@ async def test_compound_service_search_excludes_each_single_criterion_counterexa
         owner.search_response.eligible_profile_count,
         owner.search_response.result_count,
     )
+    result = owner.search_response.results[0]
+    assert [(item.category, item.value) for item in result.required_filters_matched] == [
+        ("language_level", "English"),
+        ("skill_experience", "Python"),
+    ]
+    views = await build_search_result_views(
+        db_session, tenant_id=tenant.id, response=owner.search_response
+    )
+    assert len(views) == 1
+    assert {item.snippet for item in views[0].evidence} == {
+        "English B2",
+        "Python Engineer Synthetic Co 2019 - 2025",
+    }
     assert llm.call_count == 0
 
     simple = await plan_and_search_candidates(

@@ -2,12 +2,14 @@
 
 ## Current phase
 
-**Issue #60 (candidate photo extraction and identity-only presentation)
-is under implementation on `feat/candidate-photo-identity-presentation`,
-based on accepted `9489fcdf32d34a72074a7f4484292efa7b104a81`.**
-This additive presentation slice follows merged search-correctness PR
-#59. It does not start #49, #35 PR4, #36, or #46. Owner visual review
-and independent acceptance remain required before any merge.
+**Issue #62 (Search/Agent evidence attribution for skill experience and
+language level) is under implementation on
+`fix/issue-62-search-evidence-attribution`, based on accepted `main`
+`35ef79e0007b6796030d1d8b0095f25f348732ce`.** PR #61 (candidate
+photo extraction and identity-only presentation, issue #60) is merged.
+This corrective preserves search eligibility, ranking, and scoring;
+issue #63 separately tracks order-sensitive duplicate language facts.
+Owner independent acceptance remains required before any #62 merge.
 
 **PR #42 (M8 Slice 4 — Agent Product UX & JD Matching, issue #33) is
 MERGED — squash SHA `584eb3584f10abf13db03046d32f85041b4df2ab` on `main`.**

@@ -233,6 +233,94 @@ async def test_search_candidates_turn_renders_grounded_results_not_model_text(
     assert 'class="empty-state"' not in response.text
 
 
+async def test_owner_duration_and_level_evidence_matches_direct_search_and_agent(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
+) -> None:
+    tenant, user, password, _membership = tenant_and_user
+    python_ref = {
+        "page": 1,
+        "block_index": 1,
+        "quote": "Python Engineer Synthetic Bank 2019 - 2025",
+    }
+    english_ref = {"page": 1, "block_index": 2, "quote": "English B2"}
+    candidate, pv = await seed_candidate_with_profile(
+        db_session,
+        tenant_id=tenant.id,
+        profile_content={
+            **_profile("Python"),
+            "employment_history": [
+                {
+                    "title": "Engineer",
+                    "organization": "Synthetic Bank",
+                    "start_date": "2019",
+                    "end_date": "2025",
+                    "evidence": [
+                        {
+                            "page": 1,
+                            "block_index": 3,
+                            "quote": "Engineer at Synthetic Bank 2019 - 2025",
+                        }
+                    ],
+                }
+            ],
+            "skill_experience": [
+                {
+                    "skill_name": "Python",
+                    "employment_index": 0,
+                    "start_date": "2019",
+                    "end_date": "2025",
+                    "evidence": [python_ref],
+                }
+            ],
+            "languages": [
+                {"language": "English", "proficiency": "B2", "evidence": [english_ref]}
+            ],
+        },
+    )
+    await db_session.commit()
+    from meyar.services.profile_authority import authorize_profile_version
+
+    await authorize_profile_version(db_session, version=pv)
+    query = (
+        "Ən az 5 il Python təcrübəsi olan və ingilis dili B2 "
+        "və ya daha yüksək olan 5 namizəd göstər."
+    )
+    fake = FakeLLMProvider(
+        agent_decisions=[
+            AgentDecision(
+                action=AgentActionType.SEARCH_CANDIDATES,
+                search_query=query,
+            ),
+            AgentDecision(
+                action=AgentActionType.FINAL_ANSWER,
+                response_code=AgentResponseCode.ACKNOWLEDGEMENT,
+            ),
+        ]
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake
+    csrf = await _login_and_csrf(client, user.username, password)
+    direct = await client.post("/ui/search", data={"query": query, "csrf_token": csrf})
+    agent = await client.post("/ui/agent", data={"message": query, "csrf_token": csrf})
+    for response in (direct, agent):
+        assert response.status_code == 200
+        assert str(candidate.id) in response.text
+        assert "Məcburi uyğunluqlar" in response.text
+        assert "Python" in response.text and "English" in response.text
+        assert "Sübut yerləri" in response.text
+        assert python_ref["quote"] in response.text
+        assert english_ref["quote"] in response.text
+        assert "Engineer at Synthetic Bank" not in response.text
+    simple = await client.post(
+        "/ui/search",
+        data={"query": "Python bilən namizədləri göstər", "csrf_token": csrf},
+    )
+    assert simple.status_code == 200
+    assert "Synthetic evidence: Python" in simple.text
+
+
 async def test_equivalent_zero_result_search_tools_render_one_empty_state(
     client: AsyncClient,
     db_session: AsyncSession,

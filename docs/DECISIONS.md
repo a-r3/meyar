@@ -5686,3 +5686,22 @@ memory at once. There is no independently verified bound on the number
 of candidate documents or photo versions, so aggregate memory use during
 deletion remains a P2 resource concern for #46 runtime hardening. No
 arbitrary deletion-blocking count or byte threshold is introduced here.
+
+## D-071 — Search match fact positions for truthful UI evidence (issue #62)
+
+Structured search records bounded positions of the exact authorized profile
+facts behind a matched skill-duration or language-level filter in the typed
+`RequiredFilterMatch`/`PreferredFilterMatch`. Search still uses the same
+criterion evaluator and explicit `as_of_date`; the positions add presentation
+provenance only. The UI resolves those positions against the same authorized
+profile version and displays only each matched fact's own evidence. Missing or
+invalid positions yield no evidence, never a whole-profile fallback. Bare
+skill/language filters retain their existing presentation behavior. Search
+request, plan, eligibility, ranking, scores, embeddings, and Agent result
+membership remain unchanged. The UI's bounded snippet and dedup rules still
+apply, and the Agent card uses the same search result view as direct Search.
+
+The current language evaluator is order-sensitive when duplicate same-name
+facts disagree: its first same-name fact determines eligibility. Issue #63
+tracks that separate search-semantic change; #62 preserves membership and
+attributes evidence only to the fact that actually matched today.

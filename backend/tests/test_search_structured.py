@@ -2,6 +2,7 @@
 See docs/DECISIONS.md (meyar-search-v1) and .claude/rules/testing.md."""
 
 import uuid
+from datetime import date
 
 import pytest
 from fakes import FakeEmbeddingProvider
@@ -17,15 +18,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meyar.schemas.candidate_profile import CandidateProfileExtraction
 from meyar.search.schemas import (
     CandidateSearchRequest,
+    LanguageLevelFilter,
+    NamedDurationFilter,
+    PreferredFilterMatch,
     PreferredFilters,
     RequiredFilterMatch,
     RequiredFilters,
     SearchMode,
 )
 from meyar.search.service import search_candidates
-from meyar.search.structured import _certification_present
+from meyar.search.structured import (
+    _certification_present,
+    evaluate_preferred_filters,
+    evaluate_required_filters,
+)
 from meyar.services.tenant_repo import create_tenant
-from meyar.ui.service import _requirement_attributable_evidence
+from meyar.ui.service import _evidence_views, _requirement_attributable_evidence
 
 
 def _evidence():
@@ -99,6 +107,119 @@ def _employment(title: str, start: str, end: str | None, *, is_current: bool = F
             title, "Synthetic Co", start, end, "present" if is_current else None
         ),
     }
+
+
+def test_typed_match_evidence_uses_only_duration_and_level_facts() -> None:
+    profile = CandidateProfileExtraction.model_validate(
+        {
+            **_profile(skills=["Python"], languages=[("English", "C1"), ("English", "B1")]),
+            "employment_history": [_employment("Engineer", "2010", "2025")],
+            "skill_experience": [
+                {
+                    "skill_name": "Python",
+                    "employment_index": 0,
+                    "start_date": start,
+                    "end_date": end,
+                    "evidence": synthetic_evidence("Python", start, end),
+                }
+                for start, end in (("2019", "2022"), ("2022", "2025"))
+            ]
+            + [
+                {
+                    "skill_name": "Java",
+                    "employment_index": 0,
+                    "start_date": "2019",
+                    "end_date": "2025",
+                    "evidence": synthetic_evidence("Java", "2019", "2025"),
+                }
+            ],
+        }
+    )
+    filters = RequiredFilters(
+        skill_experience=[NamedDurationFilter(value="Python", min_years=5)],
+        language_levels=[LanguageLevelFilter(value="English", required_level="B2")],
+    )
+    required = evaluate_required_filters(
+        profile, filters, as_of_year=2025, as_of_date=date(2025, 12, 31)
+    )
+    assert required.satisfied
+    refs = _requirement_attributable_evidence(profile, required.matches)
+    assert {ref.quote for ref in refs} == {
+        "Python 2019 2022",
+        "Python 2022 2025",
+        "English C1",
+    }
+    preferred = evaluate_preferred_filters(
+        profile,
+        PreferredFilters.model_validate(filters.model_dump()),
+        as_of_year=2025,
+        as_of_date=date(2025, 12, 31),
+    )
+    assert preferred.score == 1.0
+    assert _requirement_attributable_evidence(profile, preferred.matches) == refs
+    assert [ref.quote for ref in _requirement_attributable_evidence(
+        profile, [RequiredFilterMatch(category="language", value="English")]
+    )] == ["English C1", "English B1"]
+
+
+def test_short_skill_duration_cannot_borrow_total_career_evidence() -> None:
+    profile = CandidateProfileExtraction.model_validate(
+        {
+            **_profile(skills=["Python"]),
+            "employment_history": [_employment("Engineer", "2010", "2025")],
+            "skill_experience": [
+                {
+                    "skill_name": "Python",
+                    "employment_index": 0,
+                    "start_date": "2023",
+                    "end_date": "2025",
+                    "evidence": synthetic_evidence("Python", "2023", "2025"),
+                }
+            ],
+        }
+    )
+    result = evaluate_required_filters(
+        profile,
+        RequiredFilters(skill_experience=[NamedDurationFilter(value="Python", min_years=5)]),
+        as_of_year=2025,
+        as_of_date=date(2025, 12, 31),
+    )
+    assert not result.satisfied
+    assert _requirement_attributable_evidence(profile, result.matches) == []
+    assert _requirement_attributable_evidence(
+        profile, [PreferredFilterMatch(category="skill_experience", value="Python")]
+    ) == []
+
+
+def test_search_evidence_deduplicates_same_exact_ref() -> None:
+    profile = CandidateProfileExtraction.model_validate(
+        {
+            **_profile(skills=["Python"]),
+            "employment_history": [_employment("Engineer", "2019", "2025")],
+            "skill_experience": [
+                {
+                    "skill_name": "Python",
+                    "employment_index": 0,
+                    "start_date": "2019",
+                    "end_date": "2025",
+                    "evidence": synthetic_evidence("Python"),
+                }
+            ],
+        }
+    )
+    matched = evaluate_required_filters(
+        profile,
+        RequiredFilters(
+            skills=["Python"],
+            skill_experience=[NamedDurationFilter(value="Python", min_years=5)],
+        ),
+        as_of_year=2025,
+        as_of_date=date(2025, 12, 31),
+    )
+    assert matched.satisfied
+    refs = _requirement_attributable_evidence(profile, matched.matches)
+    assert len(refs) == 2
+    assert len(_evidence_views(refs, snippets=True)) == 1
 
 
 async def _tenant(db_session: AsyncSession, name: str = "SearchTenant"):
