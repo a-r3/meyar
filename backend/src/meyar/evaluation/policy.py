@@ -15,7 +15,7 @@ from meyar.schemas.evaluation import (
 
 # Bump whenever the algorithm below materially changes — every Evaluation
 # persists the exact version used, so results stay explainable/reproducible.
-POLICY_ENGINE_VERSION = "meyar-policy-v2"
+POLICY_ENGINE_VERSION = "meyar-policy-v3"
 
 # A job with no PREFERRED criteria (or >=50% of them matched) and every
 # MUST_HAVE criterion explicitly MATCH is a STRONG_MATCH; otherwise, with
@@ -24,7 +24,7 @@ PREFERRED_MATCH_RATIO_FOR_STRONG = 0.5
 
 
 def compute_overall_result(results: list[CriterionResult]) -> str:
-    """Deterministic MVP fit-band algorithm (meyar-policy-v2):
+    """Deterministic MVP fit-band algorithm (meyar-policy-v3):
 
     1. Any criterion MANUAL_REVIEW_REQUIRED or CONFLICTING_EVIDENCE
        -> overall MANUAL_REVIEW_REQUIRED (highest priority: a human must

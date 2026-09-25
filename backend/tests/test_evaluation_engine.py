@@ -143,7 +143,7 @@ async def test_evaluation_persists_exact_input_version_references(
     assert evaluation.job_id == setup.job.id
     assert evaluation.status == "COMPLETED"
     assert evaluation.overall_result == "STRONG_MATCH"
-    assert evaluation.policy_engine_version == "meyar-policy-v2"
+    assert evaluation.policy_engine_version == "meyar-policy-v3"
 
 
 async def test_evaluation_is_immutable_new_profile_version_requires_new_evaluation(

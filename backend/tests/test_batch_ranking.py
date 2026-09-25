@@ -138,6 +138,66 @@ async def _criteria(
     return version
 
 
+async def test_duplicate_language_fact_order_has_identical_v3_batch_ranking(
+    db_session: AsyncSession, tenant_and_key
+) -> None:
+    tenant, _key, _plaintext = tenant_and_key
+    candidates = []
+    for levels in (("B1", "C1"), ("C1", "B1")):
+        candidate, _profile = await seed_candidate_with_profile(
+            db_session,
+            tenant_id=tenant.id,
+            profile_content={
+                **EMPTY,
+                "languages": [
+                    {
+                        "language": "English",
+                        "proficiency": level,
+                        "evidence": synthetic_evidence("English", level),
+                    }
+                    for level in levels
+                ],
+            },
+        )
+        candidates.append(candidate.id)
+    criteria = await _criteria(
+        db_session,
+        tenant.id,
+        [
+            CriterionIn(
+                id="english_b2",
+                kind=CriterionKind.LANGUAGE,
+                type=CriterionType.MUST_HAVE,
+                label="English B2",
+                value="English",
+                required_level="B2",
+                weight=1,
+            )
+        ],
+        eligible_only=True,
+    )
+    ranking = await rank_candidates_for_job(
+        db_session,
+        tenant_id=tenant.id,
+        job_criteria_version_id=criteria.id,
+        evaluation_as_of_date=AS_OF,
+    )
+    assert ranking.evaluated_count == ranking.eligible_count == 2
+    assert ranking.reused_count == 0
+    assert [item.candidate_id for item in ranking.results] == sorted(
+        candidates, key=lambda candidate_id: candidate_id.int
+    )
+    assert {item.evaluation_policy_version for item in ranking.results} == {"meyar-policy-v3"}
+    assert {item.scoring_policy_version for item in ranking.results} == {"meyar-score-v1"}
+    assert {item.numeric_score for item in ranking.results} == {Decimal("100.00")}
+    assert {item.fit_band for item in ranking.results} == {"STRONG_MATCH"}
+    for item in ranking.results:
+        evaluation = await db_session.get(Evaluation, item.evaluation_id)
+        assert evaluation is not None
+        assert evaluation.criterion_results[0]["status"] == "MATCH"
+        assert evaluation.criterion_results[0]["evidence"] == synthetic_evidence("English", "C1")
+
+
 async def test_agent_workflow_top_k_returns_only_ranked_eligible_candidates(
     db_session: AsyncSession, tenant_and_key
 ) -> None:

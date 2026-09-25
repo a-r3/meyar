@@ -5727,6 +5727,14 @@ authority for both ordinary criterion evaluation and structured required/
 preferred language-level filters. Direct Search and Agent continue to
 use the shared result view. Single same-language facts retain their
 existing status, reason, explanation, and evidence. Only previously
-order-sensitive duplicate-fact eligibility may change; request/plan,
-other filter kinds, ranking/scoring policy, embeddings, tenant/auth,
-and photo functionality are unchanged.
+order-sensitive duplicate-fact eligibility may change. This semantic
+change bumps deterministic `POLICY_ENGINE_VERSION` from `meyar-policy-v2`
+to `meyar-policy-v3`: a scored evaluation with the same profile version,
+criteria version, and date gets a separate v3 row, while historical v2
+rows remain immutable. The ranking algorithm and numeric scoring formula
+are unchanged (`SCORING_POLICY_VERSION` remains `meyar-score-v1`), but
+changed criterion outcomes can legitimately change scores, fit bands,
+eligibility, and ranking for this duplicate-fact case. Request/plan,
+other filter kinds, embeddings, tenant/auth, and photo functionality
+are unchanged. The existing scored-provenance unique index includes both
+policy versions, so no migration is required.
