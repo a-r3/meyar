@@ -2,10 +2,10 @@
 
 ## Current phase
 
-**Accepted `main` is `0a60e50c0cc88fbfc9a62c36298dcc13c9b36116`.**
-PR #71 (#35 PR8) is merged and post-merge verified. PR9 is the current
-implementation slice for quiesced backup creation and verification;
-it is not accepted main.
+**Accepted `main` is `2dcf0a8783e49008b0eb707d81b42248209b34d6`.**
+PR9 / PR #72 is merged and post-merge verified. PR10 is the current
+implementation slice for verified backup to isolated restore; it is not
+accepted main.
 PR #65 (issue #63, order-independent duplicate same-language level
 eligibility) is merged and issue #63 is CLOSED. PR #64 (issue #62 evidence
 attribution) is merged and issue #62 is CLOSED. Deterministic evaluations
@@ -131,13 +131,18 @@ exact schema-current checks, and protected-settings Ollama/model availability
 in one read-only `OpsResult`. It does not add HTTP `/ready`, provisioning,
 update/rollback, Target-Mac benchmarking, or model approval.
 
-**PR9 for #35 (D-078) is under independent review.** `backup-create`
+**PR9 for #35 (D-078) is MERGED as PR #72 — accepted main
+`2dcf0a8783e49008b0eb707d81b42248209b34d6`, post-merge verified.** `backup-create`
 requires a stopped installed service and creates a verified, private
 PostgreSQL custom dump plus canonical storage archive under
 `shared/backups/<backup-id>`; `backup-verify` reads that artifact without
 connecting to the live database. This is backup creation and structural
-verification, not production restore or a restore test. Issue #35 remains
-OPEN, issue #46 remains OPEN, and issue #36 is unstarted.
+verification. PR10 adds only an isolated `restore` command for independent
+review. It requires an empty operator-provisioned target DB, an exact active
+release schema/source match, and a private `shared/restores/<restore-id>`
+storage workspace. It never writes the production database or live storage,
+and makes no cutover, update, rollback, readiness, or Target-Mac claim.
+Issue #35 remains OPEN, issue #46 remains OPEN, and issue #36 is unstarted.
 
 Issue #35 remains OPEN for further deployment work; issue #36 remains
 OPEN and not started; issue #46 remains OPEN and separate.

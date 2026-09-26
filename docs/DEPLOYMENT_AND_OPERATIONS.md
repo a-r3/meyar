@@ -48,7 +48,8 @@ canonical references it points to — read this alongside, not instead of:
   (issue #35), including PR4's offline bundle/activation and PR5's host
   production-config and service-binding contracts, plus PR6's privileged
   LaunchDaemon lifecycle foundation, PR7 schema initialization, PR8's
-  installed readiness gate, and PR9's quiesced backup creation/verification;
+  installed readiness gate, PR9's quiesced backup creation/verification,
+  and PR10's isolated restore;
   see its #35/#46 boundary.
 - [`docs/DECISIONS.md`](DECISIONS.md) — the full decision log, including
   D-020 (tested security/acceptance boundary) and D-066 (`meyar-ops`
@@ -371,11 +372,14 @@ Operational summary for an installed production host:
   either alone is incomplete. External DB writers must also be excluded
   during this maintenance window.
 - A verified backup is structurally sound, but **backup-created !=
-  restore-tested**. Production restore is a later #35 slice.
-- Restore into an isolated destination and validate before treating a
-  restore as complete (row counts, relationships, original-CV bytes,
-  a repeat score request reusing the same `Evaluation` — see
-  `docs/BACKUP_RESTORE.md` §Validation).
+  restore-tested**. Precreate an empty isolated PostgreSQL database, run
+  `backup-verify` → `restore`, and require `RESTORE_COMPLETED`. The fixed
+  storage destination is `shared/restores/<restore-id>/storage`, never live
+  `shared/storage`. An isolated restore completed **!=** production cutover.
+  Update, rollback, and cutover remain future #35 work.
+- Application-level validation (row counts, relationships, original-CV
+  bytes, score reuse) remains a separate operational check; see
+  `docs/BACKUP_RESTORE.md` §Validation.
 - Retention and backup-scheduling *policy* (how often, how long kept,
   where stored) remain an explicit, undecided deployment/business
   decision (`docs/SECURITY_PRIVACY.md`) — this document does not set one.

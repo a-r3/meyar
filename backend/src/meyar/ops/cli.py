@@ -25,6 +25,7 @@ from meyar.ops.preflight import run_preflight
 from meyar.ops.readiness import run_readiness
 from meyar.ops.redact import safe_exception_text
 from meyar.ops.release_manifest import RollbackCompatibility
+from meyar.ops.restore import run_restore
 from meyar.ops.result import (
     FindingStatus,
     OpsExitCode,
@@ -99,6 +100,15 @@ def _build_parser() -> argparse.ArgumentParser:
     backup_verify_parser.add_argument("--install-root", type=Path, required=True)
     backup_verify_parser.add_argument("--backup-id", type=str, required=True)
     backup_verify_parser.add_argument("--pg-bin-dir", type=Path, required=True)
+
+    restore_parser = sub.add_parser(
+        "restore", help="Restore a verified backup to an isolated target."
+    )
+    restore_parser.add_argument("--install-root", type=Path, required=True)
+    restore_parser.add_argument("--backup-id", type=str, required=True)
+    restore_parser.add_argument("--restore-id", type=str, required=True)
+    restore_parser.add_argument("--target-database", type=str, required=True)
+    restore_parser.add_argument("--pg-bin-dir", type=Path, required=True)
 
     render_parser = sub.add_parser(
         "service-render",
@@ -188,6 +198,14 @@ def _run_command(args: argparse.Namespace) -> OpsResult:
         return run_backup_create(args.install_root, args.label, args.backup_id, args.pg_bin_dir)
     if args.command == "backup-verify":
         return run_backup_verify(args.install_root, args.backup_id, args.pg_bin_dir)
+    if args.command == "restore":
+        return run_restore(
+            args.install_root,
+            args.backup_id,
+            args.restore_id,
+            args.target_database,
+            args.pg_bin_dir,
+        )
     if args.command == "service-render":
         spec = ServiceSpec(
             label=args.label,

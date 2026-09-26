@@ -5991,9 +5991,9 @@ unconfirmed.
 
 ## D-078 — Quiesced installed-host backup creation and verification (issue #35 PR9)
 
-**Date:** 2026-09-26. **Status:** Implementation for independent review
-from accepted main `0a60e50c0cc88fbfc9a62c36298dcc13c9b36116`.
-PR #71 / PR8 is merged and post-merge verified.
+**Date:** 2026-09-26. **Status:** Merged as PR #72 and post-merge verified
+at accepted main `2dcf0a8783e49008b0eb707d81b42248209b34d6`.
+PR #71 / PR8 was the implementation base.
 
 `backup-create` requires the trusted non-root install owner, exact active
 release Python/package/command and Alembic code/manifest identity,
@@ -6039,3 +6039,45 @@ encryption remain out of PR9. Infrastructure owns encryption at rest and
 production-equivalent access control for backup candidate data. #35 and
 #46 remain OPEN; #36 remains unstarted, and real Apple-Silicon behavior is
 unconfirmed.
+
+## D-079 — Verified backup to isolated restore (issue #35 PR10)
+
+**Date:** 2026-09-26. **Status:** Implementation for independent review
+from exact accepted main `2dcf0a8783e49008b0eb707d81b42248209b34d6`.
+PR9 / PR #72 is merged and post-merge verified.
+
+The installed release adds `meyar-ops restore` with operator-selected safe
+backup/restore IDs and a bounded isolated PostgreSQL database name. The
+PR4 operation lock covers verification through completion. The full PR9
+backup verifier is the source authority; the release ID, source SHA, and
+Alembic head must match the exact immutable active release. PR5 protected
+Settings supply host, port, principal, and password; only the database name
+changes. The production database name, nonempty target, or unreachable
+target is refused. The bank provisions the isolated target database and
+any required extension; this command never creates or drops a database.
+The empty-target precheck uses PostgreSQL dependency and ownership catalogs
+across user object classes, plus catalogs for standalone database objects;
+it rejects prior user objects before storage extraction. Only system
+objects, the default `public` schema, and the deployment-required `vector`
+extension and its owned objects (alongside PostgreSQL's default `plpgsql`)
+are allowed. In particular, an unrelated installed extension is not an
+empty-target exception.
+
+Verified USTAR storage is manually streamed to a private
+`shared/restores/.restore-*` stage, rejecting unsafe members, with archive
+and extracted tree digests compared. Fixed-argv trusted absolute
+`pg_restore` uses a private `PGPASSFILE`, `--exit-on-error`, and
+`--single-transaction`; postcheck requires exactly the expected single
+Alembic revision. Only then is `shared/restores/<restore-id>` published
+with no-replace semantics and a non-secret fsynced completion manifest.
+The live `shared/storage` and production database are never restore
+destinations.
+
+PostgreSQL and filesystem publication are not one transaction. Failure
+after database success returns `RESTORE_INCOMPLETE_ISOLATED_TARGET` and
+preserves isolated state; the operator must discard/recreate the isolated
+database before retry. `RESTORE_COMPLETED` alone signals completion of
+this isolated restore. It is not production cutover or application
+readiness. Update, rollback, migrations, provisioning, and Target-Mac
+acceptance remain separate future work. #35 and #46 stay OPEN; #36 is
+unstarted.
