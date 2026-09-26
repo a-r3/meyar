@@ -15,6 +15,7 @@ import asyncio
 from pathlib import Path
 from typing import NoReturn
 
+from meyar.ops.backup import run_backup_create, run_backup_verify
 from meyar.ops.build_release import BuildReleaseRequest, build_release
 from meyar.ops.deployment_ready import run_deployment_ready
 from meyar.ops.host_config import verify_host_config
@@ -85,6 +86,19 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     deployment_parser.add_argument("--install-root", type=Path, required=True)
     deployment_parser.add_argument("--label", type=str, required=True)
+
+    backup_create_parser = sub.add_parser(
+        "backup-create", help="Create a quiesced installed backup."
+    )
+    backup_create_parser.add_argument("--install-root", type=Path, required=True)
+    backup_create_parser.add_argument("--label", type=str, required=True)
+    backup_create_parser.add_argument("--backup-id", type=str, required=True)
+    backup_create_parser.add_argument("--pg-bin-dir", type=Path, required=True)
+
+    backup_verify_parser = sub.add_parser("backup-verify", help="Verify a published backup.")
+    backup_verify_parser.add_argument("--install-root", type=Path, required=True)
+    backup_verify_parser.add_argument("--backup-id", type=str, required=True)
+    backup_verify_parser.add_argument("--pg-bin-dir", type=Path, required=True)
 
     render_parser = sub.add_parser(
         "service-render",
@@ -170,6 +184,10 @@ def _run_command(args: argparse.Namespace) -> OpsResult:
         return run_schema_init(args.install_root)
     if args.command == "deployment-ready":
         return run_deployment_ready(args.install_root, args.label)
+    if args.command == "backup-create":
+        return run_backup_create(args.install_root, args.label, args.backup_id, args.pg_bin_dir)
+    if args.command == "backup-verify":
+        return run_backup_verify(args.install_root, args.backup_id, args.pg_bin_dir)
     if args.command == "service-render":
         spec = ServiceSpec(
             label=args.label,

@@ -47,8 +47,9 @@ canonical references it points to — read this alongside, not instead of:
 - [`docs/MEYAR_OPS.md`](MEYAR_OPS.md) — the `meyar-ops` operator CLI
   (issue #35), including PR4's offline bundle/activation and PR5's host
   production-config and service-binding contracts, plus PR6's privileged
-  LaunchDaemon lifecycle foundation, PR7 schema initialization, and PR8's
-  installed deployment gate; see its #35/#46 boundary.
+  LaunchDaemon lifecycle foundation, PR7 schema initialization, PR8's
+  installed readiness gate, and PR9's quiesced backup creation/verification;
+  see its #35/#46 boundary.
 - [`docs/DECISIONS.md`](DECISIONS.md) — the full decision log, including
   D-020 (tested security/acceptance boundary) and D-066 (`meyar-ops`
   foundation).
@@ -361,12 +362,16 @@ only step 2–4's fast-forward pull of `main` is.
 Full mechanism, runbook, and the executed synthetic acceptance proof are in
 [`docs/BACKUP_RESTORE.md`](BACKUP_RESTORE.md) — not duplicated here.
 
-Operational summary:
+Operational summary for an installed production host:
 
-- PostgreSQL (`pg_dump`/`pg_restore`) and document storage (`tar` over
-  `MEYAR_STORAGE_ROOT`) must be backed up **together**, from the same
-  point in time — one without the other leaves either orphaned files or
-  dangling metadata.
+- Run `deployment-ready` → privileged `service-stop` → `backup-create` →
+  `backup-verify` → privileged `service-start` → `deployment-ready`.
+  The service must be confirmed stopped before backup. The artifact pairs
+  a PostgreSQL custom dump with the complete canonical storage root;
+  either alone is incomplete. External DB writers must also be excluded
+  during this maintenance window.
+- A verified backup is structurally sound, but **backup-created !=
+  restore-tested**. Production restore is a later #35 slice.
 - Restore into an isolated destination and validate before treating a
   restore as complete (row counts, relationships, original-CV bytes,
   a repeat score request reusing the same `Evaluation` — see
