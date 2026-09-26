@@ -6017,7 +6017,12 @@ filenames, digests, sizes, and storage file count. After structural and
 hash verification, a second installed-state/quiescence check must match
 the first. A private `0700` stage with `0600` files is fsynced and
 published under `shared/backups/<backup-id>` by a kernel no-replace
-atomic rename; pre-existing backups cannot be overwritten.
+atomic rename; pre-existing backups cannot be overwritten. The parent
+directory is opened and identity-checked before rename and fsynced after it.
+Success requires that fsync. If it fails, the exact published directory is
+moved back to its private staging name for identity-checked cleanup. A
+changed identity or unsafe rollback produces a distinct uncertain-state
+result and requires operator inspection and `backup-verify` before retry.
 
 `backup-verify` reads the published artifact without protected config or
 live DB access, verifies exact manifest schema/permissions/digests,

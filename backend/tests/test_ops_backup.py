@@ -6,6 +6,7 @@ import fcntl
 import io
 import json
 import os
+import stat
 import subprocess
 import tarfile
 from collections.abc import Iterator
@@ -118,7 +119,9 @@ def test_create_verify_and_storage_bytes(host: tuple[Path, Path, ServiceSpec, Pa
         assert all(m.uid == 0 and m.gid == 0 for m in members)
     assert code(backup.run_backup_verify(root, "daily_01", tools)) == "BACKUP_VERIFIED"
     assert before == (lock.stat().st_dev, lock.stat().st_ino, lock.stat().st_mode)
+    prior = {path.name: path.read_bytes() for path in directory.iterdir()}
     assert code(create(host)) == "BACKUP_ID_CONFLICT"
+    assert {path.name: path.read_bytes() for path in directory.iterdir()} == prior
 
 
 @pytest.mark.parametrize("value", ["", ".", "..", "a..b", "/abs", "a/b", "a\\b", "a\n", "a" * 81])
@@ -527,3 +530,93 @@ def test_kernel_publication_never_replaces_existing_directory(tmp_path: Path) ->
         backup._publish(stage, final)
     assert (final / "sentinel").read_text() == "existing"
     assert stage.is_dir()
+
+
+def test_parent_fsync_failure_rolls_back_published_backup(
+    host: tuple[Path, Path, ServiceSpec, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _, _, _ = host
+    backups = root / "shared/backups"
+    final = backups / "daily_01"
+    parent = backups.stat()
+    real_fsync = os.fsync
+    renamed = False
+
+    def fail_parent_fsync(fd: int) -> None:
+        nonlocal renamed
+        metadata = os.fstat(fd)
+        if (metadata.st_dev, metadata.st_ino) == (parent.st_dev, parent.st_ino):
+            renamed = final.is_dir()
+            raise OSError("injected parent fsync failure")
+        real_fsync(fd)
+
+    monkeypatch.setattr(backup.os, "fsync", fail_parent_fsync)
+    result = create(host)
+    assert renamed
+    assert not result.ok
+    assert code(result) == "BACKUP_PUBLICATION_DURABILITY_FAILED"
+    assert not os.path.lexists(final)
+    assert not list(backups.glob(".backup-*"))
+
+
+def test_replaced_final_identity_is_never_deleted(
+    host: tuple[Path, Path, ServiceSpec, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _, _, _ = host
+    backups = root / "shared/backups"
+    final = backups / "daily_01"
+    displaced = backups / "displaced-original"
+    parent = backups.stat()
+    real_fsync = os.fsync
+
+    def replace_then_fail(fd: int) -> None:
+        metadata = os.fstat(fd)
+        if (metadata.st_dev, metadata.st_ino) == (parent.st_dev, parent.st_ino):
+            final.rename(displaced)
+            final.mkdir(mode=0o700)
+            (final / "sentinel").write_text("foreign object")
+            raise OSError("injected parent fsync failure")
+        real_fsync(fd)
+
+    monkeypatch.setattr(backup.os, "fsync", replace_then_fail)
+    result = create(host)
+    assert not result.ok
+    assert code(result) == "BACKUP_PUBLICATION_STATE_UNCERTAIN"
+    assert (final / "sentinel").read_text() == "foreign object"
+    assert displaced.is_dir()
+
+
+def test_success_requires_fsync_rename_and_parent_fsync_order(
+    host: tuple[Path, Path, ServiceSpec, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _, _, _ = host
+    parent = (root / "shared/backups").stat()
+    real_fsync = os.fsync
+    real_publish = backup._publish
+    events: list[str] = []
+
+    def record_fsync(fd: int) -> None:
+        metadata = os.fstat(fd)
+        if (metadata.st_dev, metadata.st_ino) == (parent.st_dev, parent.st_ino):
+            events.append("parent-fsync")
+        elif stat.S_ISDIR(metadata.st_mode):
+            events.append("stage-fsync")
+        else:
+            events.append("artifact-fsync")
+        real_fsync(fd)
+
+    def record_publish(stage: Path, final: Path) -> None:
+        events.append("rename")
+        real_publish(stage, final)
+
+    monkeypatch.setattr(backup.os, "fsync", record_fsync)
+    monkeypatch.setattr(backup, "_publish", record_publish)
+    assert code(create(host)) == "BACKUP_CREATED"
+    assert events[-6:] == [
+        "artifact-fsync",
+        "artifact-fsync",
+        "artifact-fsync",
+        "stage-fsync",
+        "rename",
+        "parent-fsync",
+    ]

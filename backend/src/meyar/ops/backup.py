@@ -570,6 +570,25 @@ def _publish(stage: Path, final: Path) -> None:
         )
 
 
+def _same_directory(path: Path, identity: tuple[int, int]) -> bool:
+    try:
+        metadata = path.lstat()
+    except OSError:
+        return False
+    return stat.S_ISDIR(metadata.st_mode) and (metadata.st_dev, metadata.st_ino) == identity
+
+
+def _rollback_publication(stage: Path, final: Path, identity: tuple[int, int]) -> bool:
+    """Move only our published directory back to its private staging name."""
+    if not _same_directory(final, identity) or os.path.lexists(stage):
+        return False
+    try:
+        _publish(final, stage)
+        return _same_directory(stage, identity) and not os.path.lexists(final)
+    except (BackupFailure, OSError):
+        return False
+
+
 def run_backup_create(
     root: Path,
     label: str,
@@ -585,6 +604,7 @@ def run_backup_create(
     action = "backup-create"
     stage: Path | None = None
     stage_identity: tuple[int, int] | None = None
+    publication_state = "unpublished"
     try:
         _check_id(backup_id)
         if (platform_system or platform.system()) != "Darwin":
@@ -641,21 +661,51 @@ def run_backup_create(
                 os.fsync(fd)
             finally:
                 os.close(fd)
-            _publish(stage, final)
-            stage = None
-            fd = os.open(backups, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            publication_state = "staged"
+            parent_fd = os.open(backups, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
             try:
-                os.fsync(fd)
+                parent = os.fstat(parent_fd)
+                named_parent = backups.lstat()
+                if (
+                    not stat.S_ISDIR(parent.st_mode)
+                    or (parent.st_dev, parent.st_ino) != (named_parent.st_dev, named_parent.st_ino)
+                    or parent.st_uid != owner
+                    or parent.st_mode & 0o022
+                ):
+                    raise BackupFailure("BACKUP_LAYOUT_UNSAFE")
+                _publish(stage, final)
+                publication_state = "renamed"
+                try:
+                    if not _same_directory(final, stage_identity):
+                        raise BackupFailure("BACKUP_PUBLICATION_STATE_UNCERTAIN")
+                    os.fsync(parent_fd)
+                except Exception as exc:
+                    if _rollback_publication(stage, final, stage_identity):
+                        publication_state = "staged"
+                        raise BackupFailure("BACKUP_PUBLICATION_DURABILITY_FAILED") from exc
+                    publication_state = "uncertain"
+                    raise BackupFailure("BACKUP_PUBLICATION_STATE_UNCERTAIN") from exc
+                publication_state = "committed"
+                stage = None
             finally:
-                os.close(fd)
+                try:
+                    os.close(parent_fd)
+                except OSError:
+                    pass
         return _result(action, "BACKUP_CREATED", ok=True)
     except BackupFailure as exc:
+        if publication_state == "committed":
+            return _result(action, "BACKUP_CREATED", ok=True)
         return _result(action, exc.code)
     except InstallFailure as exc:
+        if publication_state == "committed":
+            return _result(action, "BACKUP_CREATED", ok=True)
         return _result(
             action, "OPERATION_BUSY" if exc.code == "OPERATION_BUSY" else "BACKUP_LAYOUT_UNSAFE"
         )
     except Exception:  # noqa: BLE001 - never expose paths or secrets
+        if publication_state == "committed":
+            return _result(action, "BACKUP_CREATED", ok=True)
         return _result(action, "BACKUP_FAILED")
     finally:
         if stage is not None and stage_identity is not None:

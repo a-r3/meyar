@@ -524,7 +524,13 @@ byte sizes, storage file count). The manifest contains no candidate,
 tenant, path, or credential data. The private directory is `0700` and
 files are `0600`. A private same-filesystem staging directory is verified
 then atomically renamed with no-replace semantics; existing IDs are never
-overwritten. Failure removes only this invocation's unpublished stage.
+overwritten. Success requires the parent backup directory fsync after rename.
+If that fsync fails, the command moves its identity-matched backup back to
+private staging for cleanup and reports
+`BACKUP_PUBLICATION_DURABILITY_FAILED`. If the final path changed identity
+or safe rollback is impossible, it preserves foreign content and reports
+`BACKUP_PUBLICATION_STATE_UNCERTAIN`; inspect the directory and run
+`backup-verify` on the requested ID before a retry.
 
 `--pg-bin-dir` must name a normalized real directory with trusted ownership
 and no group/world write access; exact regular, non-symlink, executable
