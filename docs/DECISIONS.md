@@ -5864,9 +5864,8 @@ acceptance. Issue #35 remains OPEN.
 
 ## D-075 — Privileged LaunchDaemon lifecycle and protected runtime write contract (issue #35 PR6)
 
-**Date:** 2026-09-26. **Status:** Implementation for independent review on
-`feat/issue-35-privileged-launchdaemon-lifecycle`, from accepted main
-`d15fcc9513c6a78770496e8914bb72a95eaea681` (PR #68/PR5 merged).
+**Date:** 2026-09-26. **Status:** MERGED as PR #69; post-merge verified on
+accepted main `5b247153151243a3c329b94dd9cb9184902e1c67`.
 
 The system LaunchDaemon runs the verified active release as a dedicated
 non-root service principal; the trusted install operator remains the
@@ -5921,3 +5920,37 @@ This is a Linux-tested contract implementation, not real Apple-Silicon
 launchd acceptance. No migration, service uninstall, update/rollback,
 PostgreSQL/Ollama/model provisioning, HTTPS, Target-Mac benchmark, or
 candidate/search behavior is added. Issues #35 and #46 remain OPEN.
+
+## D-076 — Active-release fresh database schema initialization (issue #35 PR7)
+
+**Date:** 2026-09-26. **Status:** Implementation for independent review on
+`feat/35-active-release-schema-init`, from accepted main
+`5b247153151243a3c329b94dd9cb9184902e1c67` (PR #69/PR6 merged).
+
+`meyar-ops schema-init --install-root <root>` is an install-operator command
+for first deployment only. It takes the existing PR4 exclusive operation lock,
+verifies the PR4 active release and read-only installation, proves the imported
+MEYAR package and Python executable belong to that exact release, verifies
+PR5's protected production config, and loads the DB URL only from that file.
+The canonical active `backend/alembic.ini` and script directory provide the
+only migration authority; the actual single Alembic head must equal the one
+declared in the installed release manifest. No caller-selected revision or
+migration path is accepted.
+
+The command queries only Alembic revision and PostgreSQL table names. An
+exact-head database succeeds without mutation. A database with no revision
+and no user tables (an empty `alembic_version` table is allowed) runs Alembic's
+upgrade to that exact head through the active release's Python API and an
+explicit connection made from protected settings, then independently checks
+for exactly that revision. Any other unversioned table, stale or different
+revision, or multiple revisions is refused. Connection, migration, and
+postcheck failures use fixed codes without raw DB exceptions or credentials.
+No candidate rows are read. No service lifecycle operation follows migration.
+
+This is **not** the production update migration workflow. Existing older
+schemas must await backup, compatibility, staged update, migration, readiness,
+activation, and rollback boundaries. This PR adds no downgrade, stamp,
+backup, restore, PostgreSQL/pgvector provisioning, Ollama/model provisioning,
+or Target-Mac benchmark. Schema current does not mean application ready,
+service healthy, or Ollama/model ready. Issues #35 and #46 remain OPEN;
+issue #36 remains unstarted.

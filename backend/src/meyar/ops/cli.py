@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from pathlib import Path
+from typing import NoReturn
 
 from meyar.ops.build_release import BuildReleaseRequest, build_release
 from meyar.ops.host_config import verify_host_config
@@ -29,6 +30,7 @@ from meyar.ops.result import (
     build_single_finding_result,
     exit_code_for,
 )
+from meyar.ops.schema_init import run_schema_init
 from meyar.ops.service_lifecycle import run_service_lifecycle
 from meyar.ops.service_plist import ServiceSpec, run_service_render, verify_service_plist
 from meyar.ops.service_status import run_service_status
@@ -36,8 +38,15 @@ from meyar.ops.status import run_status
 from meyar.ops.verify_release import verify_release
 
 
+class _SafeArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        # argparse otherwise echoes unrecognized argument values, which may
+        # include a mistakenly supplied DB URL or password.
+        self.exit(OpsExitCode.INVALID_INVOCATION, f"{self.prog}: invalid arguments\n")
+
+
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="meyar-ops")
+    parser = _SafeArgumentParser(prog="meyar-ops")
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("preflight", help="Non-destructive host/runtime checks before deployment.")
@@ -64,6 +73,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "config-verify", help="Verify host-local production configuration without exposing values."
     )
     config_parser.add_argument("--install-root", type=Path, required=True)
+
+    schema_parser = sub.add_parser(
+        "schema-init", help="Initialize an empty database to the exact active release schema."
+    )
+    schema_parser.add_argument("--install-root", type=Path, required=True)
 
     render_parser = sub.add_parser(
         "service-render",
@@ -145,6 +159,8 @@ def _run_command(args: argparse.Namespace) -> OpsResult:
         )
     if args.command == "config-verify":
         return verify_host_config(args.install_root)
+    if args.command == "schema-init":
+        return run_schema_init(args.install_root)
     if args.command == "service-render":
         spec = ServiceSpec(
             label=args.label,
