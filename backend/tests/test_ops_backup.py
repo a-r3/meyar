@@ -532,6 +532,22 @@ def test_kernel_publication_never_replaces_existing_directory(tmp_path: Path) ->
     assert stage.is_dir()
 
 
+def test_existing_backup_id_preserves_bytes(host: tuple[Path, Path, ServiceSpec, Path]) -> None:
+    root, _, _, _ = host
+    backups = root / "shared/backups"
+    final = backups / "daily_01"
+    final.mkdir(mode=0o700)
+    sentinel = final / "sentinel"
+    original = b"existing synthetic backup bytes"
+    sentinel.write_bytes(original)
+
+    result = create(host)
+    assert not result.ok
+    assert code(result) == "BACKUP_ID_CONFLICT"
+    assert sentinel.read_bytes() == original
+    assert not list(backups.glob(".backup-*"))
+
+
 def test_parent_fsync_failure_rolls_back_published_backup(
     host: tuple[Path, Path, ServiceSpec, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -541,22 +557,59 @@ def test_parent_fsync_failure_rolls_back_published_backup(
     parent = backups.stat()
     real_fsync = os.fsync
     renamed = False
+    rolled_back = False
+    parent_fds: list[int] = []
 
     def fail_parent_fsync(fd: int) -> None:
-        nonlocal renamed
+        nonlocal renamed, rolled_back
         metadata = os.fstat(fd)
         if (metadata.st_dev, metadata.st_ino) == (parent.st_dev, parent.st_ino):
-            renamed = final.is_dir()
-            raise OSError("injected parent fsync failure")
+            parent_fds.append(fd)
+            if len(parent_fds) == 1:
+                renamed = final.is_dir()
+                raise OSError("injected parent fsync failure")
+            rolled_back = not os.path.lexists(final) and bool(list(backups.glob(".backup-*")))
         real_fsync(fd)
 
     monkeypatch.setattr(backup.os, "fsync", fail_parent_fsync)
     result = create(host)
     assert renamed
+    assert rolled_back
     assert not result.ok
     assert code(result) == "BACKUP_PUBLICATION_DURABILITY_FAILED"
+    assert len(parent_fds) == 2
+    assert parent_fds[0] == parent_fds[1]
     assert not os.path.lexists(final)
     assert not list(backups.glob(".backup-*"))
+
+
+def test_failed_rollback_fsync_preserves_private_backup(
+    host: tuple[Path, Path, ServiceSpec, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _, _, _ = host
+    backups = root / "shared/backups"
+    final = backups / "daily_01"
+    parent = backups.stat()
+    real_fsync = os.fsync
+    parent_fds: list[int] = []
+
+    def fail_parent_fsync(fd: int) -> None:
+        metadata = os.fstat(fd)
+        if (metadata.st_dev, metadata.st_ino) == (parent.st_dev, parent.st_ino):
+            parent_fds.append(fd)
+            raise OSError("injected parent fsync failure")
+        real_fsync(fd)
+
+    monkeypatch.setattr(backup.os, "fsync", fail_parent_fsync)
+    result = create(host)
+    assert not result.ok
+    assert code(result) == "BACKUP_PUBLICATION_STATE_UNCERTAIN"
+    assert len(parent_fds) == 2
+    assert parent_fds[0] == parent_fds[1]
+    assert not os.path.lexists(final)
+    stages = list(backups.glob(".backup-*"))
+    assert len(stages) == 1
+    assert (stages[0] / "backup_manifest.json").is_file()
 
 
 def test_replaced_final_identity_is_never_deleted(

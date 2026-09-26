@@ -70,14 +70,17 @@ the files `0600`, and publication is atomic and no-clobber.
 Creation succeeds only after the backup files, backup directory, and parent
 `backups` directory are fsynced. If parent-directory fsync fails after the
 rename and the published directory still has this invocation's identity,
-`backup-create` moves it back to private staging for identity-checked
-cleanup and reports `BACKUP_PUBLICATION_DURABILITY_FAILED`; the requested
-backup ID is absent.
-`BACKUP_PUBLICATION_STATE_UNCERTAIN` means the final path changed identity or
-could not safely be moved back. In that case, inspect the backup directory
-and run `backup-verify` on the requested ID before deciding whether to retry.
-Do not assume the failed command left that ID free or delete an unfamiliar
-directory as part of a retry.
+`backup-create` moves it back to private staging and fsyncs the same
+validated parent directory again. Only if that rollback fsync succeeds does
+it clean up the private stage and report
+`BACKUP_PUBLICATION_DURABILITY_FAILED`; the requested backup ID is then
+durably absent. If rollback fsync also fails, the command preserves the
+private stage and reports `BACKUP_PUBLICATION_STATE_UNCERTAIN`.
+That uncertain result also covers a changed final identity or unsafe
+rollback. Inspect `shared/backups`, resolve any private `.backup-*` residue,
+and run `backup-verify` if the requested public ID exists before retry.
+Do not assume the failed command left that ID durably free or delete an
+unfamiliar directory as part of a retry.
 
 `backup-verify` checks the manifest, hashes, dump structure via
 `pg_restore --list`, and safe tar members without connecting to the

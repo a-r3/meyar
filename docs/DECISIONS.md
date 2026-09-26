@@ -6020,9 +6020,14 @@ published under `shared/backups/<backup-id>` by a kernel no-replace
 atomic rename; pre-existing backups cannot be overwritten. The parent
 directory is opened and identity-checked before rename and fsynced after it.
 Success requires that fsync. If it fails, the exact published directory is
-moved back to its private staging name for identity-checked cleanup. A
-changed identity or unsafe rollback produces a distinct uncertain-state
-result and requires operator inspection and `backup-verify` before retry.
+moved back to its private staging name and the same validated parent
+directory is fsynced again. Only a successful rollback fsync permits
+`BACKUP_PUBLICATION_DURABILITY_FAILED` and identity-checked staging cleanup.
+If rollback fsync fails, the private stage is preserved and
+`BACKUP_PUBLICATION_STATE_UNCERTAIN` is returned. A changed final identity
+or unsafe rollback also produces that uncertain-state result. Operators
+must inspect `shared/backups`, resolve any private `.backup-*` residue, and
+run `backup-verify` if the requested public ID exists before retry.
 
 `backup-verify` reads the published artifact without protected config or
 live DB access, verifies exact manifest schema/permissions/digests,

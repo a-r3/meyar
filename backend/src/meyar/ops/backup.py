@@ -681,6 +681,13 @@ def run_backup_create(
                     os.fsync(parent_fd)
                 except Exception as exc:
                     if _rollback_publication(stage, final, stage_identity):
+                        try:
+                            os.fsync(parent_fd)
+                        except OSError as rollback_exc:
+                            publication_state = "rollback_unconfirmed"
+                            raise BackupFailure(
+                                "BACKUP_PUBLICATION_STATE_UNCERTAIN"
+                            ) from rollback_exc
                         publication_state = "staged"
                         raise BackupFailure("BACKUP_PUBLICATION_DURABILITY_FAILED") from exc
                     publication_state = "uncertain"
@@ -708,7 +715,11 @@ def run_backup_create(
             return _result(action, "BACKUP_CREATED", ok=True)
         return _result(action, "BACKUP_FAILED")
     finally:
-        if stage is not None and stage_identity is not None:
+        if (
+            publication_state not in ("uncertain", "rollback_unconfirmed")
+            and stage is not None
+            and stage_identity is not None
+        ):
             try:
                 metadata = stage.lstat()
                 if (
