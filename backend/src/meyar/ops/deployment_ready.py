@@ -18,7 +18,7 @@ from meyar.embedding.dependency import embedding_provider_from_settings
 from meyar.llm.dependency import llm_provider_from_settings
 from meyar.ops.alembic_introspect import get_db_alembic_revision
 from meyar.ops.host_config import load_host_settings
-from meyar.ops.offline_host import InstallFailure, privileged_operation_lock
+from meyar.ops.offline_host import InstallFailure, privileged_operation_lock, verify_active_release
 from meyar.ops.result import FindingStatus as Status
 from meyar.ops.result import OpsResult, OpsResultBuilder
 from meyar.ops.schema_init import SchemaInitFailure, _active_config
@@ -211,6 +211,7 @@ def run_deployment_ready(
         return builder.build()
 
     settings: Settings | None = None
+    release_id: str | None = None
     head: str | None = None
     spec: ServiceSpec | None = None
     installed: bytes | None = None
@@ -219,9 +220,10 @@ def run_deployment_ready(
         with privileged_operation_lock(root, owner_uid):
             try:
                 _, head = _active_config(root, implementation_file=Path(__file__))
-            except SchemaInitFailure as exc:
+                release_id = verify_active_release(root)
+            except (SchemaInitFailure, InstallFailure) as exc:
                 _finding(builder, "active_release", "ACTIVE_RELEASE_INVALID", status=Status.FAIL)
-                migration_invalid = exc.code in {
+                migration_invalid = isinstance(exc, SchemaInitFailure) and exc.code in {
                     "MIGRATION_IDENTITY_MISMATCH", "MULTIPLE_OR_NO_HEADS"
                 }
                 _finding(
@@ -367,10 +369,18 @@ def run_deployment_ready(
                 )
     # A mutation that held the shared lock during long probes cannot yield READY.
     # Recheck the installed identity at the end; a later mutation requires a new run.
-    if builder.build().ok and installed is not None and spec is not None:
+    if (
+        builder.build().ok
+        and installed is not None
+        and spec is not None
+        and release_id is not None
+        and head is not None
+    ):
         try:
             with privileged_operation_lock(root, owner_uid):
-                _active_config(root, implementation_file=Path(__file__))
+                _, final_head = _active_config(root, implementation_file=Path(__file__))
+                if verify_active_release(root) != release_id or final_head != head:
+                    raise ValueError("active release changed")
                 if load_host_settings(root) != settings:
                     raise ValueError("host config changed")
                 if (

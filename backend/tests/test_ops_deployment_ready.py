@@ -5,14 +5,18 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import subprocess
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 from test_ops_schema_init import _seal_release, active_root  # noqa: F401 - pytest fixture
 
+import meyar
 from meyar.ops import deployment_ready as gate
+from meyar.ops import offline_host, schema_init
 from meyar.ops.alembic_introspect import DbAlembicRevisionResult
 from meyar.ops.host_config import load_host_settings
 from meyar.ops.service_lifecycle import ServicePrincipal
@@ -370,6 +374,71 @@ def test_service_stopping_or_probe_failing_during_probes_cannot_report_ready(
     result = run(deployment, runner=runner)
     assert codes(result)["launchd"] == "SERVICE_VISIBLE"
     assert codes(result)["snapshot"] == expected
+    assert not result.ok
+
+
+@pytest.mark.parametrize("second_head", ["rev1", "rev2"])
+def test_valid_release_activation_during_probes_cannot_reuse_old_evidence(
+    deployment: tuple[Path, Path, ServiceSpec, list[list[str]]],
+    monkeypatch: pytest.MonkeyPatch,
+    second_head: str,
+) -> None:
+    root, directory, spec, commands = deployment
+    first_id = "meyar-test+abcdef123456"
+    second_id = "meyar-test+123456abcdef"
+    second = root / "releases" / second_id
+    (root / "shared/backups").chmod(0o750)
+    shutil.copytree(root / "releases" / first_id, second)
+    for path, _, _ in os.walk(second):
+        Path(path).chmod(0o755)
+    for relative, content in (
+        (".venv/lib/python3.12/site-packages/meyar-source.pth", str(second / "backend/src") + "\n"),
+        ("backend/alembic/versions/0001.py", f"revision = '{second_head}'\ndown_revision = None\n"),
+        ("release_manifest.json", json.dumps({"alembic_heads": [second_head]})),
+    ):
+        path = second / relative
+        path.chmod(0o644)
+        path.write_text(content)
+    state = second / "install_state.json"
+    state.chmod(0o644)
+    payload = json.loads(state.read_text())
+    payload["release_id"] = second_id
+    state.write_text(json.dumps(payload))
+    _seal_release(second)
+
+    source = root / "current/backend/src/meyar"
+    monkeypatch.setattr(meyar, "__file__", str(source / "__init__.py"))
+    monkeypatch.setattr(schema_init, "__file__", str(source / "ops/schema_init.py"))
+    monkeypatch.setattr(gate, "__file__", str(source / "ops/deployment_ready.py"))
+    monkeypatch.setattr(sys, "executable", str(root / "current/.venv/bin/python"))
+    assert offline_host.verify_active_release(root) == first_id
+    assert schema_init._active_config(root, implementation_file=Path(gate.__file__))[1] == "rev1"
+    config_before = (root / "shared/config/.env").read_bytes()
+    plist_before = (directory / f"{spec.label}.plist").read_bytes()
+
+    async def database(_url: str, head: str) -> tuple[str, str]:
+        assert head == "rev1"
+        assert offline_host.activate_release(root, second_id) == "RELEASE_ACTIVATED"
+        return "DATABASE_REACHABLE", "DB_REVISION_CURRENT"
+
+    monkeypatch.setattr(gate, "_probe_database", database)
+    result = run(deployment)
+    assert offline_host.verify_active_release(root) == second_id
+    assert (
+        schema_init._active_config(root, implementation_file=Path(gate.__file__))[1]
+        == second_head
+    )
+    assert (root / "shared/config/.env").read_bytes() == config_before
+    assert (directory / f"{spec.label}.plist").read_bytes() == plist_before
+    assert codes(result)["launchd"] == "SERVICE_VISIBLE"
+    assert codes(result)["application_liveness"] == "APPLICATION_LIVE"
+    assert codes(result)["database"] == "DATABASE_REACHABLE"
+    assert codes(result)["db_schema"] == "DB_REVISION_CURRENT"
+    assert codes(result)["ollama"] == "OLLAMA_REACHABLE"
+    assert codes(result)["llm_model"] == "LLM_MODEL_AVAILABLE"
+    assert codes(result)["embedding_model"] == "EMBEDDING_MODEL_AVAILABLE"
+    assert commands == [["/bin/launchctl", "print", f"system/{spec.label}"]]
+    assert codes(result)["snapshot"] == "DEPLOYMENT_CHANGED"
     assert not result.ok
 
 
