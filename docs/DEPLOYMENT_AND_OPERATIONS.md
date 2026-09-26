@@ -137,6 +137,23 @@ launchd accepted the job, not that MEYAR, DB/schema, or Ollama/model is
 ready. Real Apple-Silicon execution and production-model selection remain
 unverified.
 
+**PR7 first-deployment schema step:** after offline install, activation, and
+`config-verify`, the trusted non-root install operator runs:
+
+```bash
+<root>/current/.venv/bin/python -m meyar.ops.cli schema-init --install-root <root>
+```
+
+This uses the verified active release's exact Alembic head and the protected
+host DB URL. It upgrades only a database with no revision and no user tables;
+exact-head state is idempotent. An unversioned nonempty database or an older,
+different, or multiple-revision database is refused. Only after successful
+schema initialization should an administrator use PR6 `service-install` and
+`service-start`, followed by independent readiness checks. Schema current
+does not mean application ready, service healthy, or Ollama/model ready.
+PR7 is **not** the production update migration workflow; existing schemas
+must await the later backup/update/rollback safety boundary.
+
 ## 4. Fresh host provisioning
 
 The `git clone`/`git pull` sequence below is the current, manual,

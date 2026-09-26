@@ -2,10 +2,10 @@
 
 ## Current phase
 
-**Accepted `main` is `d15fcc9513c6a78770496e8914bb72a95eaea681`.**
-PR #68 (#35 PR5) is merged and post-merge verified. PR6 is the current
-implementation slice for privileged macOS LaunchDaemon lifecycle; it is
-not accepted main.
+**Accepted `main` is `5b247153151243a3c329b94dd9cb9184902e1c67`.**
+PR #69 (#35 PR6) is merged and post-merge verified. PR7 is the current
+implementation slice for active-release fresh database schema initialization;
+it is not accepted main.
 PR #65 (issue #63, order-independent duplicate same-language level
 eligibility) is merged and issue #63 is CLOSED. PR #64 (issue #62 evidence
 attribution) is merged and issue #62 is CLOSED. Deterministic evaluations
@@ -105,12 +105,21 @@ Settings fail-closed guards. It makes no LaunchDaemon mutation or
 target-Mac/model acceptance claim. Issue #46 remains OPEN; this advances
 only its deployment-blocking production-config item.
 
-**PR6 for #35 (D-075) is under independent review** from that accepted main.
+**PR6 for #35 (D-075) is MERGED as PR #69 — squash SHA
+`5b247153151243a3c329b94dd9cb9184902e1c67` and post-merge verified.**
 It adds privileged `service-install`/`start`/`stop`/`restart`, explicit
 install-owner verification, service principal/group checks, protected
 runtime write permissions, no-clobber plist publication, and shared PR4
 operation locking. Linux simulation does not establish real Apple-Silicon
 launchd behavior or application readiness.
+
+**PR7 for #35 (D-076) is prepared for independent review** from accepted main.
+It adds `schema-init` for an empty database, bound to the exact verified
+active release and protected host config. Exact-head databases succeed
+idempotently; an unversioned nonempty database, stale/different revision,
+or multiple revisions is refused without mutation. This is not the
+production update/backup/rollback migration workflow. Schema current does
+not prove application, service, or Ollama/model readiness.
 
 Issue #35 remains OPEN for further deployment work; issue #36 remains
 OPEN and not started; issue #46 remains OPEN and separate.
@@ -215,8 +224,9 @@ closed). Slice 12 PR #19 squash-merged at `93fa567` (issue #18 closed;
 squash-merged at `a709ce1` (`Refs #20`, issue #20 deliberately left open —
 see above). Slice 14 PR #24 squash-merged at `f6e31ff` (`Closes #23`, issue
 #23 closed; D-021). Chore PR #26 (pre-presentation readiness/local demo
-bootstrap, issue #25, D-022) squash-merged at `a539e34`. Local `main` and
-`origin/main` currently sit at `a539e34`.
+bootstrap, issue #25, D-022) squash-merged at `a539e34`. At that
+historical checkpoint, local `main` and `origin/main` sat at `a539e34`;
+the accepted current `main` is stated at the top of this document.
 **M5 — Security, Target-Mac Validation & MVP Acceptance is OPEN**,
 containing only issue #20 (Slice 13 — Security + Official
 Definition-of-Done Acceptance) pending the Target-Mac benchmark gate.

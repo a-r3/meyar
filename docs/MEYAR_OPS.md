@@ -5,8 +5,9 @@ M9). This document covers PR1 (`preflight`/`status`/`readiness`/
 `verify-release` — `docs/DECISIONS.md` D-066), PR2 (`service-render`/
 `service-verify`/`service-status` — D-067), PR3 (`build-release` —
 D-068), PR4 (offline bundle/activation — D-073), PR5 (host config
-and service binding — D-074), and PR6 (privileged LaunchDaemon lifecycle
-foundation — D-075). See §11 below for the #35/#46 boundary.
+and service binding — D-074), PR6 (privileged LaunchDaemon lifecycle
+foundation — D-075), and PR7 (fresh database schema initialization —
+D-076). See §11 below for the #35/#46 boundary.
 
 **PR3 scope reminder — read before assuming this means "deployable":**
 `build-release` produces an immutable MEYAR APPLICATION release
@@ -308,7 +309,7 @@ timeout) bounded/redacted error text via the existing
 **Real `launchctl`/`bootstrap`/reboot behavior on macOS remains
 UNCONFIRMED** — see "Platform verification status" below.
 
-### PR6 privileged lifecycle foundation (under independent review)
+### PR6 privileged lifecycle foundation (merged as PR #69)
 
 The four commands have the same required arguments:
 
@@ -382,6 +383,52 @@ service group membership, and traversal/read access. The operator-facing
 `config-verify` still requires the caller to own the root; privileged
 lifecycle still requires an explicit `--install-owner-uid`. Startup also
 rejects ambient `MEYAR_*` settings that change the protected file values.
+
+### PR7 `schema-init` — first-deployment database only
+
+Run as the trusted non-root install operator, after installing and activating
+the release and verifying the host production config, before installing or
+starting the service:
+
+```bash
+<root>/current/.venv/bin/python -m meyar.ops.cli schema-init --install-root <root>
+```
+
+`<root>` must be the canonical absolute operator-owned install root. The
+command acquires PR4's existing `<root>/.meyar-ops.lock` with nonblocking
+exclusive `flock`; contention reports `OPERATION_BUSY`. It does not delete
+the lock or change its inode, owner, or mode. It verifies the complete PR4
+active release, the actual imported MEYAR package and Python executable,
+the active `backend/alembic.ini` and `backend/alembic/` script directory,
+and the protected PR5 `shared/config/.env`. The DB URL comes only from the
+validated file, never from CLI arguments, ambient shell Settings, or the
+development checkout. The sole target is the active code's single Alembic
+head, which must equal the installed manifest's sole declared head.
+
+The command reads only Alembic revision metadata and PostgreSQL table names:
+
+| Database state | Result |
+| --- | --- |
+| Exactly the active head | `SCHEMA_ALREADY_CURRENT`; no mutation |
+| No revision and no user tables | Upgrade to the active head; independently verify exactly that one revision; `SCHEMA_INITIALIZED` |
+| No revision but any other user table | `UNVERSIONED_SCHEMA_PRESENT`; no mutation |
+| Older or different revision | `SCHEMA_UPGRADE_REQUIRES_UPDATE_WORKFLOW`; no mutation |
+| Multiple revisions | `MULTIPLE_DB_REVISIONS`; no mutation |
+| Database unavailable | `DATABASE_UNREACHABLE`; no secret-bearing exception text |
+
+No candidate rows are read. Alembic runs through the active release's
+Python API with an explicit connection using the protected DB URL; the URL
+is not put in `alembic.ini`, argv, or the result. A migration failure reports
+`SCHEMA_INITIALIZATION_FAILED`; a failed independent revision postcheck
+reports `SCHEMA_POSTCHECK_FAILED`. This command does not stamp, downgrade,
+select an arbitrary revision, recover a failed migration, or operate the
+service. PostgreSQL and pgvector must already be provisioned; migration
+failure does not install or change either.
+
+**PR7 is not the production update migration workflow.** An existing older
+schema must await the later backup/update/rollback safety boundary.
+`SCHEMA_INITIALIZED` or `SCHEMA_ALREADY_CURRENT` does not mean the
+application is ready, the service is healthy, or Ollama/model is ready.
 
 ## PR3 commands
 
@@ -739,12 +786,17 @@ and non-loopback Ollama. The service consumes active-release code and
 shared configuration, storage and logs. No LaunchDaemon mutation or
 target-Mac acceptance is performed. #35 and #46 remain open.
 
-**#35 PR6 (D-075, independent review pending):** explicit privileged
+**#35 PR6 (D-075, merged as PR #69):** explicit privileged
 install-owner boundary, dedicated service principal/group resolution,
 protected runtime write paths, no-clobber canonical plist publication,
 PR4 lock coordination, and fixed-argv system launchctl start/stop/restart.
 No application/database/model readiness, migrations, update/rollback,
 or target-Mac acceptance.
+
+**#35 PR7 (D-076, independent review pending):** `schema-init` binds the
+running package and Alembic graph to the verified active release, then
+initializes only a fresh empty database. It does not upgrade an existing
+production schema or perform backup, rollback, service, or model work.
 
 **Deferred to #46:** authenticated HTTP `/ready`, in-application
   degraded-state semantics, remaining production config policy,
