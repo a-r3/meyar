@@ -58,6 +58,12 @@ def _skip(builder: OpsResultBuilder, component: str) -> None:
     _finding(builder, component, "PREREQUISITE_FAILED", status=Status.SKIPPED)
 
 
+def _launchd_code(result: OpsResult) -> str:
+    """Preserve confirmed absence; normalize all probe uncertainty to failure."""
+    code = result.findings[0].code
+    return code if code in {"SERVICE_VISIBLE", "SERVICE_NOT_VISIBLE"} else "SERVICE_PROBE_FAILED"
+
+
 def _installed_spec(
     root: Path, label: str, directory: Path, system_uid: int, owner_uid: int
 ) -> tuple[ServiceSpec, bytes]:
@@ -301,12 +307,12 @@ def run_deployment_ready(
         _skip(builder, "application_liveness")
     else:
         status = run_service_status(label=label, platform_system="Darwin", runner=runner)
-        visible = status.ok
+        launchd_code = _launchd_code(status)
         _finding(
             builder,
             "launchd",
-            "SERVICE_VISIBLE" if visible else "SERVICE_NOT_VISIBLE",
-            status=Status.OK if visible else Status.FAIL,
+            launchd_code,
+            status=Status.OK if launchd_code == "SERVICE_VISIBLE" else Status.FAIL,
         )
         code = _probe_application(spec.port)
         _finding(
@@ -375,9 +381,13 @@ def run_deployment_ready(
                 if principal is not None:
                     service_gid = (root / "shared/config").stat().st_gid
                     _verify_runtime(root, owner_uid, service_gid, principal)
-                if not run_service_status(
-                    label=label, platform_system="Darwin", runner=runner
-                ).ok or _probe_application(spec.port) != "APPLICATION_LIVE":
+                final_launchd = _launchd_code(
+                    run_service_status(label=label, platform_system="Darwin", runner=runner)
+                )
+                if final_launchd != "SERVICE_VISIBLE":
+                    _finding(builder, "snapshot", final_launchd, status=Status.FAIL)
+                    return builder.build()
+                if _probe_application(spec.port) != "APPLICATION_LIVE":
                     raise ValueError("service changed during readiness probes")
         except (InstallFailure, SchemaInitFailure, OSError, ValueError, LifecycleFailure):
             _finding(builder, "snapshot", "DEPLOYMENT_CHANGED", status=Status.FAIL)

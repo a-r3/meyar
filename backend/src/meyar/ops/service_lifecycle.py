@@ -22,12 +22,10 @@ from meyar.ops.offline_host import (
 )
 from meyar.ops.result import FindingStatus, OpsResult, OpsResultBuilder
 from meyar.ops.service_plist import ServiceSpec, render_service_plist
-from meyar.ops.service_status import LAUNCHCTL_PATH, LaunchctlRunner
+from meyar.ops.service_status import LAUNCHCTL_PATH, SERVICE_NOT_FOUND_EXIT, LaunchctlRunner
 
 SYSTEM_PLIST_DIRECTORY = Path("/Library/LaunchDaemons")
 LOG_NAMES = ("meyar.stdout.log", "meyar.stderr.log")
-# launchctl's "Could not find specified service" status on supported macOS.
-SERVICE_NOT_FOUND_EXIT = 113
 
 
 class LifecycleFailure(Exception):

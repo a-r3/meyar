@@ -301,11 +301,12 @@ runner is injected/testable, so this command's tests never require a
 real `launchctl`/macOS host. On any non-Darwin platform (all current
 CI), it returns a truthful `PLATFORM_UNSUPPORTED` finding — it does not
 pretend the check ran, and it does not require `launchctl` to exist on
-ordinary Linux CI. Raw `launchctl` stdout/stderr is never included in the
-returned `OpsResult` — only the fixed argv used, the process exit status,
-and (on a genuine runner-level infrastructure failure — missing binary,
-timeout) bounded/redacted error text via the existing
-`meyar.ops.redact.safe_exception_text`.
+ordinary Linux CI. Exit `0` means `SERVICE_VISIBLE`; exit `113` means
+`SERVICE_NOT_VISIBLE`; any other exit means `SERVICE_PROBE_FAILED`.
+Timeout and unavailable-binary findings remain distinct in `service-status`
+and are normalized to `SERVICE_PROBE_FAILED` by `deployment-ready`.
+Raw `launchctl` stdout/stderr and runner exception text never enter either
+result.
 
 **Real `launchctl`/`bootstrap`/reboot behavior on macOS remains
 UNCONFIRMED** — see "Platform verification status" below.

@@ -9,9 +9,7 @@ macOS-only: on any other platform it returns a truthful
 The runner is injected (`LaunchctlRunner`) so tests never require a real
 `launchctl`/macOS host — see docs/MEYAR_OPS.md for what remains UNCONFIRMED
 until a real macOS/Apple-Silicon rehearsal. Raw `launchctl` stdout/stderr
-is never included in the returned `OpsResult` — only the fixed argv used,
-the process exit status, and a bounded/redacted error string on the rare
-infrastructure-level failure path (`launchctl` missing, timeout)."""
+and runner exception text are never included in the returned `OpsResult`."""
 
 from __future__ import annotations
 
@@ -24,6 +22,8 @@ from meyar.ops.result import FindingStatus, OpsResult, OpsResultBuilder
 from meyar.ops.service_plist import validate_label
 
 LAUNCHCTL_PATH = "/bin/launchctl"
+# launchctl's "Could not find specified service" status on supported macOS.
+SERVICE_NOT_FOUND_EXIT = 113
 _SUBPROCESS_TIMEOUT_SECONDS = 10.0
 
 
@@ -84,12 +84,12 @@ def run_service_status(
             message="launchctl print did not complete within the timeout",
         )
         return builder.build()
-    except OSError as exc:
+    except OSError:
         builder.add(
             component="launchctl_probe",
             status=FindingStatus.FAIL,
             code="LAUNCHCTL_UNAVAILABLE",
-            message=safe_exception_text(exc),
+            message="launchctl print unavailable",
         )
         return builder.build()
 
@@ -100,11 +100,18 @@ def run_service_status(
             code="SERVICE_VISIBLE",
             message=f"label visible in system launchd domain (exit={completed.returncode})",
         )
-    else:
+    elif completed.returncode == SERVICE_NOT_FOUND_EXIT:
         builder.add(
             component="launchctl_probe",
             status=FindingStatus.FAIL,
             code="SERVICE_NOT_VISIBLE",
             message=f"label not visible in system launchd domain (exit={completed.returncode})",
+        )
+    else:
+        builder.add(
+            component="launchctl_probe",
+            status=FindingStatus.FAIL,
+            code="SERVICE_PROBE_FAILED",
+            message="launchctl print failed without confirming service absence",
         )
     return builder.build()

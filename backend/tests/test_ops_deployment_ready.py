@@ -287,44 +287,89 @@ def test_manifest_migration_identity_mismatch_is_distinct(
     assert not result.ok
 
 
+@pytest.mark.parametrize(
+    ("exit_code", "expected"),
+    [(113, "SERVICE_NOT_VISIBLE"), (1, "SERVICE_PROBE_FAILED")],
+)
 def test_launchctl_failure_does_not_hide_other_findings(
     deployment: tuple[Path, Path, ServiceSpec, list[list[str]]],
+    exit_code: int,
+    expected: str,
 ) -> None:
+    commands: list[list[str]] = []
+
     def runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(argv)
         assert argv == ["/bin/launchctl", "print", "system/com.bank.meyar"]
-        return subprocess.CompletedProcess(argv, 113, "secret launchctl output", "secret")
+        return subprocess.CompletedProcess(argv, exit_code, "secret launchctl output", "secret")
 
     result = run(deployment, runner=runner)
-    assert codes(result)["launchd"] == "SERVICE_NOT_VISIBLE"
+    assert codes(result)["launchd"] == expected
     assert codes(result)["application_liveness"] == "APPLICATION_LIVE"
     assert codes(result)["database"] == "DATABASE_REACHABLE"
+    assert codes(result)["ollama"] == "OLLAMA_REACHABLE"
+    assert not result.ok
     assert "secret launchctl" not in result.model_dump_json()
+    assert commands == [["/bin/launchctl", "print", "system/com.bank.meyar"]]
 
 
 def test_launchctl_timeout_fails_without_output_leak(
     deployment: tuple[Path, Path, ServiceSpec, list[list[str]]]
 ) -> None:
+    commands: list[list[str]] = []
+
     def runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(argv)
         raise subprocess.TimeoutExpired(argv, 1.0, output="secret launchctl output")
 
     result = run(deployment, runner=runner)
-    assert codes(result)["launchd"] == "SERVICE_NOT_VISIBLE"
+    assert codes(result)["launchd"] == "SERVICE_PROBE_FAILED"
+    assert codes(result)["application_liveness"] == "APPLICATION_LIVE"
+    assert codes(result)["database"] == "DATABASE_REACHABLE"
+    assert codes(result)["ollama"] == "OLLAMA_REACHABLE"
+    assert not result.ok
     assert "secret launchctl" not in result.model_dump_json()
+    assert commands == [["/bin/launchctl", "print", "system/com.bank.meyar"]]
 
 
-def test_service_stopping_during_probes_cannot_report_ready(
+def test_launchctl_oserror_is_probe_failure_without_output_leak(
     deployment: tuple[Path, Path, ServiceSpec, list[list[str]]]
+) -> None:
+    commands: list[list[str]] = []
+
+    def runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(argv)
+        raise OSError("secret launchctl unavailable")
+
+    result = run(deployment, runner=runner)
+    assert codes(result)["launchd"] == "SERVICE_PROBE_FAILED"
+    assert codes(result)["application_liveness"] == "APPLICATION_LIVE"
+    assert codes(result)["database"] == "DATABASE_REACHABLE"
+    assert codes(result)["ollama"] == "OLLAMA_REACHABLE"
+    assert not result.ok
+    assert "secret" not in result.model_dump_json()
+    assert commands == [["/bin/launchctl", "print", "system/com.bank.meyar"]]
+
+
+@pytest.mark.parametrize(
+    ("final_exit", "expected"),
+    [(113, "SERVICE_NOT_VISIBLE"), (1, "SERVICE_PROBE_FAILED")],
+)
+def test_service_stopping_or_probe_failing_during_probes_cannot_report_ready(
+    deployment: tuple[Path, Path, ServiceSpec, list[list[str]]],
+    final_exit: int,
+    expected: str,
 ) -> None:
     calls = 0
 
     def runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
         nonlocal calls
         calls += 1
-        return subprocess.CompletedProcess(argv, 0 if calls == 1 else 113, "", "")
+        return subprocess.CompletedProcess(argv, 0 if calls == 1 else final_exit, "", "")
 
     result = run(deployment, runner=runner)
     assert codes(result)["launchd"] == "SERVICE_VISIBLE"
-    assert codes(result)["snapshot"] == "DEPLOYMENT_CHANGED"
+    assert codes(result)["snapshot"] == expected
     assert not result.ok
 
 
