@@ -51,6 +51,93 @@ from meyar.ops.schema_init import SchemaInitFailure, _active_config
 DATABASE_IDENTIFIER = re.compile(r"[a-z_][a-z0-9_]{0,62}\Z")
 RESTORE_MANIFEST = "restore_manifest.json"
 
+# pg_depend covers namespace members and other dependent database objects,
+# including collations, base types, operators, casts, and text-search objects.
+# PostgreSQL reserves OIDs below 16384 for system objects. Generated internal
+# objects have an internal dependency on their parent; the parent is checked.
+# Only the default plpgsql and deployment-required vector extensions and their
+# members are accepted.
+EMPTY_TARGET_SQL = """
+SELECT
+    EXISTS (
+        SELECT 1 FROM pg_catalog.pg_namespace n
+        WHERE n.nspname NOT IN ('public', 'pg_catalog', 'information_schema')
+          AND n.nspname NOT LIKE 'pg_toast%'
+          AND n.nspname NOT LIKE 'pg_temp_%'
+          AND NOT EXISTS (
+              SELECT 1 FROM pg_catalog.pg_depend owner
+              JOIN pg_catalog.pg_extension ext ON ext.oid = owner.refobjid
+              WHERE owner.classid = 'pg_catalog.pg_namespace'::regclass
+                AND owner.objid = n.oid
+                AND owner.refclassid = 'pg_catalog.pg_extension'::regclass
+                AND owner.deptype = 'e' AND ext.extname IN ('plpgsql', 'vector')
+          )
+    )
+    OR EXISTS (
+        SELECT 1 FROM pg_catalog.pg_extension ext
+        WHERE ext.extname NOT IN ('plpgsql', 'vector')
+    )
+    OR EXISTS (
+        SELECT 1 FROM pg_catalog.pg_depend d
+        WHERE d.objid >= 16384
+          AND d.deptype NOT IN ('e', 'i', 'P', 'S')
+          AND NOT EXISTS (
+              SELECT 1 FROM pg_catalog.pg_depend owner
+              JOIN pg_catalog.pg_extension ext ON ext.oid = owner.refobjid
+              WHERE owner.classid = d.classid AND owner.objid = d.objid
+                AND owner.objsubid = 0
+                AND owner.refclassid = 'pg_catalog.pg_extension'::regclass
+                AND owner.deptype = 'e' AND ext.extname IN ('plpgsql', 'vector')
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM pg_catalog.pg_depend internal
+              WHERE internal.classid = d.classid AND internal.objid = d.objid
+                AND internal.deptype IN ('i', 'P', 'S')
+          )
+          AND NOT (
+              d.classid = 'pg_catalog.pg_extension'::regclass
+              AND d.objid IN (
+                  SELECT oid FROM pg_catalog.pg_extension
+                  WHERE extname IN ('plpgsql', 'vector')
+              )
+          )
+    )
+    OR EXISTS (SELECT 1 FROM pg_catalog.pg_publication)
+    OR EXISTS (SELECT 1 FROM pg_catalog.pg_subscription)
+    OR EXISTS (SELECT 1 FROM pg_catalog.pg_event_trigger)
+    OR EXISTS (SELECT 1 FROM pg_catalog.pg_foreign_data_wrapper)
+    OR EXISTS (SELECT 1 FROM pg_catalog.pg_foreign_server)
+    OR EXISTS (SELECT 1 FROM pg_catalog.pg_largeobject_metadata)
+    OR EXISTS (SELECT 1 FROM pg_catalog.pg_default_acl)
+    OR EXISTS (
+        SELECT 1 FROM pg_catalog.pg_am am
+        WHERE am.oid >= 16384 AND NOT EXISTS (
+            SELECT 1 FROM pg_catalog.pg_depend owner
+            JOIN pg_catalog.pg_extension ext ON ext.oid = owner.refobjid
+            WHERE owner.classid = 'pg_catalog.pg_am'::regclass
+              AND owner.objid = am.oid
+              AND owner.refclassid = 'pg_catalog.pg_extension'::regclass
+              AND owner.deptype = 'e' AND ext.extname IN ('plpgsql', 'vector')
+        )
+    )
+    OR EXISTS (
+        SELECT 1 FROM pg_catalog.pg_cast c
+        WHERE c.oid >= 16384 AND NOT EXISTS (
+            SELECT 1 FROM pg_catalog.pg_depend owner
+            JOIN pg_catalog.pg_extension ext ON ext.oid = owner.refobjid
+            WHERE owner.classid = 'pg_catalog.pg_cast'::regclass
+              AND owner.objid = c.oid
+              AND owner.refclassid = 'pg_catalog.pg_extension'::regclass
+              AND owner.deptype = 'e' AND ext.extname IN ('plpgsql', 'vector')
+        )
+    )
+    OR EXISTS (SELECT 1 FROM pg_catalog.pg_transform WHERE oid >= 16384)
+    OR EXISTS (
+        SELECT 1 FROM pg_catalog.pg_language
+        WHERE lanname NOT IN ('internal', 'c', 'sql', 'plpgsql')
+    )
+"""
+
 
 class RestoreFailure(Exception):
     def __init__(
@@ -208,50 +295,8 @@ async def _inspect_target(url: URL, *, expected_head: str | None) -> None:
         async with engine.connect() as connection:
             await connection.execute(text("SELECT 1"))
             if expected_head is None:
-                # Extension-owned objects (including pgvector) are infrastructure.
-                # Every other user relation, even an empty Alembic table, refuses restore.
-                objects = await connection.execute(
-                    text(
-                        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_class c "
-                        "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
-                        "WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') "
-                        "AND n.nspname NOT LIKE 'pg_toast%' "
-                        "AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d "
-                        "WHERE d.classid = 'pg_catalog.pg_class'::regclass "
-                        "AND d.objid = c.oid AND d.deptype = 'e'))"
-                    )
-                )
-                schemas = await connection.execute(
-                    text(
-                        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace "
-                        "WHERE nspname NOT IN ('public', 'pg_catalog', 'information_schema') "
-                        "AND nspname NOT LIKE 'pg_toast%' AND nspname NOT LIKE 'pg_temp_%')"
-                    )
-                )
-                routines = await connection.execute(
-                    text(
-                        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_proc p "
-                        "JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace "
-                        "WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') "
-                        "AND n.nspname NOT LIKE 'pg_toast%' "
-                        "AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d "
-                        "WHERE d.classid = 'pg_catalog.pg_proc'::regclass "
-                        "AND d.objid = p.oid AND d.deptype = 'e'))"
-                    )
-                )
-                types = await connection.execute(
-                    text(
-                        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_type t "
-                        "JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace "
-                        "WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') "
-                        "AND n.nspname NOT LIKE 'pg_toast%' "
-                        "AND t.typtype IN ('e', 'd', 'r', 'm') "
-                        "AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d "
-                        "WHERE d.classid = 'pg_catalog.pg_type'::regclass "
-                        "AND d.objid = t.oid AND d.deptype = 'e'))"
-                    )
-                )
-                if objects.scalar() or schemas.scalar() or routines.scalar() or types.scalar():
+                objects = await connection.execute(text(EMPTY_TARGET_SQL))
+                if objects.scalar():
                     raise RestoreFailure("RESTORE_TARGET_NOT_EMPTY")
             else:
                 revision = await get_db_alembic_revision(engine)

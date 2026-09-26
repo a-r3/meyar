@@ -278,12 +278,33 @@ def test_special_password_never_enters_success_result_or_manifest(ready: tuple[P
         assert value not in result.model_dump_json() + manifest
 
 
+@pytest.mark.parametrize(
+    ("catalog", "extension_owned"),
+    [
+        ("pg_class (relation)", False),
+        ("pg_namespace (custom schema)", False),
+        ("pg_proc (routine)", False),
+        ("pg_type (enum)", False),
+        ("pg_type (domain)", False),
+        ("pg_type (range)", False),
+        ("pg_type (multirange)", False),
+        ("pg_collation (user collation)", False),
+        ("pg_type (user base type)", False),
+        ("pg_operator (user operator)", False),
+        ("pg_ts_config (text-search configuration)", False),
+        ("pg_publication (database-wide publication)", False),
+        ("pg_am (user access method)", False),
+        ("pg_collation (vector extension)", True),
+        ("pg_type (vector extension base type)", True),
+        ("pg_operator (vector extension operator)", True),
+        ("pg_am (vector extension access method)", True),
+    ],
+)
 @pytest.mark.asyncio
-async def test_catalog_empty_target_and_postcheck(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_catalog_precheck_synthetic_objects(
+    monkeypatch: pytest.MonkeyPatch, catalog: str, extension_owned: bool
 ) -> None:
     seen: list[str] = []
-    nonempty = False
 
     class Scalar:
         def __init__(self, value: bool) -> None:
@@ -302,7 +323,7 @@ async def test_catalog_empty_target_and_postcheck(
         async def execute(self, statement: object) -> Scalar:
             sql = str(statement)
             seen.append(sql)
-            return Scalar(nonempty if "pg_catalog.pg_class c" in sql else False)
+            return Scalar(not extension_owned if sql == restore.EMPTY_TARGET_SQL else False)
 
     class Engine:
         def connect(self) -> Connection:
@@ -314,13 +335,53 @@ async def test_catalog_empty_target_and_postcheck(
     engine = Engine()
     monkeypatch.setattr(restore, "create_async_engine", lambda *_a, **_kw: engine)
     url = make_url("postgresql+asyncpg://synthetic:secret@localhost/isolated")
-    await restore._inspect_target(url, expected_head=None)
-    assert any("pg_catalog.pg_class c" in sql for sql in seen)
-    assert any("pg_catalog.pg_proc p" in sql for sql in seen)
-    assert any("pg_catalog.pg_type t" in sql for sql in seen)
-    nonempty = True
-    with pytest.raises(restore.RestoreFailure, match="RESTORE_TARGET_NOT_EMPTY"):
+    if extension_owned:
         await restore._inspect_target(url, expected_head=None)
+    else:
+        with pytest.raises(restore.RestoreFailure, match="RESTORE_TARGET_NOT_EMPTY"):
+            await restore._inspect_target(url, expected_head=None)
+    assert seen == ["SELECT 1", restore.EMPTY_TARGET_SQL], catalog
+    if catalog.startswith("pg_namespace"):
+        assert "FROM pg_catalog.pg_namespace n" in restore.EMPTY_TARGET_SQL
+    elif catalog.startswith("pg_publication"):
+        assert "FROM pg_catalog.pg_publication" in restore.EMPTY_TARGET_SQL
+    elif catalog.startswith("pg_am"):
+        assert "FROM pg_catalog.pg_am am" in restore.EMPTY_TARGET_SQL
+    else:
+        assert "FROM pg_catalog.pg_depend d" in restore.EMPTY_TARGET_SQL
+        assert "d.objid >= 16384" in restore.EMPTY_TARGET_SQL
+        assert "owner.classid = d.classid AND owner.objid = d.objid" in restore.EMPTY_TARGET_SQL
+    assert "ext.extname IN ('plpgsql', 'vector')" in restore.EMPTY_TARGET_SQL
+
+
+@pytest.mark.asyncio
+async def test_catalog_empty_target_and_exact_postcheck(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Scalar:
+        def scalar(self) -> bool:
+            return False
+
+    class Connection:
+        async def __aenter__(self) -> Connection:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def execute(self, _statement: object) -> Scalar:
+            return Scalar()
+
+    class Engine:
+        def connect(self) -> Connection:
+            return Connection()
+
+        async def dispose(self) -> None:
+            return None
+
+    monkeypatch.setattr(restore, "create_async_engine", lambda *_a, **_kw: Engine())
+    url = make_url("postgresql+asyncpg://synthetic:secret@localhost/isolated")
+    await restore._inspect_target(url, expected_head=None)
 
     class Revision:
         revisions = ["rev1"]

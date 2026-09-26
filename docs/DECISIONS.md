@@ -6055,6 +6055,13 @@ Settings supply host, port, principal, and password; only the database name
 changes. The production database name, nonempty target, or unreachable
 target is refused. The bank provisions the isolated target database and
 any required extension; this command never creates or drops a database.
+The empty-target precheck uses PostgreSQL dependency and ownership catalogs
+across user object classes, plus catalogs for standalone database objects;
+it rejects prior user objects before storage extraction. Only system
+objects, the default `public` schema, and the deployment-required `vector`
+extension and its owned objects (alongside PostgreSQL's default `plpgsql`)
+are allowed. In particular, an unrelated installed extension is not an
+empty-target exception.
 
 Verified USTAR storage is manually streamed to a private
 `shared/restores/.restore-*` stage, rejecting unsafe members, with archive
