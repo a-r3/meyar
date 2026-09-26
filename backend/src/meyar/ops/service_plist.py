@@ -1,5 +1,5 @@
-"""macOS LaunchDaemon plist foundation for the MEYAR application process
-(issue #35 PR2). This module only renders and verifies a plist — it never
+"""macOS LaunchDaemon plist foundation for the MEYAR application process.
+This module only renders and verifies a plist — it never
 installs to `/Library/LaunchDaemons`, never invokes `launchctl`, and never
 requires or performs privilege escalation. See `docs/MEYAR_OPS.md` for the
 command contract and `docs/DECISIONS.md` for the accepted service model
@@ -11,18 +11,13 @@ The generated plist carries a narrow, deterministic key set
 the plist in host-local configuration), no explicit `RunAtLoad` (`KeepAlive`
 already supplies the relevant launch semantics), no `ThrottleInterval`
 (would only restate launchd's own default). `ProgramArguments` is always a
-real argv array invoking the operator-supplied absolute executable via
+real argv array invoking the active release's absolute executable via
 `-m uvicorn` against the currently accepted application contract
 (`meyar.main:app`, host `127.0.0.1`) — never a `Program` shell-string
 invocation, and `Executable` never relies on bare `uv`/PATH resolution.
 
-Path fields (`WorkingDirectory`, `Executable`, `StandardOutPath`,
-`StandardErrorPath`) are validated lexically only: required absolute,
-free of NUL/control characters, free of a lexical `..` traversal
-component. Symlink components are deliberately NOT resolved/rejected —
-there is no accepted immutable release-path contract yet (see
-docs/DECISIONS.md), and inventing containment rules ahead of that
-contract is out of scope for this PR."""
+PR4's verified activation pointer owns the executable and source.
+Mutable configuration, storage and logs stay under shared/."""
 
 from __future__ import annotations
 
@@ -30,15 +25,17 @@ import contextlib
 import os
 import plistlib
 import re
+import stat
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from xml.parsers.expat import ExpatError
 
+from meyar.ops.host_config import verify_host_config
+from meyar.ops.offline_host import InstallFailure, _real_directory, verify_active_release
 from meyar.ops.redact import safe_exception_text
 from meyar.ops.result import FindingStatus, OpsResult, OpsResultBuilder
 
-# The currently accepted application contract (backend/.env loading and
-# `scripts/fresh_deployment_smoke.py` both assume this invocation shape).
+# The accepted application invocation contract.
 # Changing either constant is a product/architecture decision, not a
 # meyar-ops implementation detail.
 APPLICATION_MODULE = "meyar.main:app"
@@ -96,10 +93,7 @@ def validate_user_name(user_name: str) -> None:
 
 
 def validate_absolute_path(value: str, *, field_name: str) -> None:
-    """Lexical-only absolute-path validation shared by every path field.
-    Deliberately does not call `Path.resolve()`/`os.path.realpath()` — no
-    blanket rejection of symlink components, since no final immutable
-    release-path contract exists yet."""
+    """Lexical validation before canonical host-layout comparison."""
     if not value:
         raise ValueError(f"{field_name} must not be empty")
     if not value.startswith("/"):
@@ -117,25 +111,42 @@ def validate_port(port: int) -> None:
 
 @dataclass(frozen=True)
 class ServiceSpec:
-    """Typed, fully operator-supplied input for `service-render`. No field
-    has a bank-specific or otherwise hardcoded default."""
+    """The operator supplies only service identity, root, and port."""
 
     label: str
     user_name: str
-    working_directory: str
-    executable: str
+    install_root: Path
     port: int
-    stdout_path: str
-    stderr_path: str
 
     def validate(self) -> None:
         validate_label(self.label)
         validate_user_name(self.user_name)
-        validate_absolute_path(self.working_directory, field_name="WorkingDirectory")
-        validate_absolute_path(self.executable, field_name="Executable")
+        validate_absolute_path(str(self.install_root), field_name="install root")
+        if str(self.install_root) != os.path.normpath(str(self.install_root)):
+            raise ValueError("install root must be normalized")
         validate_port(self.port)
-        validate_absolute_path(self.stdout_path, field_name="StandardOutPath")
-        validate_absolute_path(self.stderr_path, field_name="StandardErrorPath")
+
+
+def _canonical_paths(root: Path) -> tuple[str, str, str, str]:
+    return (
+        str(root / "current" / ".venv" / "bin" / "python"),
+        str(root / "shared" / "config"),
+        str(root / "shared" / "logs" / "meyar.stdout.log"),
+        str(root / "shared" / "logs" / "meyar.stderr.log"),
+    )
+
+
+def _verify_host_binding(root: Path) -> None:
+    try:
+        verify_active_release(root)
+        _real_directory(root / "shared" / "logs")
+        for path in (root / "shared/logs/meyar.stdout.log", root / "shared/logs/meyar.stderr.log"):
+            if os.path.lexists(path) and not stat.S_ISREG(path.lstat().st_mode):
+                raise ValueError("unsafe log path")
+    except (InstallFailure, OSError, ValueError):
+        raise ValueError("active release failed verification") from None
+    if not verify_host_config(root).ok:
+        raise ValueError("host production configuration failed verification")
 
 
 def _program_arguments(spec: ServiceSpec) -> list[str]:
@@ -143,7 +154,7 @@ def _program_arguments(spec: ServiceSpec) -> list[str]:
     is the absolute interpreter path; the module is always invoked via
     `-m uvicorn`, never a bare `uvicorn`/`uv` relying on PATH resolution."""
     return [
-        spec.executable,
+        _canonical_paths(spec.install_root)[0],
         "-m",
         "uvicorn",
         APPLICATION_MODULE,
@@ -158,13 +169,15 @@ def render_service_plist(spec: ServiceSpec) -> bytes:
     """Deterministic plist XML bytes for a validated `ServiceSpec`. Raises
     `ValueError` (never writes anything) when any field fails validation."""
     spec.validate()
+    _verify_host_binding(spec.install_root)
+    _, working_directory, stdout_path, stderr_path = _canonical_paths(spec.install_root)
     payload: dict[str, object] = {
         "Label": spec.label,
         "UserName": spec.user_name,
-        "WorkingDirectory": spec.working_directory,
+        "WorkingDirectory": working_directory,
         "ProgramArguments": _program_arguments(spec),
-        "StandardOutPath": spec.stdout_path,
-        "StandardErrorPath": spec.stderr_path,
+        "StandardOutPath": stdout_path,
+        "StandardErrorPath": stderr_path,
         "KeepAlive": {"SuccessfulExit": False},
     }
     return plistlib.dumps(payload, fmt=plistlib.FMT_XML, sort_keys=True)
@@ -187,9 +200,7 @@ _PRIVILEGED_LAUNCHDAEMONS_DIR = "/Library/LaunchDaemons"
 class ServiceRenderOutputPathPrivilegedError(Exception):
     def __init__(self, path: Path) -> None:
         self.path = path
-        super().__init__(
-            f"output path must not be inside {_PRIVILEGED_LAUNCHDAEMONS_DIR}: {path}"
-        )
+        super().__init__(f"output path must not be inside {_PRIVILEGED_LAUNCHDAEMONS_DIR}: {path}")
 
 
 def _is_privileged_location(candidate: str, *, privileged_dir: str) -> bool:
@@ -374,12 +385,27 @@ def _read_bounded_plist_bytes(path: Path, limit: int) -> bytes:
     return data
 
 
-def verify_service_plist(plist_path: Path, *, expected_label: str | None = None) -> OpsResult:
+def verify_service_plist(
+    plist_path: Path, *, install_root: Path, expected_label: str | None = None
+) -> OpsResult:
     """Bounded read + parse + shape/security verification of an
     operator-supplied plist. Never installs, never invokes `launchctl`.
     Every check below is independently reported; a failure in one check
     never hides another component's finding."""
     builder = OpsResultBuilder(action="service-verify")
+    try:
+        validate_absolute_path(str(install_root), field_name="install root")
+        if str(install_root) != os.path.normpath(str(install_root)):
+            raise ValueError("install root must be normalized")
+        _verify_host_binding(install_root)
+    except ValueError:
+        builder.add(
+            component="host_binding",
+            status=FindingStatus.FAIL,
+            code="HOST_BINDING_INVALID",
+            message="active release or production configuration failed verification",
+        )
+        return builder.build()
 
     try:
         raw = _read_bounded_plist_bytes(plist_path, _MAX_PLIST_BYTES)
@@ -438,6 +464,32 @@ def verify_service_plist(plist_path: Path, *, expected_label: str | None = None)
     _check_std_paths(builder, payload)
     _check_no_environment_variables(builder, payload)
     _check_keep_alive(builder, payload)
+    executable, working_directory, stdout_path, stderr_path = _canonical_paths(install_root)
+    expected_fields = {
+        "WorkingDirectory": working_directory,
+        "StandardOutPath": stdout_path,
+        "StandardErrorPath": stderr_path,
+    }
+    args = payload.get("ProgramArguments")
+    if (
+        not isinstance(args, list)
+        or not args
+        or args[0] != executable
+        or any(payload.get(key) != value for key, value in expected_fields.items())
+    ):
+        builder.add(
+            component="canonical_binding",
+            status=FindingStatus.FAIL,
+            code="SERVICE_BINDING_MISMATCH",
+            message="plist does not use canonical active-release and shared paths",
+        )
+    else:
+        builder.add(
+            component="canonical_binding",
+            status=FindingStatus.OK,
+            code="SERVICE_BINDING_VALID",
+            message="plist binds to verified active release and host shared paths",
+        )
 
     return builder.build()
 
@@ -449,7 +501,7 @@ def _check_allowed_keys(builder: OpsResultBuilder, payload: dict[str, object]) -
             component="allowed_keys",
             status=FindingStatus.FAIL,
             code="UNSUPPORTED_KEY",
-            message=f"unsupported plist key(s): {', '.join(extra[:10])}",
+            message="unsupported plist key present",
         )
         return
     builder.add(
@@ -606,8 +658,7 @@ def _check_no_shell_wrapper(
             status=FindingStatus.FAIL,
             code="SHELL_WRAPPER_DETECTED",
             message=(
-                "plist must invoke the application directly via ProgramArguments, "
-                "never a shell"
+                "plist must invoke the application directly via ProgramArguments, never a shell"
             ),
         )
         return
@@ -619,9 +670,7 @@ def _check_no_shell_wrapper(
     )
 
 
-def _check_executable_and_invocation(
-    builder: OpsResultBuilder, args: list[str] | None
-) -> None:
+def _check_executable_and_invocation(builder: OpsResultBuilder, args: list[str] | None) -> None:
     if args is None:
         for component in ("executable_path", "application_invocation", "host", "port"):
             builder.add(
@@ -662,8 +711,7 @@ def _check_executable_and_invocation(
             status=FindingStatus.FAIL,
             code="APPLICATION_INVOCATION_MISMATCH",
             message=(
-                "ProgramArguments does not match the expected meyar.main:app "
-                "uvicorn invocation"
+                "ProgramArguments does not match the expected meyar.main:app uvicorn invocation"
             ),
         )
         for component in ("host", "port"):

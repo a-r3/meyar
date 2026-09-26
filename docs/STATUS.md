@@ -2,7 +2,10 @@
 
 ## Current phase
 
-**Accepted `main` is `9b234a2c8ea0b4a3be533dfd0c382564016191d6`.**
+**Accepted `main` is `860357e1bc6a63e38553ab65119adfd67109056b`.**
+PR #66 (#35 PR4) is merged and post-merge verified. PR5 is the current
+implementation slice for host production configuration and active-release
+service binding; it is not accepted main.
 PR #65 (issue #63, order-independent duplicate same-language level
 eligibility) is merged and issue #63 is CLOSED. PR #64 (issue #62 evidence
 attribution) is merged and issue #62 is CLOSED. Deterministic evaluations
@@ -82,20 +85,26 @@ real HEAD commit (read-only); Apple-Silicon runtime acceptance remains
 **UNCONFIRMED** and the production model remains **TBD**.
 
 **PR4 for #35 (offline dependency bundle + host install/activation
-foundation, D-073) is under implementation on
-`feat/issue-35-offline-install-foundation` from accepted `main`
-`9b234a2c8ea0b4a3be533dfd0c382564016191d6`.** It defines a
+foundation, D-073) is MERGED as PR #66 — squash SHA
+`860357e1bc6a63e38553ab65119adfd67109056b`.** It defines a
 hash-bound CPython 3.12/macOS arm64 wheel payload, a bank-provisioned
 Python executable identity check, a stdlib-only bundled host installer,
 immutable versioned release directories, operation locking, and atomic
 filesystem activation with previous-release identity. It does not
 install/start/stop LaunchDaemons, provision PostgreSQL/Ollama/models,
 perform Alembic downgrades, or claim real Apple-Silicon execution. No
-production model is approved. PR review/CI status is not yet accepted
-`main`; see `docs/MEYAR_OPS.md` for the bounded contract.
+production model is approved. See `docs/MEYAR_OPS.md` for the bounded
+contract.
 
-Issue #35 remains OPEN as the current active engineering phase (offline
-dependency provisioning, host install layout, plist
+**PR5 for #35 (D-074) is under implementation** from that accepted main.
+It binds the PR2 LaunchDaemon render/verify contract to PR4's verified
+active release and mutable `shared/config`, `shared/storage`, and
+`shared/logs`, and adds a narrow production-config verifier and direct
+Settings fail-closed guards. It makes no LaunchDaemon mutation or
+target-Mac/model acceptance claim. Issue #46 remains OPEN; this advances
+only its deployment-blocking production-config item.
+
+Issue #35 remains OPEN as the current active engineering phase (plist
 *installation*/lifecycle orchestration, and further #35 work are still to
 come); issue #36 remains OPEN and not started; issue #46 remains OPEN and
 separate.

@@ -1,4 +1,6 @@
 import asyncio
+import json
+import os
 import uuid
 from collections.abc import AsyncGenerator
 from pathlib import Path
@@ -11,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from meyar.core.roles import ROLE_HR_USER
 from meyar.db import Base, get_db
 from meyar.main import app
+from meyar.ops import offline_host
 from meyar.services.api_key_repo import create_api_key
 from meyar.services.tenant_membership_repo import create_membership
 from meyar.services.tenant_repo import create_tenant
@@ -27,12 +30,70 @@ TEST_DATABASE_URL = "postgresql+asyncpg://meyar:meyar_dev_password@localhost:557
 FIXTURES_DIR = Path(__file__).resolve().parent.parent.parent / "fixtures" / "synthetic_cvs"
 
 
+@pytest.fixture
+def ops_host_root(tmp_path: Path) -> Path:
+    """Disposable PR4-shaped host with synthetic config and installed release."""
+    root = tmp_path / "host"
+    for relative in (
+        "releases",
+        "activations",
+        "shared/config",
+        "shared/storage",
+        "shared/backups",
+        "shared/logs",
+    ):
+        (root / relative).mkdir(parents=True, exist_ok=True)
+    (root / "shared/config/.env").write_text(
+        "MEYAR_ENV=production\n"
+        "MEYAR_DATABASE_URL=postgresql+asyncpg://synthetic:synthetic@localhost:5432/meyar\n"
+        "MEYAR_PENDING_LOGIN_SECRET=synthetic-host-test-secret\n"
+        "MEYAR_UI_COOKIE_SECURE=true\n"
+        f"MEYAR_STORAGE_ROOT={root / 'shared/storage'}\n"
+        "MEYAR_LLM_PROVIDER=ollama\n"
+        "MEYAR_EMBEDDING_PROVIDER=ollama\n"
+        "MEYAR_OLLAMA_BASE_URL=http://127.0.0.1:11434\n"
+    )
+    for directory in (root, root / "shared", root / "shared/config"):
+        directory.chmod(0o750)
+    (root / "shared/config/.env").chmod(0o640)
+    release_id = "meyar-test+abcdef123456"
+    release = root / "releases" / release_id
+    python = release / ".venv/bin/python"
+    python.parent.mkdir(parents=True)
+    python.write_text("synthetic interpreter")
+    python.chmod(0o555)
+    source = release / "backend/src/meyar/main.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("# synthetic application\n")
+    pointer = release / ".venv/lib/python3.12/site-packages/meyar-source.pth"
+    pointer.parent.mkdir(parents=True)
+    pointer.write_text(str(release / "backend/src") + "\n")
+    state = release / "install_state.json"
+    state.write_text(
+        json.dumps(
+            {
+                "release_id": release_id,
+                "rollback_compatibility": "APP_ONLY",
+                "tree_sha256": offline_host._tree_digest(release),
+            }
+        )
+    )
+    for directory, _, files in os.walk(release, topdown=False):
+        for name in files:
+            (Path(directory) / name).chmod(0o444 if name != "python" else 0o555)
+        Path(directory).chmod(0o555)
+    generation = root / "activations/g-synthetic"
+    generation.mkdir()
+    (generation / "state.json").write_text(json.dumps({"release_id": release_id}))
+    (generation / "current").symlink_to(f"../../releases/{release_id}")
+    (root / "current").symlink_to("activations/g-synthetic/current")
+    return root
+
+
 async def _prepare_test_database() -> None:
     admin_engine = create_async_engine(ADMIN_DATABASE_URL, isolation_level="AUTOCOMMIT")
     async with admin_engine.connect() as conn:
-        exists = await conn.execute(
-            text("SELECT 1 FROM pg_database WHERE datname = 'meyar_test'")
-        )
+        exists = await conn.execute(text("SELECT 1 FROM pg_database WHERE datname = 'meyar_test'"))
         if exists.scalar_one_or_none() is None:
             await conn.execute(text("CREATE DATABASE meyar_test"))
     await admin_engine.dispose()
