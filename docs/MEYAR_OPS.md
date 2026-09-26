@@ -7,8 +7,9 @@ M9). This document covers PR1 (`preflight`/`status`/`readiness`/
 D-068), PR4 (offline bundle/activation — D-073), PR5 (host config
 and service binding — D-074), PR6 (privileged LaunchDaemon lifecycle
 foundation — D-075), PR7 (fresh database schema initialization —
-D-076), PR8 (installed deployment readiness — D-077), and PR9
-(production backup creation/verification — D-078). See §11 below
+D-076), PR8 (installed deployment readiness — D-077), PR9
+(production backup creation/verification — D-078), and PR10
+(isolated restore — D-079). See §11 below
 for the #35/#46 boundary.
 
 **PR3 scope reminder — read before assuming this means "deployable":**
@@ -26,8 +27,9 @@ layout. See "PR3 commands" below and §14/§15.
 (`backend/src/meyar/ops/`) with a console entry point registered in
 `backend/pyproject.toml` (`[project.scripts]`) — not an ad-hoc shell
 script. It is operationally separate from candidate business logic: it
-never reads candidate/CV/JD/query content, and nothing in it feeds
-matching, scoring, or search. It reuses the same trusted boundaries the
+never interprets candidate/CV/JD/query content; backup and restore stream
+opaque candidate bytes under private storage controls, and nothing in it
+feeds matching, scoring, or search. It reuses the same trusted boundaries the
 application already has — `meyar.llm`/`meyar.embedding` for Ollama
 reachability, `meyar.llm.loopback` for loopback enforcement, the
 `meyar.db` engine helpers, and Alembic's own `ScriptDirectory`/DB
@@ -547,8 +549,39 @@ logs. `backup-verify` checks exact schema/permissions/hashes, runs the
 validated `pg_restore --list` without a database connection, and parses
 the tar without extracting. It never reads `.env` or changes the backup.
 Storage symlinks, hardlinks, special nodes, unsafe names, and duplicate
-archive entries are rejected. No production restore, update, or rollback
-command is added. A created and verified backup is **not** restore-tested.
+archive entries are rejected. A created and verified backup is **not**
+restore-tested.
+
+### PR10 `restore`
+
+PR9 / PR #72 is merged and post-merge verified on accepted main
+`2dcf0a8783e49008b0eb707d81b42248209b34d6`. To restore, first run
+`backup-verify`, then have a PostgreSQL operator precreate an empty isolated
+database on the protected host/port for the protected DB principal:
+
+```bash
+<root>/current/.venv/bin/python -m meyar.ops.cli restore \
+  --install-root <root> --backup-id <safe-backup-id> \
+  --restore-id <safe-restore-id> --target-database <isolated-database-name> \
+  --pg-bin-dir <absolute-postgresql-client-bin-dir>
+```
+
+Only `RESTORE_COMPLETED` is success. PR10 holds the PR4 lock, reuses PR9
+verification, requires exact active release ID/source SHA/Alembic head,
+reads the PR5 protected Settings, and refuses the production database name
+or a nonempty target. It streams verified storage into private
+`shared/restores/.restore-*` staging, checks the extracted file tree, runs
+trusted absolute `pg_restore` with `--exit-on-error --single-transaction
+--no-owner --no-privileges --no-password`, checks exactly one restored
+Alembic revision, then publishes `shared/restores/<restore-id>/` without
+replacement and writes a durable non-secret completion manifest. The
+password uses a private, removed `PGPASSFILE`. Storage and database cannot
+be one atomic transaction: after DB success, later failure returns
+`RESTORE_INCOMPLETE_ISOLATED_TARGET` and preserves isolated state. Discard
+and recreate that target DB before retrying; no database is dropped by the
+tool. Neither production DB nor live `shared/storage` is written. An
+isolated restore completed **!=** production cutover or readiness. Update,
+rollback, and cutover remain future #35 work. See `docs/BACKUP_RESTORE.md`.
 
 ## PR3 commands
 
@@ -922,8 +955,12 @@ production schema or perform backup, rollback, service, or model work.
 read-only installed-host operator gate described above. No HTTP `/ready` or
 Target-Mac acceptance is included.
 
-**#35 PR9 (D-078, independent review pending):** quiesced production backup
-creation and read-only structural verification only. No restore is included.
+**#35 PR9 (D-078, merged as PR #72):** quiesced production backup
+creation and read-only structural verification.
+
+**#35 PR10 (D-079, independent review pending):** verified backup to an
+empty isolated database and private restore workspace. No production
+cutover, update, or rollback is included.
 
 **Deferred to #46:** authenticated HTTP `/ready`, in-application
   degraded-state semantics, remaining production config policy,

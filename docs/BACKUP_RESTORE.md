@@ -1,10 +1,11 @@
 # MEYAR — Backup & Restore
 
-Status: PR9 (issue #35) implements quiesced installed-host backup creation
-and structural verification. Slice 13 (issue #20) separately has an
+Status: PR9 / PR #72 is merged and post-merge verified at accepted main
+`2dcf0a8783e49008b0eb707d81b42248209b34d6`. PR10 adds isolated
+restore for independent review. Slice 13 (issue #20) separately has an
 executed synthetic backup/restore acceptance proof in
-`backend/scripts/backup_restore_acceptance.py`. Production restore remains
-a later #35 slice. Neither mechanism creates a backup schedule.
+`backend/scripts/backup_restore_acceptance.py`. Production cutover remains
+future #35 work. Neither mechanism creates a backup schedule.
 
 ## Scope
 
@@ -87,12 +88,63 @@ unfamiliar directory as part of a retry.
 production DB or extracting anything. It does not read protected `.env`.
 **Backup-created != restore-tested.**
 
+## PR10 isolated installed-host restore
+
+First verify the published backup. Have a bank PostgreSQL operator precreate
+an **empty isolated** database on the same protected host and port, accessible
+to the same protected MEYAR database principal. Provision any required
+extension (including pgvector) through the normal database infrastructure
+process. Run as the non-root install owner, from the exact active release:
+
+```bash
+<root>/current/.venv/bin/python -m meyar.ops.cli backup-verify \
+  --install-root <root> --backup-id <safe-backup-id> \
+  --pg-bin-dir <absolute-postgresql-client-bin-dir>
+
+<root>/current/.venv/bin/python -m meyar.ops.cli restore \
+  --install-root <root> --backup-id <safe-backup-id> \
+  --restore-id <safe-restore-id> --target-database <isolated-database-name> \
+  --pg-bin-dir <absolute-postgresql-client-bin-dir>
+```
+
+Confirm the sole success code `RESTORE_COMPLETED`. The workspace is always
+`<root>/shared/restores/<restore-id>/`, with private `storage/` and
+`restore_manifest.json`. The `shared/restores` parent is install-owner
+controlled, never service-writable. Restore IDs use the backup ID grammar;
+database names use lowercase PostgreSQL identifiers, 1–63 characters,
+starting with a letter or underscore; PostgreSQL maintenance/template
+database names are refused. The target name must differ from the protected
+production database name. There is no DB URL, password, SQL,
+backup path, or storage destination option.
+
+The command reuses the complete PR9 verifier before touching the target.
+The backup release ID, source SHA, and Alembic head must match the exact
+verified active release. The target must be reachable and have no user
+relations or non-public user schema; extension-owned objects are allowed.
+The command manually streams only regular USTAR files and directories to a
+private stage, checks extracted file hashes against the archive, and runs
+trusted absolute `pg_restore` with `--exit-on-error --single-transaction
+--no-owner --no-privileges --no-password`. It then checks connectivity
+and exactly one expected Alembic revision before no-replace publication.
+Passwords travel only through a private temporary `PGPASSFILE`. Neither
+the live database nor `shared/storage` is written by this command.
+
+Filesystem and PostgreSQL cannot share one transaction. If PostgreSQL
+restore fails, its transaction rolls back and no completed workspace is
+published. If PostgreSQL succeeds but the DB postcheck or filesystem
+publication fails, `RESTORE_INCOMPLETE_ISOLATED_TARGET` leaves isolated
+state for operator inspection. **Discard/recreate the isolated target DB
+before retrying**; the command never drops it. An existing restore ID is
+never overwritten. Only a completed restore has a completion manifest.
+An isolated restore completed **!=** production cutover, application
+readiness, update, or rollback.
+
 ## Synthetic restore demonstration only
 
 The following demonstrates the existing synthetic acceptance script's
-isolated destination. It is **not** a production restore command. Never
-overwrite a live database or live storage root. Production restore tooling
-and its destructive safety procedure remain a later #35 slice.
+isolated destination. It is separate from PR10's installed-host command.
+Never overwrite a live database or live storage root. Production cutover
+remains a later #35 slice.
 
 ```bash
 # 1. Create/point at an empty destination database, then:
