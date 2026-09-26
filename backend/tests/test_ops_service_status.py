@@ -59,7 +59,7 @@ def test_zero_exit_maps_to_ok_service_visible() -> None:
     assert result.findings[0].status == FindingStatus.OK
 
 
-def test_nonzero_exit_maps_to_fail_service_not_visible() -> None:
+def test_not_found_exit_maps_to_fail_service_not_visible() -> None:
     result = run_service_status(
         label="meyar.application", platform_system="Darwin", runner=lambda argv: _completed(113)
     )
@@ -68,13 +68,25 @@ def test_nonzero_exit_maps_to_fail_service_not_visible() -> None:
     assert result.findings[0].status == FindingStatus.FAIL
 
 
+def test_unexpected_nonzero_exit_is_probe_failure_without_raw_output() -> None:
+    result = run_service_status(
+        label="meyar.application",
+        platform_system="Darwin",
+        runner=lambda argv: _completed(1, stdout="secret stdout", stderr="secret stderr"),
+    )
+    assert result.ok is False
+    assert result.findings[0].code == "SERVICE_PROBE_FAILED"
+    assert "secret" not in result.model_dump_json()
+
+
 def test_runner_timeout_maps_to_fail_launchctl_timeout() -> None:
     def _runner(argv: list[str]) -> subprocess.CompletedProcess:
-        raise subprocess.TimeoutExpired(cmd=argv, timeout=10.0)
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=10.0, output="secret timeout output")
 
     result = run_service_status(label="meyar.application", platform_system="Darwin", runner=_runner)
     assert result.ok is False
     assert result.findings[0].code == "LAUNCHCTL_TIMEOUT"
+    assert "secret" not in result.model_dump_json()
 
 
 def test_runner_missing_binary_maps_to_fail_launchctl_unavailable() -> None:
@@ -136,6 +148,7 @@ def test_credential_bearing_runner_error_is_redacted() -> None:
     result = run_service_status(label="meyar.application", platform_system="Darwin", runner=_runner)
     assert result.ok is False
     assert "hunter2" not in result.model_dump_json()
+    assert "launchctl helper failed" not in result.model_dump_json()
 
 
 # --- 21. no shell=True -------------------------------------------------------

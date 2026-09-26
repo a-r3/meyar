@@ -2,9 +2,9 @@
 
 ## Current phase
 
-**Accepted `main` is `5b247153151243a3c329b94dd9cb9184902e1c67`.**
-PR #69 (#35 PR6) is merged and post-merge verified. PR7 is the current
-implementation slice for active-release fresh database schema initialization;
+**Accepted `main` is `76ef38f8404657e904c096e114180f1a3c165ebc`.**
+PR #70 (#35 PR7) is merged and post-merge verified. PR8 is the current
+implementation slice for the read-only installed-deployment operator gate;
 it is not accepted main.
 PR #65 (issue #63, order-independent duplicate same-language level
 eligibility) is merged and issue #63 is CLOSED. PR #64 (issue #62 evidence
@@ -113,13 +113,22 @@ runtime write permissions, no-clobber plist publication, and shared PR4
 operation locking. Linux simulation does not establish real Apple-Silicon
 launchd behavior or application readiness.
 
-**PR7 for #35 (D-076) is prepared for independent review** from accepted main.
+**PR7 for #35 (D-076) is MERGED as PR #70 — squash SHA
+`76ef38f8404657e904c096e114180f1a3c165ebc` and post-merge verified.**
 It adds `schema-init` for an empty database, bound to the exact verified
 active release and protected host config. Exact-head databases succeed
 idempotently; an unversioned nonempty database, stale/different revision,
 or multiple revisions is refused without mutation. This is not the
 production update/backup/rollback migration workflow. Schema current does
 not prove application, service, or Ollama/model readiness.
+
+**PR8 for #35 (D-077) is prepared for independent review** from that exact
+accepted main. `deployment-ready` combines verified installed release,
+protected config, canonical installed LaunchDaemon, service principal/runtime
+permissions, launchd visibility, loopback application liveness, database and
+exact schema-current checks, and protected-settings Ollama/model availability
+in one read-only `OpsResult`. It does not add HTTP `/ready`, provisioning,
+update/rollback, Target-Mac benchmarking, or model approval.
 
 Issue #35 remains OPEN for further deployment work; issue #36 remains
 OPEN and not started; issue #46 remains OPEN and separate.

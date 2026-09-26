@@ -89,7 +89,7 @@ class OllamaEmbeddingProvider:
         `/api/tags` reachability/model-availability check, same 5s bound."""
         try:
             async with build_local_only_async_client(
-                timeout=5.0, transport=self._transport
+                timeout=min(5.0, self._timeout_seconds), transport=self._transport
             ) as client:
                 resp = await client.get(f"{self._base_url}/api/tags")
                 resp.raise_for_status()

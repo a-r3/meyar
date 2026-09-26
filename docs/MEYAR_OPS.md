@@ -6,8 +6,9 @@ M9). This document covers PR1 (`preflight`/`status`/`readiness`/
 `service-verify`/`service-status` — D-067), PR3 (`build-release` —
 D-068), PR4 (offline bundle/activation — D-073), PR5 (host config
 and service binding — D-074), PR6 (privileged LaunchDaemon lifecycle
-foundation — D-075), and PR7 (fresh database schema initialization —
-D-076). See §11 below for the #35/#46 boundary.
+foundation — D-075), PR7 (fresh database schema initialization —
+D-076), and PR8 (installed deployment readiness — D-077). See §11 below
+for the #35/#46 boundary.
 
 **PR3 scope reminder — read before assuming this means "deployable":**
 `build-release` produces an immutable MEYAR APPLICATION release
@@ -300,11 +301,12 @@ runner is injected/testable, so this command's tests never require a
 real `launchctl`/macOS host. On any non-Darwin platform (all current
 CI), it returns a truthful `PLATFORM_UNSUPPORTED` finding — it does not
 pretend the check ran, and it does not require `launchctl` to exist on
-ordinary Linux CI. Raw `launchctl` stdout/stderr is never included in the
-returned `OpsResult` — only the fixed argv used, the process exit status,
-and (on a genuine runner-level infrastructure failure — missing binary,
-timeout) bounded/redacted error text via the existing
-`meyar.ops.redact.safe_exception_text`.
+ordinary Linux CI. Exit `0` means `SERVICE_VISIBLE`; exit `113` means
+`SERVICE_NOT_VISIBLE`; any other exit means `SERVICE_PROBE_FAILED`.
+Timeout and unavailable-binary findings remain distinct in `service-status`
+and are normalized to `SERVICE_PROBE_FAILED` by `deployment-ready`.
+Raw `launchctl` stdout/stderr and runner exception text never enter either
+result.
 
 **Real `launchctl`/`bootstrap`/reboot behavior on macOS remains
 UNCONFIRMED** — see "Platform verification status" below.
@@ -429,6 +431,61 @@ failure does not install or change either.
 schema must await the later backup/update/rollback safety boundary.
 `SCHEMA_INITIALIZED` or `SCHEMA_ALREADY_CURRENT` does not mean the
 application is ready, the service is healthy, or Ollama/model is ready.
+
+### PR8 `deployment-ready` — installed deployment operator gate
+
+Run as the trusted non-root install operator after `install-release`,
+`activate-release`, `config-verify`, `schema-init`, `service-install`, and
+`service-start`:
+
+```bash
+<root>/current/.venv/bin/python -m meyar.ops.cli deployment-ready \
+  --install-root <root> --label <validated-launchd-label>
+```
+
+PostgreSQL/pgvector and Ollama with the configured models must already exist;
+the current tooling does not provision them. The gate takes no DB URL,
+Ollama URL, model name, port, service-user, or arbitrary plist path. Its only
+plist authority is `/Library/LaunchDaemons/<label>.plist`, which must be a
+safe, root-owned, regular, canonical-mode file with exact bytes from the
+accepted renderer. Only after structural verification does the gate derive
+the service user and port from that plist. It verifies the exact active
+release Python/package/command and migration graph, PR5 protected `.env`,
+PR6 dedicated principal and runtime permissions, and `launchctl print
+system/<label>`. Application liveness probes only
+`http://127.0.0.1:<validated-port>/api/v1/health`, via direct numeric-loopback
+`http.client.HTTPConnection`; ambient proxies, DNS and redirects cannot
+change the destination. The response must be HTTP 200 with JSON
+`{"status":"ok"}`. DB reachability uses bounded `SELECT 1`; schema current
+requires the sole active code/manifest head to equal the sole DB revision.
+Ollama and both configured models use explicit protected Settings through the
+existing local-only provider boundary. All findings use fixed codes without
+secrets or raw response/exception text.
+
+The result reports `active_release`, `host_config`, `service_plist`,
+`service_principal`, `runtime_permissions`, `launchd`,
+`application_liveness`, `database`, `db_schema`, `ollama`, `llm_model`, and
+`embedding_model` separately. Their success codes are respectively
+`ACTIVE_RELEASE_VERIFIED`, `HOST_CONFIG_VERIFIED`, `SERVICE_PLIST_VERIFIED`,
+`SERVICE_PRINCIPAL_VERIFIED`, `RUNTIME_PERMISSIONS_VERIFIED`,
+`SERVICE_VISIBLE`, `APPLICATION_LIVE`, `DATABASE_REACHABLE`,
+`DB_REVISION_CURRENT`, `OLLAMA_REACHABLE`, `LLM_MODEL_AVAILABLE`, and
+`EMBEDDING_MODEL_AVAILABLE`. A failed prerequisite yields a `SKIPPED`
+finding; independent safe checks continue. Any `FAIL` makes `ok=false`.
+
+The command opens the existing PR4 lock read-only and holds it during the
+installed identity/config/plist/runtime snapshot. It releases the lock for
+bounded HTTP/DB/model probes, then reacquires it for final installed-state,
+launchd, and liveness verification before reporting `ok=true`. A concurrent mutation caught by
+the lock or final check fails the gate; the result is a point-in-time operator
+assessment, not a promise that the host remains ready after it exits.
+It performs no filesystem or database mutation, permission repair, account
+creation, service lifecycle action, migration, or model pull.
+
+`launchd` visible != application live != deployment ready.
+`GET /api/v1/health` remains liveness only. CLI `deployment-ready` is not
+HTTP `/ready` (#46). A green CLI gate is neither real Target-Mac acceptance
+nor production-model approval (#36); issues #35 and #46 remain open.
 
 ## PR3 commands
 
@@ -793,10 +850,14 @@ PR4 lock coordination, and fixed-argv system launchctl start/stop/restart.
 No application/database/model readiness, migrations, update/rollback,
 or target-Mac acceptance.
 
-**#35 PR7 (D-076, independent review pending):** `schema-init` binds the
+**#35 PR7 (D-076, merged as PR #70):** `schema-init` binds the
 running package and Alembic graph to the verified active release, then
 initializes only a fresh empty database. It does not upgrade an existing
 production schema or perform backup, rollback, service, or model work.
+
+**#35 PR8 (D-077, independent review pending):** `deployment-ready` is the
+read-only installed-host operator gate described above. No HTTP `/ready` or
+Target-Mac acceptance is included.
 
 **Deferred to #46:** authenticated HTTP `/ready`, in-application
   degraded-state semantics, remaining production config policy,
