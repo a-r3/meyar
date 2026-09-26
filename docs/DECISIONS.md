@@ -5861,3 +5861,52 @@ Immutable code/runtime != mutable host configuration != mutable
 candidate/document storage. PR5 performs no LaunchDaemon mutation,
 service lifecycle, migration, model provisioning, or target-Mac
 acceptance. Issue #35 remains OPEN.
+
+## D-075 — Privileged LaunchDaemon lifecycle and protected runtime write contract (issue #35 PR6)
+
+**Date:** 2026-09-26. **Status:** Implementation for independent review on
+`feat/issue-35-privileged-launchdaemon-lifecycle`, from accepted main
+`d15fcc9513c6a78770496e8914bb72a95eaea681` (PR #68/PR5 merged).
+
+The system LaunchDaemon runs the verified active release as a dedicated
+non-root service principal; the trusted install operator remains the
+owner of the install root, configuration, runtime directories, and logs.
+Privileged commands require Darwin and effective UID 0, supplied by bank
+policy outside the tool. They require an explicit non-root install-owner
+UID and verify PR5's complete host config chain against it. Ordinary
+`config-verify` retains its caller-effective-UID rule. The tool does not
+elevate itself or create users/groups. `pwd`, `grp`, and
+`os.getgrouplist` verify the account, non-root UID, group existence,
+and membership before installation or start.
+
+Privileged operations acquire the existing PR4 lock by opening its
+operator-owned inode read-only with `O_NOFOLLOW`, validating owner,
+regularity, link count, and mode, then taking nonblocking `flock`.
+They never create or chown that lock. Service installation prepares
+operator-owned, service-group-traversable control paths, setgid
+activation/shared paths, and only `shared/storage` and `shared/logs`
+as service-group-writable `2770`; canonical logs are protected `0660`
+regular files. The `.env` remains PR5's `0640` host-owned file and
+immutable release files remain read-only. PR4's host-layout verifier
+accepts group write only on those two mutable paths when their GID
+equals the protected config service GID, setgid is present, and other
+write is absent. This keeps future PR4 install/activation usable.
+
+The one PR5 plist renderer remains authoritative. `service-install`
+publishes its exact seven-key bytes to the fixed system destination as
+root:wheel `0644` via a same-directory fsynced temporary file and an
+atomic no-clobber hard link; conflicting or unsafe existing entries
+are never overwritten. It does not start launchd. Start, stop, and
+restart verify the installed exact bytes and host/principal/runtime
+binding, then use fixed `/bin/launchctl` system-domain argv with finite
+timeouts and discarded output. Start uses bootstrap plus kickstart if
+absent, or ordinary kickstart if loaded. Stop uses bootout and verifies
+absence; restart uses `kickstart -k` if loaded, or bootstrap plus ordinary
+kickstart if absent. Probe status 113 is the absent state; other probe
+failures are errors. The commands never claim HTTP, database, schema,
+or model readiness from launchd visibility.
+
+This is a Linux-tested contract implementation, not real Apple-Silicon
+launchd acceptance. No migration, service uninstall, update/rollback,
+PostgreSQL/Ollama/model provisioning, HTTPS, Target-Mac benchmark, or
+candidate/search behavior is added. Issues #35 and #46 remain OPEN.

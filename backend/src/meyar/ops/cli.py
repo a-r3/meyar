@@ -29,6 +29,7 @@ from meyar.ops.result import (
     build_single_finding_result,
     exit_code_for,
 )
+from meyar.ops.service_lifecycle import run_service_lifecycle
 from meyar.ops.service_plist import ServiceSpec, run_service_render, verify_service_plist
 from meyar.ops.service_status import run_service_status
 from meyar.ops.status import run_status
@@ -86,6 +87,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Read-only probe of the MEYAR LaunchDaemon in the system launchd domain (macOS only).",
     )
     status_plist_parser.add_argument("--label", type=str, required=True)
+
+    for command in ("service-install", "service-start", "service-stop", "service-restart"):
+        lifecycle_parser = sub.add_parser(command, help="Privileged system LaunchDaemon lifecycle.")
+        lifecycle_parser.add_argument("--label", type=str, required=True)
+        lifecycle_parser.add_argument("--user-name", type=str, required=True)
+        lifecycle_parser.add_argument("--install-root", type=Path, required=True)
+        lifecycle_parser.add_argument("--install-owner-uid", type=int, required=True)
+        lifecycle_parser.add_argument("--port", type=int, required=True)
 
     build_release_parser = sub.add_parser(
         "build-release",
@@ -150,6 +159,12 @@ def _run_command(args: argparse.Namespace) -> OpsResult:
         )
     if args.command == "service-status":
         return run_service_status(label=args.label)
+    if args.command in {"service-install", "service-start", "service-stop", "service-restart"}:
+        return run_service_lifecycle(
+            args.command,
+            ServiceSpec(args.label, args.user_name, args.install_root, args.port),
+            args.install_owner_uid,
+        )
     if args.command == "build-release":
         return build_release(
             BuildReleaseRequest(

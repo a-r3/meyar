@@ -46,8 +46,9 @@ canonical references it points to — read this alongside, not instead of:
   hardware, benchmark harness, model-approval gate.
 - [`docs/MEYAR_OPS.md`](MEYAR_OPS.md) — the `meyar-ops` operator CLI
   (issue #35), including PR4's offline bundle/activation and PR5's host
-  production-config and service-binding contracts. It does not yet start the
-  full target service; see its #35/#46 boundary.
+  production-config and service-binding contracts, plus PR6's privileged
+  LaunchDaemon lifecycle foundation. It does not establish application,
+  database, or model readiness; see its #35/#46 boundary.
 - [`docs/DECISIONS.md`](DECISIONS.md) — the full decision log, including
   D-020 (tested security/acceptance boundary) and D-066 (`meyar-ops`
   foundation).
@@ -120,7 +121,7 @@ the exact commands and layout. The diagram above is the older manual
 source-checkout procedure, not the final bank-host method. PR4 does not
 start the service or constitute target-Mac acceptance.
 
-**PR5 host-service boundary, pending independent acceptance:** run
+**PR5 host-service boundary, accepted as PR #68:** run
 `meyar-ops config-verify --install-root <root>` against the operator-owned
 `<root>/shared/config/.env`, then render/verify the plist with the same
 install root. The application reads that file from its
@@ -129,8 +130,12 @@ install root. The application reads that file from its
 Storage remains `<root>/shared/storage`; logs remain `<root>/shared/logs`.
 Immutable code/runtime != mutable host configuration != mutable
 candidate/document storage. Neither config verification nor plist
-render/verify installs or starts a LaunchDaemon. Real Apple-Silicon
-execution and production-model selection remain unverified.
+render/verify installs or starts a LaunchDaemon. PR6 adds separate
+privileged install/start/stop/restart commands; the administrator supplies
+root context and an explicit install-owner UID. Installed/loaded means
+launchd accepted the job, not that MEYAR, DB/schema, or Ollama/model is
+ready. Real Apple-Silicon execution and production-model selection remain
+unverified.
 
 ## 4. Fresh host provisioning
 
@@ -140,9 +145,9 @@ production mechanism. Issue #35's target production path is an immutable,
 owner-accepted release artifact (built, verified, installed, and updated
 by `meyar-ops` tooling). PR3 built the application artifact and PR4
 defines its offline dependency/install foundation; PR5 binds the service
-plist to that active release and host-local production config. Service
-lifecycle,
-database/model provisioning, and target-Mac acceptance remain later #35
+plist to that active release and host-local production config. PR6 adds
+privileged LaunchDaemon lifecycle foundation. Database/model provisioning,
+full deployment readiness, and target-Mac acceptance remain later #35
 work. This source-checkout runbook describes the older manual dev/demo
 path and must not be used as the final bank-host deployment method.
 

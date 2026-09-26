@@ -66,7 +66,7 @@ class _FileSettings(Settings):
         return (init_settings,)
 
 
-def _read_config(root: Path) -> str:
+def _read_config(root: Path, *, expected_owner_uid: int | None = None) -> str:
     if not root.is_absolute() or ".." in root.parts:
         raise ValueError("INSTALL_ROOT_UNSAFE")
     try:
@@ -80,9 +80,9 @@ def _read_config(root: Path) -> str:
         config_stat = (root / "shared" / "config").stat()
     except OSError:
         raise ValueError("HOST_LAYOUT_UNSAFE") from None
-    if root_stat.st_uid != os.geteuid():  # Same trusted operator identity as PR4.
+    owner_uid = os.geteuid() if expected_owner_uid is None else expected_owner_uid
+    if owner_uid < 0 or root_stat.st_uid != owner_uid:
         raise ValueError("HOST_LAYOUT_UNSAFE")
-    owner_uid = root_stat.st_uid
     service_gid = config_stat.st_gid
     for parent in root.parents:
         metadata = parent.stat()
@@ -146,8 +146,8 @@ def _read_config(root: Path) -> str:
         os.close(fd)
 
 
-def load_host_settings(root: Path) -> Settings:
-    raw = _read_config(root)
+def load_host_settings(root: Path, *, expected_owner_uid: int | None = None) -> Settings:
+    raw = _read_config(root, expected_owner_uid=expected_owner_uid)
     seen: set[str] = set()
     for binding in parse_stream(io.StringIO(raw)):
         if binding.error:

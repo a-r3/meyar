@@ -100,6 +100,20 @@ def _owned_directory(path: Path) -> None:
         raise InstallFailure("INSTALL_ROOT_PERMISSIONS_UNSAFE")
 
 
+def _mutable_runtime_directory(root: Path, path: Path, service_gid: int) -> None:
+    if path not in (root / "shared/storage", root / "shared/logs"):
+        raise InstallFailure("INSTALL_ROOT_PERMISSIONS_UNSAFE")
+    _real_directory(path)
+    metadata = path.stat()
+    if (
+        metadata.st_uid != os.geteuid()
+        or metadata.st_gid != service_gid
+        or metadata.st_mode & 0o002
+        or metadata.st_mode & 0o2000 == 0
+    ):
+        raise InstallFailure("INSTALL_ROOT_PERMISSIONS_UNSAFE")
+
+
 def _load_json(path: Path) -> dict[str, object]:
     _regular_file(path, maximum=MAX_MANIFEST)
     with path.open("rb") as stream:
@@ -296,6 +310,34 @@ def _operation_lock(root: Path):
         os.close(descriptor)
 
 
+@contextlib.contextmanager
+def privileged_operation_lock(root: Path, expected_owner_uid: int):
+    """Join PR4's existing lock without root creating or changing its inode."""
+    _real_directory(root)
+    if root.stat().st_uid != expected_owner_uid:
+        raise InstallFailure("INSTALL_OWNER_MISMATCH")
+    try:
+        descriptor = os.open(root / ".meyar-ops.lock", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as exc:
+        raise InstallFailure("LOCK_UNSAFE") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_uid != expected_owner_uid
+            or metadata.st_mode & 0o022
+        ):
+            raise InstallFailure("LOCK_UNSAFE")
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise InstallFailure("OPERATION_BUSY") from exc
+        yield
+    finally:
+        os.close(descriptor)
+
+
 def _ensure_layout(root: Path) -> None:
     _owned_directory(root)
     for relative in (
@@ -312,7 +354,20 @@ def _ensure_layout(root: Path) -> None:
             path.mkdir(mode=0o750)
         except FileExistsError:
             pass
-        _owned_directory(path)
+        if relative in ("shared/storage", "shared/logs") and path.stat().st_mode & 0o020:
+            config = root / "shared" / "config"
+            _owned_directory(config)
+            config_stat = config.stat()
+            if (
+                config_stat.st_uid != os.geteuid()
+                or config_stat.st_mode & 0o007
+                or config_stat.st_mode & 0o010 == 0
+                or config_stat.st_gid != root.stat().st_gid
+            ):
+                raise InstallFailure("INSTALL_ROOT_PERMISSIONS_UNSAFE")
+            _mutable_runtime_directory(root, path, config_stat.st_gid)
+        else:
+            _owned_directory(path)
 
 
 def _extract_application(

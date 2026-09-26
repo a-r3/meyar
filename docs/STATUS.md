@@ -2,10 +2,10 @@
 
 ## Current phase
 
-**Accepted `main` is `860357e1bc6a63e38553ab65119adfd67109056b`.**
-PR #66 (#35 PR4) is merged and post-merge verified. PR5 is the current
-implementation slice for host production configuration and active-release
-service binding; it is not accepted main.
+**Accepted `main` is `d15fcc9513c6a78770496e8914bb72a95eaea681`.**
+PR #68 (#35 PR5) is merged and post-merge verified. PR6 is the current
+implementation slice for privileged macOS LaunchDaemon lifecycle; it is
+not accepted main.
 PR #65 (issue #63, order-independent duplicate same-language level
 eligibility) is merged and issue #63 is CLOSED. PR #64 (issue #62 evidence
 attribution) is merged and issue #62 is CLOSED. Deterministic evaluations
@@ -96,7 +96,8 @@ perform Alembic downgrades, or claim real Apple-Silicon execution. No
 production model is approved. See `docs/MEYAR_OPS.md` for the bounded
 contract.
 
-**PR5 for #35 (D-074) is under implementation** from that accepted main.
+**PR5 for #35 (D-074) is MERGED as PR #68 — squash SHA
+`d15fcc9513c6a78770496e8914bb72a95eaea681`.**
 It binds the PR2 LaunchDaemon render/verify contract to PR4's verified
 active release and mutable `shared/config`, `shared/storage`, and
 `shared/logs`, and adds a narrow production-config verifier and direct
@@ -104,10 +105,15 @@ Settings fail-closed guards. It makes no LaunchDaemon mutation or
 target-Mac/model acceptance claim. Issue #46 remains OPEN; this advances
 only its deployment-blocking production-config item.
 
-Issue #35 remains OPEN as the current active engineering phase (plist
-*installation*/lifecycle orchestration, and further #35 work are still to
-come); issue #36 remains OPEN and not started; issue #46 remains OPEN and
-separate.
+**PR6 for #35 (D-075) is under independent review** from that accepted main.
+It adds privileged `service-install`/`start`/`stop`/`restart`, explicit
+install-owner verification, service principal/group checks, protected
+runtime write permissions, no-clobber plist publication, and shared PR4
+operation locking. Linux simulation does not establish real Apple-Silicon
+launchd behavior or application readiness.
+
+Issue #35 remains OPEN for further deployment work; issue #36 remains
+OPEN and not started; issue #46 remains OPEN and separate.
 
 **Chore (D-069, not a #35/#36/#46 slice):** `scripts/demo-up.sh`/
 `scripts/demo-down.sh` — a one-command wrapper around the existing,

@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from xml.parsers.expat import ExpatError
 
-from meyar.ops.host_config import verify_host_config
+from meyar.ops.host_config import load_host_settings
 from meyar.ops.offline_host import InstallFailure, _real_directory, verify_active_release
 from meyar.ops.redact import safe_exception_text
 from meyar.ops.result import FindingStatus, OpsResult, OpsResultBuilder
@@ -136,7 +136,7 @@ def _canonical_paths(root: Path) -> tuple[str, str, str, str]:
     )
 
 
-def _verify_host_binding(root: Path) -> None:
+def _verify_host_binding(root: Path, *, expected_owner_uid: int | None = None) -> None:
     try:
         verify_active_release(root)
         _real_directory(root / "shared" / "logs")
@@ -145,8 +145,10 @@ def _verify_host_binding(root: Path) -> None:
                 raise ValueError("unsafe log path")
     except (InstallFailure, OSError, ValueError):
         raise ValueError("active release failed verification") from None
-    if not verify_host_config(root).ok:
-        raise ValueError("host production configuration failed verification")
+    try:
+        load_host_settings(root, expected_owner_uid=expected_owner_uid)
+    except (ValueError, OSError):
+        raise ValueError("host production configuration failed verification") from None
 
 
 def _program_arguments(spec: ServiceSpec) -> list[str]:
@@ -165,11 +167,11 @@ def _program_arguments(spec: ServiceSpec) -> list[str]:
     ]
 
 
-def render_service_plist(spec: ServiceSpec) -> bytes:
+def render_service_plist(spec: ServiceSpec, *, expected_owner_uid: int | None = None) -> bytes:
     """Deterministic plist XML bytes for a validated `ServiceSpec`. Raises
     `ValueError` (never writes anything) when any field fails validation."""
     spec.validate()
-    _verify_host_binding(spec.install_root)
+    _verify_host_binding(spec.install_root, expected_owner_uid=expected_owner_uid)
     _, working_directory, stdout_path, stderr_path = _canonical_paths(spec.install_root)
     payload: dict[str, object] = {
         "Label": spec.label,

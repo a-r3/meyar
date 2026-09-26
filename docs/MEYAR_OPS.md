@@ -4,8 +4,9 @@ Operator tooling for agentless deployment readiness (issue #35 — Slice 6,
 M9). This document covers PR1 (`preflight`/`status`/`readiness`/
 `verify-release` — `docs/DECISIONS.md` D-066), PR2 (`service-render`/
 `service-verify`/`service-status` — D-067), PR3 (`build-release` —
-D-068), PR4 (offline bundle/activation — D-073), and PR5 (host config
-and service binding — D-074). See §11 below for the #35/#46 boundary.
+D-068), PR4 (offline bundle/activation — D-073), PR5 (host config
+and service binding — D-074), and PR6 (privileged LaunchDaemon lifecycle
+foundation — D-075). See §11 below for the #35/#46 boundary.
 
 **PR3 scope reminder — read before assuming this means "deployable":**
 `build-release` produces an immutable MEYAR APPLICATION release
@@ -243,14 +244,9 @@ from its verified PR4 layout.
   default) are emitted.
 
 Rendering verifies the active interpreter's execute bits for owner, group,
-and other (PR4 installs it as `0555`); it does not run the service. PR6 must
-also establish service-account traversal through the immutable release,
-write access to `shared/storage` and `shared/logs`, and log-file ownership
-and permissions. PR4 currently requires those shared directories to remain
-owned by the install operator and not group/other-writable, so PR6 must
-provide a compatible protected write mechanism or explicitly revise that
-installer contract. Render/verify does not claim those deferred principal
-and runtime checks have passed.
+and other (PR4 installs it as `0555`); it does not run the service.
+Render/verify does not claim that PR6's separate principal and runtime
+permission checks have passed.
 
 Writes only to the explicit `--output` path — never
 `/Library/LaunchDaemons`, never `launchctl`, never `sudo`. The output
@@ -311,6 +307,72 @@ timeout) bounded/redacted error text via the existing
 
 **Real `launchctl`/`bootstrap`/reboot behavior on macOS remains
 UNCONFIRMED** — see "Platform verification status" below.
+
+### PR6 privileged lifecycle foundation (under independent review)
+
+The four commands have the same required arguments:
+
+```bash
+<root>/current/.venv/bin/python -m meyar.ops.cli service-install \
+  --label <validated-label> --user-name <provisioned-service-user> \
+  --install-root <root> --install-owner-uid <operator-uid> --port <1-65535>
+```
+
+Replace `service-install` with `service-start`, `service-stop`, or
+`service-restart` for the other operations. The bank invokes this command
+in an approved external root context; the tool requires Darwin and
+effective UID 0, never invokes `sudo`, prompts, or creates an account.
+The explicit `--install-owner-uid` is the trusted install operator's
+numeric UID. It must be non-root and match the install root; the protected
+`shared/config/.env` chain remains bound to it. Ordinary `config-verify`
+still binds that chain to its own effective UID. The configured service
+user must exist, have a nonzero UID distinct from the install operator,
+and belong to the existing dedicated service GID of `shared/config`.
+The command resolves the account/group through `pwd`, `grp`, and
+`os.getgrouplist`; bank provisioning is a prerequisite.
+
+Every mutation joins the existing PR4 `<root>/.meyar-ops.lock` with a
+nonblocking exclusive `flock`; root opens the preexisting operator-owned
+regular lock without creation, mode/owner change, or deletion. Contention
+returns `OPERATION_BUSY`. Installation verifies the active PR4 release,
+production Settings, executable, account, and group, then prepares this
+runtime contract: operator-owned root/releases/config/control paths are
+service-group traversable and never group-writable; `activations` and
+`shared` are setgid for future group inheritance; `shared/storage` and
+`shared/logs` are operator-owned, service-group-owned `2770` directories;
+the two canonical log files are operator-owned, service-group-owned
+regular `0660` files. `.env` remains unchanged at the accepted `0640`
+contract, and immutable release content remains read-only. Existing
+unsafe symlinks, ownership, and broad write bits fail closed. PR4's
+host-layout verifier permits group write only for those two mutable
+directories with the expected config service GID, setgid, and no other
+write; future PR4 install/verify/activation remains compatible.
+
+Installation publishes the exact PR5 seven-key XML bytes at the fixed
+`/Library/LaunchDaemons/<label>.plist`. It writes/fsyncs a same-directory
+temporary regular file as root:wheel `0644`, then hard-links it to the
+final name without replacement and removes the temporary name. Existing
+safe exact bytes return `SERVICE_PLIST_ALREADY_INSTALLED`; any different,
+symlinked, nonregular, or unsafe existing destination returns a conflict.
+`service-install` never starts the job.
+
+After rechecking plist, host binding, principal, and runtime permissions,
+the lifecycle uses only fixed argv with `/bin/launchctl` and the system
+domain. `service-start` probes `print system/<label>`; absent means
+`bootstrap system /Library/LaunchDaemons/<label>.plist`, then
+`kickstart system/<label>`; loaded means `kickstart system/<label>` only.
+`service-stop` uses `bootout system/<label>` when loaded and verifies
+absence; already absent succeeds without mutation and leaves the plist,
+config, logs, storage, and release untouched. `service-restart` uses
+`kickstart -k system/<label>` when loaded; absent uses bootstrap plus
+ordinary kickstart. Probe exit 113 is treated as absent; other probe
+failures fail closed. All subprocesses have a 10-second timeout, discard
+stdout/stderr, and use a fixed minimal environment. The result contains
+only fixed codes and no raw launchctl output or candidate content.
+
+**LaunchDaemon installed/loaded != MEYAR application ready != DB/schema
+ready != Ollama/model ready.** These commands assert launchd visibility
+only. Real Apple-Silicon launchd and reboot behavior remain unconfirmed.
 
 ## PR3 commands
 
@@ -608,14 +670,10 @@ never flip `ok`. Every component's finding is always present in the list
 
 - No HTTP `/ready` route (`/api/v1/health` remains liveness-only,
   unchanged) — issue #46.
-- No launchd/service **lifecycle**: no `service-install`, `service-start`,
-  `service-stop`, `service-restart`. No plist is ever written to
-  `/Library/LaunchDaemons`, no `launchctl bootstrap`/`bootout`/
-  `kickstart` is ever called, no `sudo`/privilege escalation, no service
-  account is created. `service-render`/`service-verify`/`service-status`
-  are foundation-only (D-067).
-- PR4's immutable release/install layout exists; PR5 binds the service
-  plist to it. Privileged installation remains pending.
+- No service uninstall, full update/rollback, database/model provisioning,
+  or readiness orchestration. PR6's privileged lifecycle foundation
+  installs and controls only the MEYAR LaunchDaemon; it does not invoke
+  `sudo`, escalate itself, or create a service account.
 - No update/rollback orchestration (the `RollbackCompatibility` enum is a
   typed classification for a future human-operated runbook, not an
   executable mechanism — no automatic Alembic downgrade).
@@ -672,6 +730,13 @@ and non-loopback Ollama. The service consumes active-release code and
 shared configuration, storage and logs. No LaunchDaemon mutation or
 target-Mac acceptance is performed. #35 and #46 remain open.
 
+**#35 PR6 (D-075, independent review pending):** explicit privileged
+install-owner boundary, dedicated service principal/group resolution,
+protected runtime write paths, no-clobber canonical plist publication,
+PR4 lock coordination, and fixed-argv system launchctl start/stop/restart.
+No application/database/model readiness, migrations, update/rollback,
+or target-Mac acceptance.
+
 **Deferred to #46:** authenticated HTTP `/ready`, in-application
   degraded-state semantics, remaining production config policy,
   SQL/exception logging hardening, application recovery/
@@ -685,7 +750,8 @@ benchmark, or approve a production model.
 
 Everything in this document — `preflight`, `status`, `readiness`,
 `verify-release`, `service-render`, `service-verify`, `service-status`,
-`build-release`, and the full test suite — has been run and verified **on
+PR6's lifecycle simulation, `build-release`, and the full test suite —
+has been run and verified **on
 Linux only**, against the local Ollama daemon and the local PostgreSQL/
 `pgvector`
 container described in `docker-compose.yml`. `service-status`'s tests use
@@ -694,9 +760,10 @@ behavior.
 
 **Apple Silicon / Mac mini M4 Pro reference-hardware rehearsal remains
 UNCONFIRMED.** No claim of Apple-Silicon runtime acceptance, real
-`launchctl print`/`bootstrap` behavior, service-survives-reboot behavior,
+`launchctl print`/`bootstrap`/`bootout`/`kickstart` behavior,
+service-survives-reboot behavior,
 or bank-Mac verification is made by this document. That verification is
-issue #35's later (installation/lifecycle) scope plus issue #36, and
+issue #35's later physical-host rehearsal plus issue #36, and
 depends on this tooling first being reviewed and merged.
 
 **Production model remains TBD** — `qwen3:0.6b` is the source/default
