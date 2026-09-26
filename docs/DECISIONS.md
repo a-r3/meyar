@@ -5988,3 +5988,49 @@ not mutate the filesystem, database, launchd, accounts, or models. It adds
 no provisioning, update/rollback, benchmark, or model approval. #35 and
 #46 remain open; #36 remains unstarted and real Target-Mac behavior
 unconfirmed.
+
+## D-078 — Quiesced installed-host backup creation and verification (issue #35 PR9)
+
+**Date:** 2026-09-26. **Status:** Implementation for independent review
+from accepted main `0a60e50c0cc88fbfc9a62c36298dcc13c9b36116`.
+PR #71 / PR8 is merged and post-merge verified.
+
+`backup-create` requires the trusted non-root install owner, exact active
+release Python/package/command and Alembic code/manifest identity,
+protected PR5 Settings, canonical installed PR6 plist/runtime, a reachable
+database with exactly the active revision, confirmed launchd absence
+(`print system/<label>` exit 113), and a refused numeric-loopback
+connection to the canonical application port. It holds the existing PR4
+operation lock through snapshot and publication. Unexpected launchctl
+results, socket timeouts, or ambiguous errors fail closed. The service is
+stopped separately by the privileged lifecycle command. Bank operations
+must exclude independent writers to this database during the maintenance
+window; no tool can enforce that external boundary.
+
+The command uses exact trusted `pg_dump`/`pg_restore` files from a validated
+absolute client directory, fixed argv, PostgreSQL custom format, and a
+private ephemeral `0600` libpq password file. It archives exactly
+`shared/storage`, rejecting links and special nodes, streams file bytes,
+and normalizes tar ownership. The versioned non-secret manifest records
+release/source/schema identity, safe backup ID/time/operator UID, fixed
+filenames, digests, sizes, and storage file count. After structural and
+hash verification, a second installed-state/quiescence check must match
+the first. A private `0700` stage with `0600` files is fsynced and
+published under `shared/backups/<backup-id>` by a kernel no-replace
+atomic rename; pre-existing backups cannot be overwritten. The parent
+directory is opened and identity-checked before rename and fsynced after it.
+Success requires that fsync. If it fails, the exact published directory is
+moved back to its private staging name for identity-checked cleanup. A
+changed identity or unsafe rollback produces a distinct uncertain-state
+result and requires operator inspection and `backup-verify` before retry.
+
+`backup-verify` reads the published artifact without protected config or
+live DB access, verifies exact manifest schema/permissions/digests,
+`pg_restore --list`, and bounded safe tar member structure without
+extracting. A created/verified backup is not restore-tested. The existing
+synthetic backup/restore acceptance remains the separate end-to-end proof;
+production restore, update, rollback, scheduling, replication, and custom
+encryption remain out of PR9. Infrastructure owns encryption at rest and
+production-equivalent access control for backup candidate data. #35 and
+#46 remain OPEN; #36 remains unstarted, and real Apple-Silicon behavior is
+unconfirmed.

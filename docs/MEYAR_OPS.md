@@ -7,7 +7,8 @@ M9). This document covers PR1 (`preflight`/`status`/`readiness`/
 D-068), PR4 (offline bundle/activation — D-073), PR5 (host config
 and service binding — D-074), PR6 (privileged LaunchDaemon lifecycle
 foundation — D-075), PR7 (fresh database schema initialization —
-D-076), and PR8 (installed deployment readiness — D-077). See §11 below
+D-076), PR8 (installed deployment readiness — D-077), and PR9
+(production backup creation/verification — D-078). See §11 below
 for the #35/#46 boundary.
 
 **PR3 scope reminder — read before assuming this means "deployable":**
@@ -487,6 +488,65 @@ creation, service lifecycle action, migration, or model pull.
 HTTP `/ready` (#46). A green CLI gate is neither real Target-Mac acceptance
 nor production-model approval (#36); issues #35 and #46 remain open.
 
+### PR9 `backup-create` and `backup-verify`
+
+Run the installed release's Python as the trusted non-root install owner:
+
+```bash
+<root>/current/.venv/bin/python -m meyar.ops.cli backup-create \
+  --install-root <root> --label <validated-launchd-label> \
+  --backup-id <safe-id> --pg-bin-dir <absolute-postgresql-client-bin-dir>
+
+<root>/current/.venv/bin/python -m meyar.ops.cli backup-verify \
+  --install-root <root> --backup-id <safe-id> \
+  --pg-bin-dir <absolute-postgresql-client-bin-dir>
+```
+
+The production sequence is `deployment-ready` → privileged `service-stop`
+→ `backup-create` → `backup-verify` → privileged `service-start` →
+`deployment-ready`. `backup-create` never controls launchd. Under the
+existing PR4 lock it verifies the exact active release, code/manifest
+Alembic head, protected Settings, canonical installed plist and runtime
+permissions, sole current database revision, `launchctl print
+system/<label>` exit **113**, and a refused direct connection to
+`127.0.0.1:<canonical-port>`. Exit 0 means the service must be stopped;
+unexpected exit, timeout, and ambiguous socket errors fail. A final
+snapshot check repeats installed identity/config/plist and stopped-state
+proof before publication. Independent external database writers must be
+excluded by the maintenance procedure.
+
+`<safe-id>` matches `[A-Za-z0-9][A-Za-z0-9_-]{0,79}`. Output is fixed at
+`<root>/shared/backups/<safe-id>/`: `database.dump` (PostgreSQL `-Fc`),
+`storage.tar` (relative descendants of `shared/storage`), and
+`backup_manifest.json` (format version 1, backup ID/time/operator UID,
+release ID/source SHA/Alembic head, fixed filenames, SHA-256 digests,
+byte sizes, storage file count). The manifest contains no candidate,
+tenant, path, or credential data. The private directory is `0700` and
+files are `0600`. A private same-filesystem staging directory is verified
+then atomically renamed with no-replace semantics; existing IDs are never
+overwritten. Success requires the parent backup directory fsync after rename.
+If that fsync fails, the command moves its identity-matched backup back to
+private staging for cleanup and reports
+`BACKUP_PUBLICATION_DURABILITY_FAILED`. If the final path changed identity
+or safe rollback is impossible, it preserves foreign content and reports
+`BACKUP_PUBLICATION_STATE_UNCERTAIN`; inspect the directory and run
+`backup-verify` on the requested ID before a retry.
+
+`--pg-bin-dir` must name a normalized real directory with trusted ownership
+and no group/world write access; exact regular, non-symlink, executable
+`pg_dump` and `pg_restore` files are required. No ambient PATH lookup is
+used. Protected Settings supply the DB identity. `pg_dump` runs with fixed
+argv `pg_dump -Fc --serializable-deferrable --no-password -h <host> -p
+<port> -U <user> -d <database> -f <private-stage>/database.dump`. The
+password is held in a private `0600` `PGPASSFILE`, escaped per libpq, and
+removed before publication; it never enters argv, findings, manifest, or
+logs. `backup-verify` checks exact schema/permissions/hashes, runs the
+validated `pg_restore --list` without a database connection, and parses
+the tar without extracting. It never reads `.env` or changes the backup.
+Storage symlinks, hardlinks, special nodes, unsafe names, and duplicate
+archive entries are rejected. No production restore, update, or rollback
+command is added. A created and verified backup is **not** restore-tested.
+
 ## PR3 commands
 
 `build-release` — builds an immutable, verifiable MEYAR **application**
@@ -855,9 +915,12 @@ running package and Alembic graph to the verified active release, then
 initializes only a fresh empty database. It does not upgrade an existing
 production schema or perform backup, rollback, service, or model work.
 
-**#35 PR8 (D-077, independent review pending):** `deployment-ready` is the
+**#35 PR8 (D-077, merged as PR #71):** `deployment-ready` is the
 read-only installed-host operator gate described above. No HTTP `/ready` or
 Target-Mac acceptance is included.
+
+**#35 PR9 (D-078, independent review pending):** quiesced production backup
+creation and read-only structural verification only. No restore is included.
 
 **Deferred to #46:** authenticated HTTP `/ready`, in-application
   degraded-state semantics, remaining production config policy,

@@ -1,10 +1,10 @@
 # MEYAR — Backup & Restore
 
-Status: Slice 13 (issue #20) synthetic acceptance proof executed and
-passing — see `backend/scripts/backup_restore_acceptance.py`. This
-document is the operator runbook that script demonstrates; it does not
-by itself constitute a production backup schedule (see Deployment
-responsibility below).
+Status: PR9 (issue #35) implements quiesced installed-host backup creation
+and structural verification. Slice 13 (issue #20) separately has an
+executed synthetic backup/restore acceptance proof in
+`backend/scripts/backup_restore_acceptance.py`. Production restore remains
+a later #35 slice. Neither mechanism creates a backup schedule.
 
 ## Scope
 
@@ -24,51 +24,80 @@ database with no matching storage directory has `candidate_documents`
 rows whose `storage_key` resolves to nothing (original-CV retrieval
 fails), and a restored storage directory with no matching database has
 orphaned files with no metadata. **Always back up and restore both
-together, from the same point in time.**
+together, from one stopped-service maintenance window.**
 
 No cloud backup infrastructure is used or required — this uses
 PostgreSQL-native tooling (`pg_dump`/`pg_restore`) plus a plain
 filesystem archive.
 
-## Prerequisites
+## Installed production backup
 
-- `pg_dump` / `pg_restore` (PostgreSQL 16 client tools, matching the
-  `pgvector/pgvector:pg16` server image)
-- `tar` (or equivalent archive tool)
-- Enough disk space for one dump + one storage archive
-
-## Backup
+First run `deployment-ready`, then privileged `service-stop`. During the
+backup window, bank operations must not independently mutate this
+PostgreSQL database; the tool cannot prevent writers outside MEYAR's
+operational boundary. Run as the trusted non-root install owner:
 
 ```bash
-# 1. Database (custom format — supports parallel/selective restore)
-pg_dump -h <host> -p <port> -U meyar -d meyar -Fc -f meyar-backup.dump
+<root>/current/.venv/bin/python -m meyar.ops.cli backup-create \
+  --install-root <root> --label <validated-launchd-label> \
+  --backup-id <safe-id> --pg-bin-dir <absolute-postgresql-client-bin-dir>
 
-# 2. Document storage
-tar -C "$MEYAR_STORAGE_ROOT" -cf meyar-storage-backup.tar .
+<root>/current/.venv/bin/python -m meyar.ops.cli backup-verify \
+  --install-root <root> --backup-id <safe-id> \
+  --pg-bin-dir <absolute-postgresql-client-bin-dir>
 ```
 
-Take both in the same maintenance window; MEYAR does not currently
-provide a point-in-time-consistent combined snapshot mechanism, so avoid
-taking the storage archive while an upload is actively in flight.
+Then run privileged `service-start` and `deployment-ready` again. The
+complete sequence is `deployment-ready` → `service-stop` →
+`backup-create` → `backup-verify` → `service-start` → `deployment-ready`.
+`backup-create` itself does not stop or start the service. It requires
+confirmed launchd absence (exit 113) and a refused connection to the
+canonical numeric-loopback application port before and after the snapshot.
 
-Store `meyar-backup.dump` and `meyar-storage-backup.tar` together,
-labeled with the same timestamp. Neither file contains an API-key
-plaintext (only `key_hash`, per `docs/SECURITY_PRIVACY.md`) — but both
-still contain tenant-scoped operational data and must be handled with
-the same access control as production data.
+`<safe-id>` is 1–80 ASCII characters matching
+`[A-Za-z0-9][A-Za-z0-9_-]{0,79}`. The fixed artifact directory is
+`<root>/shared/backups/<safe-id>/` and contains `database.dump`
+(PostgreSQL custom format), `storage.tar` (the complete canonical
+`shared/storage` tree, including original CVs and derived photos), and
+`backup_manifest.json` (version 1). The manifest carries the backup ID,
+time and operator UID; active release ID, source SHA, and Alembic head;
+fixed filenames, SHA-256 digests, byte sizes, and storage file count.
+It contains no passwords, database URL, candidate details, tenant IDs,
+or storage member paths. The files contain **production candidate data**
+and need production-equivalent access controls. The directory is `0700`,
+the files `0600`, and publication is atomic and no-clobber.
 
-## Restore
+Creation succeeds only after the backup files, backup directory, and parent
+`backups` directory are fsynced. If parent-directory fsync fails after the
+rename and the published directory still has this invocation's identity,
+`backup-create` moves it back to private staging for identity-checked
+cleanup and reports `BACKUP_PUBLICATION_DURABILITY_FAILED`; the requested
+backup ID is absent.
+`BACKUP_PUBLICATION_STATE_UNCERTAIN` means the final path changed identity or
+could not safely be moved back. In that case, inspect the backup directory
+and run `backup-verify` on the requested ID before deciding whether to retry.
+Do not assume the failed command left that ID free or delete an unfamiliar
+directory as part of a retry.
 
-**Restore into an isolated destination — never overwrite a live
-database or the live storage root.**
+`backup-verify` checks the manifest, hashes, dump structure via
+`pg_restore --list`, and safe tar members without connecting to the
+production DB or extracting anything. It does not read protected `.env`.
+**Backup-created != restore-tested.**
+
+## Synthetic restore demonstration only
+
+The following demonstrates the existing synthetic acceptance script's
+isolated destination. It is **not** a production restore command. Never
+overwrite a live database or live storage root. Production restore tooling
+and its destructive safety procedure remain a later #35 slice.
 
 ```bash
 # 1. Create/point at an empty destination database, then:
-pg_restore -h <dest-host> -p <dest-port> -U meyar -d meyar --no-owner meyar-backup.dump
+pg_restore -h <dest-host> -p <dest-port> -U meyar -d meyar --no-owner database.dump
 
 # 2. Extract storage into an empty destination storage root:
 mkdir -p /path/to/dest-storage
-tar -C /path/to/dest-storage -xf meyar-storage-backup.tar
+tar -C /path/to/dest-storage -xf storage.tar
 
 # 3. Point the app at the restore and start it:
 MEYAR_DATABASE_URL=postgresql+asyncpg://meyar:<password>@<dest-host>:<dest-port>/meyar \
@@ -123,9 +152,8 @@ fixtures) — run it deliberately, not on every commit.
   the database itself; never commit them to git (`.githooks/pre-commit`
   and `scripts/scan-tracked-tree.sh` both reject tracked `*dump*.sql`/
   `.sqlite*`/`.dump` files and paths under `backend/var/`).
-- API-key secrets are never at risk from a backup — only the SHA-256
-  hash is ever persisted (`docs/SECURITY_PRIVACY.md`); a restored
-  environment cannot be used to recover a plaintext key.
+- The database persists API-key hashes rather than plaintext API keys,
+  but the dump and archive are still sensitive candidate data.
 - Restoring into a destination that is reachable from outside the
   operator's own network re-creates the same tenant-isolation and
   authentication surface as production — treat a restore target with
