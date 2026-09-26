@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import NoReturn
 
 from meyar.ops.build_release import BuildReleaseRequest, build_release
+from meyar.ops.deployment_ready import run_deployment_ready
 from meyar.ops.host_config import verify_host_config
 from meyar.ops.model_manifest import ModelApprovalStatus
 from meyar.ops.offline_bundle import BundleBuildRequest, build_deployment_bundle
@@ -78,6 +79,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "schema-init", help="Initialize an empty database to the exact active release schema."
     )
     schema_parser.add_argument("--install-root", type=Path, required=True)
+
+    deployment_parser = sub.add_parser(
+        "deployment-ready", help="Read-only readiness gate for an installed, started deployment."
+    )
+    deployment_parser.add_argument("--install-root", type=Path, required=True)
+    deployment_parser.add_argument("--label", type=str, required=True)
 
     render_parser = sub.add_parser(
         "service-render",
@@ -161,6 +168,8 @@ def _run_command(args: argparse.Namespace) -> OpsResult:
         return verify_host_config(args.install_root)
     if args.command == "schema-init":
         return run_schema_init(args.install_root)
+    if args.command == "deployment-ready":
+        return run_deployment_ready(args.install_root, args.label)
     if args.command == "service-render":
         spec = ServiceSpec(
             label=args.label,

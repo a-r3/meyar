@@ -34,7 +34,7 @@ class SchemaInitFailure(Exception):
         super().__init__(code)
 
 
-def _active_config(root: Path) -> tuple[Config, str]:
+def _active_config(root: Path, *, implementation_file: Path | None = None) -> tuple[Config, str]:
     if os.geteuid() == 0 or not root.is_absolute() or ".." in root.parts:
         raise SchemaInitFailure("ACTIVE_RELEASE_INVALID")
     try:
@@ -45,6 +45,10 @@ def _active_config(root: Path) -> tuple[Config, str]:
         if (
             Path(meyar.__file__).resolve().parent != source
             or Path(__file__).resolve() != source / "ops" / "schema_init.py"
+            or (
+                implementation_file is not None
+                and implementation_file.resolve() != source / "ops" / implementation_file.name
+            )
             or Path(sys.executable).resolve() != python
         ):
             raise SchemaInitFailure("ACTIVE_RELEASE_INVALID")

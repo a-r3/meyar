@@ -47,8 +47,8 @@ canonical references it points to — read this alongside, not instead of:
 - [`docs/MEYAR_OPS.md`](MEYAR_OPS.md) — the `meyar-ops` operator CLI
   (issue #35), including PR4's offline bundle/activation and PR5's host
   production-config and service-binding contracts, plus PR6's privileged
-  LaunchDaemon lifecycle foundation. It does not establish application,
-  database, or model readiness; see its #35/#46 boundary.
+  LaunchDaemon lifecycle foundation, PR7 schema initialization, and PR8's
+  installed deployment gate; see its #35/#46 boundary.
 - [`docs/DECISIONS.md`](DECISIONS.md) — the full decision log, including
   D-020 (tested security/acceptance boundary) and D-066 (`meyar-ops`
   foundation).
@@ -563,11 +563,16 @@ default/universal production rollback mechanism.
 
 ## 16. Post-deployment verification
 
-`uv run meyar-ops status` and `uv run meyar-ops readiness` (see
-`docs/MEYAR_OPS.md`) give a machine-readable, read-only snapshot covering
-several of the items below (database/Alembic-head/storage/Ollama/model
-reachability) in one call — useful as a quick local aid, but they do not
-yet replace this manual checklist; run both.
+For a fresh installed deployment, run `preflight` → `install-release` →
+`activate-release` → `config-verify` → `schema-init` → `service-install` →
+`service-start` → `deployment-ready` (exact invocation and boundaries in
+`docs/MEYAR_OPS.md`). PostgreSQL/pgvector and Ollama/models must be
+provisioned separately before this sequence can finish. The dedicated
+`deployment-ready` command reports installed-host readiness as one
+machine-readable result; the older `readiness` command retains its general
+component-level local behavior. Continue with the manual acceptance steps
+below. A green CLI result is neither real Target-Mac acceptance nor
+production-model approval, and it does not add HTTP `/ready` (#46).
 
 Compact checklist, grounded in MEYAR's actual surfaces:
 

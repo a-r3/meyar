@@ -5954,3 +5954,37 @@ backup, restore, PostgreSQL/pgvector provisioning, Ollama/model provisioning,
 or Target-Mac benchmark. Schema current does not mean application ready,
 service healthy, or Ollama/model ready. Issues #35 and #46 remain OPEN;
 issue #36 remains unstarted.
+
+## D-077 — Read-only installed deployment acceptance gate (issue #35 PR8)
+
+**Date:** 2026-09-26. **Status:** Implementation for independent review on
+`feat/35-installed-deployment-ready`, from accepted main
+`76ef38f8404657e904c096e114180f1a3c165ebc` (PR #70/PR7 merged and
+post-merge verified).
+
+`meyar-ops deployment-ready --install-root <root> --label <label>` is a
+separate installed-host contract; PR1's general `readiness` is unchanged.
+It proves the running interpreter, imported package, command implementation,
+verified PR4 active release, and exact active Alembic code/manifest head
+before trusting an installed deployment. PR5's protected config supplies
+the DB URL and local Ollama/model settings without ambient-shell overrides.
+The only service definition is the root-owned canonical plist at
+`/Library/LaunchDaemons/<label>.plist`; user and port are extracted only
+after safe-file/shape validation and exact renderer comparison. PR6's
+principal and read-only runtime permission validation, the fixed
+`/bin/launchctl print system/<label>` probe, direct numeric-loopback
+`GET /api/v1/health` liveness probe, bounded `SELECT 1`, exact sole DB
+revision check, and explicit-settings local-only Ollama providers produce
+separate fixed-code findings. No candidate/business rows or secrets are
+reported or read. The health route remains liveness-only; HTTP `/ready`
+belongs to #46.
+
+The command opens the existing lock without creating or changing it for
+local installed-state checks, releases it during bounded health probes, and
+reacquires it to reject changed local state, launchd visibility, or liveness
+before `ok=true`. This is a
+point-in-time operator gate; later host changes require a new run. It does
+not mutate the filesystem, database, launchd, accounts, or models. It adds
+no provisioning, update/rollback, benchmark, or model approval. #35 and
+#46 remain open; #36 remains unstarted and real Target-Mac behavior
+unconfirmed.
