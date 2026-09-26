@@ -34,9 +34,12 @@ class LaunchctlRunner(Protocol):
 def default_launchctl_runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(  # noqa: S603 - fixed argv, no shell, argv[0] is an absolute path
         argv,
-        capture_output=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
         text=True,
         timeout=_SUBPROCESS_TIMEOUT_SECONDS,
+        env={"PATH": "/usr/bin:/bin", "HOME": "/var/empty"},
+        check=False,
     )
 
 

@@ -14,6 +14,7 @@ import pytest
 
 from meyar.ops import offline_host as host
 from meyar.ops.offline_bundle import _locked_runtime_packages, _selected_wheel
+from meyar.ops.service_lifecycle import _prepare_runtime
 
 SOURCE = "abcdef123456" + "0" * 28
 RELEASE_ID = "meyar-0.1.0+abcdef123456"
@@ -169,6 +170,48 @@ def test_exact_bundle_installs_and_idempotent(installed: tuple[Path, Path]) -> N
     assert host.install_release(bundle, root) == "INSTALL_ALREADY_PRESENT"
     assert (root / "releases" / RELEASE_ID / "backend" / "uv.lock").read_bytes() == LOCK_BYTES
     assert (root / "releases" / RELEASE_ID).stat().st_mode & 0o222 == 0
+
+
+def test_pr4_operations_continue_after_pr6_runtime_preparation(
+    installed: tuple[Path, Path]
+) -> None:
+    bundle, root = installed
+    assert host.activate_release(root, RELEASE_ID) == "RELEASE_ACTIVATED"
+    service_gid = os.getegid()
+    _prepare_runtime(root, os.geteuid(), service_gid)
+    assert host.verify_install(root, RELEASE_ID) == "INSTALL_VERIFIED"
+    assert host._current_release(root) == RELEASE_ID
+    assert host.install_release(bundle, root) == "INSTALL_ALREADY_PRESENT"
+    assert host.activate_release(root, RELEASE_ID) == "ACTIVATION_ALREADY_CURRENT"
+    # A subsequent PR4 activation generation inherits the dedicated group.
+    (root / "current").unlink()  # disposable synthetic root only
+    assert host.activate_release(root, RELEASE_ID) == "RELEASE_ACTIVATED"
+    generation = root / Path(os.readlink(root / "current")).parent
+    assert generation.stat().st_gid == service_gid
+    assert generation.stat().st_mode & 0o7777 == 0o2750
+    assert (root / "shared/storage").stat().st_mode & 0o7777 == 0o2770
+    assert (root / "shared/logs").stat().st_mode & 0o7777 == 0o2770
+
+
+def test_pr4_mutable_exception_rejects_wrong_gid_and_unsafe_modes(tmp_path: Path) -> None:
+    root = tmp_path / "host"
+    (root / "shared").mkdir(parents=True)
+    path = root / "shared/storage"
+    path.mkdir()
+    path.chmod(0o2770)
+    with pytest.raises(host.InstallFailure, match="INSTALL_ROOT_PERMISSIONS_UNSAFE"):
+        host._mutable_runtime_directory(root, path, os.getegid() + 1)
+    path.chmod(0o2772)
+    with pytest.raises(host.InstallFailure, match="INSTALL_ROOT_PERMISSIONS_UNSAFE"):
+        host._mutable_runtime_directory(root, path, os.getegid())
+    path.chmod(0o770)
+    with pytest.raises(host.InstallFailure, match="INSTALL_ROOT_PERMISSIONS_UNSAFE"):
+        host._mutable_runtime_directory(root, path, os.getegid())
+    path.chmod(0o2770)
+    with pytest.raises(host.InstallFailure, match="INSTALL_ROOT_PERMISSIONS_UNSAFE"):
+        host._owned_directory(path)
+    with pytest.raises(host.InstallFailure, match="INSTALL_ROOT_PERMISSIONS_UNSAFE"):
+        host._mutable_runtime_directory(root, root / "releases", os.getegid())
 
 
 def test_missing_dependency_wheel_rejected(tmp_path: Path) -> None:

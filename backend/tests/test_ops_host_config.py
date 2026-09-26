@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,6 +21,31 @@ def config(root: Path) -> Path:
 def change(root: Path, old: str, new: str) -> None:
     path = config(root)
     path.write_text(path.read_text().replace(old, new))
+
+
+@pytest.fixture
+def runtime_service_identity(
+    ops_host_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[int]:
+    install_owner = os.geteuid()
+    service_uid = install_owner + 1
+    service_gid = (ops_host_root / "shared/config").stat().st_gid
+    changed: list[tuple[Path, int]] = []
+    for ancestor in ops_host_root.parents:
+        metadata = ancestor.stat()
+        mode = metadata.st_mode & 0o7777
+        if metadata.st_uid == install_owner and not mode & 0o010:
+            changed.append((ancestor, mode))
+            ancestor.chmod(mode | 0o010)
+    monkeypatch.chdir(ops_host_root / "shared/config")
+    monkeypatch.setattr(os, "geteuid", lambda: service_uid)
+    monkeypatch.setattr(os, "getegid", lambda: service_gid)
+    monkeypatch.setattr(os, "getgroups", lambda: [service_gid])
+    try:
+        yield service_uid
+    finally:
+        for ancestor, mode in reversed(changed):
+            ancestor.chmod(mode)
 
 
 def test_valid_production_config(ops_host_root: Path) -> None:
@@ -279,16 +305,122 @@ async def test_application_startup_rejects_unsafe_production(
 
 
 async def test_host_startup_rejects_ambient_override(
-    ops_host_root: Path, monkeypatch: pytest.MonkeyPatch
+    runtime_service_identity: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from meyar.config import get_settings
     from meyar.main import app
 
-    monkeypatch.chdir(ops_host_root / "shared/config")
     monkeypatch.setenv("MEYAR_ENV", "development")
     get_settings.cache_clear()
     try:
         with pytest.raises(ValueError, match="overridden"):
+            async with app.router.lifespan_context(app):
+                pass
+    finally:
+        get_settings.cache_clear()
+
+
+async def test_host_startup_accepts_distinct_service_uid(
+    ops_host_root: Path, runtime_service_identity: int
+) -> None:
+    from meyar.config import get_settings
+    from meyar.main import app
+
+    assert runtime_service_identity != ops_host_root.stat().st_uid
+    get_settings.cache_clear()
+    try:
+        async with app.router.lifespan_context(app):
+            pass
+    finally:
+        get_settings.cache_clear()
+
+
+async def test_host_startup_rejects_service_owned_fake_tree(
+    ops_host_root: Path, runtime_service_identity: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from meyar.config import get_settings
+    from meyar.main import app
+
+    original_stat = Path.stat
+
+    def service_owned_root(
+        path: Path, *args: object, **kwargs: object
+    ) -> SimpleNamespace | os.stat_result:
+        metadata = original_stat(path, *args, **kwargs)
+        if path != ops_host_root:
+            return metadata
+        return SimpleNamespace(
+            st_mode=metadata.st_mode,
+            st_uid=runtime_service_identity,
+            st_gid=metadata.st_gid,
+        )
+
+    monkeypatch.setattr(Path, "stat", service_owned_root)
+    get_settings.cache_clear()
+    try:
+        with pytest.raises(ValueError, match="HOST_LAYOUT_UNSAFE"):
+            async with app.router.lifespan_context(app):
+                pass
+    finally:
+        get_settings.cache_clear()
+
+
+async def test_host_startup_rejects_wrong_owned_config(
+    runtime_service_identity: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from meyar.config import get_settings
+    from meyar.main import app
+
+    original_fstat = os.fstat
+
+    def service_owned_config(fd: int) -> SimpleNamespace:
+        metadata = original_fstat(fd)
+        return SimpleNamespace(
+            st_mode=metadata.st_mode,
+            st_nlink=metadata.st_nlink,
+            st_size=metadata.st_size,
+            st_uid=runtime_service_identity,
+            st_gid=metadata.st_gid,
+        )
+
+    monkeypatch.setattr(os, "fstat", service_owned_config)
+    get_settings.cache_clear()
+    try:
+        with pytest.raises(ValueError, match="CONFIG_PERMISSIONS_UNSAFE"):
+            async with app.router.lifespan_context(app):
+                pass
+    finally:
+        get_settings.cache_clear()
+
+
+async def test_host_startup_requires_service_group_membership(
+    runtime_service_identity: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from meyar.config import get_settings
+    from meyar.main import app
+
+    monkeypatch.setattr(os, "getegid", lambda: -1)
+    monkeypatch.setattr(os, "getgroups", lambda: [])
+    get_settings.cache_clear()
+    try:
+        with pytest.raises(ValueError, match="HOST_LAYOUT_UNSAFE"):
+            async with app.router.lifespan_context(app):
+                pass
+    finally:
+        get_settings.cache_clear()
+
+
+@pytest.mark.parametrize("mode", [0o644, 0o660])
+async def test_host_startup_rejects_writable_or_public_config(
+    ops_host_root: Path, runtime_service_identity: int, mode: int
+) -> None:
+    from meyar.config import get_settings
+    from meyar.main import app
+
+    config(ops_host_root).chmod(mode)
+    get_settings.cache_clear()
+    try:
+        with pytest.raises(ValueError, match="CONFIG_PERMISSIONS_UNSAFE"):
             async with app.router.lifespan_context(app):
                 pass
     finally:
