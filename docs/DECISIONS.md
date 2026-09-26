@@ -5906,6 +5906,17 @@ kickstart if absent. Probe status 113 is the absent state; other probe
 failures are errors. The commands never claim HTTP, database, schema,
 or model readiness from launchd visibility.
 
+Application startup under the dedicated service UID uses a separate
+runtime-only host-config verifier. From the canonical `shared/config`
+working directory it accepts the non-root root owner only when that UID
+differs from the non-root service UID, the complete PR5 owner/GID/mode and
+ancestor-chain checks pass, the service belongs to the config group, and
+the service has traversal/read access without control-path write access.
+The same config parser, production Settings validation, and ambient
+override comparison still apply. Ordinary `config-verify` continues to
+require the invoking UID; privileged lifecycle continues to require the
+explicit install-owner UID. No owner identity is placed in the plist.
+
 This is a Linux-tested contract implementation, not real Apple-Silicon
 launchd acceptance. No migration, service uninstall, update/rollback,
 PostgreSQL/Ollama/model provisioning, HTTPS, Target-Mac benchmark, or

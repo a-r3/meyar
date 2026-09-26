@@ -374,6 +374,15 @@ only fixed codes and no raw launchctl output or candidate content.
 ready != Ollama/model ready.** These commands assert launchd visibility
 only. Real Apple-Silicon launchd and reboot behavior remain unconfirmed.
 
+The application process validates host config at FastAPI startup as the
+dedicated service user. Its runtime verifier derives the install owner
+from the canonical, protected `shared/config` tree only after rejecting a
+service-owned root, checking the PR5 owner/GID/mode and ancestor chain,
+service group membership, and traversal/read access. The operator-facing
+`config-verify` still requires the caller to own the root; privileged
+lifecycle still requires an explicit `--install-owner-uid`. Startup also
+rejects ambient `MEYAR_*` settings that change the protected file values.
+
 ## PR3 commands
 
 `build-release` — builds an immutable, verifiable MEYAR **application**

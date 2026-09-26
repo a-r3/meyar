@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from meyar.api.docs import mount_docs_assets
 from meyar.api.v1.router import api_router
 from meyar.config import get_settings
-from meyar.ops.host_config import load_host_settings
+from meyar.ops.host_config import load_runtime_host_settings
 from meyar.ui.router import install_ui
 
 
@@ -20,7 +20,7 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     if cwd.name == "config" and cwd.parent.name == "shared":
         # The PR5 service runs here. Ambient launchd MEYAR_* variables must
         # not silently override the operator-owned production config file.
-        host_settings = load_host_settings(cwd.parent.parent)
+        host_settings = load_runtime_host_settings()
         if settings.model_dump() != host_settings.model_dump():
             raise ValueError("Host production configuration was overridden by environment.")
     yield
