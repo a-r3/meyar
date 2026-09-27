@@ -91,6 +91,12 @@ def deployment(
 
     monkeypatch.setattr(gate, "_probe_database", database)
     monkeypatch.setattr(gate, "_probe_ollama", ollama)
+    # This fixture exercises the PR8 service/schema race contract. The PR11
+    # installed-model authority is covered separately with real synthetic
+    # manifests and fake local daemon metadata.
+    monkeypatch.setattr(
+        gate, "verify_installed_models", lambda _root, _settings, probe=True: ("synthetic", {})
+    )
     commands: list[list[str]] = []
     try:
         yield root, directory, spec, commands
@@ -136,6 +142,7 @@ def test_full_installed_deployment_ready_without_mutation(
     assert codes(result) == {
         "active_release": "ACTIVE_RELEASE_VERIFIED",
         "host_config": "HOST_CONFIG_VERIFIED",
+        "model_manifest": "MODEL_MANIFEST_VERIFIED",
         "service_plist": "SERVICE_PLIST_VERIFIED",
         "service_principal": "SERVICE_PRINCIPAL_VERIFIED",
         "runtime_permissions": "RUNTIME_PERMISSIONS_VERIFIED",
@@ -181,7 +188,7 @@ def test_installed_plist_fail_closed(
 
 
 def test_wrong_installed_owner_and_nonregular_plist_fail(
-    deployment: tuple[Path, Path, ServiceSpec, list[list[str]]]
+    deployment: tuple[Path, Path, ServiceSpec, list[list[str]]],
 ) -> None:
     _, directory, spec, _ = deployment
     assert codes(run(deployment, system_uid=os.geteuid() + 1))["service_plist"] == (
@@ -206,6 +213,38 @@ def test_multiple_findings_preserved(
     assert codes(result)["db_schema"] == "DB_REVISION_CURRENT"
     assert codes(result)["llm_model"] == "LLM_MODEL_UNAVAILABLE"
     assert codes(result)["embedding_model"] == "EMBEDDING_MODEL_AVAILABLE"
+
+
+def test_missing_installed_model_manifest_cannot_report_ready(
+    deployment: tuple[Path, Path, ServiceSpec, list[list[str]]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from meyar.ops.ai_provision import AIFailure
+
+    def missing(_root: Path, _settings: object, *, probe: bool = True) -> object:
+        raise AIFailure("MODEL_MANIFEST_HASH_MISMATCH")
+
+    monkeypatch.setattr(gate, "verify_installed_models", missing)
+    result = run(deployment)
+    assert not result.ok
+    assert codes(result)["model_manifest"] == "MODEL_MANIFEST_UNVERIFIED"
+    assert codes(result)["llm_model"] == "LLM_MODEL_IDENTITY_UNVERIFIED"
+    assert codes(result)["embedding_model"] == "EMBEDDING_MODEL_IDENTITY_UNVERIFIED"
+
+
+def test_model_identity_change_during_probes_cannot_report_ready(
+    deployment: tuple[Path, Path, ServiceSpec, list[list[str]]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = 0
+
+    def changing(_root: Path, _settings: object, *, probe: bool = True) -> tuple[str, dict]:
+        nonlocal calls
+        calls += 1
+        return ("first" if calls == 1 else "changed", {})
+
+    monkeypatch.setattr(gate, "verify_installed_models", changing)
+    result = run(deployment)
+    assert not result.ok
+    assert codes(result)["llm_model"] == "LLM_MODEL_IDENTITY_UNVERIFIED"
 
 
 def test_unsafe_config_skips_config_dependent_probes(
@@ -235,7 +274,7 @@ def test_invalid_service_principal_and_runtime_are_independent(
 
 
 def test_install_owner_service_user_and_missing_group_fail(
-    deployment: tuple[Path, Path, ServiceSpec, list[list[str]]]
+    deployment: tuple[Path, Path, ServiceSpec, list[list[str]]],
 ) -> None:
     owner = os.geteuid()
     for principal in (
@@ -276,7 +315,7 @@ def test_wrong_python_owner_and_tampered_release_fail_identity(
 
 
 def test_manifest_migration_identity_mismatch_is_distinct(
-    deployment: tuple[Path, Path, ServiceSpec, list[list[str]]]
+    deployment: tuple[Path, Path, ServiceSpec, list[list[str]]],
 ) -> None:
     root, _, _, _ = deployment
     release = root / "releases/meyar-test+abcdef123456"
@@ -318,7 +357,7 @@ def test_launchctl_failure_does_not_hide_other_findings(
 
 
 def test_launchctl_timeout_fails_without_output_leak(
-    deployment: tuple[Path, Path, ServiceSpec, list[list[str]]]
+    deployment: tuple[Path, Path, ServiceSpec, list[list[str]]],
 ) -> None:
     commands: list[list[str]] = []
 
@@ -337,7 +376,7 @@ def test_launchctl_timeout_fails_without_output_leak(
 
 
 def test_launchctl_oserror_is_probe_failure_without_output_leak(
-    deployment: tuple[Path, Path, ServiceSpec, list[list[str]]]
+    deployment: tuple[Path, Path, ServiceSpec, list[list[str]]],
 ) -> None:
     commands: list[list[str]] = []
 
@@ -425,8 +464,7 @@ def test_valid_release_activation_during_probes_cannot_reuse_old_evidence(
     result = run(deployment)
     assert offline_host.verify_active_release(root) == second_id
     assert (
-        schema_init._active_config(root, implementation_file=Path(gate.__file__))[1]
-        == second_head
+        schema_init._active_config(root, implementation_file=Path(gate.__file__))[1] == second_head
     )
     assert (root / "shared/config/.env").read_bytes() == config_before
     assert (directory / f"{spec.label}.plist").read_bytes() == plist_before

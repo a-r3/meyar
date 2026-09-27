@@ -24,9 +24,7 @@ def change(root: Path, old: str, new: str) -> None:
 
 
 @pytest.fixture
-def runtime_service_identity(
-    ops_host_root: Path, monkeypatch: pytest.MonkeyPatch
-) -> Iterator[int]:
+def runtime_service_identity(ops_host_root: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[int]:
     install_owner = os.geteuid()
     service_uid = install_owner + 1
     service_gid = (ops_host_root / "shared/config").stat().st_gid
@@ -41,6 +39,13 @@ def runtime_service_identity(
     monkeypatch.setattr(os, "geteuid", lambda: service_uid)
     monkeypatch.setattr(os, "getegid", lambda: service_gid)
     monkeypatch.setattr(os, "getgroups", lambda: [service_gid])
+    from meyar.ops import ai_provision
+
+    monkeypatch.setattr(
+        ai_provision,
+        "verify_installed_models",
+        lambda _root, _settings, probe=False: ("synthetic", {}),
+    )
     try:
         yield service_uid
     finally:
@@ -265,6 +270,8 @@ def test_direct_settings_production_fails_closed() -> None:
         "env": "production",
         "database_url": "postgresql+asyncpg://synthetic:synthetic@localhost:5432/meyar",
         "pending_login_secret": "synthetic-host-test-secret",
+        "ollama_model": "meyar-test-llm:v1",
+        "ollama_embedding_model": "meyar-test-embed:v1",
     }
     assert Settings(_env_file=None, **safe).env == "production"
     for override in (
@@ -331,6 +338,26 @@ async def test_host_startup_accepts_distinct_service_uid(
     try:
         async with app.router.lifespan_context(app):
             pass
+    finally:
+        get_settings.cache_clear()
+
+
+async def test_host_startup_rejects_missing_installed_model_manifest(
+    runtime_service_identity: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from meyar.config import get_settings
+    from meyar.main import app
+    from meyar.ops import ai_provision
+
+    def missing(_root: Path, _settings: object, *, probe: bool = False) -> object:
+        raise ai_provision.AIFailure("MODEL_MANIFEST_HASH_MISMATCH")
+
+    monkeypatch.setattr(ai_provision, "verify_installed_models", missing)
+    get_settings.cache_clear()
+    try:
+        with pytest.raises(ValueError, match="LOCAL_MODEL_IDENTITY_UNVERIFIED"):
+            async with app.router.lifespan_context(app):
+                pass
     finally:
         get_settings.cache_clear()
 

@@ -94,14 +94,14 @@ def _active_generation(root: Path) -> Path:
 def _prepare_runtime(root: Path, owner_uid: int, service_gid: int) -> None:
     generation = _active_generation(root)
     modes = (
-        (root, 0o750),
+        (root, 0o751 if root.stat().st_mode & 0o001 else 0o750),
         (root / "releases", 0o750),
         (root / "activations", 0o2750),
         (generation, 0o2750),
-        (root / "shared", 0o2750),
+        (root / "shared", 0o2751 if (root / "shared").stat().st_mode & 0o001 else 0o2750),
         (root / "shared/config", 0o750),
         (root / "shared/storage", 0o2770),
-        (root / "shared/logs", 0o2770),
+        (root / "shared/logs", 0o2771 if (root / "shared/logs").stat().st_mode & 0o001 else 0o2770),
     )
     for path, _mode in modes:
         _check_preparation_target(
@@ -174,14 +174,14 @@ def _verify_runtime(
 ) -> None:
     generation = _active_generation(root)
     required = (
-        (root, 0o750),
+        (root, 0o751 if root.stat().st_mode & 0o001 else 0o750),
         (root / "releases", 0o750),
         (root / "activations", 0o2750),
         (generation, 0o2750),
-        (root / "shared", 0o2750),
+        (root / "shared", 0o2751 if (root / "shared").stat().st_mode & 0o001 else 0o2750),
         (root / "shared/config", 0o750),
         (root / "shared/storage", 0o2770),
-        (root / "shared/logs", 0o2770),
+        (root / "shared/logs", 0o2771 if (root / "shared/logs").stat().st_mode & 0o001 else 0o2770),
     )
     for parent in root.parents:
         if not _service_access(parent, principal, 0o1):

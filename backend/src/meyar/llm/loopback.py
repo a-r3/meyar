@@ -38,6 +38,13 @@ def build_local_only_async_client(
     configuration. follow_redirects stays explicit False (httpx's own
     default) so a redirect response can never carry a request outside this
     boundary either."""
+    from meyar.config import get_settings
+
+    settings = get_settings()
+    if settings.env == "production":
+        from meyar.ops.ai_provision import assert_runtime_local_identity
+
+        assert_runtime_local_identity(settings)
     return httpx.AsyncClient(
         timeout=timeout,
         transport=transport,

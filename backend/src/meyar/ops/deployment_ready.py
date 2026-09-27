@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from meyar.config import Settings
 from meyar.embedding.dependency import embedding_provider_from_settings
 from meyar.llm.dependency import llm_provider_from_settings
+from meyar.ops.ai_provision import AIFailure, verify_installed_models
 from meyar.ops.alembic_introspect import get_db_alembic_revision
 from meyar.ops.host_config import load_host_settings
 from meyar.ops.offline_host import InstallFailure, privileged_operation_lock, verify_active_release
@@ -106,6 +107,7 @@ def _probe_application(port: int) -> str:
         raw = response.read(_HEALTH_BODY_LIMIT + 1)
         if len(raw) > _HEALTH_BODY_LIMIT:
             return "APPLICATION_HEALTH_INVALID"
+
         def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
             result: dict[str, object] = {}
             for key, value in pairs:
@@ -216,6 +218,7 @@ def run_deployment_ready(
     spec: ServiceSpec | None = None
     installed: bytes | None = None
     principal: ServicePrincipal | None = None
+    model_snapshot: tuple[str, dict[str, object]] | None = None
     try:
         with privileged_operation_lock(root, owner_uid):
             try:
@@ -224,7 +227,8 @@ def run_deployment_ready(
             except (SchemaInitFailure, InstallFailure) as exc:
                 _finding(builder, "active_release", "ACTIVE_RELEASE_INVALID", status=Status.FAIL)
                 migration_invalid = isinstance(exc, SchemaInitFailure) and exc.code in {
-                    "MIGRATION_IDENTITY_MISMATCH", "MULTIPLE_OR_NO_HEADS"
+                    "MIGRATION_IDENTITY_MISMATCH",
+                    "MULTIPLE_OR_NO_HEADS",
                 }
                 _finding(
                     builder,
@@ -240,6 +244,17 @@ def run_deployment_ready(
                 _finding(builder, "host_config", "HOST_CONFIG_INVALID", status=Status.FAIL)
             else:
                 _finding(builder, "host_config", "HOST_CONFIG_VERIFIED")
+            if release_id is not None and settings is not None:
+                try:
+                    model_snapshot = verify_installed_models(root, settings, probe=False)
+                except (AIFailure, InstallFailure, OSError, ValueError):
+                    _finding(
+                        builder, "model_manifest", "MODEL_MANIFEST_UNVERIFIED", status=Status.FAIL
+                    )
+                else:
+                    _finding(builder, "model_manifest", "MODEL_MANIFEST_VERIFIED")
+            else:
+                _skip(builder, "model_manifest")
             if head is not None and settings is not None:
                 try:
                     spec, installed = _installed_spec(
@@ -350,6 +365,20 @@ def run_deployment_ready(
                     status=Status.OK if schema == "DB_REVISION_CURRENT" else Status.FAIL,
                 )
             daemon, llm, embedding = asyncio.run(_probe_ollama(settings))
+            if model_snapshot is None:
+                llm, embedding = (
+                    "LLM_MODEL_IDENTITY_UNVERIFIED",
+                    "EMBEDDING_MODEL_IDENTITY_UNVERIFIED",
+                )
+            else:
+                try:
+                    if verify_installed_models(root, settings, probe=True) != model_snapshot:
+                        raise AIFailure("MODEL_STATE_CHANGED")
+                except (AIFailure, InstallFailure, OSError, ValueError):
+                    llm, embedding = (
+                        "LLM_MODEL_IDENTITY_UNVERIFIED",
+                        "EMBEDDING_MODEL_IDENTITY_UNVERIFIED",
+                    )
             _finding(
                 builder,
                 "ollama",
@@ -375,6 +404,7 @@ def run_deployment_ready(
         and spec is not None
         and release_id is not None
         and head is not None
+        and model_snapshot is not None
     ):
         try:
             with privileged_operation_lock(root, owner_uid):
@@ -383,6 +413,8 @@ def run_deployment_ready(
                     raise ValueError("active release changed")
                 if load_host_settings(root) != settings:
                     raise ValueError("host config changed")
+                if verify_installed_models(root, settings, probe=True) != model_snapshot:
+                    raise ValueError("model identity changed")
                 if (
                     _installed_spec(root, label, plist_directory, system_uid, owner_uid)[1]
                     != installed
@@ -399,6 +431,13 @@ def run_deployment_ready(
                     return builder.build()
                 if _probe_application(spec.port) != "APPLICATION_LIVE":
                     raise ValueError("service changed during readiness probes")
-        except (InstallFailure, SchemaInitFailure, OSError, ValueError, LifecycleFailure):
+        except (
+            AIFailure,
+            InstallFailure,
+            SchemaInitFailure,
+            OSError,
+            ValueError,
+            LifecycleFailure,
+        ):
             _finding(builder, "snapshot", "DEPLOYMENT_CHANGED", status=Status.FAIL)
     return builder.build()

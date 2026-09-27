@@ -1,5 +1,6 @@
 from functools import lru_cache
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -7,6 +8,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 
 from meyar.llm.loopback import require_loopback_url
+from meyar.llm.model_identity import is_local_model_identity
 
 
 class Settings(BaseSettings):
@@ -102,6 +104,25 @@ class Settings(BaseSettings):
             require_loopback_url(self.ollama_base_url, setting_name="MEYAR_OLLAMA_BASE_URL")
         except ValueError:
             raise ValueError("Production requires a loopback Ollama endpoint.") from None
+        endpoint = urlsplit(self.ollama_base_url)
+        try:
+            port = endpoint.port
+        except ValueError:
+            port = None
+        if (
+            endpoint.scheme != "http"
+            or endpoint.hostname != "127.0.0.1"
+            or port is None
+            or endpoint.username
+            or endpoint.password
+            or endpoint.path not in ("", "/")
+            or endpoint.query
+            or endpoint.fragment
+        ):
+            raise ValueError("Production requires a numeric loopback Ollama endpoint.")
+        for name in (self.ollama_model, self.ollama_embedding_model):
+            if not is_local_model_identity(name):
+                raise ValueError("Production requires a local model identity.")
         return self
 
     @property

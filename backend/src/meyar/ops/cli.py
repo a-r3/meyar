@@ -15,6 +15,14 @@ import asyncio
 from pathlib import Path
 from typing import NoReturn
 
+from meyar.ops.ai_provision import (
+    install_models,
+    install_ollama,
+    run_ai_bundle_verify,
+    run_model_verify,
+    run_ollama_service,
+    run_ollama_service_status,
+)
 from meyar.ops.backup import run_backup_create, run_backup_verify
 from meyar.ops.build_release import BuildReleaseRequest, build_release
 from meyar.ops.deployment_ready import run_deployment_ready
@@ -109,6 +117,33 @@ def _build_parser() -> argparse.ArgumentParser:
     restore_parser.add_argument("--restore-id", type=str, required=True)
     restore_parser.add_argument("--target-database", type=str, required=True)
     restore_parser.add_argument("--pg-bin-dir", type=Path, required=True)
+
+    ai_verify = sub.add_parser("ai-bundle-verify", help="Verify a local offline AI bundle.")
+    ai_verify.add_argument("--bundle-dir", type=Path, required=True)
+    for command in ("ollama-install", "model-install"):
+        ai_install = sub.add_parser(command, help="Install verified local AI artifacts.")
+        ai_install.add_argument("--install-root", type=Path, required=True)
+        ai_install.add_argument("--bundle-dir", type=Path, required=True)
+    model_verify = sub.add_parser(
+        "model-verify", help="Verify active-release local model identity."
+    )
+    model_verify.add_argument("--install-root", type=Path, required=True)
+    ollama_status = sub.add_parser(
+        "ollama-service-status", help="Probe Ollama system LaunchDaemon."
+    )
+    ollama_status.add_argument("--label", type=str, required=True)
+    for command in (
+        "ollama-service-install",
+        "ollama-service-start",
+        "ollama-service-stop",
+        "ollama-service-restart",
+    ):
+        service = sub.add_parser(command, help="Manage the dedicated Ollama LaunchDaemon.")
+        service.add_argument("--install-root", type=Path, required=True)
+        service.add_argument("--label", type=str, required=True)
+        service.add_argument("--app-label", type=str, required=True)
+        service.add_argument("--user-name", type=str, required=True)
+        service.add_argument("--install-owner-uid", type=int, required=True)
 
     render_parser = sub.add_parser(
         "service-render",
@@ -205,6 +240,30 @@ def _run_command(args: argparse.Namespace) -> OpsResult:
             args.restore_id,
             args.target_database,
             args.pg_bin_dir,
+        )
+    if args.command == "ai-bundle-verify":
+        return run_ai_bundle_verify(args.bundle_dir)
+    if args.command == "ollama-install":
+        return install_ollama(args.install_root, args.bundle_dir)
+    if args.command == "model-install":
+        return install_models(args.install_root, args.bundle_dir)
+    if args.command == "model-verify":
+        return run_model_verify(args.install_root)
+    if args.command == "ollama-service-status":
+        return run_ollama_service_status(args.label)
+    if args.command in {
+        "ollama-service-install",
+        "ollama-service-start",
+        "ollama-service-stop",
+        "ollama-service-restart",
+    }:
+        return run_ollama_service(
+            args.command,
+            args.install_root,
+            args.label,
+            args.app_label,
+            args.user_name,
+            args.install_owner_uid,
         )
     if args.command == "service-render":
         spec = ServiceSpec(
