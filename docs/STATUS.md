@@ -2,10 +2,11 @@
 
 ## Current phase
 
-**Accepted `main` is `2dcf0a8783e49008b0eb707d81b42248209b34d6`.**
-PR9 / PR #72 is merged and post-merge verified. PR10 is the current
-implementation slice for verified backup to isolated restore; it is not
-accepted main.
+**Accepted `main` is `39d1c2222aa96708aecd68d715d92024a1f72a1a`.**
+PR10 / PR #73 is merged and post-merge verified. PR11 is the current
+independent-review slice for agentless Ollama runtime and offline local-model
+provisioning; it is not accepted main. Issue #35 is OPEN. Issue #46 is OPEN.
+Issue #36 is OPEN and unstarted; no final production model is approved.
 PR #65 (issue #63, order-independent duplicate same-language level
 eligibility) is merged and issue #63 is CLOSED. PR #64 (issue #62 evidence
 attribution) is merged and issue #62 is CLOSED. Deterministic evaluations
@@ -137,12 +138,22 @@ requires a stopped installed service and creates a verified, private
 PostgreSQL custom dump plus canonical storage archive under
 `shared/backups/<backup-id>`; `backup-verify` reads that artifact without
 connecting to the live database. This is backup creation and structural
-verification. PR10 adds only an isolated `restore` command for independent
-review. It requires an empty operator-provisioned target DB, an exact active
+verification. **PR10 for #35 (D-079) is MERGED as PR #73 — accepted main
+`39d1c2222aa96708aecd68d715d92024a1f72a1a`, post-merge verified.**
+Its isolated `restore` command requires an empty operator-provisioned target DB, an exact active
 release schema/source match, and a private `shared/restores/<restore-id>`
 storage workspace. It never writes the production database or live storage,
 and makes no cutover, update, rollback, readiness, or Target-Mac claim.
 Issue #35 remains OPEN, issue #46 remains OPEN, and issue #36 is unstarted.
+
+**PR11 for #35 (D-080) is submitted for independent audit from the exact
+accepted main above.** It adds a separate versioned offline AI bundle,
+immutable Ollama runtime installation, a dedicated non-root local-only
+LaunchDaemon, verified local GGUF import, hash-bound installed
+`ModelManifest`, local tag-digest and synthetic embedding-dimension checks,
+and integration with `deployment-ready` and production request paths. It
+does not select or approve a production model. Real Apple-Silicon and bank
+host behavior remains unconfirmed; #35/#46 stay OPEN and #36 unstarted.
 
 Issue #35 remains OPEN for further deployment work; issue #36 remains
 OPEN and not started; issue #46 remains OPEN and separate.

@@ -1,5 +1,7 @@
+import re
 from functools import lru_cache
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -102,6 +104,27 @@ class Settings(BaseSettings):
             require_loopback_url(self.ollama_base_url, setting_name="MEYAR_OLLAMA_BASE_URL")
         except ValueError:
             raise ValueError("Production requires a loopback Ollama endpoint.") from None
+        endpoint = urlsplit(self.ollama_base_url)
+        try:
+            port = endpoint.port
+        except ValueError:
+            port = None
+        if (
+            endpoint.scheme != "http"
+            or endpoint.hostname != "127.0.0.1"
+            or port is None
+            or endpoint.username
+            or endpoint.password
+            or endpoint.path not in ("", "/")
+            or endpoint.query
+            or endpoint.fragment
+        ):
+            raise ValueError("Production requires a numeric loopback Ollama endpoint.")
+        for name in (self.ollama_model, self.ollama_embedding_model):
+            if not re.fullmatch(
+                r"[a-z0-9][a-z0-9._-]{0,99}(?::[a-z0-9][a-z0-9._-]{0,99})?", name
+            ) or name.endswith(":cloud"):
+                raise ValueError("Production requires a local model identity.")
         return self
 
     @property

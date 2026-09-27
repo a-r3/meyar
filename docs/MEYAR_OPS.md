@@ -9,7 +9,8 @@ and service binding — D-074), PR6 (privileged LaunchDaemon lifecycle
 foundation — D-075), PR7 (fresh database schema initialization —
 D-076), PR8 (installed deployment readiness — D-077), PR9
 (production backup creation/verification — D-078), and PR10
-(isolated restore — D-079). See §11 below
+(isolated restore — D-079), and PR11 (offline local AI provisioning —
+D-080). See §11 below
 for the #35/#46 boundary.
 
 **PR3 scope reminder — read before assuming this means "deployable":**
@@ -446,8 +447,8 @@ Run as the trusted non-root install operator after `install-release`,
   --install-root <root> --label <validated-launchd-label>
 ```
 
-PostgreSQL/pgvector and Ollama with the configured models must already exist;
-the current tooling does not provision them. The gate takes no DB URL,
+PostgreSQL/pgvector must already exist; PR11 provisions Ollama and verified
+local model artifacts separately before this gate. The gate takes no DB URL,
 Ollama URL, model name, port, service-user, or arbitrary plist path. Its only
 plist authority is `/Library/LaunchDaemons/<label>.plist`, which must be a
 safe, root-owned, regular, canonical-mode file with exact bytes from the
@@ -462,10 +463,14 @@ change the destination. The response must be HTTP 200 with JSON
 `{"status":"ok"}`. DB reachability uses bounded `SELECT 1`; schema current
 requires the sole active code/manifest head to equal the sole DB revision.
 Ollama and both configured models use explicit protected Settings through the
-existing local-only provider boundary. All findings use fixed codes without
+existing local-only provider boundary. PR11 additionally requires the active
+release's `sha256:<model-manifest-hash>` reference to resolve to an immutable
+installed manifest and import receipt, exact configured names, local tag
+digests, runtime version, Ollama LaunchDaemon, and synthetic embedding
+dimensions. Name availability alone cannot pass. All findings use fixed codes without
 secrets or raw response/exception text.
 
-The result reports `active_release`, `host_config`, `service_plist`,
+The result reports `active_release`, `host_config`, `model_manifest`, `service_plist`,
 `service_principal`, `runtime_permissions`, `launchd`,
 `application_liveness`, `database`, `db_schema`, `ollama`, `llm_model`, and
 `embedding_model` separately. Their success codes are respectively
@@ -489,6 +494,72 @@ creation, service lifecycle action, migration, or model pull.
 `GET /api/v1/health` remains liveness only. CLI `deployment-ready` is not
 HTTP `/ready` (#46). A green CLI gate is neither real Target-Mac acceptance
 nor production-model approval (#36); issues #35 and #46 remain open.
+
+### PR11 offline Ollama and model provisioning
+
+The bank Mac receives a reviewed local directory with only
+`ai_bundle_manifest.json`, `model_manifest.json`, one macOS arm64 Ollama
+Mach-O executable named by the manifest, and two single-file GGUF artifacts.
+The transport manifest is version 1 and binds the runtime platform,
+architecture, declared version, filename and SHA-256; the model-manifest
+filename and SHA-256; and each LLM/EMBEDDING role, exact local tagged model
+name, GGUF filename and SHA-256. It is separate from `ModelManifest`, which
+continues to own model identity and approval status. The active release must
+have been built with `--model-manifest-reference sha256:<SHA-256 of the exact
+model_manifest.json>` and a status matching both entries. Older documentary
+references cannot pass `model-install`, `model-verify`, or `deployment-ready`.
+Use an operator-reviewed bundle and immutable release; hashes establish
+integrity relative to that trusted handoff, not publisher authenticity.
+
+From the installed release, use the trusted non-root install owner except
+for the four privileged service mutations. The dedicated Ollama account
+must already exist and differ from both the install owner and MEYAR app
+service account. The application LaunchDaemon must already be installed.
+
+```bash
+<root>/current/.venv/bin/python -m meyar.ops.cli ai-bundle-verify --bundle-dir <local-ai-bundle>
+<root>/current/.venv/bin/python -m meyar.ops.cli ollama-install --install-root <root> --bundle-dir <local-ai-bundle>
+<root>/current/.venv/bin/python -m meyar.ops.cli ollama-service-install --install-root <root> --label <ollama-label> --app-label <app-label> --user-name <dedicated-ollama-user> --install-owner-uid <uid>
+<root>/current/.venv/bin/python -m meyar.ops.cli ollama-service-start --install-root <root> --label <ollama-label> --app-label <app-label> --user-name <dedicated-ollama-user> --install-owner-uid <uid>
+<root>/current/.venv/bin/python -m meyar.ops.cli model-install --install-root <root> --bundle-dir <local-ai-bundle>
+<root>/current/.venv/bin/python -m meyar.ops.cli model-verify --install-root <root>
+<root>/current/.venv/bin/python -m meyar.ops.cli deployment-ready --install-root <root> --label <app-label>
+```
+
+`ollama-service-stop`, `ollama-service-restart`, and read-only
+`ollama-service-status --label <ollama-label>` are also available. Mutation
+uses the existing PR4 lock and fixed `/bin/launchctl` system-domain argv.
+The canonical plist runs exactly `<root>/shared/ollama/runtimes/<SHA-256>/ollama
+serve` without a shell, as the dedicated non-root user, with fixed
+`OLLAMA_HOST=127.0.0.1:<configured-port>`, `OLLAMA_MODELS`, private `HOME`,
+`OLLAMA_NO_CLOUD=1`, and bounded MEYAR log paths. Runtime binaries and
+manifests are owner-owned and read-only; the Ollama user owns only its
+private model/state directories and dedicated logs. Root/shared/logs allow
+traversal to those paths without read access to app releases, config secrets,
+candidate storage, backups, or restores.
+
+`model-install` verifies every local hash, copies each GGUF into a temporary
+service-readable staging directory, writes only `FROM <verified-local-GGUF>`
+to a generated Modelfile, and runs fixed argv
+`<immutable-ollama> create <manifest-name> -f <generated-Modelfile>` with a
+fixed local-only environment. It never calls `ollama pull`, a model registry,
+Git, Homebrew, `curl`, `wget`, `pip`, or `uv download`; it uses no shell and
+needs no coding agent or network on the bank host. A name already present
+without an exact receipt is a conflict. A failed partial import leaves no
+completion receipt and never deletes unrelated models; operator inspection
+is required before retry. Successful imports publish an immutable manifest
+at `shared/ollama/manifests/<SHA-256>.json` plus a no-clobber receipt. The
+receipt records source GGUF SHA-256 and Ollama's local tag digest separately.
+The former is **not** the latter. `model-verify` checks `/api/version`,
+`/api/tags` digests, service visibility, and one bounded synthetic `/api/embed`
+probe against `MEYAR_EMBEDDING_DIMENSIONS`; it never sends candidate text.
+Production request paths recheck local tag digests before candidate-bearing
+Ollama calls. Raw Ollama bodies and process output never enter results.
+
+**Model installed != model production-approved.** PR11 proves the
+installation/verification mechanism only. All PR11 fixtures use
+`DEVELOPMENT_INTEGRATION`; final production model approval remains Issue #36
+and real Target-Mac behavior remains unconfirmed.
 
 ### PR9 `backup-create` and `backup-verify`
 
@@ -879,9 +950,9 @@ never flip `ok`. Every component's finding is always present in the list
 
 - No HTTP `/ready` route (`/api/v1/health` remains liveness-only,
   unchanged) — issue #46.
-- No service uninstall, full update/rollback, database/model provisioning,
-  or readiness orchestration. PR6's privileged lifecycle foundation
-  installs and controls only the MEYAR LaunchDaemon; it does not invoke
+- No service uninstall, full update/rollback, or PostgreSQL provisioning.
+  PR6's privileged lifecycle foundation
+  installs and controls the MEYAR LaunchDaemon; it does not invoke
   `sudo`, escalate itself, or create a service account.
 - No update/rollback orchestration (the `RollbackCompatibility` enum is a
   typed classification for a future human-operated runbook, not an
@@ -958,9 +1029,13 @@ Target-Mac acceptance is included.
 **#35 PR9 (D-078, merged as PR #72):** quiesced production backup
 creation and read-only structural verification.
 
-**#35 PR10 (D-079, independent review pending):** verified backup to an
+**#35 PR10 (D-079, merged as PR #73):** verified backup to an
 empty isolated database and private restore workspace. No production
 cutover, update, or rollback is included.
+
+**#35 PR11 (D-080, independent review pending):** offline local GGUF/Ollama
+provisioning, dedicated LaunchDaemon, exact installed manifest/digest
+verification, and readiness/runtime identity checks. No model approval.
 
 **Deferred to #46:** authenticated HTTP `/ready`, in-application
   degraded-state semantics, remaining production config policy,

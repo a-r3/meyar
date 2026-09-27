@@ -165,8 +165,10 @@ owner-accepted release artifact (built, verified, installed, and updated
 by `meyar-ops` tooling). PR3 built the application artifact and PR4
 defines its offline dependency/install foundation; PR5 binds the service
 plist to that active release and host-local production config. PR6 adds
-privileged LaunchDaemon lifecycle foundation. Database/model provisioning,
-full deployment readiness, and target-Mac acceptance remain later #35
+privileged LaunchDaemon lifecycle foundation. PR11 adds the separate
+offline Ollama/model provision bundle and dedicated service described in
+`docs/MEYAR_OPS.md`; PostgreSQL provisioning, full update/rollback, and
+target-Mac acceptance remain later #35
 work. This source-checkout runbook describes the older manual dev/demo
 path and must not be used as the final bank-host deployment method.
 
@@ -401,6 +403,18 @@ Operational summary for an installed production host:
 
 ## 11. Local AI / Ollama operations
 
+For an installed production release, use PR11's reviewed offline AI
+bundle and agentless sequence in `docs/MEYAR_OPS.md`: verify bundle →
+install immutable Ollama runtime → install/start its dedicated LaunchDaemon
+→ import verified local GGUF models → `model-verify` → `deployment-ready`.
+The bank host needs no Git, coding agent, model registry, or internet for
+this flow. The active release reference is the exact
+`sha256:<model_manifest.json hash>`; local installed tags and digests must
+match the immutable receipt. `ollama pull` belongs only to the older
+development/source-checkout workflow below, not production provisioning.
+**Model installed != model production-approved.** Issue #36 remains the final
+approval evidence boundary; real Apple-Silicon behavior is unconfirmed.
+
 - Ollama is the local inference runtime for both the LLM and the embedding
   provider — both accessed only through `meyar.llm.LLMProvider` /
   `meyar.embedding` abstractions, never called directly from application
@@ -574,9 +588,9 @@ default/universal production rollback mechanism.
 
 For a fresh installed deployment, run `preflight` → `install-release` →
 `activate-release` → `config-verify` → `schema-init` → `service-install` →
-`service-start` → `deployment-ready` (exact invocation and boundaries in
-`docs/MEYAR_OPS.md`). PostgreSQL/pgvector and Ollama/models must be
-provisioned separately before this sequence can finish. The dedicated
+`service-start` → PR11's verified local-AI sequence → `deployment-ready`
+(exact invocation and boundaries in `docs/MEYAR_OPS.md`). PostgreSQL/
+pgvector must be provisioned separately. The dedicated
 `deployment-ready` command reports installed-host readiness as one
 machine-readable result; the older `readiness` command retains its general
 component-level local behavior. Continue with the manual acceptance steps
@@ -598,8 +612,8 @@ Compact checklist, grounded in MEYAR's actual surfaces:
       run against this environment (e.g. the fresh-deployment smoke
       pattern in `backend/scripts/fresh_deployment_smoke.py`, run against
       a disposable database/storage root — never against production data).
-- [ ] If this deployment depends on a specific local model, confirm it is
-      pulled and available (`ollama list`) — see §11.
+- [ ] `model-verify` confirms exact local manifest, tag digests, runtime
+      version, and synthetic embedding dimensions — see §11.
 - [ ] No unexpected public-network dependency was introduced (the
       no-exfiltration guard and its test remain the standing acceptance
       evidence — `backend/tests/test_no_exfiltration.py`).

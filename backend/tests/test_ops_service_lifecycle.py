@@ -129,6 +129,20 @@ def test_install_protects_runtime_and_preserves_pr5_config(
     assert (spec.install_root / "releases/meyar-test+abcdef123456").stat().st_mode & 0o222 == 0
 
 
+def test_app_service_remains_valid_after_ollama_traversal_only_modes(
+    lifecycle_context: tuple[ServiceSpec, Path, FakeLaunchctl],
+) -> None:
+    spec, _, _ = lifecycle_context
+    assert run("service-install", lifecycle_context).ok
+    for relative, mode in (("", 0o751), ("shared", 0o2751), ("shared/logs", 0o2771)):
+        (spec.install_root / relative).chmod(mode)
+    (spec.install_root / "shared/backups").chmod(0o750)
+    assert run("service-start", lifecycle_context).ok
+    assert verify_host_config(spec.install_root).ok
+    for relative in ("shared/config", "shared/storage", "shared/backups", "releases"):
+        assert spec.install_root.joinpath(relative).stat().st_mode & 0o007 == 0
+
+
 def test_platform_privilege_and_explicit_owner(
     lifecycle_context: tuple[ServiceSpec, Path, FakeLaunchctl],
 ) -> None:

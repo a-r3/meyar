@@ -226,7 +226,17 @@ def load_runtime_host_settings() -> Settings:
             raise ValueError("CONFIG_PERMISSIONS_UNSAFE")
     except (InstallFailure, OSError):
         raise ValueError("HOST_LAYOUT_UNSAFE") from None
-    return load_host_settings(root, expected_owner_uid=owner_uid)
+    settings = load_host_settings(root, expected_owner_uid=owner_uid)
+    # Runtime startup consumes the same hash-bound active-release identity as
+    # model-verify. This is deliberately local metadata only; no candidate
+    # content or network request is needed at startup.
+    from meyar.ops.ai_provision import AIFailure, verify_installed_models
+
+    try:
+        verify_installed_models(root, settings, probe=False)
+    except (AIFailure, InstallFailure, OSError, ValueError):
+        raise ValueError("LOCAL_MODEL_IDENTITY_UNVERIFIED") from None
+    return settings
 
 
 def verify_host_config(root: Path) -> OpsResult:

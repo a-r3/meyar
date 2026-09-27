@@ -6042,9 +6042,10 @@ unconfirmed.
 
 ## D-079 — Verified backup to isolated restore (issue #35 PR10)
 
-**Date:** 2026-09-26. **Status:** Implementation for independent review
-from exact accepted main `2dcf0a8783e49008b0eb707d81b42248209b34d6`.
-PR9 / PR #72 is merged and post-merge verified.
+**Date:** 2026-09-26. **Status:** MERGED as PR #73, squash SHA
+`39d1c2222aa96708aecd68d715d92024a1f72a1a`; post-merge verified.
+Implementation began from accepted main `2dcf0a8783e49008b0eb707d81b42248209b34d6`.
+PR9 / PR #72 was merged and post-merge verified before this slice.
 
 The installed release adds `meyar-ops restore` with operator-selected safe
 backup/restore IDs and a bounded isolated PostgreSQL database name. The
@@ -6081,3 +6082,64 @@ this isolated restore. It is not production cutover or application
 readiness. Update, rollback, migrations, provisioning, and Target-Mac
 acceptance remain separate future work. #35 and #46 stay OPEN; #36 is
 unstarted.
+
+## D-080 — Offline Ollama runtime and local model provisioning (issue #35 PR11)
+
+**Date:** 2026-09-27. **Status:** Implementation for independent audit from
+exact accepted main `39d1c2222aa96708aecd68d715d92024a1f72a1a`.
+PR10 / PR #73 is merged and post-merge verified. Issue #35 and #46 remain
+OPEN; issue #36 remains OPEN and unstarted.
+
+The application release remains the source-code/runtime authority and its
+existing `ModelManifestReference` remains the model-governance authority.
+PR11 adds a separate transport manifest, `ai_bundle_manifest.json`, with
+one macOS arm64 Ollama Mach-O runtime, its declared version and SHA-256, an
+exact `model_manifest.json` SHA-256, and LLM/EMBEDDING local GGUF names and
+SHA-256s. The release reference now has executable installed-host semantics:
+`sha256:<model_manifest.json hash>` resolves only to the no-clobber immutable
+manifest in `shared/ollama/manifests`. Existing documentary references are
+not accepted by PR11 installation/verification. No GGUF or actual runtime
+binary is committed. Hashes prove correspondence to a reviewed handoff,
+not independent publisher authenticity.
+
+The trusted non-root install owner verifies the bundle and installs the
+runtime under `shared/ollama/runtimes/<SHA-256>/ollama` read-only, without
+overwriting a different identity. Privileged lifecycle operations install
+an exact root-owned system LaunchDaemon under the existing PR4 lock. It runs
+`ollama serve` with fixed argv as a pre-existing dedicated non-root Ollama
+user, distinct from the install owner and app user. Its fixed environment
+contains only numeric loopback `OLLAMA_HOST`, canonical `OLLAMA_MODELS`,
+private `HOME`, fixed `PATH`, and Ollama's documented `OLLAMA_NO_CLOUD=1`.
+The Ollama user owns its private model/state paths and logs; other-execute
+traversal on root/shared/logs permits those paths without granting read
+access to app releases, protected config, candidate storage, backups, or
+restores. The app continues to access Ollama only over numeric loopback.
+
+`model-install` accepts no arbitrary model name. It validates the active
+release reference and protected production Settings against exactly one
+LLM and one EMBEDDING manifest entry, rejects cloud/URL/namespace names,
+verifies source artifacts, then copies each GGUF to a private temporary
+stage readable by the Ollama user. Its sole Modelfile content is
+`FROM <verified-local-staged-GGUF>`; it invokes the immutable executable
+with fixed `create <manifest-name> -f <Modelfile>` argv and a fixed local-only
+environment. There is no shell, `ollama pull`, registry lookup, Git,
+Homebrew, curl/wget, pip, or dependency download on the target host.
+Partial failure never publishes the final receipt and never deletes
+unrelated models; an unreceipted name conflict requires operator review.
+
+The completion receipt distinguishes source GGUF SHA-256 from the installed
+Ollama tag digest. Read-only `model-verify` checks the exact active release,
+manifest hash/status/config names, installed runtime and LaunchDaemon,
+local `/api/version` and `/api/tags` digest, and one bounded synthetic
+`/api/embed` vector dimension. `deployment-ready` requires this authority
+before reporting model availability and rechecks it after probes. Production
+provider requests recheck local tag identity before candidate-bearing
+requests. Results are fixed-code and never include candidate text, secrets,
+raw process output, or Ollama bodies.
+
+All PR11 synthetic manifests remain `DEVELOPMENT_INTEGRATION`.
+**Model installed != model production-approved.** PR11 proves only the
+installation and verification mechanism. Final production model selection
+and approval require real Target-Mac evidence under Issue #36. Real
+Apple-Silicon LaunchDaemon, binary import, cloud-disable, and host egress
+behavior are not established by Linux simulations.

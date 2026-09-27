@@ -202,8 +202,8 @@ closing the transport-egress defect above (D-047) only closes the first:
   approved boundary.
 
 **HOST/OLLAMA CONFIGURATION GUARANTEE (deployment-environment
-responsibility — a future deployment preflight must verify these before
-go-live, not this codebase):**
+responsibility, with PR11's installed-host checks and physical acceptance
+still required before go-live):**
 - The Ollama daemon itself binds only to an approved local interface,
   preferably loopback (`OLLAMA_HOST=127.0.0.1`, not `0.0.0.0`).
 - Cloud-backed Ollama behavior (any "Ollama Cloud"/hosted-model routing
@@ -218,12 +218,23 @@ go-live, not this codebase):**
   guarantee above — the application guarantee must not be treated as a
   substitute for it.
 
-**NOT VERIFIED in this development environment:** daemon-level
-cloud-disable status, interface binding, model pinning/digest management,
-and host-level egress denial are all deployment/target-hardware concerns
-(see `docs/TARGET_MAC_BENCHMARK.md`) that cannot be checked from this
-repository's test suite — they require a deployment preflight against the
-actual target Ollama installation, not yet implemented.
+**PR11 operator mechanism:** the installed Ollama LaunchDaemon has exact
+immutable executable and `serve` argv, numeric-loopback `OLLAMA_HOST`, a
+private `OLLAMA_MODELS` store, and Ollama's documented
+`OLLAMA_NO_CLOUD=1`. An active release resolves only its hash-bound
+installed `ModelManifest` and receipt; production config, local tag digests,
+and bounded synthetic embedding dimensions are verified before
+`deployment-ready` can pass. Production provider requests recheck local
+tag digests before candidate-bearing Ollama calls. Cloud-style names and
+non-manifest identities fail closed. Source GGUF hashes and installed
+Ollama digests remain distinct. These assertions are Linux-tested with
+synthetic fixtures, not physical Mac acceptance.
+
+**NOT VERIFIED in this development environment:** real Apple-Silicon
+LaunchDaemon operation, whether the installed Ollama version obeys its
+cloud-disable setting on the target host, and host-level egress denial.
+Those require bank-host rehearsal and defense-in-depth controls; Issue #36
+remains the model-approval evidence boundary.
 
 ## Threat model (MVP-relevant)
 
