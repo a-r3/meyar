@@ -270,6 +270,8 @@ def test_direct_settings_production_fails_closed() -> None:
         "env": "production",
         "database_url": "postgresql+asyncpg://synthetic:synthetic@localhost:5432/meyar",
         "pending_login_secret": "synthetic-host-test-secret",
+        "ollama_model": "meyar-test-llm:v1",
+        "ollama_embedding_model": "meyar-test-embed:v1",
     }
     assert Settings(_env_file=None, **safe).env == "production"
     for override in (

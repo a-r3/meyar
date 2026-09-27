@@ -52,6 +52,8 @@ def ops_host_root(tmp_path: Path) -> Path:
         "MEYAR_LLM_PROVIDER=ollama\n"
         "MEYAR_EMBEDDING_PROVIDER=ollama\n"
         "MEYAR_OLLAMA_BASE_URL=http://127.0.0.1:11434\n"
+        "MEYAR_OLLAMA_MODEL=meyar-test-llm:v1\n"
+        "MEYAR_OLLAMA_EMBEDDING_MODEL=meyar-test-embed:v1\n"
     )
     for directory in (root, root / "shared", root / "shared/config"):
         directory.chmod(0o750)

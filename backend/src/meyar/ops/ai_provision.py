@@ -27,6 +27,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from meyar.config import Settings
+from meyar.llm.model_identity import is_local_model_identity
 from meyar.ops.model_manifest import ModelManifest, ModelRole
 from meyar.ops.offline_host import (
     InstallFailure,
@@ -40,7 +41,6 @@ from meyar.ops.result import FindingStatus, OpsResult, build_single_finding_resu
 from meyar.ops.service_status import LaunchctlRunner
 
 HEX = re.compile(r"^[0-9a-f]{64}$")
-NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,99}(?::[a-z0-9][a-z0-9._-]{0,99})?$")
 VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][a-zA-Z0-9._-]+)?$")
 MAX_META = 1024 * 1024
 MAX_MODEL = 100 * 1024 * 1024 * 1024
@@ -162,8 +162,8 @@ def _trusted_directory(path: Path, owner_uid: int) -> None:
 
 def _model_name(name: str) -> None:
     # A local MEYAR identity is a simple unqualified tag. In particular,
-    # namespace, URL, and :cloud identities are never allowed to reach Ollama.
-    if not NAME.fullmatch(name) or ":" not in name or name.endswith(":cloud"):
+    # namespace, URL, :cloud, and size-cloud tags cannot reach Ollama.
+    if not is_local_model_identity(name):
         raise AIFailure("CLOUD_OR_UNSAFE_MODEL_IDENTITY")
 
 
@@ -403,7 +403,11 @@ def install_ollama(
             if ai.stat().st_uid != os.geteuid() or ai.stat().st_mode & 0o022:
                 raise AIFailure("OLLAMA_LAYOUT_UNSAFE")
             runtimes = ai / "runtimes"
-            runtimes.mkdir(mode=0o755, exist_ok=True)
+            runtimes.mkdir(mode=0o711, exist_ok=True)
+            _real_directory(runtimes)
+            if runtimes.stat().st_uid != os.geteuid() or runtimes.stat().st_mode & 0o022:
+                raise AIFailure("OLLAMA_LAYOUT_UNSAFE")
+            os.chmod(runtimes, 0o711)
             digest = bundle.transport.ollama.sha256
             version = bundle.transport.ollama.version
             expected = {
@@ -416,6 +420,10 @@ def install_ollama(
             if state_path.exists():
                 if _runtime_state(root) != expected:
                     raise AIFailure("OLLAMA_RUNTIME_CONFLICT")
+                runtime_dir = runtimes / digest
+                if runtime_dir.stat().st_uid != os.geteuid() or runtime_dir.stat().st_mode & 0o022:
+                    raise AIFailure("OLLAMA_LAYOUT_UNSAFE")
+                os.chmod(runtime_dir, 0o511)
                 return _result(action, "OLLAMA_RUNTIME_ALREADY_INSTALLED", True)
             if (runtimes / digest).exists():
                 raise AIFailure("OLLAMA_RUNTIME_CONFLICT")
@@ -427,7 +435,7 @@ def install_ollama(
                     raise AIFailure("OLLAMA_RUNTIME_HASH_MISMATCH")
                 os.chmod(target, 0o555)
                 _runtime_version(target, version)
-                os.chmod(stage, 0o555)
+                os.chmod(stage, 0o511)
                 stage.rename(runtimes / digest)
                 _write_new(
                     state_path, (json.dumps(expected, sort_keys=True) + "\n").encode(), 0o444
@@ -687,12 +695,21 @@ def run_model_verify(root: Path) -> OpsResult:
 
 
 def _service_state(root: Path) -> dict[str, Any]:
+    from meyar.ops.deployment_ready import _installed_spec
+    from meyar.ops.service_lifecycle import LifecycleFailure
+
     state = _json(_ai_root(root) / "service.json")
     if set(state) != {"label", "app_label", "user_name", "uid", "gid", "port", "runtime_sha256"}:
         raise AIFailure("OLLAMA_SERVICE_INVALID")
     try:
-        account = pwd.getpwnam(state["user_name"])
-    except (KeyError, TypeError):
+        owner_uid = root.stat().st_uid
+        app, _ = _installed_spec(
+            root, state["app_label"], Path("/Library/LaunchDaemons"), 0, owner_uid
+        )
+        principal, account = _ollama_principal(
+            root, state["user_name"], owner_uid, app.user_name
+        )
+    except (LifecycleFailure, OSError, ValueError, TypeError, KeyError):
         raise AIFailure("OLLAMA_SERVICE_INVALID") from None
     if (
         account.pw_uid != state["uid"]
@@ -702,7 +719,69 @@ def _service_state(root: Path) -> dict[str, Any]:
         raise AIFailure("OLLAMA_SERVICE_INVALID")
     if _runtime_state(root)["sha256"] != state["runtime_sha256"]:
         raise AIFailure("OLLAMA_SERVICE_INVALID")
+    _verify_ollama_access(root, principal, state["runtime_sha256"])
     return state
+
+
+def _ollama_principal(
+    root: Path, user_name: str, owner_uid: int, app_user_name: str
+) -> tuple[Any, Any]:
+    from meyar.ops.service_lifecycle import ServicePrincipal
+
+    try:
+        account = pwd.getpwnam(user_name)
+        app_account = pwd.getpwnam(app_user_name)
+        groups = frozenset(os.getgrouplist(user_name, account.pw_gid))
+        service_gid = (root / "shared/config").stat().st_gid
+    except (OSError, ValueError, TypeError, KeyError):
+        raise AIFailure("OLLAMA_SERVICE_USER_INVALID") from None
+    if (
+        account.pw_uid in (0, owner_uid, app_account.pw_uid)
+        or user_name == app_user_name
+        or service_gid in groups
+        or account.pw_gid not in groups
+    ):
+        raise AIFailure("OLLAMA_SERVICE_USER_INVALID")
+    return ServicePrincipal(account.pw_uid, groups), account
+
+
+def _verify_ollama_access(root: Path, principal: Any, runtime_sha256: str) -> None:
+    from meyar.ops.service_lifecycle import _service_access
+
+    def permits(path: Path, bit: int) -> bool:
+        return _service_access(path, principal, bit)
+
+    ai = _ai_root(root)
+    for path in (*root.parents, root, root / "shared", root / "shared/logs", ai,
+                 ai / "runtimes", ai / "runtimes" / runtime_sha256):
+        _real_directory(path)
+        if not permits(path, 0o1):
+            raise AIFailure("OLLAMA_LAYOUT_UNSAFE")
+    for path in (root, root / "shared", root / "shared/logs", ai,
+                 ai / "runtimes", ai / "runtimes" / runtime_sha256):
+        if permits(path, 0o2) or permits(path, 0o4):
+            raise AIFailure("OLLAMA_LAYOUT_UNSAFE")
+    binary = ai / "runtimes" / runtime_sha256 / "ollama"
+    if not permits(binary, 0o1) or permits(binary, 0o2):
+        raise AIFailure("OLLAMA_LAYOUT_UNSAFE")
+    for name in ("models", "state"):
+        path = ai / name
+        _real_directory(path)
+        if not all(permits(path, bit) for bit in (0o1, 0o2, 0o4)):
+            raise AIFailure("OLLAMA_LAYOUT_UNSAFE")
+    for name in ("ollama.stdout.log", "ollama.stderr.log"):
+        path = root / "shared/logs" / name
+        if not permits(path, 0o2):
+            raise AIFailure("OLLAMA_LAYOUT_UNSAFE")
+    for path in (root / "shared/config", root / "shared/storage", root / "releases",
+                 root / "shared/backups", root / "shared/restores"):
+        if os.path.lexists(path):
+            _real_directory(path)
+            if any(permits(path, bit) for bit in (0o1, 0o2, 0o4)):
+                raise AIFailure("OLLAMA_LAYOUT_UNSAFE")
+    env = root / "shared/config/.env"
+    if os.path.lexists(env) and permits(env, 0o4):
+        raise AIFailure("OLLAMA_LAYOUT_UNSAFE")
 
 
 def _service_plist(root: Path, state: dict[str, Any]) -> bytes:
@@ -869,11 +948,8 @@ def run_ollama_service(
             verify_active_release(root)
             runtime = _runtime_state(root)
             app, _ = _installed_spec(root, app_label, plist_directory, system_uid, owner_uid)
-            try:
-                account = pwd.getpwnam(user_name)
-            except KeyError:
-                raise AIFailure("OLLAMA_SERVICE_USER_INVALID") from None
-            if account.pw_uid in (0, owner_uid) or user_name == app.user_name or label == app_label:
+            principal, account = _ollama_principal(root, user_name, owner_uid, app.user_name)
+            if label == app_label:
                 raise AIFailure("OLLAMA_SERVICE_USER_INVALID")
             state = {
                 "label": label,
@@ -896,6 +972,7 @@ def run_ollama_service(
                 if existing is not None and existing != expected:
                     raise AIFailure("OLLAMA_PLIST_CONFLICT")
                 _service_layout(root, account.pw_uid, account.pw_gid)
+                _verify_ollama_access(root, principal, runtime["sha256"])
                 if not state_path.exists():
                     _write_new(
                         state_path, (json.dumps(state, sort_keys=True) + "\n").encode(), 0o444

@@ -1,4 +1,3 @@
-import re
 from functools import lru_cache
 from typing import Literal
 from urllib.parse import urlsplit
@@ -9,6 +8,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 
 from meyar.llm.loopback import require_loopback_url
+from meyar.llm.model_identity import is_local_model_identity
 
 
 class Settings(BaseSettings):
@@ -121,9 +121,7 @@ class Settings(BaseSettings):
         ):
             raise ValueError("Production requires a numeric loopback Ollama endpoint.")
         for name in (self.ollama_model, self.ollama_embedding_model):
-            if not re.fullmatch(
-                r"[a-z0-9][a-z0-9._-]{0,99}(?::[a-z0-9][a-z0-9._-]{0,99})?", name
-            ) or name.endswith(":cloud"):
+            if not is_local_model_identity(name):
                 raise ValueError("Production requires a local model identity.")
         return self
 

@@ -13,6 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 
 from meyar.config import Settings
 from meyar.ops import ai_provision as ai
@@ -178,6 +179,148 @@ def test_model_manifest_roles_config_and_cloud_boundary(bundle: Path) -> None:
             ai._model_name(name)
 
 
+@pytest.mark.parametrize(
+    "name",
+    ["glm-4.7:cloud", "gpt-oss:120b-cloud", "gpt-oss:20b-cloud",
+     "qwen3-coder:480b-cloud", "deepseek-v3.1:671b-cloud", "remote:cloud"],
+)
+def test_cloud_style_names_fail_at_bundle_manifest_and_installed_boundaries(
+    bundle: Path, name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    verified = ai.verify_ai_bundle(bundle)
+    entries = list(verified.models.entries)
+    entries[0] = entries[0].model_copy(update={"model_name": name})
+    with pytest.raises(ai.AIFailure, match="CLOUD_OR_UNSAFE_MODEL_IDENTITY"):
+        ai._roles(verified.models.model_copy(update={"entries": entries}))
+    cloud_manifest = verified.models.model_copy(update={"entries": entries})
+    release = SimpleNamespace(
+        model_manifest=SimpleNamespace(status=ModelApprovalStatus.DEVELOPMENT_INTEGRATION)
+    )
+    monkeypatch.setattr(ai, "_release_manifest", lambda _root: ("release", release, "a" * 64))
+    monkeypatch.setattr(ai, "_installed_manifest", lambda _root, _digest: cloud_manifest)
+    with pytest.raises(ai.AIFailure, match="CLOUD_OR_UNSAFE_MODEL_IDENTITY"):
+        ai.verify_installed_models(tmp_path, Settings(_env_file=None), probe=False)
+    change_transport(bundle, lambda value: value["models"][0].update(model_name=name))
+    assert ai.run_ai_bundle_verify(bundle).findings[0].code == "CLOUD_OR_UNSAFE_MODEL_IDENTITY"
+    manifest_path = bundle / "model_manifest.json"
+    manifest_path.write_text(cloud_manifest.model_dump_json())
+    change_transport(
+        bundle,
+        lambda value: value.update(model_manifest_sha256=digest(manifest_path.read_bytes())),
+    )
+    assert ai.run_ai_bundle_verify(bundle).findings[0].code == "CLOUD_OR_UNSAFE_MODEL_IDENTITY"
+
+
+def test_ollama_principal_rejects_app_uid_primary_and_supplementary_groups(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "host"
+    (root / "shared/config").mkdir(parents=True)
+    service_gid = (root / "shared/config").stat().st_gid
+    owner = os.geteuid()
+    app = SimpleNamespace(pw_uid=owner + 1, pw_gid=service_gid)
+    ollama = SimpleNamespace(pw_uid=owner + 2, pw_gid=service_gid + 1)
+    monkeypatch.setattr(ai.pwd, "getpwnam", lambda name: app if name == "app" else ollama)
+    monkeypatch.setattr(ai.os, "getgrouplist", lambda _name, gid: [gid])
+    assert ai._ollama_principal(root, "ollama", owner, "app")[0].groups == {service_gid + 1}
+    with pytest.raises(ai.AIFailure, match="OLLAMA_SERVICE_USER_INVALID"):
+        ai._ollama_principal(root, "app", owner, "app")
+    ollama.pw_gid = service_gid
+    with pytest.raises(ai.AIFailure, match="OLLAMA_SERVICE_USER_INVALID"):
+        ai._ollama_principal(root, "ollama", owner, "app")
+    ollama.pw_gid = service_gid + 1
+    monkeypatch.setattr(ai.os, "getgrouplist", lambda _name, gid: [gid, service_gid])
+    with pytest.raises(ai.AIFailure, match="OLLAMA_SERVICE_USER_INVALID"):
+        ai._ollama_principal(root, "ollama", owner, "app")
+
+    def group_failure(_name: str, _gid: int) -> list[int]:
+        raise OSError("synthetic group lookup failure")
+
+    monkeypatch.setattr(ai.os, "getgrouplist", group_failure)
+    with pytest.raises(ai.AIFailure, match="OLLAMA_SERVICE_USER_INVALID"):
+        ai._ollama_principal(root, "ollama", owner, "app")
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["glm-4.7:cloud", "gpt-oss:120b-cloud", "gpt-oss:20b-cloud",
+     "qwen3-coder:480b-cloud", "deepseek-v3.1:671b-cloud", "remote:cloud"],
+)
+def test_production_settings_reject_cloud_names_before_provider_construction(name: str) -> None:
+    safe = {
+        "_env_file": None,
+        "env": "production",
+        "database_url": "postgresql+asyncpg://test:test@127.0.0.1:5432/test",
+        "pending_login_secret": "synthetic-production-secret",
+        "ollama_model": "meyar-test-llm:v1",
+        "ollama_embedding_model": "meyar-test-embed:v1",
+    }
+    assert Settings(**safe).ollama_model == "meyar-test-llm:v1"
+    for field in ("ollama_model", "ollama_embedding_model"):
+        with pytest.raises(ValidationError, match="Production requires a local model identity"):
+            Settings(**(safe | {field: name}))
+
+
+def test_ollama_access_verifier_checks_installed_modes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "host"
+    ai_root = root / "shared/ollama"
+    runtime = ai_root / "runtimes" / ("a" * 64)
+    for path, mode in (
+        (root, 0o751), (root / "shared", 0o2751),
+        (root / "shared/logs", 0o2771), (root / "shared/config", 0o750),
+        (root / "shared/storage", 0o2770), (root / "shared/backups", 0o700),
+        (root / "shared/restores", 0o700), (root / "releases", 0o750),
+        (ai_root, 0o751), (ai_root / "runtimes", 0o711), (runtime, 0o711),
+        (ai_root / "models", 0o700), (ai_root / "state", 0o700),
+    ):
+        path.mkdir(exist_ok=True)
+        path.chmod(mode)
+    for path, mode in (
+        (runtime / "ollama", 0o555), (root / "shared/config/.env", 0o640),
+        (root / "shared/logs/ollama.stdout.log", 0o600),
+        (root / "shared/logs/ollama.stderr.log", 0o600),
+    ):
+        path.touch()
+        path.chmod(mode)
+    runtime.chmod(0o511)
+    from meyar.ops.service_lifecycle import ServicePrincipal, _service_access
+
+    ollama_uid = os.geteuid() + 101
+    owned = {ai_root / "models", ai_root / "state",
+             root / "shared/logs/ollama.stdout.log", root / "shared/logs/ollama.stderr.log"}
+    original_stat = Path.stat
+
+    def synthetic_stat(path: Path, *args: object, **kwargs: object) -> os.stat_result:
+        metadata = original_stat(path, *args, **kwargs)
+        if path not in owned and path not in root.parents:
+            return metadata
+        fields = list(metadata)
+        if path in owned:
+            fields[4] = ollama_uid
+            fields[5] = os.getgid() + 101
+        else:
+            fields[0] |= 0o001  # synthetic ancestor traversal for the service account
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(Path, "stat", synthetic_stat)
+    principal = ServicePrincipal(ollama_uid, frozenset({os.getgid() + 101}))
+    assert not _service_access(root / "shared/config/.env", principal, 0o4)
+    for bit in (0o1, 0o2, 0o4):
+        assert not _service_access(root / "shared/storage", principal, bit)
+    for name in ("models", "state"):
+        assert all(_service_access(ai_root / name, principal, bit) for bit in (0o1, 0o2, 0o4))
+    ai._verify_ollama_access(root, principal, "a" * 64)
+    (root / "shared/config/.env").chmod(0o644)
+    with pytest.raises(ai.AIFailure, match="OLLAMA_LAYOUT_UNSAFE"):
+        ai._verify_ollama_access(root, principal, "a" * 64)
+    (root / "shared/config/.env").chmod(0o640)
+    (root / "shared/storage").chmod(0o2777)
+    with pytest.raises(ai.AIFailure, match="OLLAMA_LAYOUT_UNSAFE"):
+        ai._verify_ollama_access(root, principal, "a" * 64)
+
+
 def test_ollama_plist_is_fixed_local_and_separate(bundle: Path, tmp_path: Path) -> None:
     root = tmp_path / "host"
     state = {
@@ -231,16 +374,22 @@ def test_ollama_service_requires_distinct_user_and_uses_fixed_lifecycle(
 ) -> None:
     root = tmp_path / "host"
     (root / "shared/ollama").mkdir(parents=True)
+    (root / "shared/config").mkdir()
     directory = tmp_path / "LaunchDaemons"
     directory.mkdir()
-    account = SimpleNamespace(pw_uid=os.geteuid() + 2, pw_gid=os.getgid())
-    monkeypatch.setattr(ai.pwd, "getpwnam", lambda _name: account)
+    account = SimpleNamespace(pw_uid=os.geteuid() + 2, pw_gid=os.getgid() + 1)
+    app_account = SimpleNamespace(pw_uid=os.geteuid() + 1, pw_gid=os.getgid())
+    monkeypatch.setattr(
+        ai.pwd, "getpwnam", lambda name: app_account if name == "_meyar" else account
+    )
+    monkeypatch.setattr(ai.os, "getgrouplist", lambda _name, gid: [gid])
     monkeypatch.setattr(ai, "privileged_operation_lock", lambda *_args: nullcontext())
     monkeypatch.setattr(ai, "verify_active_release", lambda _root: "release")
     monkeypatch.setattr(
         ai, "_runtime_state", lambda _root: {"sha256": "a" * 64, "version": "0.12.0"}
     )
     monkeypatch.setattr(ai, "_service_layout", lambda *_args: None)
+    monkeypatch.setattr(ai, "_verify_ollama_access", lambda *_args: None)
     monkeypatch.setattr(
         deployment_ready,
         "_installed_spec",
@@ -324,7 +473,13 @@ def test_runtime_install_no_clobber_and_shared_lock(
 
     monkeypatch.setattr(ai.subprocess, "run", run)
     assert ai.install_ollama(root, bundle).findings[0].code == "OLLAMA_RUNTIME_INSTALLED"
+    runtime_directory = (
+        ai._ai_root(root) / "runtimes" / ai.verify_ai_bundle(bundle).transport.ollama.sha256
+    )
+    assert runtime_directory.stat().st_mode & 0o777 == 0o511
+    runtime_directory.chmod(0o555)  # normalize a pre-correction installation
     assert ai.install_ollama(root, bundle).findings[0].code == "OLLAMA_RUNTIME_ALREADY_INSTALLED"
+    assert runtime_directory.stat().st_mode & 0o777 == 0o511
     assert all(args[1:] == ["--version"] for args in calls)
     runtime = (
         ai._ai_root(root)

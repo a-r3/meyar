@@ -6110,6 +6110,12 @@ an exact root-owned system LaunchDaemon under the existing PR4 lock. It runs
 user, distinct from the install owner and app user. Its fixed environment
 contains only numeric loopback `OLLAMA_HOST`, canonical `OLLAMA_MODELS`,
 private `HOME`, fixed `PATH`, and Ollama's documented `OLLAMA_NO_CLOUD=1`.
+The Ollama principal's complete primary and supplementary group set must
+exclude the installed MEYAR service GID from `shared/config`. Installed
+path modes are checked for secret, candidate-storage, release, backup, and
+restore isolation. Local model tags reject both `cloud` and `*-cloud` at
+the shared manifest, bundle, installed-model, and production Settings
+boundaries.
 The Ollama user owns its private model/state paths and logs; other-execute
 traversal on root/shared/logs permits those paths without granting read
 access to app releases, protected config, candidate storage, backups, or

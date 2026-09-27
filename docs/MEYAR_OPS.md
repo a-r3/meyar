@@ -515,6 +515,8 @@ From the installed release, use the trusted non-root install owner except
 for the four privileged service mutations. The dedicated Ollama account
 must already exist and differ from both the install owner and MEYAR app
 service account. The application LaunchDaemon must already be installed.
+Its full primary and supplementary group set must exclude the MEYAR service
+GID recorded on `shared/config`; group lookup failure blocks installation.
 
 ```bash
 <root>/current/.venv/bin/python -m meyar.ops.cli ai-bundle-verify --bundle-dir <local-ai-bundle>
@@ -537,6 +539,9 @@ manifests are owner-owned and read-only; the Ollama user owns only its
 private model/state directories and dedicated logs. Root/shared/logs allow
 traversal to those paths without read access to app releases, config secrets,
 candidate storage, backups, or restores.
+The service verifies those effective access rights against installed modes
+and refuses widened paths. Local model tags reject `cloud` and any `-cloud`
+suffix through the same validator used by production Settings.
 
 `model-install` verifies every local hash, copies each GGUF into a temporary
 service-readable staging directory, writes only `FROM <verified-local-GGUF>`
