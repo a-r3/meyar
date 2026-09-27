@@ -6237,6 +6237,16 @@ update and explicit rollback, HTTPS edge, diagnostics, and disposable
 synthetic smoke evidence; missing evidence is never a pass. No Alembic
 downgrade or production restore cutover occurs.
 
+**PR13 provenance correction:** A synthetic smoke receipt is valid only when
+the smoke workload itself runs from the verified immutable active release.
+Evidence mode launches `meyar.smoke_workload` with the active release's
+Python; its migration, CLI, and Uvicorn processes use that same Python and
+installed source tree. Disposable PostgreSQL and storage are explicit. The
+worker verifies active release/source/schema/model/config identity before and
+after the run. Receipt format 2 names fixed required capability checks, and
+`lifecycle-acceptance` refuses legacy `PASS` plus step-count evidence. A local
+Ollama timeout or missing capability yields no PASS receipt.
+
 **Boundary:** PR13 engineering tooling and Linux tests are not #35
 acceptance. A separate owner audit after merge decides issue closure.
 Real Apple-Silicon launchctl, reboot and native-runtime behavior remain

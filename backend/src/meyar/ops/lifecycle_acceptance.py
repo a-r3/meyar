@@ -30,6 +30,7 @@ from meyar.ops.restore import DATABASE_IDENTIFIER, _inspect_target, _tree_hash
 from meyar.ops.result import FindingStatus, OpsResult, build_single_finding_result
 from meyar.ops.service_plist import validate_label
 from meyar.ops.service_status import run_service_status
+from meyar.ops.smoke_contract import REQUIRED_CHECKS
 from meyar.ops.update import (
     UpdateFailure,
     _active_generation,
@@ -246,18 +247,22 @@ def _smoke(root: Path, smoke_id: str, identity: tuple[Any, ...]) -> bool:
             "release_id",
             "source_sha",
             "disposable_database",
-            "all_steps_passed",
-            "step_count",
+            "alembic_head",
+            "execution_mode",
+            "all_required_steps_passed",
+            "passed_checks",
         }
-        and receipt["format_version"] == 1
+        and receipt["format_version"] == 2
         and receipt["smoke_id"] == smoke_id
         and receipt["status"] == "PASS"
         and receipt["release_id"] == identity[0]
         and receipt["source_sha"] == identity[1]
+        and receipt["alembic_head"] == identity[2]
+        and receipt["execution_mode"] == "installed-release"
         and receipt["disposable_database"] is True
-        and receipt["all_steps_passed"] is True
-        and type(receipt["step_count"]) is int
-        and receipt["step_count"] >= 12
+        and receipt["all_required_steps_passed"] is True
+        and type(receipt["passed_checks"]) is list
+        and receipt["passed_checks"] == sorted(REQUIRED_CHECKS)
     )
 
 

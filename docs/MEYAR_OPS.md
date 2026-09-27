@@ -1369,12 +1369,36 @@ restores, updates, models, diagnostics, benchmarks, or DB data.
 immutable release/source/config/schema/model, services and full readiness,
 then the named reboot, verified backup, isolated restore, finalized update
 and explicit rollback, HTTPS edge, diagnostics, and synthetic smoke evidence.
-The accepted `backend/scripts/fresh_deployment_smoke.py` can publish the
-last receipt only after every step passes against its disposable database:
-`uv run python scripts/fresh_deployment_smoke.py --ops-install-root <root>
---app-label <app-label> --smoke-id <id>`. This separate source-side smoke
-requires its own local Docker/uv/Ollama prerequisites; it is not a
-production-tenant seeder or destination-host Git deployment instruction.
+Run the smoke worker directly on the installed host:
+`<root>/current/.venv/bin/python -I -m meyar.smoke_workload --ops-install-root <root> --app-label <app-label> --smoke-id <id>`.
+`backend/scripts/fresh_deployment_smoke.py` dispatches that same command
+when invoked from a checkout with all three evidence options. The worker
+verifies the exact active release, its installed Python/source and Alembic
+head before creating a disposable PostgreSQL container and temporary
+storage. Migration, CLI and Uvicorn subprocesses all use the verified
+immutable release Python with
+`-I`; Alembic uses that release's `backend/alembic.ini` and migration tree.
+The Docker endpoint must be a local Unix socket; the disposable database has
+a random name/password and a `127.0.0.1`-only port mapping. Evidence-mode
+Uvicorn inherits a pre-bound loopback socket so HTTP responses can only come
+from the launched installed-release process.
+The worker re-verifies release, model and configuration identity before
+publishing. It strips ambient `MEYAR_*` and `PYTHON*` values from the smoke
+subprocess environment, sets the disposable DB/storage explicitly, and uses
+only the protected host settings for the local Ollama/model identities.
+Docker and local Ollama are required; `uv` is used only by the ordinary
+checkout developer mode. A failed extraction, embedding, or other
+required capability publishes no PASS receipt. This is not a production-
+tenant seeder or destination-host Git deployment instruction.
+
+Smoke receipt format 2 records only `smoke_id`, PASS, release/source/head,
+`execution_mode: installed-release`, `disposable_database: true`,
+`all_required_steps_passed: true`, and fixed `passed_checks` identifiers:
+`fresh_schema`, `auth_login`, `synthetic_cv_ingestion`, `local_extraction`,
+`local_embedding`, `candidate_library_detail`, `structured_search`,
+`vacancy_flow`, `deterministic_scoring`, `deterministic_ranking`,
+`original_cv_authorization`, and `restart_persistence`. Legacy receipts
+cannot satisfy lifecycle acceptance.
 Missing evidence is `INCOMPLETE`, invalid/tampered evidence is `FAIL`, and
 every check must be `PASS` for overall `PASS`. The new `0700`
 `shared/acceptance/<run-id>/` directory has `0600` `manifest.json`,
