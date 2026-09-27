@@ -13,6 +13,7 @@ from meyar.ops import deployment_ready, update
 from meyar.ops.alembic_static_metadata import prove_static_linear_upgrade
 from meyar.ops.offline_host import InstallFailure
 from meyar.ops.result import FindingStatus, OpsResultBuilder
+from meyar.ops.service_plist import ServiceSpec
 
 FROM = "meyar-0.1.0+" + "a" * 12
 TO = "meyar-0.1.1+" + "b" * 12
@@ -514,6 +515,22 @@ def test_receipt_fsync_failure_never_reports_completion(
     assert PASSWORD not in str(failure.value)
 
 
+def _final_service_probes(
+    root: Path, monkeypatch: pytest.MonkeyPatch, state: dict[str, str]
+) -> None:
+    monkeypatch.setattr(
+        deployment_ready,
+        "_installed_spec",
+        lambda *_args: (ServiceSpec(LABEL, "meyar", root, 8000), b"canonical-plist"),
+    )
+    monkeypatch.setattr(
+        update,
+        "run_service_status",
+        lambda **_kwargs: update._result("service-status", state["launchd"], ok=True),
+    )
+    monkeypatch.setattr(deployment_ready, "_probe_application", lambda _port: state["health"])
+
+
 def test_finalize_publishes_only_after_full_readiness(
     ops_host_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -523,6 +540,8 @@ def test_finalize_publishes_only_after_full_readiness(
     plan["actor_uid"] = update.os.geteuid()
     receipt = update._phase_record(plan, backup_id="backup-1", activation_generation="g-update")
     monkeypatch.setattr(update, "_finalize_snapshot", lambda *_a, **_k: (directory, plan, receipt))
+    state = {"launchd": "SERVICE_VISIBLE", "health": "APPLICATION_LIVE"}
+    _final_service_probes(ops_host_root, monkeypatch, state)
     monkeypatch.setattr(
         deployment_ready,
         "run_deployment_ready",
@@ -541,6 +560,10 @@ def test_finalize_publishes_only_after_full_readiness(
         "UPDATE_COMPLETED"
     )
     assert (directory / "finalize.json").exists()
+    state["launchd"] = "SERVICE_NOT_VISIBLE"
+    assert update.run_update_finalize(ops_host_root, LABEL, "update-1").findings[0].code == (
+        "UPDATE_COMPLETED"
+    )
 
 
 def test_forward_rollback_finalize_requires_distinct_schema_finding(
@@ -552,6 +575,8 @@ def test_forward_rollback_finalize_requires_distinct_schema_finding(
     plan["actor_uid"] = update.os.geteuid()
     receipt = update._phase_record(plan, backup_id="backup-1", activation_generation="g-rollback")
     monkeypatch.setattr(update, "_finalize_snapshot", lambda *_a, **_k: (directory, plan, receipt))
+    state = {"launchd": "SERVICE_VISIBLE", "health": "APPLICATION_LIVE"}
+    _final_service_probes(ops_host_root, monkeypatch, state)
     monkeypatch.setattr(
         deployment_ready,
         "run_deployment_ready",
@@ -571,3 +596,79 @@ def test_forward_rollback_finalize_requires_distinct_schema_finding(
     assert update.run_rollback_finalize(ops_host_root, LABEL, "update-1").findings[0].code == (
         "ROLLBACK_COMPLETED"
     )
+    assert (directory / "rollback_finalize.json").exists()
+    state["launchd"] = "SERVICE_NOT_VISIBLE"
+    assert update.run_rollback_finalize(ops_host_root, LABEL, "update-1").findings[0].code == (
+        "ROLLBACK_COMPLETED"
+    )
+
+
+@pytest.mark.parametrize(
+    "rollback,phase,completed,changed",
+    [
+        (False, "finalize", "UPDATE_COMPLETED", "UPDATE_READINESS_CHANGED"),
+        (True, "rollback_finalize", "ROLLBACK_COMPLETED", "ROLLBACK_READINESS_CHANGED"),
+    ],
+)
+@pytest.mark.parametrize(
+    "launchd",
+    ["SERVICE_NOT_VISIBLE", "SERVICE_PROBE_FAILED", "LAUNCHCTL_TIMEOUT", "LAUNCHCTL_UNAVAILABLE"],
+)
+def test_finalize_rechecks_service_after_green_readiness(
+    ops_host_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    rollback: bool,
+    phase: str,
+    completed: str,
+    changed: str,
+    launchd: str,
+) -> None:
+    monkeypatch.setattr(update.platform, "system", lambda: "Darwin")
+    directory = update._transaction(ops_host_root, "update-1", create=True)
+    plan = _plan()
+    plan["actor_uid"] = update.os.geteuid()
+    receipt = update._phase_record(plan, backup_id="backup-1", activation_generation="g-1")
+    monkeypatch.setattr(update, "_finalize_snapshot", lambda *_a, **_k: (directory, plan, receipt))
+    state = {"launchd": "SERVICE_VISIBLE", "health": "APPLICATION_LIVE"}
+    _final_service_probes(ops_host_root, monkeypatch, state)
+
+    def green_then_stop(*_args: object) -> object:
+        state["launchd"] = launchd
+        return update._result("deployment-ready", "READY", ok=True)
+
+    monkeypatch.setattr(deployment_ready, "run_deployment_ready", green_then_stop)
+    finalize = update.run_rollback_finalize if rollback else update.run_update_finalize
+    result = finalize(ops_host_root, LABEL, "update-1")
+    assert result.findings[0].code == changed
+    assert result.findings[0].code != completed
+    assert not (directory / f"{phase}.json").exists()
+
+
+@pytest.mark.parametrize("health", ["APPLICATION_UNREACHABLE", "APPLICATION_HEALTH_INVALID"])
+@pytest.mark.parametrize("rollback", [False, True])
+def test_finalize_rejects_liveness_drift_after_green_readiness(
+    ops_host_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    rollback: bool,
+    health: str,
+) -> None:
+    monkeypatch.setattr(update.platform, "system", lambda: "Darwin")
+    directory = update._transaction(ops_host_root, "update-1", create=True)
+    plan = _plan()
+    plan["actor_uid"] = update.os.geteuid()
+    receipt = update._phase_record(plan, backup_id="backup-1", activation_generation="g-1")
+    monkeypatch.setattr(update, "_finalize_snapshot", lambda *_a, **_k: (directory, plan, receipt))
+    state = {"launchd": "SERVICE_VISIBLE", "health": "APPLICATION_LIVE"}
+    _final_service_probes(ops_host_root, monkeypatch, state)
+
+    def green_then_drift(*_args: object) -> object:
+        state["health"] = health
+        return update._result("deployment-ready", "READY", ok=True)
+
+    monkeypatch.setattr(deployment_ready, "run_deployment_ready", green_then_drift)
+    finalize = update.run_rollback_finalize if rollback else update.run_update_finalize
+    result = finalize(ops_host_root, LABEL, "update-1")
+    assert result.findings[0].code == (
+        "ROLLBACK_READINESS_CHANGED" if rollback else "UPDATE_READINESS_CHANGED"
+    )
+    assert not (directory / ("rollback_finalize.json" if rollback else "finalize.json")).exists()

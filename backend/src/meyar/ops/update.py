@@ -732,6 +732,28 @@ def _finalize_snapshot(
     return directory, plan, receipt
 
 
+def _finalize_service_ready(root: Path, label: str, *, rollback: bool) -> None:
+    """Recheck service authority under the operation lock before publication."""
+    from meyar.ops import deployment_ready
+
+    changed = "ROLLBACK_READINESS_CHANGED" if rollback else "UPDATE_READINESS_CHANGED"
+    try:
+        spec, _ = deployment_ready._installed_spec(
+            root, label, Path("/Library/LaunchDaemons"), 0, os.geteuid()
+        )
+        launchd = deployment_ready._launchd_code(
+            run_service_status(label=label, platform_system="Darwin")
+        )
+        if launchd != "SERVICE_VISIBLE":
+            raise UpdateFailure(changed)
+        if deployment_ready._probe_application(spec.port) != "APPLICATION_LIVE":
+            raise UpdateFailure(changed)
+    except UpdateFailure:
+        raise
+    except Exception as exc:  # noqa: BLE001 - never expose plist, launchctl, or health text
+        raise UpdateFailure(changed) from exc
+
+
 def _finalize(root: Path, label: str, update_id: str, *, rollback: bool) -> OpsResult:
     action = "rollback-finalize" if rollback else "update-finalize"
     phase = "rollback_finalize" if rollback else "finalize"
@@ -771,6 +793,7 @@ def _finalize(root: Path, label: str, update_id: str, *, rollback: bool) -> OpsR
                 raise UpdateFailure(
                     "ROLLBACK_STATE_INVALID" if rollback else "UPDATE_STATE_UNCERTAIN"
                 )
+            _finalize_service_ready(root, label, rollback=rollback)
             _publish_phase(directory, phase, _phase_record(plan))
         return _result(action, "ROLLBACK_COMPLETED" if rollback else "UPDATE_COMPLETED", ok=True)
     except UpdateFailure as exc:
