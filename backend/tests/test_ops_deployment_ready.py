@@ -158,6 +158,38 @@ def test_full_installed_deployment_ready_without_mutation(
     assert before == [(path.read_bytes(), path.stat().st_mode) for path in watched]
 
 
+def test_only_evidenced_forward_rollback_receives_distinct_schema_finding(
+    deployment: tuple[Path, Path, ServiceSpec, list[list[str]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from meyar.ops import update
+
+    monkeypatch.setattr(update, "forward_rollback_head", lambda _root, _release: "target")
+
+    async def target_database(_url: str, head: str) -> tuple[str, str]:
+        assert head == "target"
+        return "DATABASE_REACHABLE", "DB_REVISION_CURRENT"
+
+    monkeypatch.setattr(gate, "_probe_database", target_database)
+    result = run(deployment)
+    assert result.ok, codes(result)
+    assert codes(result)["db_schema"] == "DB_REVISION_FORWARD_COMPATIBLE_ROLLBACK"
+
+
+def test_ordinary_schema_mismatch_remains_failure(
+    deployment: tuple[Path, Path, ServiceSpec, list[list[str]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def wrong_database(_url: str, head: str) -> tuple[str, str]:
+        assert head == "rev1"
+        return "DATABASE_REACHABLE", "SCHEMA_MISMATCH"
+
+    monkeypatch.setattr(gate, "_probe_database", wrong_database)
+    result = run(deployment)
+    assert not result.ok
+    assert codes(result)["db_schema"] == "SCHEMA_MISMATCH"
+
+
 @pytest.mark.parametrize("fault", ["missing", "symlink", "mode", "bytes", "extra_key"])
 def test_installed_plist_fail_closed(
     deployment: tuple[Path, Path, ServiceSpec, list[list[str]]], fault: str

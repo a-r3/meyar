@@ -219,11 +219,15 @@ def run_deployment_ready(
     installed: bytes | None = None
     principal: ServicePrincipal | None = None
     model_snapshot: tuple[str, dict[str, object]] | None = None
+    compatible_rollback_head: str | None = None
     try:
         with privileged_operation_lock(root, owner_uid):
             try:
                 _, head = _active_config(root, implementation_file=Path(__file__))
                 release_id = verify_active_release(root)
+                from meyar.ops.update import forward_rollback_head
+
+                compatible_rollback_head = forward_rollback_head(root, release_id)
             except (SchemaInitFailure, InstallFailure) as exc:
                 _finding(builder, "active_release", "ACTIVE_RELEASE_INVALID", status=Status.FAIL)
                 migration_invalid = isinstance(exc, SchemaInitFailure) and exc.code in {
@@ -348,7 +352,11 @@ def run_deployment_ready(
             for component in ("ollama", "llm_model", "embedding_model"):
                 _skip(builder, component)
         else:
-            database, schema = asyncio.run(_probe_database(settings.database_url, head))
+            database, schema = asyncio.run(
+                _probe_database(settings.database_url, compatible_rollback_head or head)
+            )
+            if schema == "DB_REVISION_CURRENT" and compatible_rollback_head is not None:
+                schema = "DB_REVISION_FORWARD_COMPATIBLE_ROLLBACK"
             _finding(
                 builder,
                 "database",
@@ -362,7 +370,9 @@ def run_deployment_ready(
                     builder,
                     "db_schema",
                     schema,
-                    status=Status.OK if schema == "DB_REVISION_CURRENT" else Status.FAIL,
+                    status=Status.OK if schema in {
+                        "DB_REVISION_CURRENT", "DB_REVISION_FORWARD_COMPATIBLE_ROLLBACK"
+                    } else Status.FAIL,
                 )
             daemon, llm, embedding = asyncio.run(_probe_ollama(settings))
             if model_snapshot is None:
@@ -411,6 +421,10 @@ def run_deployment_ready(
                 _, final_head = _active_config(root, implementation_file=Path(__file__))
                 if verify_active_release(root) != release_id or final_head != head:
                     raise ValueError("active release changed")
+                from meyar.ops.update import forward_rollback_head
+
+                if forward_rollback_head(root, release_id) != compatible_rollback_head:
+                    raise ValueError("rollback evidence changed")
                 if load_host_settings(root) != settings:
                     raise ValueError("host config changed")
                 if verify_installed_models(root, settings, probe=True) != model_snapshot:
