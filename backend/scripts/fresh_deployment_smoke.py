@@ -23,6 +23,7 @@ are recorded as environment-limited rather than fabricated as passing.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import shutil
@@ -57,6 +58,21 @@ def _run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, check=True, **kwargs)
 
 
+def _created_tenant(stdout: str) -> tuple[str, str]:
+    """Parse the current CLI's one-time key without printing it."""
+    lines = stdout.splitlines()
+    try:
+        tenant_line = next(line for line in lines if line.startswith("Created tenant: "))
+        tenant_id = tenant_line.split(": ", 1)[1].split(" (", 1)[0].strip()
+        marker = lines.index("API key (shown once, store it now):")
+        key = lines[marker + 1].strip()
+        if not tenant_id or not key.startswith("meyar_test_"):
+            raise ValueError
+        return tenant_id, key
+    except (StopIteration, IndexError, ValueError) as exc:
+        raise RuntimeError("tenant provisioning output invalid") from exc
+
+
 def _require_tools() -> None:
     missing = [t for t in ("docker", "uv") if shutil.which(t) is None]
     if missing:
@@ -68,19 +84,31 @@ def _start_disposable_postgres() -> None:
     subprocess.run(["docker", "rm", "-f", CONTAINER], capture_output=True)
     _run(
         [
-            "docker", "run", "--rm", "-d", "--name", CONTAINER,
-            "-e", f"POSTGRES_USER={PG_USER}",
-            "-e", f"POSTGRES_PASSWORD={PG_PASSWORD}",
-            "-e", f"POSTGRES_DB={PG_DB}",
-            "-p", f"{PORT}:5432",
+            "docker",
+            "run",
+            "--rm",
+            "-d",
+            "--name",
+            CONTAINER,
+            "-e",
+            f"POSTGRES_USER={PG_USER}",
+            "-e",
+            f"POSTGRES_PASSWORD={PG_PASSWORD}",
+            "-e",
+            f"POSTGRES_DB={PG_DB}",
+            "-p",
+            f"{PORT}:5432",
             IMAGE,
         ]
     )
     for _ in range(30):
-        if subprocess.run(
-            ["docker", "exec", CONTAINER, "pg_isready", "-U", PG_USER, "-d", PG_DB],
-            capture_output=True,
-        ).returncode == 0:
+        if (
+            subprocess.run(
+                ["docker", "exec", CONTAINER, "pg_isready", "-U", PG_USER, "-d", PG_DB],
+                capture_output=True,
+            ).returncode
+            == 0
+        ):
             return
         time.sleep(1)
     raise RuntimeError("disposable Postgres never became ready")
@@ -105,6 +133,17 @@ def _start_app(env: dict, log_path: Path) -> subprocess.Popen:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--ops-install-root", type=Path)
+    parser.add_argument("--smoke-id")
+    parser.add_argument("--app-label")
+    args = parser.parse_args()
+    if any(
+        value is not None for value in (args.ops_install_root, args.smoke_id, args.app_label)
+    ) and not all(
+        value is not None for value in (args.ops_install_root, args.smoke_id, args.app_label)
+    ):
+        parser.error("all smoke evidence options must be supplied together")
     _require_tools()
     tmp = Path(tempfile.mkdtemp(prefix="meyar-smoke-"))
     storage_root = tmp / "storage"
@@ -134,14 +173,11 @@ def main() -> None:
         print("== provisioning tenant/API key via CLI ==")
         create = _run(
             ["uv", "run", "meyar", "create-tenant", "--name", "Smoke-Test-Tenant"],
-            env=env, capture_output=True, text=True,
+            env=env,
+            capture_output=True,
+            text=True,
         )
-        print(create.stdout)
-        api_key = next(
-            line.split(": ", 1)[1].strip()
-            for line in create.stdout.splitlines()
-            if line.startswith("API key")
-        )
+        tenant_id, api_key = _created_tenant(create.stdout)
         _record("CLI tenant/API-key provisioning", True)
 
         print("== starting real uvicorn process ==")
@@ -164,7 +200,9 @@ def main() -> None:
 
         fixture = (
             Path(__file__).resolve().parent.parent.parent
-            / "fixtures" / "synthetic_cvs" / "valid_cv.pdf"
+            / "fixtures"
+            / "synthetic_cvs"
+            / "valid_cv.pdf"
         )
         upload = httpx.post(
             f"{BASE_URL}/api/v1/candidates/{candidate_id}/documents",
@@ -183,17 +221,25 @@ def main() -> None:
         # docs/DECISIONS.md D-018/D-019): run via `meyar extract-profile`/
         # `meyar embed-candidate` against the same disposable DB the app
         # process is using.
-        tenant_id = create.stdout.splitlines()[0].split(": ", 1)[1].split(" (")[0].strip()
         extraction_completed = False
         try:
             extract_cli = subprocess.run(
                 [
-                    "uv", "run", "meyar", "extract-profile",
-                    "--tenant-id", tenant_id,
-                    "--candidate-id", candidate_id,
-                    "--document-id", document_id,
+                    "uv",
+                    "run",
+                    "meyar",
+                    "extract-profile",
+                    "--tenant-id",
+                    tenant_id,
+                    "--candidate-id",
+                    candidate_id,
+                    "--document-id",
+                    document_id,
                 ],
-                env=env, capture_output=True, text=True, timeout=300,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=300,
             )
             print(extract_cli.stdout)
             extraction_completed = "Status: COMPLETED" in extract_cli.stdout
@@ -201,7 +247,8 @@ def main() -> None:
                 "profile extraction via real local Ollama LLM (CLI)",
                 extraction_completed,
                 extract_cli.stdout.strip().splitlines()[-1]
-                if extract_cli.stdout else extract_cli.stderr[:300],
+                if extract_cli.stdout
+                else extract_cli.stderr[:300],
             )
         except subprocess.TimeoutExpired:
             _record(
@@ -215,10 +262,19 @@ def main() -> None:
         try:
             embed_cli = subprocess.run(
                 [
-                    "uv", "run", "meyar", "embed-candidate",
-                    "--tenant-id", tenant_id, "--candidate-id", candidate_id,
+                    "uv",
+                    "run",
+                    "meyar",
+                    "embed-candidate",
+                    "--tenant-id",
+                    tenant_id,
+                    "--candidate-id",
+                    candidate_id,
                 ],
-                env=env, capture_output=True, text=True, timeout=60,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
             )
             embedding_completed = (
                 embed_cli.returncode == 0 and "could not run" not in embed_cli.stdout
@@ -338,6 +394,29 @@ def main() -> None:
         print(f"\n{len(failed)} step(s) failed or were environment-limited (see above).")
         sys.exit(1)
     print("\nFRESH-DEPLOYMENT SMOKE: ALL STEPS PASSED.")
+    if args.ops_install_root is not None:
+        from meyar.ops.diagnostics import _identity
+        from meyar.ops.offline_host import _operation_lock
+        from meyar.ops.private_evidence import area, publish_bundle
+
+        with _operation_lock(args.ops_install_root):
+            identity = _identity(args.ops_install_root, args.app_label)
+            publish_bundle(
+                area(args.ops_install_root, "smoke", create=True),
+                args.smoke_id,
+                {
+                    "manifest.json": {
+                        "format_version": 1,
+                        "smoke_id": args.smoke_id,
+                        "status": "PASS",
+                        "release_id": identity[0],
+                        "source_sha": identity[1],
+                        "disposable_database": True,
+                        "all_steps_passed": True,
+                        "step_count": len(results),
+                    }
+                },
+            )
 
 
 if __name__ == "__main__":

@@ -25,12 +25,17 @@ from meyar.ops.ai_provision import (
 )
 from meyar.ops.backup import run_backup_create, run_backup_verify
 from meyar.ops.build_release import BuildReleaseRequest, build_release
+from meyar.ops.cleanup import run_cleanup
 from meyar.ops.deployment_ready import run_deployment_ready
+from meyar.ops.diagnostics import collect_diagnostics, verify_diagnostics
+from meyar.ops.edge import run_edge_verify
 from meyar.ops.host_config import verify_host_config
+from meyar.ops.lifecycle_acceptance import run_lifecycle_acceptance
 from meyar.ops.model_manifest import ModelApprovalStatus
 from meyar.ops.offline_bundle import BundleBuildRequest, build_deployment_bundle
 from meyar.ops.preflight import run_preflight
 from meyar.ops.readiness import run_readiness
+from meyar.ops.reboot import run_reboot_prepare, run_reboot_verify
 from meyar.ops.redact import safe_exception_text
 from meyar.ops.release_manifest import RollbackCompatibility
 from meyar.ops.restore import run_restore
@@ -102,6 +107,58 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     deployment_parser.add_argument("--install-root", type=Path, required=True)
     deployment_parser.add_argument("--label", type=str, required=True)
+
+    diagnostics_parser = sub.add_parser(
+        "collect-diagnostics", help="Publish allowlisted local diagnostics."
+    )
+    diagnostics_parser.add_argument("--install-root", type=Path, required=True)
+    diagnostics_parser.add_argument("--app-label", type=str, required=True)
+    diagnostics_parser.add_argument("--ollama-label", type=str, required=True)
+    diagnostics_parser.add_argument("--diagnostic-id", type=str, required=True)
+    diagnostics_verify = sub.add_parser(
+        "diagnostics-verify", help="Verify a private diagnostics bundle."
+    )
+    diagnostics_verify.add_argument("--install-root", type=Path, required=True)
+    diagnostics_verify.add_argument("--diagnostic-id", type=str, required=True)
+
+    edge_parser = sub.add_parser("edge-verify", help="Verify bank-managed HTTPS ingress health.")
+    edge_parser.add_argument("--origin", type=str, required=True)
+    edge_parser.add_argument("--ca-file", type=Path)
+    edge_parser.add_argument("--install-root", type=Path)
+    edge_parser.add_argument("--edge-id", type=str)
+    edge_parser.add_argument("--app-label", type=str)
+
+    for command in ("reboot-prepare", "reboot-verify"):
+        reboot_parser = sub.add_parser(command, help="Human-operated reboot survival proof.")
+        reboot_parser.add_argument("--install-root", type=Path, required=True)
+        reboot_parser.add_argument("--app-label", type=str, required=True)
+        reboot_parser.add_argument("--ollama-label", type=str, required=True)
+        reboot_parser.add_argument("--reboot-id", type=str, required=True)
+
+    cleanup_parser = sub.add_parser(
+        "cleanup", help="Inspect or remove proven abandoned activation links."
+    )
+    cleanup_parser.add_argument("--install-root", type=Path, required=True)
+    cleanup_parser.add_argument("--apply", action="store_true")
+
+    acceptance_parser = sub.add_parser(
+        "lifecycle-acceptance", help="Record the full lifecycle evidence matrix."
+    )
+    acceptance_parser.add_argument("--install-root", type=Path, required=True)
+    acceptance_parser.add_argument("--app-label", type=str, required=True)
+    acceptance_parser.add_argument("--ollama-label", type=str, required=True)
+    acceptance_parser.add_argument("--run-id", type=str, required=True)
+    for identifier in (
+        "backup-id",
+        "restore-id",
+        "update-id",
+        "reboot-id",
+        "edge-id",
+        "diagnostic-id",
+    ):
+        acceptance_parser.add_argument(f"--{identifier}", type=str)
+    acceptance_parser.add_argument("--pg-bin-dir", type=Path)
+    acceptance_parser.add_argument("--smoke-id", type=str)
 
     backup_create_parser = sub.add_parser(
         "backup-create", help="Create a quiesced installed backup."
@@ -253,6 +310,45 @@ def _run_command(args: argparse.Namespace) -> OpsResult:
         return run_schema_init(args.install_root)
     if args.command == "deployment-ready":
         return run_deployment_ready(args.install_root, args.label)
+    if args.command == "collect-diagnostics":
+        return collect_diagnostics(
+            args.install_root, args.app_label, args.ollama_label, args.diagnostic_id
+        )
+    if args.command == "diagnostics-verify":
+        return verify_diagnostics(args.install_root, args.diagnostic_id)
+    if args.command == "edge-verify":
+        return run_edge_verify(
+            args.origin,
+            args.ca_file,
+            install_root=args.install_root,
+            edge_id=args.edge_id,
+            app_label=args.app_label,
+        )
+    if args.command == "reboot-prepare":
+        return run_reboot_prepare(
+            args.install_root, args.app_label, args.ollama_label, args.reboot_id
+        )
+    if args.command == "reboot-verify":
+        return run_reboot_verify(
+            args.install_root, args.app_label, args.ollama_label, args.reboot_id
+        )
+    if args.command == "cleanup":
+        return run_cleanup(args.install_root, apply=args.apply)
+    if args.command == "lifecycle-acceptance":
+        return run_lifecycle_acceptance(
+            args.install_root,
+            args.app_label,
+            args.ollama_label,
+            args.run_id,
+            backup_id=args.backup_id,
+            restore_id=args.restore_id,
+            update_id=args.update_id,
+            reboot_id=args.reboot_id,
+            edge_id=args.edge_id,
+            diagnostic_id=args.diagnostic_id,
+            smoke_id=args.smoke_id,
+            pg_bin_dir=args.pg_bin_dir,
+        )
     if args.command == "backup-create":
         return run_backup_create(args.install_root, args.label, args.backup_id, args.pg_bin_dir)
     if args.command == "backup-verify":

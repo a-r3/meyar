@@ -10,7 +10,8 @@ foundation — D-075), PR7 (fresh database schema initialization —
 D-076), PR8 (installed deployment readiness — D-077), PR9
 (production backup creation/verification — D-078), and PR10
 (isolated restore — D-079), PR11 (offline local AI provisioning —
-D-080), and PR12 (staged update and rollback — D-081). See §11 below
+D-080), PR12 (staged update and rollback — D-081), and PR13
+(diagnostics and lifecycle evidence — D-082). See §11 below
 for the #35/#46 boundary.
 
 **PR3 scope reminder — read before assuming this means "deployable":**
@@ -1042,7 +1043,7 @@ cutover, update, or rollback is included.
 provisioning, dedicated LaunchDaemon, exact installed manifest/digest
 verification, and readiness/runtime identity checks. No model approval.
 
-**#35 PR12 (D-081, independent review pending):** staged update and explicit
+**#35 PR12 (D-081, merged as PR #75):** staged update and explicit
 application rollback with mandatory verified backup and durable receipts.
 No downgrade or production restore cutover.
 
@@ -1297,3 +1298,108 @@ an unfinished transaction or a forward-compatible rollback. That latter
 state requires a separately reviewed reconciliation procedure before any
 new update; PR12 provides no generic schema-override flag or production
 restore cutover. Real Apple-Silicon/launchd behavior remains unconfirmed.
+
+## PR13 — diagnostics, HTTPS edge, reboot proof, cleanup, lifecycle matrix (D-082)
+
+PR12 / PR #75 merged and was post-merge verified. Accepted main is
+`7c911cbc850d21999eae2239e6b51bfedc570d4a`. PR13 is engineering
+closure tooling for #35; the separate owner acceptance audit decides
+whether #35 can close. Run the active release's Python as the trusted
+non-root install owner. IDs match `[A-Za-z0-9][A-Za-z0-9_-]{0,79}`.
+
+```bash
+<root>/current/.venv/bin/python -m meyar.ops.cli collect-diagnostics --install-root <root> --app-label <app-label> --ollama-label <ollama-label> --diagnostic-id <id>
+<root>/current/.venv/bin/python -m meyar.ops.cli diagnostics-verify --install-root <root> --diagnostic-id <id>
+<root>/current/.venv/bin/python -m meyar.ops.cli edge-verify --origin https://<bank-hostname> --ca-file <bank-approved-ca-file> --install-root <root> --app-label <app-label> --edge-id <id>
+<root>/current/.venv/bin/python -m meyar.ops.cli reboot-prepare --install-root <root> --app-label <app-label> --ollama-label <ollama-label> --reboot-id <id>
+# Human/IT performs one normal machine reboot here.
+<root>/current/.venv/bin/python -m meyar.ops.cli reboot-verify --install-root <root> --app-label <app-label> --ollama-label <ollama-label> --reboot-id <id>
+<root>/current/.venv/bin/python -m meyar.ops.cli cleanup --install-root <root>
+<root>/current/.venv/bin/python -m meyar.ops.cli cleanup --install-root <root> --apply
+<root>/current/.venv/bin/python -m meyar.ops.cli lifecycle-acceptance --install-root <root> --app-label <app-label> --ollama-label <ollama-label> --run-id <id> --backup-id <backup-id> --restore-id <restore-id> --update-id <update-id> --reboot-id <reboot-id> --edge-id <edge-id> --diagnostic-id <diagnostic-id> --smoke-id <smoke-id> --pg-bin-dir <trusted-postgresql-bin-dir>
+```
+
+Omit `--ca-file` for system trust. `edge-verify` without the three evidence
+arguments is a read-only probe; supply `--install-root`, `--app-label`, and
+`--edge-id` together to publish a receipt for lifecycle acceptance. The
+bank manages TLS/reverse proxy/ingress. Browsers reach its HTTPS origin;
+the proxy reaches MEYAR on numeric `127.0.0.1:<MEYAR-port>`. Uvicorn and
+Ollama remain loopback-only. The verifier makes only an unauthenticated
+direct `GET /api/v1/health` to the explicit HTTPS origin: no redirect,
+proxy environment, cookies, API key, request body, candidate data, or
+arbitrary path. It requires system or explicit CA trust, hostname
+validation, HTTP 200, and exact `{"status":"ok"}` within 1024 bytes and
+three seconds. No internet dependency or proxy installer is introduced.
+
+`collect-diagnostics` writes only the following `0600` files inside a
+new `0700` `<root>/shared/diagnostics/<id>/` directory, with no overwrite:
+`manifest.json`, `environment.json`, `deployment.json`, `services.json`,
+`database.json`, `ai.json`, `operations.json`, `filesystem.json`, and
+`checksums.sha256`. These carry safe release/source/schema/model manifest,
+installed LLM and embedding digests, and Ollama runtime version/hash
+identities, fixed finding codes, platform/Python, service labels/status,
+and filesystem capacity. They contain no raw logs, launchctl output,
+config values, database rows/dumps, candidate filename/content/identity,
+query, prompt, model response, or storage enumeration. No upload exists.
+The command takes the operation lock to capture deployment identity,
+releases it for bounded readiness/service probes, then reacquires it to
+recheck active release, config file identity, model receipt, and service
+plist before no-clobber publication. A changed identity fails
+`DIAGNOSTICS_STATE_CHANGED`. Collection self-verifies exact members,
+private modes, JSON shape, duplicate keys, size bounds, and hashes.
+
+`reboot-prepare` records macOS `kern.boottime` (via fixed `/usr/sbin/sysctl`
+argv), active release/source/schema/model/runtime, labels, time, and
+operator UID under `shared/reboots/<id>-prepare/`. It never reboots the
+machine. After a human/IT reboot, `reboot-verify` requires a strictly
+newer boot identity, unchanged deployment identity, both visible system
+LaunchDaemons, full `deployment-ready` (including app liveness), and
+live model verification before publishing a separate private
+`<id>-verify` receipt. Same-boot verification fails truthfully.
+
+`cleanup` is dry-run by default. `--apply` deletes only a proven orphan
+`<root>/.next-current-<32 hex>` symlink created by PR4 activation, with
+the exact canonical activation-generation target. It refuses deletion
+when a similarly named, wrong-type, foreign-owner, unknown-target, or
+active-target entry is present. The operation lock protects mutation.
+It never deletes releases, generations, config, storage, logs, backups,
+restores, updates, models, diagnostics, benchmarks, or DB data.
+
+`lifecycle-acceptance` validates current Darwin/arm64 and active CPython,
+immutable release/source/config/schema/model, services and full readiness,
+then the named reboot, verified backup, isolated restore, finalized update
+and explicit rollback, HTTPS edge, diagnostics, and synthetic smoke evidence.
+The accepted `backend/scripts/fresh_deployment_smoke.py` can publish the
+last receipt only after every step passes against its disposable database:
+`uv run python scripts/fresh_deployment_smoke.py --ops-install-root <root>
+--app-label <app-label> --smoke-id <id>`. This separate source-side smoke
+requires its own local Docker/uv/Ollama prerequisites; it is not a
+production-tenant seeder or destination-host Git deployment instruction.
+Missing evidence is `INCOMPLETE`, invalid/tampered evidence is `FAIL`, and
+every check must be `PASS` for overall `PASS`. The new `0700`
+`shared/acceptance/<run-id>/` directory has `0600` `manifest.json`,
+`checks.json`, `summary.json`, and `checksums.sha256`. `summary.json`
+contains `status: PASS|FAIL|INCOMPLETE`, release/source, and fixed-code
+check results. This command performs no service/update/restore mutation.
+
+The #35 agentless sequence is: preflight → offline install → configure →
+schema-init → offline Ollama/models → app/Ollama LaunchDaemons →
+deployment-ready → human reboot proof → synthetic smoke → backup →
+isolated restore → staged update → explicit rollback rehearsal → HTTPS
+edge verification → diagnostics → lifecycle acceptance. The safe
+diagnostics metadata carries release/source/schema/model manifest, installed
+model digests, runtime version/hash, platform, and service-readiness identities
+for #36; it does not duplicate
+`backend/scripts/target_mac_benchmark.py` or select a production model.
+
+| Stage | PR13 state |
+| --- | --- |
+| Tooling implemented | proposed in PR13; independent audit pending |
+| Linux simulations | executed in PR13 quality gate |
+| Apple-Silicon lifecycle rehearsal | **INCOMPLETE / hardware unavailable in this run** |
+| Bank-Mac benchmark and production model | **unstarted; Issue #36** |
+
+**Issue #35 tooling complete != real bank Mac benchmark complete.** Real
+macOS arm64 native runtime, launchctl, and reboot behavior are not
+established by Linux tests. Issue #36 remains next after #35 acceptance.
+Issue #49 is post-presentation capability expansion. #35/#46 remain OPEN.

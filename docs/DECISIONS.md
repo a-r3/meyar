@@ -6207,3 +6207,40 @@ an incomplete transaction or this forward-compatible rollback state;
 reconciliation needs a separate reviewed procedure. Production restore
 cutover, model migration, automatic rollback, cleanup, and Target-Mac
 validation remain outside PR12. Real Apple-Silicon behavior is unconfirmed.
+
+## D-082 — Agentless diagnostics and lifecycle acceptance evidence (issue #35 PR13)
+
+**Date:** 2026-09-27. **Status:** Proposed engineering implementation
+for independent audit from exact accepted main
+`7c911cbc850d21999eae2239e6b51bfedc570d4a`. PR12 / PR #75 is
+merged and post-merge verified. #35/#46 remain OPEN; #36 is explicitly
+next after #35 acceptance; #49 is post-presentation expansion.
+
+**Decision:** Use the existing `meyar-ops` interface, PR4 lock and active
+release authority, PR8 readiness, PR9 backup verification, PR10 isolated
+restore evidence, PR11 model identity, and PR12 update/rollback receipts.
+Add local-only allowlisted `collect-diagnostics`/`diagnostics-verify`,
+fixed-path HTTPS `edge-verify`, human two-phase `reboot-prepare`/
+`reboot-verify`, dry-run-first `cleanup`, and private
+`lifecycle-acceptance` with `PASS|FAIL|INCOMPLETE`. No second release,
+service, DB, model, backup, update, or lock authority is introduced.
+
+Diagnostics publish safe metadata only after lock → identity snapshot →
+unlocked bounded probes → lock → identity recheck. The artifact excludes
+raw logs and candidate/secret material by construction. HTTPS is an
+externally managed bank reverse proxy, with both application and Ollama
+remaining on numeric loopback. Reboot proof requires a changed macOS
+`kern.boottime` and full postboot readiness. Cleanup deletes only
+canonical orphan activation temporary symlinks. Lifecycle acceptance
+requires matching physical reboot, backup, isolated restore, finalized
+update and explicit rollback, HTTPS edge, diagnostics, and disposable
+synthetic smoke evidence; missing evidence is never a pass. No Alembic
+downgrade or production restore cutover occurs.
+
+**Boundary:** PR13 engineering tooling and Linux tests are not #35
+acceptance. A separate owner audit after merge decides issue closure.
+Real Apple-Silicon launchctl, reboot and native-runtime behavior remain
+unconfirmed without a non-target Mac rehearsal. The bank-Mac benchmark,
+production model decision, and latency/RAM/concurrency gates remain
+unstarted #36 work. **Issue #35 tooling complete != real bank Mac
+benchmark complete.** No production deployment acceptance is inferred.

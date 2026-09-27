@@ -2,11 +2,12 @@
 
 ## Current phase
 
-**Accepted `main` is `38624ca3440c7dbf750d4248d8e0a9992b7192b5`.**
-PR11 / PR #74 is merged and post-merge verified. PR12 is the current
-independent-review slice for staged production update and explicit rollback;
-it is not accepted main. Issue #35 is OPEN. Issue #46 is OPEN.
-Issue #36 is OPEN and unstarted; no final production model is approved.
+**Accepted `main` is `7c911cbc850d21999eae2239e6b51bfedc570d4a`.**
+PR12 / PR #75 is merged and post-merge verified. PR13 is the current
+engineering proposal for diagnostics and lifecycle acceptance tooling.
+Issue #35 is OPEN. Issue #46 is OPEN. Issue #36 is OPEN, explicitly next
+after #35 acceptance, and unstarted. Issue #49 is OPEN post-presentation
+capability expansion. No final production model is approved.
 PR #65 (issue #63, order-independent duplicate same-language level
 eligibility) is merged and issue #63 is CLOSED. PR #64 (issue #62 evidence
 attribution) is merged and issue #62 is CLOSED. Deterministic evaluations
@@ -156,8 +157,9 @@ and integration with `deployment-ready` and production request paths. It
 does not select or approve a production model. Real Apple-Silicon and bank
 host behavior remains unconfirmed; #35/#46 stay OPEN and #36 unstarted.
 
-**PR12 for #35 (D-081) is submitted for independent audit from that exact
-accepted main.** It stages an already installed release with a private
+**PR12 for #35 (D-081) is MERGED as PR #75 — accepted main
+`7c911cbc850d21999eae2239e6b51bfedc570d4a`, post-merge verified.**
+It stages an already installed release with a private
 append-only update plan, requires a quiesced and verified backup, performs
 only a proven forward schema upgrade when explicitly compatible, atomically
 activates the target, and completes only after deployment readiness.
@@ -166,8 +168,15 @@ forward-compatible class. No Alembic downgrade, production restore cutover,
 model change, or automatic rollback is introduced. Real Apple-Silicon
 behavior remains unconfirmed.
 
-Issue #35 remains OPEN for further deployment work; issue #36 remains
-OPEN and not started; issue #46 remains OPEN and separate.
+**PR13 for #35 (D-082) is proposed from that exact accepted main.** It
+adds allowlisted local diagnostics and verification, fixed HTTPS edge
+health verification, a two-boot proof, conservative activation-temp
+cleanup, and a machine-readable lifecycle evidence matrix. Engineering
+tooling implementation and Linux simulations are not physical acceptance.
+Real Apple-Silicon launchctl, reboot survival, native-runtime behavior,
+and the full agentless rehearsal are **UNCONFIRMED** until run on an actual
+Mac. A missing proof yields `INCOMPLETE`; no issue closure follows from
+PR13 alone. Issue #35/#46 stay OPEN; #36/#49 are not started.
 
 **Chore (D-069, not a #35/#36/#46 slice):** `scripts/demo-up.sh`/
 `scripts/demo-down.sh` — a one-command wrapper around the existing,

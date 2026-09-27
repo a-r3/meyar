@@ -97,6 +97,14 @@ model name + revision, and an explicit decision recorded in
 
 ## How to run the actual acceptance benchmark
 
+PR13's private diagnostics bundle can supply safe handoff identities for
+this benchmark: active release and source SHA, schema code head, model
+manifest hash, installed LLM and embedding digests, Ollama runtime version
+and hash, platform, and service readiness codes. Verify its checksums with
+`meyar-ops diagnostics-verify` before using those identities. The benchmark
+script below remains the Issue #36 performance authority; diagnostics do
+not establish latency, memory, concurrency, or production model approval.
+
 On the confirmed target Mac mini M4 Pro:
 
 ```bash
