@@ -167,7 +167,7 @@ defines its offline dependency/install foundation; PR5 binds the service
 plist to that active release and host-local production config. PR6 adds
 privileged LaunchDaemon lifecycle foundation. PR11 adds the separate
 offline Ollama/model provision bundle and dedicated service described in
-`docs/MEYAR_OPS.md`; PostgreSQL provisioning, full update/rollback, and
+`docs/MEYAR_OPS.md`; PostgreSQL provisioning, production restore cutover, and
 target-Mac acceptance remain later #35
 work. This source-checkout runbook describes the older manual dev/demo
 path and must not be used as the final bank-host deployment method.
@@ -320,26 +320,15 @@ same `uv run uvicorn meyar.main:app` invocation shown above, with
 
 ## 7. Deploying an update
 
-1. Confirm a recent backup exists where the update includes a schema
-   migration or other consequential change (§9).
-2. On the deployment host: `git fetch origin`.
-3. Verify the exact commit/release being deployed —
-   `git log -1 --oneline origin/main` — against the intended PR/release.
-4. Fast-forward only: `git switch main && git pull --ff-only origin main`.
-   Never merge or rebase on the deployment host.
-5. `cd backend && uv sync --locked` — synchronize locked dependencies
-   exactly; never run `uv sync` without `--locked` on a deployment host.
-6. Inspect what migrations, if any, this update adds
-   (`uv run alembic history` / `git log` on `backend/alembic/versions/`),
-   then `uv run alembic upgrade head` (§8).
-7. Restart the application process (§6).
-8. Perform post-deployment verification (§16).
-9. Record the deployed revision (the commit SHA from step 3) — e.g. in
-   the operator's own deployment log; this repository does not currently
-   maintain one.
-
-A feature/task branch or an unmerged PR is never a deployment source —
-only step 2–4's fast-forward pull of `main` is.
+For the accepted installed-host architecture, use the exact PR12 command
+sequence in [`docs/MEYAR_OPS.md`](MEYAR_OPS.md#pr12--staged-production-update-and-explicit-rollback-d-081):
+`install-release` → `verify-install` → `update-prepare` → privileged
+`service-stop` → `backup-create` → `backup-verify` → `update-apply` →
+privileged `service-start` → `update-finalize`. The target release must
+already be installed and verified before prepare. The target host does not
+run Git, `uv sync`, or download dependencies for an update. Only
+`UPDATE_COMPLETED` after final readiness means the deployment completed.
+`shared/updates/<update-id>/` holds the private, durable audit trail.
 
 ## 8. Database migrations
 
@@ -378,7 +367,8 @@ Operational summary for an installed production host:
   `backup-verify` → `restore`, and require `RESTORE_COMPLETED`. The fixed
   storage destination is `shared/restores/<restore-id>/storage`, never live
   `shared/storage`. An isolated restore completed **!=** production cutover.
-  Update, rollback, and cutover remain future #35 work.
+  PR12 adds staged application update and rollback; production restore
+  cutover remains future #35 work.
 - Application-level validation (row counts, relationships, original-CV
   bytes, score reuse) remains a separate operational check; see
   `docs/BACKUP_RESTORE.md` §Validation.
@@ -546,43 +536,28 @@ deployment host:
 6. Verify secrets were **not** transferred incorrectly — Actions
    secrets/environment variables must be re-provisioned deliberately on
    the new remote, never assumed to have migrated.
-7. Point every deployment host's `git fetch`/`git pull` (§7) at the newly
-   designated canonical repository — a deployment host pulling from a
-   stale remote after handover is a real operational risk.
+7. Update the trusted build/handoff process to source releases from the
+   newly designated canonical repository. Installed production hosts
+   continue to receive verified offline bundles, with no Git remote.
 
 ## 15. Rollback / failed deployment
 
-Rollback is not one operation — distinguish:
+PR12's explicit application rollback is privileged `service-stop` →
+install-owner `rollback-apply --update-id <id>` → privileged
+`service-start` → install-owner `rollback-finalize --update-id <id>`.
+The rollback destination comes from the verified transaction, never an
+operator-selected release ID. `ROLLBACK_APPLIED_SERVICE_STOPPED` is not
+completion; only `ROLLBACK_COMPLETED` after full readiness is.
 
-**A. Application-code rollback** — redeploy a previously known-good
-commit on `main` (§7, steps 2–7, targeting the prior commit instead of the
-latest). Safe when no schema-incompatible migration sits between the two
-commits.
-
-**B. Database-schema rollback** — only when the failed deployment included
-a migration. Per §8, do not assume `alembic downgrade` is safe for a given
-revision without having verified that specific downgrade path. Where it
-has not been verified, restoring from the pre-migration backup (C) is the
-conservative option.
-
-**C. Data restore** — required when a failed deployment corrupted data or
-when B is not confidently reversible; follow `docs/BACKUP_RESTORE.md`,
-restoring to a point before the failed deployment.
-
-In all cases:
-
-1. Identify the last known-good, accepted revision (a specific commit on
-   `main`, per §7 step 9's recorded deployment log).
-2. Bring the database to a schema state compatible with that revision (B
-   or C above, as required — not always necessary for a pure code
-   rollback).
-3. Redeploy that revision (§7).
-4. Run post-deployment verification (§16) before considering the rollback
-   complete — a rollback that hasn't been verified is not yet a rollback,
-   it's a second unverified deployment.
-
-Never use `git reset --hard` or an unverified `alembic downgrade` as a
-default/universal production rollback mechanism.
+For `APP_ONLY`, both app releases share one DB head. For
+`FORWARD_COMPATIBLE_SCHEMA`, rollback means the previous application
+release running against the newer explicitly compatible DB schema.
+**Rollback does not run Alembic downgrade.** `BACKUP_RESTORE_REQUIRED`
+and `PROHIBITED_PENDING_PROCEDURE` have no PR12 activation path.
+Production database restore/cutover requires a future, separately reviewed
+procedure; PR10's isolated restore is not that procedure. See
+[`docs/MEYAR_OPS.md`](MEYAR_OPS.md#pr12--staged-production-update-and-explicit-rollback-d-081)
+for exact commands and crash recovery.
 
 ## 16. Post-deployment verification
 

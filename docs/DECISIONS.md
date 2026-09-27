@@ -6149,3 +6149,61 @@ installation and verification mechanism. Final production model selection
 and approval require real Target-Mac evidence under Issue #36. Real
 Apple-Silicon LaunchDaemon, binary import, cloud-disable, and host egress
 behavior are not established by Linux simulations.
+
+## D-081 — Staged installed-host update and explicit application rollback (issue #35 PR12)
+
+**Date:** 2026-09-27. **Status:** Implementation for independent audit from
+exact accepted main `38624ca3440c7dbf750d4248d8e0a9992b7192b5`.
+PR11 / PR #74 is merged and post-merge verified. #35/#46 remain OPEN;
+#36 is OPEN and unstarted.
+
+The trusted non-root install owner executes five separate phases:
+`update-prepare`, `update-apply`, `update-finalize`, `rollback-apply`, and
+`rollback-finalize`. Existing privileged `service-stop` and
+`service-start` remain outside that process and preserve the PR6 root,
+install-owner, application-user, and Ollama-user separation. No phase
+invokes `sudo` or a shell. The target is an already installed, verified
+immutable release; there is no target-host Git or network update.
+
+Prepare requires full current `deployment-ready`, verifies source/target
+release and unchanged local model manifest identity, checks production
+config and the target migration graph, then reacquires the PR4 operation
+lock and rechecks identity before publishing a private plan. APP_ONLY
+requires equal heads. FORWARD_COMPATIBLE_SCHEMA requires exactly one
+target head and a statically parsed, unbranched descendant path from
+the source head; no migration module is executed for this proof.
+BACKUP_RESTORE_REQUIRED and PROHIBITED_PENDING_PROCEDURE are rejected
+before mutation, as is a model-manifest reference or status change.
+
+Apply independently confirms launchd exit-113 absence, re-verifies the
+entire PR9 backup, and requires its source release/SHA/head and timestamp
+to bind to the plan. APP_ONLY never runs Alembic. Forward migration runs
+only through the verified target release's Python/package/migration code
+against protected host config, from the exact source head to the exact
+target head; argv contains no DB credential and output is suppressed.
+PostgreSQL transaction and revision postchecks guard the migration.
+Failure with a confirmed source head leaves the old pointer and stopped
+service; uncertain DB revision refuses activation. If migration reached
+the target head before activation, the explicit forward-compatibility
+declaration permits retry to complete activation without rerunning it.
+
+Activation reuses PR4's atomic `current` pointer and records update ID,
+plan digest, backup ID, reason, and DB head in its generation. Private
+`shared/updates/<id>/` phase receipts use exclusive no-follow creation,
+file and directory fsync, and no overwrite. A missing apply or rollback
+receipt can be reconstructed only from the exact matching generation.
+`UPDATE_APPLIED_SERVICE_STOPPED` is not completion: only full readiness
+and durable finalize yield `UPDATE_COMPLETED`. Readiness failure never
+automatically rolls back a running app.
+
+Explicit rollback only returns to the transaction's prior app release.
+APP_ONLY keeps the common DB head. FORWARD_COMPATIBLE_SCHEMA retains the
+target DB head; **no Alembic downgrade** is run. The normal readiness
+exact-head rule gains one evidence-bound exception requiring the matching
+rollback generation, plan, rollback receipt, verified source release,
+declared compatibility, and unchanged model identity. It emits
+`DB_REVISION_FORWARD_COMPATIBLE_ROLLBACK`. A new update is blocked over
+an incomplete transaction or this forward-compatible rollback state;
+reconciliation needs a separate reviewed procedure. Production restore
+cutover, model migration, automatic rollback, cleanup, and Target-Mac
+validation remain outside PR12. Real Apple-Silicon behavior is unconfirmed.

@@ -46,6 +46,13 @@ from meyar.ops.service_lifecycle import run_service_lifecycle
 from meyar.ops.service_plist import ServiceSpec, run_service_render, verify_service_plist
 from meyar.ops.service_status import run_service_status
 from meyar.ops.status import run_status
+from meyar.ops.update import (
+    run_rollback_apply,
+    run_rollback_finalize,
+    run_update_apply,
+    run_update_finalize,
+    run_update_prepare,
+)
 from meyar.ops.verify_release import verify_release
 
 
@@ -117,6 +124,23 @@ def _build_parser() -> argparse.ArgumentParser:
     restore_parser.add_argument("--restore-id", type=str, required=True)
     restore_parser.add_argument("--target-database", type=str, required=True)
     restore_parser.add_argument("--pg-bin-dir", type=Path, required=True)
+
+    for command in (
+        "update-prepare",
+        "update-apply",
+        "update-finalize",
+        "rollback-apply",
+        "rollback-finalize",
+    ):
+        update_parser = sub.add_parser(command, help="Staged application update or rollback phase.")
+        update_parser.add_argument("--install-root", type=Path, required=True)
+        update_parser.add_argument("--label", type=str, required=True)
+        update_parser.add_argument("--update-id", type=str, required=True)
+        if command == "update-prepare":
+            update_parser.add_argument("--target-release-id", type=str, required=True)
+        if command == "update-apply":
+            update_parser.add_argument("--backup-id", type=str, required=True)
+            update_parser.add_argument("--pg-bin-dir", type=Path, required=True)
 
     ai_verify = sub.add_parser("ai-bundle-verify", help="Verify a local offline AI bundle.")
     ai_verify.add_argument("--bundle-dir", type=Path, required=True)
@@ -241,6 +265,20 @@ def _run_command(args: argparse.Namespace) -> OpsResult:
             args.target_database,
             args.pg_bin_dir,
         )
+    if args.command == "update-prepare":
+        return run_update_prepare(
+            args.install_root, args.label, args.update_id, args.target_release_id
+        )
+    if args.command == "update-apply":
+        return run_update_apply(
+            args.install_root, args.label, args.update_id, args.backup_id, args.pg_bin_dir
+        )
+    if args.command == "update-finalize":
+        return run_update_finalize(args.install_root, args.label, args.update_id)
+    if args.command == "rollback-apply":
+        return run_rollback_apply(args.install_root, args.label, args.update_id)
+    if args.command == "rollback-finalize":
+        return run_rollback_finalize(args.install_root, args.label, args.update_id)
     if args.command == "ai-bundle-verify":
         return run_ai_bundle_verify(args.bundle_dir)
     if args.command == "ollama-install":

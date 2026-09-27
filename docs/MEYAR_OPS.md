@@ -9,8 +9,8 @@ and service binding — D-074), PR6 (privileged LaunchDaemon lifecycle
 foundation — D-075), PR7 (fresh database schema initialization —
 D-076), PR8 (installed deployment readiness — D-077), PR9
 (production backup creation/verification — D-078), and PR10
-(isolated restore — D-079), and PR11 (offline local AI provisioning —
-D-080). See §11 below
+(isolated restore — D-079), PR11 (offline local AI provisioning —
+D-080), and PR12 (staged update and rollback — D-081). See §11 below
 for the #35/#46 boundary.
 
 **PR3 scope reminder — read before assuming this means "deployable":**
@@ -955,13 +955,13 @@ never flip `ok`. Every component's finding is always present in the list
 
 - No HTTP `/ready` route (`/api/v1/health` remains liveness-only,
   unchanged) — issue #46.
-- No service uninstall, full update/rollback, or PostgreSQL provisioning.
+- No service uninstall, production database restore cutover, or PostgreSQL provisioning.
   PR6's privileged lifecycle foundation
   installs and controls the MEYAR LaunchDaemon; it does not invoke
   `sudo`, escalate itself, or create a service account.
-- No update/rollback orchestration (the `RollbackCompatibility` enum is a
-  typed classification for a future human-operated runbook, not an
-  executable mechanism — no automatic Alembic downgrade).
+- PR12 supports only `APP_ONLY` and `FORWARD_COMPATIBLE_SCHEMA` application
+  update/rollback. There is no automatic Alembic downgrade or destructive
+  production restore.
 - No offline Python runtime, `uv` executable, third-party wheel/
   wheelhouse, Ollama, model, or PostgreSQL payload in the `build-release`
   artifact — application/source release-artifact *building* now exists
@@ -1038,9 +1038,13 @@ creation and read-only structural verification.
 empty isolated database and private restore workspace. No production
 cutover, update, or rollback is included.
 
-**#35 PR11 (D-080, independent review pending):** offline local GGUF/Ollama
+**#35 PR11 (D-080, merged as PR #74):** offline local GGUF/Ollama
 provisioning, dedicated LaunchDaemon, exact installed manifest/digest
 verification, and readiness/runtime identity checks. No model approval.
+
+**#35 PR12 (D-081, independent review pending):** staged update and explicit
+application rollback with mandatory verified backup and durable receipts.
+No downgrade or production restore cutover.
 
 **Deferred to #46:** authenticated HTTP `/ready`, in-application
   degraded-state semantics, remaining production config policy,
@@ -1200,3 +1204,96 @@ rollback in PR4. PR5 binds the service executable to
 Immutable code/runtime != mutable host configuration != mutable
 candidate/document storage. Real Mac execution, native-extension import checks, and
 service/reboot rehearsal remain **UNCONFIRMED**.
+
+## PR12 — staged production update and explicit rollback (D-081)
+
+PR11 / PR #74 is merged and post-merge verified. The accepted base for
+PR12 is `38624ca3440c7dbf750d4248d8e0a9992b7192b5`. Both application
+releases must already be installed and verified with PR4's offline
+`install-release` and `verify-install`; this workflow uses no Git, network,
+download, or rebuild on the deployment host. Run each unprivileged phase
+as the trusted non-root install owner from the *then-current* installed
+release. The bank invokes only `service-stop` and `service-start` in its
+approved external root context, with the exact PR6 arguments above.
+
+**Update sequence:**
+
+```bash
+<approved-python3.12> <bundle>/meyar-ops.py install-release --bundle-dir <bundle> --install-root <root>
+<approved-python3.12> <bundle>/meyar-ops.py verify-install --install-root <root> --release-id <target-release-id>
+<root>/current/.venv/bin/python -m meyar.ops.cli update-prepare --install-root <root> --label <app-label> --update-id <safe-id> --target-release-id <target-release-id>
+sudo <root>/current/.venv/bin/python -m meyar.ops.cli service-stop --label <app-label> --user-name <app-service-user> --install-root <root> --install-owner-uid <install-owner-uid> --port <app-port>
+<root>/current/.venv/bin/python -m meyar.ops.cli backup-create --install-root <root> --label <app-label> --backup-id <safe-backup-id> --pg-bin-dir <trusted-postgresql-bin-dir>
+<root>/current/.venv/bin/python -m meyar.ops.cli backup-verify --install-root <root> --backup-id <safe-backup-id> --pg-bin-dir <trusted-postgresql-bin-dir>
+<root>/current/.venv/bin/python -m meyar.ops.cli update-apply --install-root <root> --label <app-label> --update-id <safe-id> --backup-id <safe-backup-id> --pg-bin-dir <trusted-postgresql-bin-dir>
+sudo <root>/current/.venv/bin/python -m meyar.ops.cli service-start --label <app-label> --user-name <app-service-user> --install-root <root> --install-owner-uid <install-owner-uid> --port <app-port>
+<root>/current/.venv/bin/python -m meyar.ops.cli update-finalize --install-root <root> --label <app-label> --update-id <safe-id>
+```
+
+`update-prepare` requires full healthy `deployment-ready`, installed
+release/model/config identity, unchanged model manifest reference and
+approval status, and a supported schema path. It probes readiness without
+holding the operation lock, then reacquires that lock and rechecks identity
+before publishing `plan.json`. The plan binds the config file's device,
+inode, size, and nanosecond mtime; it never stores config bytes or a
+password-derived hash. A changed config requires a new update ID and plan.
+`update-apply` independently requires the accepted launchd exit-113
+absence, re-verifies the entire PR9 backup (hashes, tar, dump structure),
+and binds its release ID, source SHA, head, and creation time to the plan.
+The service remains stopped after `UPDATE_APPLIED_SERVICE_STOPPED`.
+Only successful full readiness followed by a durable `finalize.json`
+returns `UPDATE_COMPLETED`. A readiness failure leaves the new release
+active; stop the service before an explicit rollback.
+
+**Rollback sequence:**
+
+```bash
+sudo <root>/current/.venv/bin/python -m meyar.ops.cli service-stop --label <app-label> --user-name <app-service-user> --install-root <root> --install-owner-uid <install-owner-uid> --port <app-port>
+<root>/current/.venv/bin/python -m meyar.ops.cli rollback-apply --install-root <root> --label <app-label> --update-id <safe-id>
+sudo <root>/current/.venv/bin/python -m meyar.ops.cli service-start --label <app-label> --user-name <app-service-user> --install-root <root> --install-owner-uid <install-owner-uid> --port <app-port>
+<root>/current/.venv/bin/python -m meyar.ops.cli rollback-finalize --install-root <root> --label <app-label> --update-id <safe-id>
+```
+
+The destination is only the verified transaction's prior release; no
+arbitrary release argument exists. `APP_ONLY` requires identical Alembic
+heads and makes no DB change. `FORWARD_COMPATIBLE_SCHEMA` requires one
+statically proven target head and a single unbranched descendant path
+from the source head. Only its target installed Python executes `alembic
+upgrade <exact-target-head>` against protected host config, with fixed
+argv, suppressed process output, and an exact before/after DB revision
+check. Its rollback means **previous application release + newer,
+explicitly compatible DB schema**. Rollback never means Alembic
+downgrade. Normal readiness still requires exact app/DB heads; the sole
+exception requires matching rollback activation metadata, plan, receipt,
+source release, model identity, and target DB head, and reports
+`DB_REVISION_FORWARD_COMPATIBLE_ROLLBACK`.
+
+`BACKUP_RESTORE_REQUIRED` fails at prepare with
+`UPDATE_REQUIRES_RESTORE_PROCEDURE`; `PROHIBITED_PENDING_PROCEDURE` fails
+with `UPDATE_PROHIBITED_PENDING_PROCEDURE`. A model reference or approval
+status change fails `UPDATE_MODEL_CHANGE_UNSUPPORTED`. PR12 neither
+restores a production DB nor provisions a new model.
+
+The private install-owner `0700` area
+`<root>/shared/updates/<update-id>/` holds append-only `0600`
+`plan.json`, `apply.json`, `finalize.json`, `rollback.json`, and
+`rollback_finalize.json`. A phase file appears only after that phase
+completes, via exclusive no-follow creation and file/directory fsync.
+Records contain operator UID/time, from/to release/source/head,
+compatibility, unchanged model reference/status, app label, config file
+identity, backup ID, and activation generation evidence; no DB URL,
+password, environment value, candidate identifier, CV path, prompt, or
+model output. An uncertain publication requires inspecting and retrying
+the same transaction; a matching completed phase is idempotent.
+
+If a forward migration commits while the old app pointer remains, the
+declared compatibility permits that exact app/schema pair during recovery.
+Retry `update-apply` with the same plan and verified backup: it sees the
+target DB head and activates without rerunning migration. If pointer
+activation completed but the apply or rollback receipt was interrupted,
+the exact activation generation can reconstruct only its own missing
+receipt. A foreign generation is refused. A new update is blocked over
+an unfinished transaction or a forward-compatible rollback. That latter
+state requires a separately reviewed reconciliation procedure before any
+new update; PR12 provides no generic schema-override flag or production
+restore cutover. Real Apple-Silicon/launchd behavior remains unconfirmed.

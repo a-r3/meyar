@@ -379,6 +379,49 @@ def test_atomic_activation_and_previous_identity(
     assert activation_state["previous_release_id"] == RELEASE_ID
 
 
+def test_update_activation_generation_is_atomic_and_retains_bound_metadata(
+    installed: tuple[Path, Path],
+) -> None:
+    _bundle, root = installed
+    assert host.activate_release(root, RELEASE_ID) == "RELEASE_ACTIVATED"
+    second = RELEASE_ID.replace("abcdef123456", "123456abcdef")
+    other = root / "releases" / second
+    import shutil
+
+    shutil.copytree(root / "releases" / RELEASE_ID, other)
+    state_path = other / "install_state.json"
+    state_path.chmod(0o644)
+    state = json.loads(state_path.read_text())
+    state["release_id"] = second
+    pointer = other / ".venv/lib/python3.12/site-packages/meyar-source.pth"
+    pointer.chmod(0o644)
+    pointer.write_text(str(other / "backend/src") + "\n")
+    pointer.chmod(0o444)
+    state["tree_sha256"] = host._tree_digest(other)
+    state_path.write_text(json.dumps(state))
+    state_path.chmod(0o444)
+    metadata = {
+        "activation_reason": "update",
+        "update_id": "synthetic-update",
+        "plan_sha256": "a" * 64,
+        "backup_id": "synthetic-backup",
+        "database_schema_head": "target",
+    }
+    with host._operation_lock(root):
+        assert host._activate_release_locked(root, second, metadata=metadata) == (
+            "RELEASE_ACTIVATED"
+        )
+    generation = root / Path(os.readlink(root / "current")).parent
+    record = json.loads((generation / "state.json").read_text())
+    assert record == {
+        **metadata,
+        "release_id": second,
+        "previous_release_id": RELEASE_ID,
+        "rollback_compatibility": "APP_ONLY",
+    }
+    assert (root / "current").resolve() == other
+
+
 def test_first_activation_replace_failure_leaves_no_public_current(
     installed: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:

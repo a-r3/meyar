@@ -2,7 +2,9 @@
 
 Status: PR9 / PR #72 is merged and post-merge verified at accepted main
 `2dcf0a8783e49008b0eb707d81b42248209b34d6`. PR10 adds isolated
-restore for independent review. Slice 13 (issue #20) separately has an
+restore for independent review. PR11 / PR #74 is merged and post-merge
+verified at accepted main `38624ca3440c7dbf750d4248d8e0a9992b7192b5`.
+PR12 uses verified backup as a mandatory staged-update gate. Slice 13 (issue #20) separately has an
 executed synthetic backup/restore acceptance proof in
 `backend/scripts/backup_restore_acceptance.py`. Production cutover remains
 future #35 work. Neither mechanism creates a backup schedule.
@@ -87,6 +89,15 @@ unfamiliar directory as part of a retry.
 `pg_restore --list`, and safe tar members without connecting to the
 production DB or extracting anything. It does not read protected `.env`.
 **Backup-created != restore-tested.**
+
+For a PR12 update, run `backup-create` and `backup-verify` **after**
+`update-prepare` and privileged `service-stop`, then pass the backup ID
+to `update-apply`. Apply re-runs this exact artifact verifier and requires
+the backup's release ID, source SHA, and Alembic head to equal the plan's
+source identity. The backup timestamp must be at or after the plan time.
+An old, foreign, incomplete, or tampered backup returns
+`UPDATE_BACKUP_INVALID` before migration or activation. Neither PR12
+rollback nor PR10 isolated restore silently restores the production DB.
 
 ## PR10 isolated installed-host restore
 

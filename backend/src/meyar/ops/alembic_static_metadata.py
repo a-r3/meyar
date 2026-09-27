@@ -249,3 +249,30 @@ def compute_static_alembic_heads(content_by_path: dict[str, bytes]) -> list[str]
             "(every revision is referenced as another revision's parent)"
         )
     return heads
+
+
+def prove_static_linear_upgrade(
+    content_by_path: dict[str, bytes], from_revision: str, to_revision: str
+) -> bool:
+    """Prove one unbranched path from an existing revision to the sole head.
+
+    Migration modules are parsed as data. A merge or an unrelated branch
+    between the two revisions is deliberately outside the update procedure.
+    """
+    if compute_static_alembic_heads(content_by_path) != [to_revision]:
+        return False
+    revisions = {
+        meta.revision: meta
+        for path, content in content_by_path.items()
+        if _is_versions_file(path)
+        for meta in [_parse_revision_file(path, content)]
+    }
+    if from_revision not in revisions:
+        return False
+    current = to_revision
+    while current != from_revision:
+        parents = revisions[current].down_revisions
+        if parents is None or len(parents) != 1:
+            return False
+        current = parents[0]
+    return True

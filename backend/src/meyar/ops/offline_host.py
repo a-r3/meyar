@@ -696,48 +696,97 @@ def verify_active_release(root: Path) -> str:
     return release_id
 
 
+def _activate_release_locked(
+    root: Path,
+    release_id: str,
+    *,
+    metadata: dict[str, object] | None = None,
+    returning_to_prior_release: bool = False,
+) -> str:
+    """Publish one generation while the caller holds PR4's operation lock."""
+    _ensure_layout(root)
+    state = _verify_install(root, release_id)
+    previous = _current_release(root)
+    if previous == release_id:
+        return "ACTIVATION_ALREADY_CURRENT"
+    if previous is not None:
+        _verify_install(root, previous)
+        if returning_to_prior_release and (
+            metadata is None
+            or metadata.get("activation_reason") != "rollback"
+            or not isinstance(metadata.get("plan_sha256"), str)
+            or not isinstance(metadata.get("update_id"), str)
+        ):
+            raise InstallFailure("ACTIVATION_METADATA_INVALID")
+        if (
+            state.get("rollback_compatibility") == "PROHIBITED_PENDING_PROCEDURE"
+            and not returning_to_prior_release
+        ):
+            raise InstallFailure("ACTIVATION_PROHIBITED_PENDING_PROCEDURE")
+        if (
+            state.get("rollback_compatibility") == "BACKUP_RESTORE_REQUIRED"
+            and not returning_to_prior_release
+        ):
+            raise InstallFailure("ACTIVATION_REQUIRES_BACKUP_WORKFLOW")
+    if metadata is not None and set(metadata) & {
+        "release_id",
+        "previous_release_id",
+        "rollback_compatibility",
+    }:
+        raise InstallFailure("ACTIVATION_METADATA_INVALID")
+    payload = {
+        "release_id": release_id,
+        "previous_release_id": previous,
+        "rollback_compatibility": state["rollback_compatibility"],
+        **(metadata or {}),
+    }
+    public = root / "current"
+    generation = "g-" + uuid.uuid4().hex
+    directory = root / "activations" / generation
+    directory.mkdir(mode=0o750)
+    # A fully created generation is harmless if interrupted before the pointer
+    # swap. Never remove a generation that may already have become active.
+    state_file = directory / "state.json"
+    descriptor = os.open(state_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+    try:
+        stream = os.fdopen(descriptor, "wb")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    data = (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    with stream:
+        stream.write(data)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.symlink(f"../../releases/{release_id}", directory / "current")
+    directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+    activations_fd = os.open(root / "activations", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(activations_fd)
+    finally:
+        os.close(activations_fd)
+    temporary = root / (".next-current-" + uuid.uuid4().hex)
+    os.symlink(f"activations/{generation}/current", temporary)
+    try:
+        os.replace(temporary, public)
+    finally:
+        if temporary.is_symlink():
+            temporary.unlink()
+    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(root_fd)
+    finally:
+        os.close(root_fd)
+    return "RELEASE_ACTIVATED"
+
+
 def activate_release(root: Path, release_id: str) -> str:
     with _operation_lock(root):
-        _ensure_layout(root)
-        state = _verify_install(root, release_id)
-        previous = _current_release(root)
-        if previous == release_id:
-            return "ACTIVATION_ALREADY_CURRENT"
-        if previous is not None:
-            _verify_install(root, previous)
-            if state.get("rollback_compatibility") == "PROHIBITED_PENDING_PROCEDURE":
-                raise InstallFailure("ACTIVATION_PROHIBITED_PENDING_PROCEDURE")
-            if state.get("rollback_compatibility") == "BACKUP_RESTORE_REQUIRED":
-                raise InstallFailure("ACTIVATION_REQUIRES_BACKUP_WORKFLOW")
-        public = root / "current"
-        generation = "g-" + uuid.uuid4().hex
-        directory = root / "activations" / generation
-        directory.mkdir(mode=0o750)
-        try:
-            (directory / "state.json").write_text(
-                json.dumps(
-                    {
-                        "release_id": release_id,
-                        "previous_release_id": previous,
-                        "rollback_compatibility": state["rollback_compatibility"],
-                    },
-                    sort_keys=True,
-                )
-                + "\n"
-            )
-            os.symlink(f"../../releases/{release_id}", directory / "current")
-            temporary = root / (".next-current-" + uuid.uuid4().hex)
-            os.symlink(f"activations/{generation}/current", temporary)
-            try:
-                os.replace(temporary, public)
-            finally:
-                if temporary.is_symlink():
-                    temporary.unlink()
-        except BaseException:
-            # A fully created generation is harmless if a process dies before
-            # pointer replacement. Never remove a generation that may be active.
-            raise
-        return "RELEASE_ACTIVATED"
+        return _activate_release_locked(root, release_id)
 
 
 class _SafeArgumentParser(argparse.ArgumentParser):

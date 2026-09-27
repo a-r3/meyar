@@ -2,10 +2,10 @@
 
 ## Current phase
 
-**Accepted `main` is `39d1c2222aa96708aecd68d715d92024a1f72a1a`.**
-PR10 / PR #73 is merged and post-merge verified. PR11 is the current
-independent-review slice for agentless Ollama runtime and offline local-model
-provisioning; it is not accepted main. Issue #35 is OPEN. Issue #46 is OPEN.
+**Accepted `main` is `38624ca3440c7dbf750d4248d8e0a9992b7192b5`.**
+PR11 / PR #74 is merged and post-merge verified. PR12 is the current
+independent-review slice for staged production update and explicit rollback;
+it is not accepted main. Issue #35 is OPEN. Issue #46 is OPEN.
 Issue #36 is OPEN and unstarted; no final production model is approved.
 PR #65 (issue #63, order-independent duplicate same-language level
 eligibility) is merged and issue #63 is CLOSED. PR #64 (issue #62 evidence
@@ -146,14 +146,25 @@ storage workspace. It never writes the production database or live storage,
 and makes no cutover, update, rollback, readiness, or Target-Mac claim.
 Issue #35 remains OPEN, issue #46 remains OPEN, and issue #36 is unstarted.
 
-**PR11 for #35 (D-080) is submitted for independent audit from the exact
-accepted main above.** It adds a separate versioned offline AI bundle,
+**PR11 for #35 (D-080) is MERGED as PR #74 — accepted main
+`38624ca3440c7dbf750d4248d8e0a9992b7192b5`, post-merge verified.**
+It adds a separate versioned offline AI bundle,
 immutable Ollama runtime installation, a dedicated non-root local-only
 LaunchDaemon, verified local GGUF import, hash-bound installed
 `ModelManifest`, local tag-digest and synthetic embedding-dimension checks,
 and integration with `deployment-ready` and production request paths. It
 does not select or approve a production model. Real Apple-Silicon and bank
 host behavior remains unconfirmed; #35/#46 stay OPEN and #36 unstarted.
+
+**PR12 for #35 (D-081) is submitted for independent audit from that exact
+accepted main.** It stages an already installed release with a private
+append-only update plan, requires a quiesced and verified backup, performs
+only a proven forward schema upgrade when explicitly compatible, atomically
+activates the target, and completes only after deployment readiness.
+Explicit application rollback keeps the newer schema for the declared
+forward-compatible class. No Alembic downgrade, production restore cutover,
+model change, or automatic rollback is introduced. Real Apple-Silicon
+behavior remains unconfirmed.
 
 Issue #35 remains OPEN for further deployment work; issue #36 remains
 OPEN and not started; issue #46 remains OPEN and separate.
