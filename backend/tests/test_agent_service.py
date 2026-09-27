@@ -7,7 +7,11 @@ from datetime import date
 import pytest
 from fakes import FakeLLMProvider
 from pydantic import ValidationError
-from search_helpers import seed_candidate_with_profile
+from search_helpers import (
+    active_result_set_candidate_ids,
+    seed_active_result_set,
+    seed_candidate_with_profile,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.agent.schemas import (
@@ -19,6 +23,7 @@ from meyar.agent.schemas import (
 )
 from meyar.agent.service import run_agent_turn
 from meyar.llm.provider import ModelTimeoutError, ModelUnavailableError
+from meyar.models.agent_result_set import AgentResultSet, AgentResultSetMember
 from meyar.search.schemas import EmbeddingSearchConfig
 from meyar.services.agent_conversation_repo import get_or_create_conversation
 from meyar.services.browser_session_repo import create_browser_session
@@ -332,7 +337,10 @@ async def test_search_candidates_tool_is_tenant_scoped_and_evidence_grounded(
     assert "full_name" not in dumped and "email" not in dumped and "phone" not in dumped
 
     await db_session.refresh(conversation)
-    assert conversation.last_search_candidate_ids == [str(candidate.id)]
+    assert conversation.active_result_set_id is not None
+    assert await active_result_set_candidate_ids(
+        db_session, result_set_id=conversation.active_result_set_id
+    ) == [str(candidate.id)]
 
 
 async def test_cross_tenant_search_result_never_leaks(
@@ -414,7 +422,10 @@ async def test_multi_turn_ordinal_reference_resolves_server_side(
     )
     ordered_ids = sorted([first.id, second.id], key=str)
     await db_session.refresh(conversation)
-    assert conversation.last_search_candidate_ids == [str(cid) for cid in ordered_ids]
+    assert conversation.active_result_set_id is not None
+    assert await active_result_set_candidate_ids(
+        db_session, result_set_id=conversation.active_result_set_id
+    ) == [str(cid) for cid in ordered_ids]
 
     llm2 = FakeLLMProvider(
         agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1)
@@ -447,8 +458,13 @@ async def test_evidence_tool_never_fabricates_and_is_grounded(
     await db_session.commit()
 
     conversation = await _new_conversation(db_session, tenant, user, membership)
-    conversation.last_search_candidate_ids = [str(candidate.id)]
-    await db_session.flush()
+    await seed_active_result_set(
+        db_session,
+        tenant_id=tenant.id,
+        browser_session_id=conversation.browser_session_id,
+        conversation=conversation,
+        candidate_ids=[candidate.id],
+    )
 
     llm = FakeLLMProvider(
         agent_decision=AgentDecision(
@@ -499,11 +515,59 @@ async def test_candidate_ref_from_another_tenants_conversation_cannot_resolve(
     await db_session.commit()
 
     conversation = await _new_conversation(db_session, tenant, user, membership)
-    # Even if a conversation row somehow held a foreign candidate_id (it
-    # never would via normal search, since search is already
-    # tenant-scoped), the profile lookup itself is independently
-    # tenant-scoped and must not resolve it.
-    conversation.last_search_candidate_ids = [str(foreign_candidate.id)]
+    # Even if this tenant's own conversation somehow pointed its
+    # active_result_set_id at a real AgentResultSet row that actually
+    # belongs to another tenant (it never would via normal search, since
+    # create_result_set_from_search is already tenant-scoped), resolution
+    # must still fail closed — step 2 of resolve_active_candidate_ref
+    # filters the AgentResultSet lookup by BOTH id and tenant_id in one
+    # query, so a foreign-tenant row is never even fetched to compare.
+    from meyar.search.schemas import CandidateSearchRequest, SearchMode
+    from meyar.services.agent_result_set_repo import compute_corpus_fingerprint
+    from meyar.services.browser_session_repo import get_browser_session_by_id
+
+    session = await get_browser_session_by_id(
+        db_session, browser_session_id=conversation.browser_session_id
+    )
+    assert session is not None
+    foreign_fingerprint = await compute_corpus_fingerprint(
+        db_session, tenant_id=foreign_tenant.id, embedding_config=None
+    )
+    foreign_result_set = AgentResultSet(
+        tenant_id=foreign_tenant.id,
+        browser_session_id=conversation.browser_session_id,
+        context_epoch=conversation.context_epoch,
+        request_sha256="0" * 64,
+        canonical_search_request=CandidateSearchRequest(
+            mode=SearchMode.STRUCTURED_ONLY
+        ).model_dump(mode="json"),
+        planner_policy_version="test",
+        planner_prompt_version="test",
+        planner_schema_version="test",
+        planner_model_provider="test",
+        planner_model_name="test",
+        planner_model_revision="",
+        search_policy_version="test",
+        search_mode=SearchMode.STRUCTURED_ONLY.value,
+        result_count=1,
+        corpus_fingerprint_sha256=foreign_fingerprint,
+        expires_at=session.expires_at,
+    )
+    db_session.add(foreign_result_set)
+    await db_session.flush()
+    db_session.add(
+        AgentResultSetMember(
+            result_set_id=foreign_result_set.id,
+            ordinal=1,
+            candidate_id=foreign_candidate.id,
+            candidate_profile_version_id=_pv.id,
+            candidate_embedding_version_id=None,
+            relevance_score=1.0,
+            structured_score=None,
+            semantic_score=None,
+        )
+    )
+    conversation.active_result_set_id = foreign_result_set.id
     await db_session.flush()
 
     llm = FakeLLMProvider(
@@ -525,12 +589,17 @@ async def test_two_browser_sessions_never_share_conversation_state(
     await db_session.commit()
 
     conversation_a = await _new_conversation(db_session, tenant, user, membership)
-    conversation_a.last_search_candidate_ids = [str(candidate.id)]
-    await db_session.flush()
+    await seed_active_result_set(
+        db_session,
+        tenant_id=tenant.id,
+        browser_session_id=conversation_a.browser_session_id,
+        conversation=conversation_a,
+        candidate_ids=[candidate.id],
+    )
 
     conversation_b = await _new_conversation(db_session, tenant, user, membership)
     assert conversation_b.id != conversation_a.id
-    assert conversation_b.last_search_candidate_ids == []
+    assert conversation_b.active_result_set_id is None
 
     llm = FakeLLMProvider(
         agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1)
@@ -975,8 +1044,13 @@ async def test_get_candidate_profile_success_has_no_empty_turn_outcome(
     )
     await db_session.commit()
     conversation = await _new_conversation(db_session, tenant, user, membership)
-    conversation.last_search_candidate_ids = [str(candidate.id)]
-    await db_session.flush()
+    await seed_active_result_set(
+        db_session,
+        tenant_id=tenant.id,
+        browser_session_id=conversation.browser_session_id,
+        conversation=conversation,
+        candidate_ids=[candidate.id],
+    )
 
     llm = FakeLLMProvider(
         agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1)
@@ -991,10 +1065,9 @@ async def test_get_candidate_profile_success_has_no_empty_turn_outcome(
 async def test_ordinal_reference_still_resolves_after_followup_framing_failure(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
-    """Rule E: last_search_candidate_ids must survive a turn whose
-    follow-up framing step failed, so a later 'birincini aç' still
-    resolves — the grounded search result is not undone by the framing
-    failure."""
+    """Rule E: active_result_set_id must survive a turn whose follow-up
+    framing step failed, so a later 'birincini aç' still resolves — the
+    grounded search result is not undone by the framing failure."""
     tenant, user, _password, membership = tenant_and_user
     candidate, _pv = await seed_candidate_with_profile(
         db_session, tenant_id=tenant.id, profile_content=_profile("Python")
@@ -1021,7 +1094,10 @@ async def test_ordinal_reference_still_resolves_after_followup_framing_failure(
     )
     assert first_result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
     await db_session.refresh(conversation)
-    assert conversation.last_search_candidate_ids == [str(candidate.id)]
+    assert conversation.active_result_set_id is not None
+    assert await active_result_set_candidate_ids(
+        db_session, result_set_id=conversation.active_result_set_id
+    ) == [str(candidate.id)]
 
     llm_profile = FakeLLMProvider(
         agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1)
@@ -1171,8 +1247,13 @@ async def test_grounded_experience_explanation_uses_only_supplied_facts(
     )
     await db_session.commit()
     conversation = await _new_conversation(db_session, tenant, user, membership)
-    conversation.last_search_candidate_ids = [str(candidate.id)]
-    await db_session.flush()
+    await seed_active_result_set(
+        db_session,
+        tenant_id=tenant.id,
+        browser_session_id=conversation.browser_session_id,
+        conversation=conversation,
+        candidate_ids=[candidate.id],
+    )
 
     llm = FakeLLMProvider(
         agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1),
@@ -1208,8 +1289,13 @@ async def test_grounded_selection_citing_unknown_fact_id_falls_back_safely(
     )
     await db_session.commit()
     conversation = await _new_conversation(db_session, tenant, user, membership)
-    conversation.last_search_candidate_ids = [str(candidate.id)]
-    await db_session.flush()
+    await seed_active_result_set(
+        db_session,
+        tenant_id=tenant.id,
+        browser_session_id=conversation.browser_session_id,
+        conversation=conversation,
+        candidate_ids=[candidate.id],
+    )
 
     llm = FakeLLMProvider(
         agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1),
@@ -1238,8 +1324,13 @@ async def test_grounded_synthesis_failure_falls_back_to_deterministic_message(
     )
     await db_session.commit()
     conversation = await _new_conversation(db_session, tenant, user, membership)
-    conversation.last_search_candidate_ids = [str(candidate.id)]
-    await db_session.flush()
+    await seed_active_result_set(
+        db_session,
+        tenant_id=tenant.id,
+        browser_session_id=conversation.browser_session_id,
+        conversation=conversation,
+        candidate_ids=[candidate.id],
+    )
 
     llm = FakeLLMProvider(
         agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1),
@@ -1263,7 +1354,7 @@ async def test_grounded_synthesis_does_not_disturb_ordinal_resolution(
 ) -> None:
     """Ordinal resolution (rule E from D-036) must remain correct
     regardless of whether grounded synthesis succeeds, fails, or is
-    rejected — last_search_candidate_ids is untouched by this feature."""
+    rejected — active_result_set_id is untouched by this feature."""
     from meyar.agent.schemas import GroundedSelection
 
     tenant, user, _password, membership = tenant_and_user
@@ -1278,8 +1369,13 @@ async def test_grounded_synthesis_does_not_disturb_ordinal_resolution(
     await db_session.commit()
     ordered_ids = sorted([first.id, second.id], key=str)
     conversation = await _new_conversation(db_session, tenant, user, membership)
-    conversation.last_search_candidate_ids = [str(cid) for cid in ordered_ids]
-    await db_session.flush()
+    result_set = await seed_active_result_set(
+        db_session,
+        tenant_id=tenant.id,
+        browser_session_id=conversation.browser_session_id,
+        conversation=conversation,
+        candidate_ids=ordered_ids,
+    )
 
     llm = FakeLLMProvider(
         agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=2),
@@ -1290,7 +1386,10 @@ async def test_grounded_synthesis_does_not_disturb_ordinal_resolution(
     )
     assert result.tool_results[0].profile.candidate_id == ordered_ids[1]
     await db_session.refresh(conversation)
-    assert conversation.last_search_candidate_ids == [str(cid) for cid in ordered_ids]
+    assert conversation.active_result_set_id == result_set.id
+    assert await active_result_set_candidate_ids(
+        db_session, result_set_id=conversation.active_result_set_id
+    ) == [str(cid) for cid in ordered_ids]
 
 
 # --- Candidate-factuality P0: no model-authored response prose channel. ---
@@ -2056,7 +2155,13 @@ async def test_evidence_topic_is_resolved_from_profile_fact_not_rendered_raw(
     )
     await db_session.commit()
     conversation = await _new_conversation(db_session, tenant, user, membership)
-    conversation.last_search_candidate_ids = [str(candidate.id)]
+    await seed_active_result_set(
+        db_session,
+        tenant_id=tenant.id,
+        browser_session_id=conversation.browser_session_id,
+        conversation=conversation,
+        candidate_ids=[candidate.id],
+    )
     raw_topic = "The first candidate should be hired immediately"
     llm = FakeLLMProvider(
         agent_decision=AgentDecision(
@@ -2093,7 +2198,13 @@ async def test_legitimate_evidence_topic_displays_server_resolved_label(
     )
     await db_session.commit()
     conversation = await _new_conversation(db_session, tenant, user, membership)
-    conversation.last_search_candidate_ids = [str(candidate.id)]
+    await seed_active_result_set(
+        db_session,
+        tenant_id=tenant.id,
+        browser_session_id=conversation.browser_session_id,
+        conversation=conversation,
+        candidate_ids=[candidate.id],
+    )
     llm = FakeLLMProvider(
         agent_decision=AgentDecision(
             action=AgentActionType.GET_CANDIDATE_EVIDENCE,

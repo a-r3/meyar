@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 from fakes import FakeEmbeddingProvider
-from search_helpers import seed_candidate_with_profile, seed_embedding
+from search_helpers import seed_active_result_set, seed_candidate_with_profile, seed_embedding
 from test_candidate_factual_authority_backstop import _seed_completed_profile
 
 from meyar.extraction.evidence import (
@@ -544,7 +544,13 @@ async def test_current_authority_all_consumers_and_immutable_history(
     conversation = await get_or_create_conversation(
         db_session, tenant_id=tenant.id, browser_session_id=session.id
     )
-    conversation.last_search_candidate_ids = [str(seeded.candidate.id)]
+    await seed_active_result_set(
+        db_session,
+        tenant_id=tenant.id,
+        browser_session_id=session.id,
+        conversation=conversation,
+        candidate_ids=[seeded.candidate.id],
+    )
     for action in ("GET_CANDIDATE_PROFILE", "GET_CANDIDATE_EVIDENCE"):
         result = await run_agent_turn(
             db_session,

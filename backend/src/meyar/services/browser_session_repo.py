@@ -65,3 +65,17 @@ async def revoke_browser_session_by_id(
         .where(BrowserSession.id == session_id, BrowserSession.revoked_at.is_(None))
         .values(revoked_at=revoked_at or datetime.now(UTC))
     )
+
+
+async def get_browser_session_by_id(
+    db: AsyncSession, *, browser_session_id: uuid.UUID
+) -> BrowserSession | None:
+    """BrowserSession has no tenant_id column of its own (tenant is always
+    re-derived live via its TenantMembership — see the model docstring),
+    matching every other lookup in this module. Used by
+    meyar.services.agent_result_set_repo to bind a new AgentResultSet's
+    ``expires_at`` to its owning session's own expiry — the caller's own
+    ``browser_session_id`` always comes from an already tenant-scoped
+    AgentConversation row, never a client-supplied value."""
+    result = await db.execute(select(BrowserSession).where(BrowserSession.id == browser_session_id))
+    return result.scalar_one_or_none()

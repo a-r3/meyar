@@ -52,7 +52,8 @@ async def get_or_create_conversation(
         tenant_id=tenant_id,
         browser_session_id=browser_session_id,
         turns=[],
-        last_search_candidate_ids=[],
+        context_epoch=1,
+        active_result_set_id=None,
     )
     db.add(conversation)
     await db.flush()
@@ -64,10 +65,10 @@ async def save_conversation_state(
     conversation: AgentConversation,
     *,
     turns: list[dict],
-    last_search_candidate_ids: list[str],
+    active_result_set_id: uuid.UUID | None,
 ) -> None:
     conversation.turns = turns
-    conversation.last_search_candidate_ids = last_search_candidate_ids
+    conversation.active_result_set_id = active_result_set_id
     await db.flush()
 
 
@@ -107,13 +108,22 @@ async def sync_last_turn_display_text(
 
 async def reset_conversation(db: AsyncSession, conversation: AgentConversation) -> None:
     """Slice 4 (issue #33): the "Yeni söhbət" capability — clears this
-    session's own server-held conversation state (turns and the ordinal
-    candidate_ref resolution table) without touching any other tenant/
-    candidate/job row. Same tenant/session scoping as every other call
-    site here; the caller resolves ``conversation`` via
-    get_or_create_conversation first, so it is always already this
-    request's own row."""
-    await save_conversation_state(db, conversation, turns=[], last_search_candidate_ids=[])
+    session's own server-held conversation state (turns and the active
+    result-set pointer) without touching any other tenant/candidate/job
+    row, and increments ``context_epoch`` (issue #49) so a previously
+    created AgentResultSet — even one a tampered/stale
+    ``active_result_set_id`` still points at — can never resolve a
+    candidate_ref again after this reset (see
+    meyar.services.agent_result_set_repo.resolve_active_candidate_ref).
+    Same tenant/session scoping as every other call site here; the caller
+    resolves ``conversation`` via get_or_create_conversation first, so it
+    is always already this request's own row. Never deletes any
+    AgentResultSet/AgentResultSetMember row — only repoints/invalidates
+    this conversation's own reference to one."""
+    conversation.turns = []
+    conversation.active_result_set_id = None
+    conversation.context_epoch += 1
+    await db.flush()
 
 
 def get_pending_job_draft(
@@ -155,7 +165,7 @@ async def replace_pending_job_draft(
         db,
         conversation,
         turns=turns,
-        last_search_candidate_ids=conversation.last_search_candidate_ids,
+        active_result_set_id=conversation.active_result_set_id,
     )
 
 
@@ -206,5 +216,5 @@ async def mark_pending_job_draft_confirmed(
         db,
         conversation,
         turns=turns,
-        last_search_candidate_ids=conversation.last_search_candidate_ids,
+        active_result_set_id=conversation.active_result_set_id,
     )

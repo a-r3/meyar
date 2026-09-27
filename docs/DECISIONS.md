@@ -6263,3 +6263,67 @@ unconfirmed without a non-target Mac rehearsal. The bank-Mac benchmark,
 production model decision, and latency/RAM/concurrency gates remain
 unstarted #36 work. **Issue #35 tooling complete != real bank Mac
 benchmark complete.** No production deployment acceptance is inferred.
+
+## D-083 — Server-owned AgentResultSet replaces last_search_candidate_ids (issue #49 PR49-1)
+
+**Date:** 2026-09-28. **Status:** Accepted.
+
+**Decision:** Replace `AgentConversation.last_search_candidate_ids` (a bare
+JSON id list) with `AgentResultSet`/`AgentResultSetMember` — tenant/session/
+context-epoch-scoped rows carrying full search provenance (canonical
+`CandidateSearchRequest`, planner/search policy versions, a corpus
+fingerprint, and an `expires_at` bound to the owning `BrowserSession`).
+`AgentConversation` gains `context_epoch` (int, bumped on every "Yeni
+söhbət" reset) and `active_result_set_id` (FK, `ON DELETE SET NULL`). The
+LLM still only ever emits `candidate_ref = N`; resolution is now
+`meyar.services.agent_result_set_repo.resolve_active_candidate_ref`, an
+8-step ordered check (active pointer set → AgentResultSet exists AND
+`tenant_id` matches in one query → `browser_session_id` matches →
+`context_epoch` matches → not expired → corpus fingerprint still matches →
+ordinal in range → candidate still currently authorized) — the model
+interprets/orchestrates, the server alone decides which candidate_id (if
+any) a `candidate_ref` names, matching the existing D-030/D-031 split.
+
+**Corpus fingerprint:** sha256 over sorted
+`"{candidate_id}:{profile_version_id}[:{embedding_version_id|NONE}]"`
+tuples for the tenant's current, search-authorized profiles (same
+`list_current_profile_versions_for_tenant` + `authorize_profile_version`
+notion `meyar.search.service` itself uses) — never profile content, CV
+text, or CandidateIdentity. A mismatch at resolution time means the corpus
+has drifted (reprocessing, a new candidate, an embedding change) since the
+result set was created, and resolves to `RESULT_SET_STALE`; an expired
+`expires_at` resolves to `RESULT_SET_EXPIRED` — both distinct from
+`CANDIDATE_REF_NOT_FOUND` (no legitimate reference could ever be
+identified) so HR is told the truthful reason to re-run the search.
+
+**CandidateIdentity exclusion:** neither `AgentResultSet` nor
+`AgentResultSetMember` carries a name/email/phone field, and membership
+order/staleness never depends on one — ordinal authority is a
+professional-fact/provenance concept exactly like search/evaluation.
+
+**Immutable-snapshot FK rationale:** `AgentResultSetMember.candidate_id`,
+`candidate_profile_version_id`, and `candidate_embedding_version_id` are
+deliberately plain UUID columns with NO `ForeignKey` constraint against
+`candidates`/`candidate_profile_versions`/`candidate_embedding_versions`.
+A hard candidate delete (`meyar.services.candidate_service.
+delete_candidate_cascade`) must never be blocked by, and must never
+cascade-delete or silently renumber, a historical membership row — a
+deleted/reprocessed candidate simply makes the fingerprint stop matching
+(`RESULT_SET_STALE`), never a DB integrity error. `result_set_id` DOES
+`ON DELETE CASCADE` to `agent_result_sets.id` — deleting a whole result set
+legitimately deletes its own membership rows; that is not the same
+"destructive FK" concern.
+
+**Migration:** `d2a8f6c1b3e9` (chained on `8bd12e7c4a60`) drops
+`last_search_candidate_ids` with no backfill — there is no provenance
+(planner/search request, corpus fingerprint, expiry) to safely reconstruct
+an `AgentResultSet` from a bare id list. A deployment upgrade may require
+one fresh search before an ordinal follow-up works again; existing
+transcripts/pending job drafts are untouched.
+
+**Scope note:** the agent's own NL search planner
+(`meyar.search.planner_service`) only ever produces `STRUCTURED_ONLY`
+requests today — SEMANTIC_ONLY/HYBRID result-set population is exercised
+via direct `agent_result_set_repo` unit tests (constructing a
+`PlannedCandidateSearchResponse` directly), not the full agent turn; no
+product behavior regresses, this is pre-existing planner scope.

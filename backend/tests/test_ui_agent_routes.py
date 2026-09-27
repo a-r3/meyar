@@ -2590,8 +2590,9 @@ async def test_agent_reset_clears_this_sessions_conversation_state(
     assert query_text not in workspace_after.text
     del candidate
 
-    # The cleared last_search_candidate_ids table means a stale ordinal
-    # reference from before the reset can no longer resolve.
+    # The reset clears active_result_set_id AND bumps context_epoch, so a
+    # stale ordinal reference from before the reset can no longer resolve
+    # (issue #49).
     fake_profile = FakeLLMProvider(
         agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1)
     )

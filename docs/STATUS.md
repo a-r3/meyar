@@ -196,11 +196,21 @@ M9 and do not supersede or close M5/#20.
 
 **Other open/backlog work:** issue #45 (API-first agent/application
 contract completion, M8) and issue #46 (pre-deployment runtime/ingestion/
-recovery hardening, M9) remain OPEN. Issues #49 (server-owned search
-result-context and conversational follow-ups) and #50 (evidence-backed
-candidate Q&A and deterministic comparison, depends on #49) are
-post-presentation capability-backlog items — **planned, not
+recovery hardening, M9) remain OPEN, untouched by PR49-1. Issue #50
+(evidence-backed candidate Q&A and deterministic comparison, depends on
+#49) is a post-presentation capability-backlog item — **planned, not
 implemented.**
+
+**PR49-1 for issue #49 (D-083) is implemented, pending quality-gate/PR
+review.** Replaces `AgentConversation.last_search_candidate_ids` with
+tenant/session/context-epoch-scoped `AgentResultSet`/`AgentResultSetMember`
+rows (migration `d2a8f6c1b3e9`) — a `candidate_ref` still only ever comes
+from the model, but resolution is now `agent_result_set_repo.
+resolve_active_candidate_ref`'s 8-step ordered check (tenant/session/
+context-epoch/expiry/corpus-fingerprint/ordinal-range/authorization),
+distinguishing `RESULT_SET_STALE`/`RESULT_SET_EXPIRED` from
+`CANDIDATE_REF_NOT_FOUND`. No Target-Mac work performed; #35/#36/#46
+untouched by this PR.
 
 The detailed narrative immediately below (the D-055 through D-063 passes,
 and the earlier M7 HR UI productization detail) is retained as historical

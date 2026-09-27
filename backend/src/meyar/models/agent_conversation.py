@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, ForeignKey, func
+from sqlalchemy import JSON, DateTime, ForeignKey, Integer, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from meyar.db import Base
@@ -22,12 +22,17 @@ class AgentConversation(Base):
     meyar.services.audit_repo, applied here to conversational state
     instead of the audit trail).
 
-    ``last_search_candidate_ids`` is the SERVER-AUTHORITATIVE ordinal
-    resolution table for follow-up references ("birincini aç") — a list of
-    candidate_id strings ordered by search rank. The model never supplies
-    or trusts its own memory of a candidate_id; every candidate_ref the
-    model produces is resolved against this column, tenant-scoped, at
-    read time. See meyar.agent.service._resolve_candidate_ref."""
+    ``active_result_set_id`` + ``context_epoch`` (issue #49, replacing the
+    old ``last_search_candidate_ids`` JSON ordinal table) are the
+    SERVER-AUTHORITATIVE state a follow-up ``candidate_ref`` ("birincini
+    aç") resolves against — see meyar.services.agent_result_set_repo.
+    resolve_active_candidate_ref, the ONLY place a candidate_ref becomes a
+    real candidate_id. ``context_epoch`` increments on every "Yeni söhbət"
+    reset (see meyar.services.agent_conversation_repo.reset_conversation)
+    so a stale/tampered ``active_result_set_id`` from a previous
+    conversation epoch can never resolve again, even if repointed at a
+    still-otherwise-valid AgentResultSet row for this same tenant/session.
+    """
 
     __tablename__ = "agent_conversations"
 
@@ -42,7 +47,12 @@ class AgentConversation(Base):
         index=True,
     )
     turns: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
-    last_search_candidate_ids: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    context_epoch: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
+    active_result_set_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("agent_result_sets.id", ondelete="SET NULL"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

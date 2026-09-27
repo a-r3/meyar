@@ -272,6 +272,12 @@ AGENT_TURN_OUTCOME_TEXT: dict[str, str] = {
     "CANDIDATE_REF_NOT_FOUND": (
         "Göstərilən namizəd tapılmadı — əvvəlcə axtarış nəticələrindən birini seçin."
     ),
+    "RESULT_SET_STALE": (
+        "Bu axtarış nəticələri artıq yenilənib. Namizədi seçmək üçün axtarışı yenidən edin."
+    ),
+    "RESULT_SET_EXPIRED": (
+        "Bu axtarış nəticələrinin müddəti bitib. Namizədi seçmək üçün axtarışı yenidən edin."
+    ),
     "JOB_DRAFT_FAILED": (
         "Bu elandan kriteriya qaralaması hazırlana bilmədi. Mətni bir az fərqli "
         "şəkildə yenidən göndərin və ya vakansiyanı əl ilə yaradın."
