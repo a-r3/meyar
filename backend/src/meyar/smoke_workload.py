@@ -22,7 +22,7 @@ from meyar.ops.diagnostics import _identity
 from meyar.ops.host_config import load_host_settings
 from meyar.ops.offline_host import _operation_lock, verify_active_release
 from meyar.ops.private_evidence import area, publish_bundle
-from meyar.ops.smoke_contract import REQUIRED_CHECKS
+from meyar.ops.smoke_contract import REQUIRED_CHECKS, postgres_image_digest
 from meyar.smoke_fixture import SYNTHETIC_CV_PDF
 
 CONTAINER = f"meyar-smoke-{os.getpid()}"
@@ -31,8 +31,8 @@ APP_PORT = 58080
 PG_USER = "meyar"
 PG_PASSWORD = secrets.token_urlsafe(24)
 PG_DB = f"meyar_smoke_{secrets.token_hex(6)}"
-IMAGE = "pgvector/pgvector:pg16"
-DATABASE_URL = f"postgresql+asyncpg://{PG_USER}:{PG_PASSWORD}@localhost:{PORT}/{PG_DB}"
+DEV_IMAGE = "pgvector/pgvector:pg16"
+DATABASE_URL = f"postgresql+asyncpg://{PG_USER}:{PG_PASSWORD}@127.0.0.1:{PORT}/{PG_DB}"
 BASE_URL = f"http://127.0.0.1:{APP_PORT}"
 
 results: list[dict] = []
@@ -41,6 +41,7 @@ installed_python: Path | None = None
 installed_backend: Path | None = None
 installed_ini: Path | None = None
 docker_command: list[str] = ["docker"]
+docker_env: dict[str, str] = {}
 
 
 class SmokeIncomplete(Exception):
@@ -85,20 +86,35 @@ def _created_tenant(stdout: str) -> tuple[str, str]:
 
 
 def _require_tools(evidence: bool) -> None:
-    global docker_command
-    missing = [
-        t for t in (("docker",) if evidence else ("docker", "uv")) if shutil.which(t) is None
-    ]
+    global docker_command, docker_env
+    docker_found = shutil.which("docker")
+    missing = (["docker"] if docker_found is None else []) + (
+        ["uv"] if not evidence and shutil.which("uv") is None else []
+    )
     if missing:
         print(f"ENVIRONMENTAL GATE: missing tool(s): {missing}", file=sys.stderr)
         sys.exit(2)
+    docker_path = Path(docker_found or "")
+    if (
+        not docker_path.is_absolute()
+        or not docker_path.is_file()
+        or not os.access(docker_path, os.X_OK)
+    ):
+        raise RuntimeError("smoke Docker executable is not an absolute executable file")
+    docker_path = docker_path.resolve(strict=True)
     docker_env = {
         key: value
         for key, value in os.environ.items()
         if key not in {"DOCKER_HOST", "DOCKER_CONTEXT"}
     }
     endpoint = subprocess.run(
-        ["docker", "context", "inspect", "--format", '{{(index .Endpoints "docker").Host}}'],
+        [
+            str(docker_path),
+            "context",
+            "inspect",
+            "--format",
+            '{{(index .Endpoints "docker").Host}}',
+        ],
         env=docker_env,
         capture_output=True,
         text=True,
@@ -109,16 +125,39 @@ def _require_tools(evidence: bool) -> None:
     socket_path = Path(endpoint.removeprefix("unix://"))
     if not socket_path.is_absolute() or not stat.S_ISSOCK(socket_path.stat().st_mode):
         raise RuntimeError("smoke Docker endpoint is not a local Unix socket")
-    docker_command = ["docker", "--host", endpoint]
+    docker_command = [str(docker_path), "--host", endpoint]
 
 
-def _start_disposable_postgres() -> None:
+def _require_local_image(image_ref: str) -> str:
+    digest = postgres_image_digest(image_ref)
+    if digest is None:
+        raise SmokeIncomplete("approved pgvector image must be an exact sha256 reference")
+    inspected = subprocess.run(
+        [*docker_command, "image", "inspect", "--format", "{{json .RepoDigests}}", image_ref],
+        env=docker_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if inspected.returncode != 0:
+        raise SmokeIncomplete("approved pgvector image is not preloaded locally")
+    try:
+        digests = json.loads(inspected.stdout)
+    except json.JSONDecodeError as exc:
+        raise SmokeIncomplete("local pgvector image identity is unavailable") from exc
+    if not isinstance(digests, list) or image_ref not in digests:
+        raise SmokeIncomplete("local pgvector image identity does not match approved digest")
+    return digest
+
+
+def _start_disposable_postgres(image_ref: str | None = None) -> None:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.bind(("127.0.0.1", PORT))
     _run(
         [
             *docker_command,
             "run",
+            "--pull=never",
             "--rm",
             "-d",
             "--name",
@@ -131,14 +170,15 @@ def _start_disposable_postgres() -> None:
             f"POSTGRES_DB={PG_DB}",
             "-p",
             f"127.0.0.1:{PORT}:5432",
-            IMAGE,
+            image_ref or DEV_IMAGE,
         ],
-        env={**os.environ, "POSTGRES_PASSWORD": PG_PASSWORD},
+        env={**docker_env, "POSTGRES_PASSWORD": PG_PASSWORD},
     )
     for _ in range(30):
         if (
             subprocess.run(
                 [*docker_command, "exec", CONTAINER, "pg_isready", "-U", PG_USER, "-d", PG_DB],
+                env=docker_env,
                 capture_output=True,
             ).returncode
             == 0
@@ -230,7 +270,9 @@ def _smoke_env(storage_root: Path, root: Path | None = None) -> dict[str, str]:
     return env
 
 
-def _publish_evidence(root: Path, smoke_id: str, app_label: str, before: tuple[Any, ...]) -> None:
+def _publish_evidence(
+    root: Path, smoke_id: str, app_label: str, before: tuple[Any, ...], image_digest: str
+) -> None:
     if any(not result["ok"] for result in results) or checks != REQUIRED_CHECKS:
         raise RuntimeError("required synthetic smoke checks did not all pass")
     with _operation_lock(root):
@@ -250,6 +292,7 @@ def _publish_evidence(root: Path, smoke_id: str, app_label: str, before: tuple[A
                     "alembic_head": before[2],
                     "execution_mode": "installed-release",
                     "disposable_database": True,
+                    "postgres_image_digest": image_digest,
                     "all_required_steps_passed": True,
                     "passed_checks": sorted(REQUIRED_CHECKS),
                 }
@@ -268,14 +311,18 @@ def main() -> None:
     parser.add_argument("--ops-install-root", type=Path)
     parser.add_argument("--smoke-id")
     parser.add_argument("--app-label")
+    parser.add_argument("--postgres-image-ref")
     args = parser.parse_args()
     if any(
-        value is not None for value in (args.ops_install_root, args.smoke_id, args.app_label)
+        value is not None
+        for value in (args.ops_install_root, args.smoke_id, args.app_label, args.postgres_image_ref)
     ) and not all(
-        value is not None for value in (args.ops_install_root, args.smoke_id, args.app_label)
+        value is not None
+        for value in (args.ops_install_root, args.smoke_id, args.app_label, args.postgres_image_ref)
     ):
         parser.error("all smoke evidence options must be supplied together")
     evidence = args.ops_install_root is not None
+    image_digest: str | None = None
     _require_tools(evidence)
     before: tuple[Any, ...] | None = None
     if evidence:
@@ -285,6 +332,11 @@ def main() -> None:
         installed_python = release / ".venv/bin/python"
         installed_backend = release / "backend"
         installed_ini = installed_backend / "alembic.ini"
+        try:
+            image_digest = _require_local_image(args.postgres_image_ref)
+        except SmokeIncomplete as exc:
+            print(f"ENVIRONMENTAL GATE: {exc}", file=sys.stderr)
+            sys.exit(2)
     tmp = Path(tempfile.mkdtemp(prefix="meyar-smoke-"))
     storage_root = tmp / "storage"
     storage_root.mkdir()
@@ -297,7 +349,7 @@ def main() -> None:
 
     try:
         print(f"== working directory: {tmp} ==")
-        _start_disposable_postgres()
+        _start_disposable_postgres(args.postgres_image_ref)
 
         if not evidence:
             print("== uv sync --locked ==")
@@ -620,7 +672,7 @@ def main() -> None:
                 app_proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 app_proc.kill()
-        subprocess.run([*docker_command, "stop", CONTAINER], capture_output=True)
+        subprocess.run([*docker_command, "stop", CONTAINER], env=docker_env, capture_output=True)
         shutil.rmtree(tmp, ignore_errors=True)
 
     print("\n== SUMMARY ==")
@@ -634,8 +686,10 @@ def main() -> None:
     print("\nFRESH-DEPLOYMENT SMOKE: ALL STEPS PASSED.")
     if evidence:
         assert args.ops_install_root is not None and args.app_label is not None
-        assert args.smoke_id is not None and before is not None
-        _publish_evidence(args.ops_install_root, args.smoke_id, args.app_label, before)
+        assert args.smoke_id is not None and before is not None and image_digest is not None
+        _publish_evidence(
+            args.ops_install_root, args.smoke_id, args.app_label, before, image_digest
+        )
 
 
 if __name__ == "__main__":

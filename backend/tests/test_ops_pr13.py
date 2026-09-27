@@ -27,8 +27,18 @@ RUNTIME = "c" * 64
 APP = "com.bank.meyar"
 OLLAMA = "com.bank.ollama"
 IDENTITY = (
-    RELEASE, SOURCE, "head", MODEL, RUNTIME, (1, 2, 3, 4), "d" * 64, "e" * 64,
-    "0.12.0", "a" * 64, "b" * 64, OLLAMA,
+    RELEASE,
+    SOURCE,
+    "head",
+    MODEL,
+    RUNTIME,
+    (1, 2, 3, 4),
+    "d" * 64,
+    "e" * 64,
+    "0.12.0",
+    "a" * 64,
+    "b" * 64,
+    OLLAMA,
 )
 
 
@@ -468,6 +478,30 @@ def test_lifecycle_missing_is_incomplete_and_tampered_evidence_fails(
         "_load_json",
         lambda *_: {"release_id": RELEASE, "source_sha": SOURCE, "alembic_head": "head"},
     )
+    no_image = lifecycle_acceptance.run_lifecycle_acceptance(
+        root,
+        APP,
+        OLLAMA,
+        "run-missing-image",
+        backup_id="backup",
+        restore_id="restore",
+        update_id="update",
+        reboot_id="reboot",
+        edge_id="edge",
+        diagnostic_id="diag",
+        smoke_id="smoke",
+        postgres_image_ref="pgvector/pgvector@sha256:" + "d" * 64,
+        pg_bin_dir=root,
+    )
+    assert no_image.findings[0].code == "ACCEPTANCE_INCOMPLETE"
+    missing_checks = json.loads(
+        (root / "shared/acceptance/run-missing-image/checks.json").read_text()
+    )["checks"]
+    assert (
+        next(check for check in missing_checks if check["component"] == "synthetic_smoke")["status"]
+        == "INCOMPLETE"
+    )
+    (root / "shared/smoke/smoke").mkdir(parents=True)
     passed = lifecycle_acceptance.run_lifecycle_acceptance(
         root,
         APP,
@@ -480,6 +514,7 @@ def test_lifecycle_missing_is_incomplete_and_tampered_evidence_fails(
         edge_id="edge",
         diagnostic_id="diag",
         smoke_id="smoke",
+        postgres_image_ref="pgvector/pgvector@sha256:" + "d" * 64,
         pg_bin_dir=root,
     )
     assert passed.findings[0].code == "ACCEPTANCE_PASS"
@@ -496,6 +531,7 @@ def test_lifecycle_missing_is_incomplete_and_tampered_evidence_fails(
         edge_id="edge",
         diagnostic_id="diag",
         smoke_id="smoke",
+        postgres_image_ref="pgvector/pgvector@sha256:" + "d" * 64,
         pg_bin_dir=root,
     )
     assert failed.findings[0].code == "ACCEPTANCE_FAIL"

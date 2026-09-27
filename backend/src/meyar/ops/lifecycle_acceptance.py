@@ -30,7 +30,7 @@ from meyar.ops.restore import DATABASE_IDENTIFIER, _inspect_target, _tree_hash
 from meyar.ops.result import FindingStatus, OpsResult, build_single_finding_result
 from meyar.ops.service_plist import validate_label
 from meyar.ops.service_status import run_service_status
-from meyar.ops.smoke_contract import REQUIRED_CHECKS
+from meyar.ops.smoke_contract import POSTGRES_IMAGE_DIGEST, REQUIRED_CHECKS, postgres_image_digest
 from meyar.ops.update import (
     UpdateFailure,
     _active_generation,
@@ -234,7 +234,10 @@ def _edge(root: Path, edge_id: str, identity: tuple[Any, ...]) -> bool:
     )
 
 
-def _smoke(root: Path, smoke_id: str, identity: tuple[Any, ...]) -> bool:
+def _smoke(root: Path, smoke_id: str, identity: tuple[Any, ...], image_ref: str) -> bool:
+    expected_digest = postgres_image_digest(image_ref)
+    if expected_digest is None:
+        return False
     receipt = verify_bundle(area(root, "smoke") / smoke_id, frozenset({"manifest.json"}))[
         "manifest.json"
     ]
@@ -247,6 +250,7 @@ def _smoke(root: Path, smoke_id: str, identity: tuple[Any, ...]) -> bool:
             "release_id",
             "source_sha",
             "disposable_database",
+            "postgres_image_digest",
             "alembic_head",
             "execution_mode",
             "all_required_steps_passed",
@@ -260,6 +264,9 @@ def _smoke(root: Path, smoke_id: str, identity: tuple[Any, ...]) -> bool:
         and receipt["alembic_head"] == identity[2]
         and receipt["execution_mode"] == "installed-release"
         and receipt["disposable_database"] is True
+        and isinstance(receipt["postgres_image_digest"], str)
+        and POSTGRES_IMAGE_DIGEST.fullmatch(receipt["postgres_image_digest"]) is not None
+        and receipt["postgres_image_digest"] == expected_digest
         and receipt["all_required_steps_passed"] is True
         and type(receipt["passed_checks"]) is list
         and receipt["passed_checks"] == sorted(REQUIRED_CHECKS)
@@ -273,8 +280,14 @@ def _diagnostics(root: Path, diagnostic_id: str, identity: tuple[Any, ...]) -> b
         area(root, "diagnostics") / diagnostic_id,
         frozenset(
             {
-                "manifest.json", "environment.json", "deployment.json", "services.json",
-                "database.json", "ai.json", "operations.json", "filesystem.json",
+                "manifest.json",
+                "environment.json",
+                "deployment.json",
+                "services.json",
+                "database.json",
+                "ai.json",
+                "operations.json",
+                "filesystem.json",
             }
         ),
     )
@@ -305,6 +318,7 @@ def run_lifecycle_acceptance(
     edge_id: str | None = None,
     diagnostic_id: str | None = None,
     smoke_id: str | None = None,
+    postgres_image_ref: str | None = None,
     pg_bin_dir: Path | None = None,
 ) -> OpsResult:
     try:
@@ -422,7 +436,22 @@ def run_lifecycle_acceptance(
         )
         evidence("https_edge", edge_id, lambda value: _edge(root, value, first))
         evidence("diagnostics", diagnostic_id, lambda value: _diagnostics(root, value, first))
-        evidence("synthetic_smoke", smoke_id, lambda value: _smoke(root, value, first))
+        if smoke_id is not None and postgres_image_ref is None:
+            checks.append(_check("synthetic_smoke", "INCOMPLETE", "SYNTHETIC_SMOKE_IMAGE_MISSING"))
+        elif (
+            smoke_id is not None
+            and SAFE_ID.fullmatch(smoke_id) is not None
+            and not os.path.lexists(root / "shared/smoke" / smoke_id)
+        ):
+            checks.append(
+                _check("synthetic_smoke", "INCOMPLETE", "SYNTHETIC_SMOKE_EVIDENCE_MISSING")
+            )
+        else:
+            evidence(
+                "synthetic_smoke",
+                smoke_id,
+                lambda value: _smoke(root, value, first, postgres_image_ref or ""),
+            )
         with _operation_lock(root):
             if _identity(root, app_label) != first:
                 raise EvidenceFailure("ACCEPTANCE_STATE_CHANGED")

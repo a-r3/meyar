@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -18,6 +20,8 @@ from meyar.ops.private_evidence import EvidenceFailure, area, publish_bundle
 from meyar.smoke_fixture import SYNTHETIC_CV_PDF
 
 IDENTITY = ("meyar-test+abcdef123456", "a" * 40, "head")
+IMAGE_REF = "pgvector/pgvector@sha256:" + "d" * 64
+IMAGE_DIGEST = "sha256:" + "d" * 64
 
 
 def test_packaged_cv_is_the_reviewed_synthetic_fixture() -> None:
@@ -42,6 +46,7 @@ def _receipt(smoke_id: str, **changes: object) -> dict[str, object]:
         "alembic_head": IDENTITY[2],
         "execution_mode": "installed-release",
         "disposable_database": True,
+        "postgres_image_digest": IMAGE_DIGEST,
         "all_required_steps_passed": True,
         "passed_checks": sorted(smoke_workload.REQUIRED_CHECKS),
     }
@@ -74,6 +79,8 @@ def test_evidence_launcher_uses_active_python_and_module(tmp_path: Path) -> None
             "smoke-1",
             "--app-label",
             "com.bank.meyar",
+            "--postgres-image-ref",
+            IMAGE_REF,
         ],
         env=env,
         capture_output=True,
@@ -91,6 +98,8 @@ def test_evidence_launcher_uses_active_python_and_module(tmp_path: Path) -> None
         "smoke-1",
         "--app-label",
         "com.bank.meyar",
+        "--postgres-image-ref",
+        IMAGE_REF,
     ]
     assert cwd == str(backend)
 
@@ -176,6 +185,7 @@ def test_synthetic_env_excludes_production_database_and_storage(
     )
     env = smoke_workload._smoke_env(tmp_path / "disposable-storage", tmp_path)
     assert env["MEYAR_DATABASE_URL"] == smoke_workload.DATABASE_URL
+    assert "@127.0.0.1:" in env["MEYAR_DATABASE_URL"]
     assert env["MEYAR_STORAGE_ROOT"] == str(tmp_path / "disposable-storage")
     assert env["MEYAR_ENV"] == "test"
     assert "PYTHONPATH" not in env
@@ -191,17 +201,119 @@ def test_smoke_requires_local_docker_socket(
     with socket.socket(socket.AF_UNIX) as listener:
         listener.bind(str(sock))
         monkeypatch.setenv("DOCKER_HOST", "tcp://remote.example:2376")
-        monkeypatch.setattr(smoke_workload.shutil, "which", lambda _: "/usr/bin/docker")
+        monkeypatch.setenv("DOCKER_CONTEXT", "remote")
+        docker = tmp_path / "docker"
+        docker.write_text("#!/bin/sh\nexit 0\n")
+        docker.chmod(0o700)
+        monkeypatch.setattr(smoke_workload.shutil, "which", lambda _: str(docker))
         seen: dict[str, object] = {}
 
-        def inspect(*_args: object, **kwargs: object) -> SimpleNamespace:
+        def inspect(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            seen["argv"] = argv
             seen["env"] = kwargs["env"]
             return SimpleNamespace(stdout=f"unix://{sock}\n")
 
         monkeypatch.setattr(smoke_workload.subprocess, "run", inspect)
         smoke_workload._require_tools(True)
         assert "DOCKER_HOST" not in seen["env"]
-        assert smoke_workload.docker_command == ["docker", "--host", f"unix://{sock}"]
+        assert "DOCKER_CONTEXT" not in seen["env"]
+        assert seen["argv"][0] == str(docker)
+        assert smoke_workload.docker_command == [str(docker), "--host", f"unix://{sock}"]
+
+
+def test_remote_docker_context_is_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    docker = tmp_path / "docker"
+    docker.write_text("#!/bin/sh\nexit 0\n")
+    docker.chmod(0o700)
+    monkeypatch.setattr(smoke_workload.shutil, "which", lambda _: str(docker))
+    monkeypatch.setattr(
+        smoke_workload.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(stdout="tcp://remote.example:2376"),
+    )
+    with pytest.raises(RuntimeError, match="local Unix Docker socket"):
+        smoke_workload._require_tools(True)
+
+
+def test_missing_pinned_image_never_runs_or_pulls(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        smoke_workload, "docker_command", ["/usr/bin/docker", "--host", "unix:///local"]
+    )
+    monkeypatch.setattr(smoke_workload, "docker_env", {})
+
+    def inspect(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+        calls.append(argv)
+        return SimpleNamespace(returncode=1, stdout="")
+
+    monkeypatch.setattr(smoke_workload.subprocess, "run", inspect)
+    with pytest.raises(smoke_workload.SmokeIncomplete, match="not preloaded"):
+        smoke_workload._require_local_image(IMAGE_REF)
+    assert len(calls) == 1 and calls[0][3:5] == ["image", "inspect"]
+    assert all("pull" not in command for command in calls)
+    with pytest.raises(smoke_workload.SmokeIncomplete, match="exact sha256"):
+        smoke_workload._require_local_image("pgvector/pgvector:pg16")
+    assert len(calls) == 1
+
+
+def test_smoke_worker_has_no_docker_pull_command() -> None:
+    assert re.search(r"['\"]pull['\"]", inspect.getsource(smoke_workload)) is None
+
+
+def test_missing_docker_or_image_cannot_publish_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _root(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "smoke",
+            "--ops-install-root",
+            str(root),
+            "--app-label",
+            "app",
+            "--smoke-id",
+            "missing-prerequisite",
+            "--postgres-image-ref",
+            IMAGE_REF,
+        ],
+    )
+    monkeypatch.setattr(
+        smoke_workload, "_require_tools", lambda *_: (_ for _ in ()).throw(SystemExit(2))
+    )
+    with pytest.raises(SystemExit) as exited:
+        smoke_workload.main()
+    assert exited.value.code == 2
+    assert not (root / "shared/smoke/missing-prerequisite").exists()
+
+    monkeypatch.setattr(smoke_workload, "_require_tools", lambda *_: None)
+    monkeypatch.setattr(smoke_workload, "_installed_identity", lambda *_: IDENTITY)
+    monkeypatch.setattr(
+        smoke_workload,
+        "_require_local_image",
+        lambda *_: (_ for _ in ()).throw(smoke_workload.SmokeIncomplete("image absent")),
+    )
+    with pytest.raises(SystemExit) as exited:
+        smoke_workload.main()
+    assert exited.value.code == 2
+    assert not (root / "shared/smoke/missing-prerequisite").exists()
+
+
+def test_preloaded_image_must_match_exact_requested_digest(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        smoke_workload, "docker_command", ["/usr/bin/docker", "--host", "unix:///local"]
+    )
+    monkeypatch.setattr(smoke_workload, "docker_env", {})
+    monkeypatch.setattr(
+        smoke_workload.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0, stdout=json.dumps(["pgvector/pgvector@sha256:" + "e" * 64])
+        ),
+    )
+    with pytest.raises(smoke_workload.SmokeIncomplete, match="does not match"):
+        smoke_workload._require_local_image(IMAGE_REF)
 
 
 def test_disposable_database_uses_loopback_and_random_credentials(
@@ -211,7 +323,10 @@ def test_disposable_database_uses_loopback_and_random_credentials(
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
     monkeypatch.setattr(smoke_workload, "PORT", port)
-    monkeypatch.setattr(smoke_workload, "docker_command", ["docker", "--host", "unix:///local"])
+    monkeypatch.setattr(
+        smoke_workload, "docker_command", ["/usr/bin/docker", "--host", "unix:///local"]
+    )
+    monkeypatch.setattr(smoke_workload, "docker_env", {})
     captured: dict[str, object] = {}
 
     def docker_run(argv: list[str], **kwargs: object) -> None:
@@ -222,7 +337,10 @@ def test_disposable_database_uses_loopback_and_random_credentials(
     monkeypatch.setattr(
         smoke_workload.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0)
     )
-    smoke_workload._start_disposable_postgres()
+    smoke_workload._start_disposable_postgres(IMAGE_REF)
+    assert "--pull=never" in captured["argv"]
+    assert captured["argv"][0] == "/usr/bin/docker"
+    assert captured["argv"][-1] == IMAGE_REF
     assert f"127.0.0.1:{port}:5432" in captured["argv"]
     assert "POSTGRES_PASSWORD" in captured["argv"]
     assert not any(smoke_workload.PG_PASSWORD in arg for arg in captured["argv"])
@@ -237,13 +355,13 @@ def test_failed_model_or_missing_capability_cannot_publish(
     monkeypatch.setattr(smoke_workload, "results", [{"step": "local extraction", "ok": False}])
     monkeypatch.setattr(smoke_workload, "checks", set(smoke_workload.REQUIRED_CHECKS))
     with pytest.raises(RuntimeError, match="did not all pass"):
-        smoke_workload._publish_evidence(root, "failed-model", "app", IDENTITY)
+        smoke_workload._publish_evidence(root, "failed-model", "app", IDENTITY, IMAGE_DIGEST)
     monkeypatch.setattr(smoke_workload, "results", [{"step": "smoke", "ok": True}])
     monkeypatch.setattr(
         smoke_workload, "checks", set(smoke_workload.REQUIRED_CHECKS) - {"local_embedding"}
     )
     with pytest.raises(RuntimeError, match="did not all pass"):
-        smoke_workload._publish_evidence(root, "missing-capability", "app", IDENTITY)
+        smoke_workload._publish_evidence(root, "missing-capability", "app", IDENTITY, IMAGE_DIGEST)
     assert not (root / "shared/smoke").exists()
 
 
@@ -257,7 +375,7 @@ def test_caller_cannot_label_another_release_after_success(
         smoke_workload, "_installed_identity", lambda *_: ("other-release", *IDENTITY[1:])
     )
     with pytest.raises(RuntimeError, match="identity changed"):
-        smoke_workload._publish_evidence(root, "wrong-label", "app", IDENTITY)
+        smoke_workload._publish_evidence(root, "wrong-label", "app", IDENTITY, IMAGE_DIGEST)
     assert not (root / "shared/smoke/wrong-label").exists()
 
 
@@ -268,8 +386,10 @@ def test_successful_installed_worker_receipt_round_trips_to_lifecycle(
     monkeypatch.setattr(smoke_workload, "results", [{"step": "complete", "ok": True}])
     monkeypatch.setattr(smoke_workload, "checks", set(smoke_workload.REQUIRED_CHECKS))
     monkeypatch.setattr(smoke_workload, "_installed_identity", lambda *_: IDENTITY)
-    smoke_workload._publish_evidence(root, "smoke-valid", "app", IDENTITY)
-    assert lifecycle_acceptance._smoke(root, "smoke-valid", IDENTITY)
+    smoke_workload._publish_evidence(root, "smoke-valid", "app", IDENTITY, IMAGE_DIGEST)
+    receipt = json.loads((root / "shared/smoke/smoke-valid/manifest.json").read_text())
+    assert receipt["postgres_image_digest"] == IMAGE_DIGEST
+    assert lifecycle_acceptance._smoke(root, "smoke-valid", IDENTITY, IMAGE_REF)
 
 
 def test_developer_commands_remain_uv_based(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -302,11 +422,21 @@ def test_lifecycle_accepts_only_exact_installed_release_capabilities(tmp_path: P
             "passed_checks": sorted(smoke_workload.REQUIRED_CHECKS - {"deterministic_ranking"})
         },
         "false-disposable": {"disposable_database": False},
+        "missing-image": {"postgres_image_digest": None},
+        "changed-image": {"postgres_image_digest": "sha256:" + "e" * 64},
+        "mutable-image": {"postgres_image_digest": "pgvector/pgvector:pg16"},
         "legacy": {"format_version": 1},
     }
     for smoke_id, changes in variants.items():
         publish_bundle(parent, smoke_id, {"manifest.json": _receipt(smoke_id, **changes)})
-        assert lifecycle_acceptance._smoke(root, smoke_id, IDENTITY) is (smoke_id == "valid")
+        assert lifecycle_acceptance._smoke(root, smoke_id, IDENTITY, IMAGE_REF) is (
+            smoke_id == "valid"
+        )
+    missing_field = _receipt("missing-image-field")
+    missing_field.pop("postgres_image_digest")
+    publish_bundle(parent, "missing-image-field", {"manifest.json": missing_field})
+    assert not lifecycle_acceptance._smoke(root, "missing-image-field", IDENTITY, IMAGE_REF)
+    assert not lifecycle_acceptance._smoke(root, "valid", IDENTITY, "pgvector/pgvector:pg16")
     publish_bundle(
         parent,
         "legacy-shape",
@@ -323,8 +453,8 @@ def test_lifecycle_accepts_only_exact_installed_release_capabilities(tmp_path: P
             }
         },
     )
-    assert not lifecycle_acceptance._smoke(root, "legacy-shape", IDENTITY)
+    assert not lifecycle_acceptance._smoke(root, "legacy-shape", IDENTITY, IMAGE_REF)
     tampered = parent / "valid/manifest.json"
     tampered.write_text(tampered.read_text().replace("installed-release", "checkout"))
     with pytest.raises(EvidenceFailure):
-        lifecycle_acceptance._smoke(root, "valid", IDENTITY)
+        lifecycle_acceptance._smoke(root, "valid", IDENTITY, IMAGE_REF)

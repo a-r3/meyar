@@ -159,6 +159,7 @@ def _build_parser() -> argparse.ArgumentParser:
         acceptance_parser.add_argument(f"--{identifier}", type=str)
     acceptance_parser.add_argument("--pg-bin-dir", type=Path)
     acceptance_parser.add_argument("--smoke-id", type=str)
+    acceptance_parser.add_argument("--postgres-image-ref", type=str)
 
     backup_create_parser = sub.add_parser(
         "backup-create", help="Create a quiesced installed backup."
@@ -347,6 +348,7 @@ def _run_command(args: argparse.Namespace) -> OpsResult:
             edge_id=args.edge_id,
             diagnostic_id=args.diagnostic_id,
             smoke_id=args.smoke_id,
+            postgres_image_ref=args.postgres_image_ref,
             pg_bin_dir=args.pg_bin_dir,
         )
     if args.command == "backup-create":

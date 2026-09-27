@@ -6247,6 +6247,15 @@ after the run. Receipt format 2 names fixed required capability checks, and
 `lifecycle-acceptance` refuses legacy `PASS` plus step-count evidence. A local
 Ollama timeout or missing capability yields no PASS receipt.
 
+**PR13 offline database correction:** Installed smoke requires an operator-
+documented `pgvector/pgvector@sha256:<approved-manifest-digest>` reference.
+It verifies that exact image locally before container creation and runs with
+`--pull=never`; it never repairs or pulls a missing image. The receipt binds
+the exact digest and lifecycle verification compares it with the same approved
+input. Docker is a prerequisite of the disposable synthetic rehearsal only,
+not a selected production PostgreSQL topology; PR13 does not provision it.
+Missing Docker or the exact preloaded image leaves synthetic smoke incomplete.
+
 **Boundary:** PR13 engineering tooling and Linux tests are not #35
 acceptance. A separate owner audit after merge decides issue closure.
 Real Apple-Silicon launchctl, reboot and native-runtime behavior remain

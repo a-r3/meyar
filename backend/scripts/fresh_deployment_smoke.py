@@ -13,8 +13,14 @@ def main() -> None:
     parser.add_argument("--ops-install-root", type=Path)
     parser.add_argument("--smoke-id")
     parser.add_argument("--app-label")
+    parser.add_argument("--postgres-image-ref")
     args = parser.parse_args()
-    evidence_options = (args.ops_install_root, args.smoke_id, args.app_label)
+    evidence_options = (
+        args.ops_install_root,
+        args.smoke_id,
+        args.app_label,
+        args.postgres_image_ref,
+    )
     if any(value is not None for value in evidence_options) and not all(
         value is not None for value in evidence_options
     ):
@@ -45,6 +51,8 @@ def main() -> None:
             args.smoke_id,
             "--app-label",
             args.app_label,
+            "--postgres-image-ref",
+            args.postgres_image_ref,
         ],
         cwd=backend,
         env=env,

@@ -1,5 +1,17 @@
 """Fixed capability codes required for installed synthetic smoke evidence."""
 
+import re
+
+POSTGRES_IMAGE_REF = re.compile(r"pgvector/pgvector@sha256:([0-9a-f]{64})\Z")
+POSTGRES_IMAGE_DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
+
+
+def postgres_image_digest(reference: str) -> str | None:
+    """Accept only an exact pgvector manifest digest supplied for rehearsal."""
+    match = POSTGRES_IMAGE_REF.fullmatch(reference)
+    return f"sha256:{match.group(1)}" if match else None
+
+
 REQUIRED_CHECKS = frozenset(
     {
         "fresh_schema",

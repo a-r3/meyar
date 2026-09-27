@@ -1316,7 +1316,7 @@ non-root install owner. IDs match `[A-Za-z0-9][A-Za-z0-9_-]{0,79}`.
 <root>/current/.venv/bin/python -m meyar.ops.cli reboot-verify --install-root <root> --app-label <app-label> --ollama-label <ollama-label> --reboot-id <id>
 <root>/current/.venv/bin/python -m meyar.ops.cli cleanup --install-root <root>
 <root>/current/.venv/bin/python -m meyar.ops.cli cleanup --install-root <root> --apply
-<root>/current/.venv/bin/python -m meyar.ops.cli lifecycle-acceptance --install-root <root> --app-label <app-label> --ollama-label <ollama-label> --run-id <id> --backup-id <backup-id> --restore-id <restore-id> --update-id <update-id> --reboot-id <reboot-id> --edge-id <edge-id> --diagnostic-id <diagnostic-id> --smoke-id <smoke-id> --pg-bin-dir <trusted-postgresql-bin-dir>
+<root>/current/.venv/bin/python -m meyar.ops.cli lifecycle-acceptance --install-root <root> --app-label <app-label> --ollama-label <ollama-label> --run-id <id> --backup-id <backup-id> --restore-id <restore-id> --update-id <update-id> --reboot-id <reboot-id> --edge-id <edge-id> --diagnostic-id <diagnostic-id> --smoke-id <smoke-id> --postgres-image-ref 'pgvector/pgvector@sha256:<approved-manifest-digest>' --pg-bin-dir <trusted-postgresql-bin-dir>
 ```
 
 Omit `--ca-file` for system trust. `edge-verify` without the three evidence
@@ -1370,9 +1370,9 @@ immutable release/source/config/schema/model, services and full readiness,
 then the named reboot, verified backup, isolated restore, finalized update
 and explicit rollback, HTTPS edge, diagnostics, and synthetic smoke evidence.
 Run the smoke worker directly on the installed host:
-`<root>/current/.venv/bin/python -I -m meyar.smoke_workload --ops-install-root <root> --app-label <app-label> --smoke-id <id>`.
+`<root>/current/.venv/bin/python -I -m meyar.smoke_workload --ops-install-root <root> --app-label <app-label> --smoke-id <id> --postgres-image-ref 'pgvector/pgvector@sha256:<approved-manifest-digest>'`.
 `backend/scripts/fresh_deployment_smoke.py` dispatches that same command
-when invoked from a checkout with all three evidence options. The worker
+when invoked from a checkout with all four evidence options. The worker
 verifies the exact active release, its installed Python/source and Alembic
 head before creating a disposable PostgreSQL container and temporary
 storage. Migration, CLI and Uvicorn subprocesses all use the verified
@@ -1380,7 +1380,21 @@ immutable release Python with
 `-I`; Alembic uses that release's `backend/alembic.ini` and migration tree.
 The Docker endpoint must be a local Unix socket; the disposable database has
 a random name/password and a `127.0.0.1`-only port mapping. Evidence-mode
-Uvicorn inherits a pre-bound loopback socket so HTTP responses can only come
+PostgreSQL connections also use numeric `127.0.0.1`. Before rehearsal, the
+operator must document the approved `pgvector/pgvector@sha256:<64 lowercase
+hex digits>` manifest reference in the build/rehearsal input and preload that
+exact image on the host. The same reference is supplied to smoke and
+`lifecycle-acceptance`. The worker verifies the exact reference in local
+Docker image metadata, then runs it with `--pull=never`; a missing image is
+incomplete and never triggers a registry pull or a PASS receipt. Docker is a
+prerequisite of this disposable lifecycle-smoke rehearsal path. It is not the
+selected production PostgreSQL topology and PR13 does not provision Docker.
+The worker resolves one absolute local Docker executable and uses it for all
+evidence calls, with caller `DOCKER_HOST` and `DOCKER_CONTEXT` removed and an
+explicit verified local Unix-socket endpoint. If Docker or the exact preloaded
+image is unavailable on the Apple-Silicon rehearsal host, synthetic smoke is
+`INCOMPLETE` and lifecycle acceptance cannot PASS. Evidence-mode Uvicorn
+inherits a pre-bound loopback socket so HTTP responses can only come
 from the launched installed-release process.
 The worker re-verifies release, model and configuration identity before
 publishing. It strips ambient `MEYAR_*` and `PYTHON*` values from the smoke
@@ -1393,12 +1407,15 @@ tenant seeder or destination-host Git deployment instruction.
 
 Smoke receipt format 2 records only `smoke_id`, PASS, release/source/head,
 `execution_mode: installed-release`, `disposable_database: true`,
+`postgres_image_digest: sha256:<approved-manifest-digest>`,
 `all_required_steps_passed: true`, and fixed `passed_checks` identifiers:
 `fresh_schema`, `auth_login`, `synthetic_cv_ingestion`, `local_extraction`,
 `local_embedding`, `candidate_library_detail`, `structured_search`,
 `vacancy_flow`, `deterministic_scoring`, `deterministic_ranking`,
 `original_cv_authorization`, and `restart_persistence`. Legacy receipts
-cannot satisfy lifecycle acceptance.
+cannot satisfy lifecycle acceptance. The digest must be well formed and equal
+the approved reference supplied to lifecycle verification; a missing or
+different digest is rejected.
 Missing evidence is `INCOMPLETE`, invalid/tampered evidence is `FAIL`, and
 every check must be `PASS` for overall `PASS`. The new `0700`
 `shared/acceptance/<run-id>/` directory has `0600` `manifest.json`,
