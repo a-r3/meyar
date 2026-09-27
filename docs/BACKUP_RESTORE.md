@@ -1,13 +1,13 @@
 # MEYAR — Backup & Restore
 
-Status: PR9 / PR #72 is merged and post-merge verified at accepted main
-`2dcf0a8783e49008b0eb707d81b42248209b34d6`. PR10 adds isolated
-restore for independent review. PR11 / PR #74 is merged and post-merge
-verified at accepted main `38624ca3440c7dbf750d4248d8e0a9992b7192b5`.
-PR12 uses verified backup as a mandatory staged-update gate. Slice 13 (issue #20) separately has an
+Status: PR9 / PR #72, PR10 / PR #73, PR11 / PR #74, and PR12 / PR #75
+are merged and post-merge verified. Accepted main is
+`7c911cbc850d21999eae2239e6b51bfedc570d4a`. PR12 uses verified
+backup as a mandatory staged-update gate. Slice 13 (issue #20) separately has an
 executed synthetic backup/restore acceptance proof in
-`backend/scripts/backup_restore_acceptance.py`. Production cutover remains
-future #35 work. Neither mechanism creates a backup schedule.
+`backend/scripts/backup_restore_acceptance.py`. Production cutover is
+unimplemented and requires a separately approved procedure. Neither
+mechanism creates a backup schedule.
 
 ## Scope
 
@@ -244,3 +244,14 @@ responsibilities layered on top of this mechanism, consistent with
 `docs/SECURITY_PRIVACY.md`'s existing position that encryption-at-rest
 for document storage is a deployment/infrastructure control (host/disk-
 level encryption), not an application-layer feature in MVP.
+
+## PR13 lifecycle handoff
+
+PR12 / PR #75 is merged and post-merge verified on accepted main
+`7c911cbc850d21999eae2239e6b51bfedc570d4a`. PR13's
+`lifecycle-acceptance` does not create a backup or restore a database.
+It reuses PR9 `backup-verify` for the named quiesced backup, checks PR10's
+isolated restore receipt, storage tree and isolated target revision, and
+requires matching PR12 finalized update and explicit rollback receipts.
+A missing rehearsal is `INCOMPLETE`; an invalid/tampered artifact is
+`FAIL`. The isolated restore never becomes a production cutover.

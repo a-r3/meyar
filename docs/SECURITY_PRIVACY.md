@@ -351,3 +351,32 @@ malicious prompt-injection content, malformed file. Never commit real CVs
 - Whether Postgres RLS is added before broader internal rollout —
   deferred until real production load is observed. (No external pilot
   customer exists — MEYAR is internal-only, D-011.)
+
+## PR13 support and HTTPS boundary
+
+PR12 / PR #75 is merged and post-merge verified; accepted main is
+`7c911cbc850d21999eae2239e6b51bfedc570d4a`. PR13 diagnostics are
+local private metadata only. They use an exact file allowlist, fixed
+finding codes, `0700` directory/`0600` file modes, hashes, duplicate-key
+and size checks, no-clobber publication, and shared operation-lock
+identity recheck. They do not copy logs, `.env`, DB dumps/rows,
+`shared/storage`, candidate filenames/content/identity, queries,
+prompts, model responses, cookies, credentials, or launchctl output.
+There is no upload or candidate-bearing external call.
+
+Bank-managed HTTPS ingress is the sole supported LAN path:
+HR browser → bank TLS reverse proxy → `127.0.0.1:<MEYAR-port>`.
+MEYAR and Ollama never bind directly to the LAN. `edge-verify` sends a
+fixed unauthenticated `GET /api/v1/health` to one explicit HTTPS origin,
+using system or explicitly trusted CA validation and strict hostname
+checking. It ignores proxy environment variables, never follows a
+redirect, and has no API key, cookie, request body, candidate content,
+or arbitrary path. This is a non-sensitive health probe, not a
+candidate-content network path.
+
+Reboot and acceptance receipts contain release/source/schema/model and
+fixed codes, not protected config values. Cleanup's only deletion
+allowlist is abandoned activation temporary symlinks; candidate data,
+backups, restores, model blobs, and logs are outside its authority.
+Real Apple-Silicon and bank-network validation remain unconfirmed until
+physical execution. No production model is approved by PR13.

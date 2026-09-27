@@ -770,3 +770,32 @@ It intentionally does not restate the full backup/restore mechanism
 (`docs/TARGET_MAC_BENCHMARK.md`), or the REST API reference (`README.md`)
 — consult those directly for detail beyond an operator's day-to-day
 sequence of commands.*
+
+## 22. PR13 agentless lifecycle evidence
+
+PR12 / PR #75 is merged and post-merge verified. Accepted main is
+`7c911cbc850d21999eae2239e6b51bfedc570d4a`. PR13 proposes the
+remaining #35 engineering commands. Their exact syntax and private
+artifact contracts are in `docs/MEYAR_OPS.md`.
+
+The operational order is preflight → offline install → protected configure
+→ schema-init → offline Ollama/model setup → application and Ollama system
+LaunchDaemons → deployment-ready → human reboot proof → synthetic smoke
+in a disposable database → quiesced backup → isolated restore → staged
+update → explicit rollback rehearsal → bank-managed HTTPS edge verify →
+allowlisted diagnostics → lifecycle acceptance. The HR browser reaches
+bank HTTPS ingress, which forwards to MEYAR's numeric loopback listener.
+Ollama remains numeric loopback-only. There is no target-host Git
+checkout, source editing, AI coding agent, or automatic diagnostic upload.
+
+The machine-readable lifecycle result is `PASS`, `FAIL`, or `INCOMPLETE`.
+Missing reboot, backup, restore, update/rollback, HTTPS, diagnostics, or
+synthetic smoke evidence is `INCOMPLETE`, never an implied pass. Invalid
+or mismatched evidence is `FAIL`. The separate owner audit after PR13
+merge determines actual #35 acceptance. A Linux simulation does not
+exercise real macOS launchctl, reboot, native arm64 wheels, or bank
+network ingress. No Apple-Silicon rehearsal host was available for this
+PR13 run; that physical rehearsal remains **INCOMPLETE**. The bank-Mac
+latency/RAM/concurrency benchmark and production model selection remain
+unstarted in #36, next only after #35 acceptance. #49 is later
+post-presentation capability expansion; #46 remains open separately.
