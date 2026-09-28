@@ -235,6 +235,18 @@ class AgentJobDraftView(BaseModel):
     wrong_mode_guidance: bool = False
 
 
+class AgentRefineSummaryView(BaseModel):
+    """issue #49 PR49-2 — safe, non-identity summary counts for one
+    REFINE_CANDIDATE_RESULTS tool result, used to build one deterministic
+    HR-facing sentence (never the raw filter_query text)."""
+
+    source_result_count: int
+    result_count: int
+    has_filter: bool
+    requested_limit: int | None = None
+    limit_truncated: bool = False
+
+
 class AgentToolResultView(BaseModel):
     tool_name: str
     search_outcome: PlannerOutcomeView | None = None
@@ -243,6 +255,7 @@ class AgentToolResultView(BaseModel):
     evidence: AgentEvidenceView | None = None
     job_draft: AgentJobDraftView | None = None
     not_found_ref: int | None = None
+    refine_summary: AgentRefineSummaryView | None = None
 
 
 class AgentTurnView(BaseModel):

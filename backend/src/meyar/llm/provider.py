@@ -83,6 +83,7 @@ class LLMProvider(Protocol):
         *,
         recent_turns: list[tuple[str, str]],
         last_tool_result_summary: dict[str, Any] | None,
+        active_result_context_present: bool,
         available_candidate_refs: list[int],
         repair: bool = False,
     ) -> tuple[AgentDecision, "LLMResultProvenance"]:

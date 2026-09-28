@@ -42,6 +42,7 @@ from meyar.core.result_count import DEFAULT_RESULT_LIMIT, MAX_RESULT_LIMIT, MIN_
 from meyar.schemas.candidate_profile import CandidateProfileExtraction, EvidenceRef
 from meyar.schemas.criteria import CriterionIn, CriterionType
 from meyar.search.planner_schemas import PlannedCandidateSearchResponse
+from meyar.search.schemas import CandidateSearchResponse
 
 AGENT_SCHEMA_VERSION = "agent-decision-schema-v1"
 AGENT_POLICY_VERSION = "agent-policy-v1"
@@ -69,6 +70,15 @@ class AgentActionType(StrEnum):
     SEARCH_CANDIDATES = "SEARCH_CANDIDATES"
     GET_CANDIDATE_PROFILE = "GET_CANDIDATE_PROFILE"
     GET_CANDIDATE_EVIDENCE = "GET_CANDIDATE_EVIDENCE"
+    # issue #49 PR49-2: a follow-up that operates on the conversation's own
+    # CURRENT active AgentResultSet ("ilk üçü", "bunlardan SQL bilənlər",
+    # "5 nəfərə endir") rather than naming a new, independent search. The
+    # model may only express bounded intent (filter_query/limit below) —
+    # it never supplies a result_set_id/candidate_id/ordinal membership
+    # list; the server alone resolves the active result set and computes
+    # the derived membership/order (see
+    # meyar.services.agent_result_set_repo.create_result_set_from_refinement).
+    REFINE_CANDIDATE_RESULTS = "REFINE_CANDIDATE_RESULTS"
     # Slice 4 (issue #33, D-030/D-032): the user pasted/described a JD or
     # role and wants candidate-evaluation criteria drafted from it. No
     # argument on the decision itself — the server uses the user's OWN
@@ -90,6 +100,14 @@ class AgentResponseCode(StrEnum):
     CANDIDATE_REFERENCE_REQUIRED = "CANDIDATE_REFERENCE_REQUIRED"
     UNSUPPORTED_REQUEST = "UNSUPPORTED_REQUEST"
     HIRING_DECISION_REQUIRES_HUMAN = "HIRING_DECISION_REQUIRES_HUMAN"
+    # issue #49 PR49-2: REFINE_CANDIDATE_RESULTS-shaped intent ("ilk üçü",
+    # "bunlardan ...") with no active result set to operate on — distinct
+    # from CANDIDATE_REFERENCE_REQUIRED (which is about naming ONE
+    # candidate_ref), since a refinement request never names a single
+    # candidate at all. Never used for a STALE/EXPIRED active result set —
+    # those get their own truthful AgentTurnOutcome (RESULT_SET_STALE/
+    # RESULT_SET_EXPIRED), same as candidate_ref resolution.
+    RESULT_CONTEXT_REQUIRED = "RESULT_CONTEXT_REQUIRED"
 
 
 _FINAL_RESPONSE_CODES = frozenset({AgentResponseCode.GREETING, AgentResponseCode.ACKNOWLEDGEMENT})
@@ -99,6 +117,7 @@ _CLARIFICATION_RESPONSE_CODES = frozenset(
         AgentResponseCode.CANDIDATE_REFERENCE_REQUIRED,
         AgentResponseCode.UNSUPPORTED_REQUEST,
         AgentResponseCode.HIRING_DECISION_REQUIRES_HUMAN,
+        AgentResponseCode.RESULT_CONTEXT_REQUIRED,
     }
 )
 
@@ -109,6 +128,7 @@ TOOL_ACTIONS = frozenset(
         AgentActionType.GET_CANDIDATE_PROFILE,
         AgentActionType.GET_CANDIDATE_EVIDENCE,
         AgentActionType.DRAFT_JOB_CRITERIA,
+        AgentActionType.REFINE_CANDIDATE_RESULTS,
     }
 )
 
@@ -137,6 +157,24 @@ class AgentDecision(BaseModel):
     # never treated as instructions — matched as a case/diacritic-
     # insensitive substring against existing stored facts only.
     evidence_topic: str | None = Field(default=None, max_length=200)
+    # REFINE_CANDIDATE_RESULTS only, optional: the user's own natural-
+    # language refinement criterion (e.g. "SQL bilənlər"), forwarded
+    # UNMODIFIED into the existing frozen NL search-planner pipeline
+    # (D-031) — exactly like SEARCH_CANDIDATES.search_query — to derive a
+    # validated deterministic RequiredFilters shape. Never itself executed
+    # as a tenant-wide search: meyar.agent.service._dispatch_refine
+    # evaluates the resulting filters ONLY against the active
+    # AgentResultSet's own current members. See AgentActionType.
+    # REFINE_CANDIDATE_RESULTS.
+    filter_query: str | None = Field(
+        default=None, min_length=1, max_length=MAX_AGENT_SEARCH_QUERY_LENGTH
+    )
+    # REFINE_CANDIDATE_RESULTS only, optional: "ilk N" / "N nəfərə endir" —
+    # applied server-side, after any filter, against the active result
+    # set's OWN preserved order. Bounded to the same MAX_CANDIDATE_REF a
+    # candidate_ref itself is bounded to (never a limit the search policy
+    # itself could not have produced).
+    limit: int | None = Field(default=None, ge=1, le=MAX_CANDIDATE_REF)
     # FINAL_ANSWER / CLARIFY only: a closed conversational intent. The
     # server maps this to fixed copy; no model-authored prose can reach HR.
     response_code: AgentResponseCode | None = None
@@ -150,6 +188,8 @@ class AgentDecision(BaseModel):
                 raise ValueError("SEARCH_CANDIDATES must not set candidate_ref or response_code.")
             if self.evidence_topic is not None:
                 raise ValueError("SEARCH_CANDIDATES must not set evidence_topic.")
+            if self.filter_query is not None or self.limit is not None:
+                raise ValueError("SEARCH_CANDIDATES must not set filter_query or limit.")
         elif self.action in (
             AgentActionType.GET_CANDIDATE_PROFILE,
             AgentActionType.GET_CANDIDATE_EVIDENCE,
@@ -158,11 +198,33 @@ class AgentDecision(BaseModel):
                 raise ValueError(f"{self.action} requires candidate_ref.")
             if self.search_query is not None or self.response_code is not None:
                 raise ValueError(f"{self.action} must not set search_query or response_code.")
+            if self.filter_query is not None or self.limit is not None:
+                raise ValueError(f"{self.action} must not set filter_query or limit.")
             if (
                 self.action == AgentActionType.GET_CANDIDATE_PROFILE
                 and self.evidence_topic is not None
             ):
                 raise ValueError("GET_CANDIDATE_PROFILE must not set evidence_topic.")
+        elif self.action == AgentActionType.REFINE_CANDIDATE_RESULTS:
+            # The model may express ONLY bounded intent — see
+            # AgentActionType.REFINE_CANDIDATE_RESULTS and the filter_query/
+            # limit field docstrings. At least one refinement operation
+            # must be present: a bare "bunlardan"-shaped decision with
+            # neither set is never accepted as this action (small-model
+            # safety — see docs/DECISIONS.md D-084); the model must use
+            # CLARIFY(NEED_MORE_DETAIL) instead.
+            if self.search_query is not None or self.candidate_ref is not None:
+                raise ValueError(
+                    "REFINE_CANDIDATE_RESULTS must not set search_query or candidate_ref."
+                )
+            if self.evidence_topic is not None or self.response_code is not None:
+                raise ValueError(
+                    "REFINE_CANDIDATE_RESULTS must not set evidence_topic or response_code."
+                )
+            if self.filter_query is None and self.limit is None:
+                raise ValueError(
+                    "REFINE_CANDIDATE_RESULTS requires filter_query and/or limit."
+                )
         elif self.action == AgentActionType.DRAFT_JOB_CRITERIA:
             # Bare action, no argument — see AgentActionType.DRAFT_JOB_CRITERIA
             # docstring for why the JD text itself is never round-tripped
@@ -172,10 +234,12 @@ class AgentDecision(BaseModel):
                 or self.candidate_ref is not None
                 or self.evidence_topic is not None
                 or self.response_code is not None
+                or self.filter_query is not None
+                or self.limit is not None
             ):
                 raise ValueError(
                     "DRAFT_JOB_CRITERIA must not set search_query, candidate_ref, "
-                    "evidence_topic, or response_code."
+                    "evidence_topic, filter_query, limit, or response_code."
                 )
         else:  # FINAL_ANSWER / CLARIFY
             if self.response_code is None:
@@ -184,9 +248,12 @@ class AgentDecision(BaseModel):
                 self.search_query is not None
                 or self.candidate_ref is not None
                 or self.evidence_topic is not None
+                or self.filter_query is not None
+                or self.limit is not None
             ):
                 raise ValueError(
-                    f"{self.action} must not set search_query, candidate_ref, or evidence_topic."
+                    f"{self.action} must not set search_query, candidate_ref, evidence_topic, "
+                    "filter_query, or limit."
                 )
             allowed = (
                 _FINAL_RESPONSE_CODES
@@ -204,6 +271,36 @@ class AgentSearchToolResult(BaseModel):
     model_config = {"extra": "forbid"}
 
     response: PlannedCandidateSearchResponse
+
+
+class AgentRefineToolResult(BaseModel):
+    """REFINE_CANDIDATE_RESULTS's tool result (issue #49 PR49-2) — NEVER
+    LLM-authored: ``response`` is server-built, reusing the exact
+    ``CandidateSearchResponse``/``CandidateSearchResult`` shape
+    SEARCH_CANDIDATES already produces (so the existing candidate-card
+    presentation layer renders it unchanged), except every result here is
+    already a member of the source AgentResultSet — never a fresh tenant-
+    wide search. ``source_result_count`` is the active result set's own
+    size BEFORE this refinement; ``result_count`` (also
+    ``response.result_count``) is the derived set's size. ``has_filter``/
+    ``requested_limit``/``limit_truncated`` are safe, non-identity summary
+    flags the presentation layer uses to build one deterministic HR-facing
+    sentence — never a raw filter_query/limit echo of untrusted model
+    input."""
+
+    model_config = {"extra": "forbid"}
+
+    response: CandidateSearchResponse
+    source_result_count: int = Field(ge=0)
+    has_filter: bool
+    requested_limit: int | None = Field(default=None, ge=1, le=MAX_CANDIDATE_REF)
+    # True only when a requested_limit was set AND the source (post-filter)
+    # set already had fewer members than that limit — see
+    # AgentActionType.REFINE_CANDIDATE_RESULTS section 16 precedent
+    # (docs/DECISIONS.md D-084): a derived set is still created, truthfully
+    # reporting the smaller count, never fabricating members to reach the
+    # requested limit.
+    limit_truncated: bool = False
 
 
 class AgentProfileToolResult(BaseModel):
@@ -648,6 +745,7 @@ class AgentToolResult(BaseModel):
     profile: AgentProfileToolResult | None = None
     evidence: AgentEvidenceToolResult | None = None
     job_draft: AgentJobDraftToolResult | None = None
+    refine: AgentRefineToolResult | None = None
 
     @model_validator(mode="after")
     def _validate_payload_matches_tool(self) -> "AgentToolResult":
@@ -656,10 +754,11 @@ class AgentToolResult(BaseModel):
             AgentActionType.GET_CANDIDATE_PROFILE: ("profile",),
             AgentActionType.GET_CANDIDATE_EVIDENCE: ("evidence",),
             AgentActionType.DRAFT_JOB_CRITERIA: ("job_draft",),
+            AgentActionType.REFINE_CANDIDATE_RESULTS: ("refine",),
         }.get(self.tool_name)
         if expected is None:
             raise ValueError(f"{self.tool_name} is not a valid tool result tag.")
-        for field_name in ("search", "profile", "evidence", "job_draft"):
+        for field_name in ("search", "profile", "evidence", "job_draft", "refine"):
             populated = getattr(self, field_name) is not None
             should_be_populated = field_name in expected
             if populated != should_be_populated:

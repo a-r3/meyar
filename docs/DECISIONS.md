@@ -6327,3 +6327,156 @@ requests today — SEMANTIC_ONLY/HYBRID result-set population is exercised
 via direct `agent_result_set_repo` unit tests (constructing a
 `PlannedCandidateSearchResponse` directly), not the full agent turn; no
 product behavior regresses, this is pre-existing planner scope.
+
+## D-084 — Conversational result-set refinement (issue #49 PR49-2)
+
+**Date:** 2026-09-28. **Status:** Accepted (implementation), NOT YET owner-
+accepted for issue #49 closure — see the PR's own human-checkpoint report.
+
+**Decision:** Add a dedicated `REFINE_CANDIDATE_RESULTS` agent action
+completing D-083's result-set authority with conversational continuation
+("ilk üçü", "bunlardan SQL bilənlər", "5 nəfərə endir"). The model-facing
+decision carries ONLY bounded intent — `filter_query: str | None` (forwarded
+unmodified into the existing frozen NL search-planner pipeline, exactly like
+`SEARCH_CANDIDATES.search_query`) and `limit: int | None` (`1..
+MAX_CANDIDATE_REF`) — never a `result_set_id`, `candidate_id`,
+`candidate_profile_version_id`, `candidate_embedding_version_id`, candidate
+list, or ordinal membership list. At least one of the two must be set
+(enforced by `AgentDecision` schema validation); a bare "bunlardan"-shaped
+request with neither routes to `CLARIFY(NEED_MORE_DETAIL)` instead.
+
+**Core rule:**
+
+```text
+LLM interprets refinement intent.
+Server-owned ResultSet defines the candidate universe.
+Deterministic policy filters/limits that universe.
+A new immutable ResultSet becomes the new context.
+```
+
+Concretely: **derived members ⊆ parent members** — a refinement's
+authoritative input universe is exactly `active_result_set.members ordered
+by ordinal`; a candidate absent from that set can never enter the derived
+set no matter what a global search for the same criterion would return
+(regression-tested: `test_filter_never_admits_a_candidate_outside_the_
+parent_set`). Filtering evaluates `CandidateSearchRequest.required_filters`
+(the Slice 8 `evaluate_required_filters` gate, unchanged) against each
+retained member's own CURRENT authorized profile — never `preferred_
+filters` (no reranking in this PR) and never a fresh
+`meyar.search.service.search_candidates` tenant-wide query. **Filtering
+preserves the parent's existing order; limit truncates that same preserved
+order; new dense ordinals (`1..N`) are server-generated** — the LLM never
+assigns or modifies `relevance_score`/`structured_score`/`semantic_score`/
+ordinal; scores are copied unchanged from the retained source member.
+
+**Authority reuse, not duplication:** `_validate_active_result_set` factors
+the 6 shared steps of D-083's own check order (active pointer set → tenant-
+scoped existence → session match → epoch match → not expired → corpus
+fingerprint match) out of `resolve_active_candidate_ref` into one function
+both it and the new `create_result_set_from_refinement` call — ordinal
+resolution, `active_result_set_size`, and refinement all consult the exact
+same authoritative definition, never a second staleness policy. STALE/
+EXPIRED resolve to the same `RESULT_SET_STALE`/`RESULT_SET_EXPIRED` turn
+outcomes D-083 already established; every other reason (no active result
+set, cross-tenant/cross-session/cross-epoch mismatch) collapses to one
+deterministic `CLARIFY(RESULT_CONTEXT_REQUIRED)` clarification — the new
+`AgentResponseCode` member for a refinement-shaped request with no
+resolvable context, distinct from `CANDIDATE_REFERENCE_REQUIRED` (which
+names one candidate, not a whole result list).
+
+**Defense in depth beyond the corpus fingerprint:** before evaluating any
+filter, each source member's own recorded `candidate_profile_version_id`
+must still equal the candidate's CURRENT authorized profile version. A
+mismatch (an edge case the aggregate fingerprint does not happen to cover)
+fails the WHOLE refinement as `RESULT_SET_STALE` — never a partial result,
+never silently evaluating a different profile version than the one this
+result set's own provenance recorded.
+
+**Provenance model:** `AgentResultSet` gains `result_set_kind` (`SEARCH` |
+`REFINEMENT`), `parent_result_set_id` (a plain immutable UUID snapshot
+reference — deliberately NOT a self-referential `ForeignKey`, mirroring
+`AgentResultSetMember`'s own candidate/profile/embedding snapshot-reference
+rationale in D-083: a derived row's provenance chain must never be
+corrupted by, or block, a later deletion of an ancestor row),
+`refinement_request_sha256`, `canonical_refinement_request` (DB-only
+provenance — `{"filter_request": <validated CandidateSearchRequest|null>,
+"limit": <int|null>}` — never copied into audit metadata, exactly like
+`canonical_search_request`), and `refinement_policy_version`. A derived
+row's `canonical_search_request`/`planner_*`/`search_policy_version`/
+`search_mode`/`corpus_fingerprint_sha256` are copied VERBATIM from the
+parent at creation time — never overwritten with the refinement's own
+filter text — so "what search produced this context" is always answerable
+from one row without walking the parent chain. `expires_at` is inherited
+exactly (`derived.expires_at == parent.expires_at`); a refinement never
+extends validity beyond its parent. Every row that predates this PR is
+backfilled truthfully as `result_set_kind='SEARCH'`,
+`parent_result_set_id=NULL` (migration `543c60f7efc5`, chained on
+`d2a8f6c1b3e9`) — no fabricated refinement provenance for a pre-existing
+row.
+
+**Limit-exceeds-count policy:** a `requested_limit` greater than the
+current (post-filter) member count still creates an auditable derived
+ResultSet containing every available member, truthfully reporting the
+smaller count (`AgentRefineToolResult.limit_truncated=True`) — never a
+fabricated member, never silently treated as a no-op.
+
+**Zero-result policy:** a valid deterministic refinement that retains zero
+members is NOT an error — a `result_count=0` derived ResultSet is created
+and becomes the new active context (a later ordinal reference against it
+then fails safely via the normal ordinal-out-of-range path, never
+auto-restoring the parent).
+
+**Model-facing context correction:** orchestration prompt v6 keeps two
+bounded, non-authoritative facts separate on every server request:
+`active_result_context_present` is derived only from
+`conversation.active_result_set_id is not None`, while
+`available_candidate_refs` contains only currently valid individual
+ordinals after normal ResultSet validation. Therefore a valid zero-member,
+stale, expired, foreign, or otherwise tampered pointer is still presented as
+context-present with no ordinal authority. This permits a refinement-shaped
+request to reach the existing server validation and return the truthful
+zero-result child, `RESULT_SET_STALE`, `RESULT_SET_EXPIRED`, or fail-closed
+context clarification. A reset clears the pointer and therefore presents
+context-absent. The model receives only the boolean — never the ResultSet UUID,
+candidate/profile/embedding IDs, or membership — and a true value never
+authorizes `candidate_ref`.
+
+**Turn-terminal, no reranking, no side effects:** `REFINE_CANDIDATE_RESULTS`
+is always turn-terminal (`meyar.agent.service._dispatch_refine`, mirroring
+`GET_CANDIDATE_PROFILE`/`GET_CANDIDATE_EVIDENCE`) — the model never keeps
+looping after a valid refinement into an accidental new search. A
+semantic/hybrid filter plan (not producible by today's agent NL planner
+per D-083's own scope note, but guarded regardless as defense in depth) is
+rejected with a fixed `UNSUPPORTED_REQUEST` clarification, never silently
+downgraded to `STRUCTURED_ONLY` and never executed as a global search. A
+prohibited-attribute filter_query is rejected by the SAME
+`precheck_natural_language_request`/`find_prohibited_term`/
+`CandidateSearchRequest` denylist chain SEARCH_CANDIDATES already uses —
+no second denylist, no derived ResultSet, the active ResultSet is left
+completely untouched. `CandidateIdentity` is never imported by
+`meyar.services.agent_result_set_repo` or `meyar.models.agent_result_set`
+(same structural test as D-083, now also covering the refinement code
+added to those two modules). No `Job`/`JobCriteriaVersion`/`Evaluation`
+row is ever created by a refinement turn.
+
+**Audit:** `agent.result_set.refined` (success) / `agent.result_set.
+refine_rejected` (an active-result-set validation failure) carry only
+ids/enums/counts/bools (`source_result_set_id`, `result_set_id`,
+`context_epoch`, `source_result_count`, `result_count`,
+`refinement_request_sha256`, `refinement_policy_version`, `requested_limit`,
+`has_filter`) — never the raw HR filter/query text, never a candidate
+name/email/phone.
+
+**Concurrency:** the complete refinement turn runs inside the same
+`get_or_create_conversation_for_update` row-lock transaction D-083
+established — two concurrent `REFINE_CANDIDATE_RESULTS` turns on the SAME
+browser session serialize into one coherent chain (R0 → R1 → R2), proven at
+the real `/ui/agent` route boundary (`test_real_ui_agent_route_
+serializes_concurrent_same_session_refinements`), never two siblings both
+derived independently from R0 with a competing active pointer.
+
+**Non-scope (unchanged from issue #49's own non-scope, and PR49-2's own
+governance bounds):** semantic reranking of the current set, deep candidate
+factual Q&A, candidate-to-candidate comparison, hiring recommendation, LLM
+numeric scoring, new scoring policy, RAG/long-term conversation memory, the
+future unified-composer/sidebar UI redesign.

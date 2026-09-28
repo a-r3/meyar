@@ -133,6 +133,7 @@ class OllamaLLMProvider:
         *,
         recent_turns: list[tuple[str, str]],
         last_tool_result_summary: dict[str, Any] | None,
+        active_result_context_present: bool,
         available_candidate_refs: list[int],
         repair: bool = False,
     ) -> tuple[AgentDecision, LLMResultProvenance]:
@@ -141,6 +142,7 @@ class OllamaLLMProvider:
             user_prompt=build_agent_user_prompt(
                 recent_turns=recent_turns,
                 last_tool_result_summary=last_tool_result_summary,
+                active_result_context_present=active_result_context_present,
                 available_candidate_refs=available_candidate_refs,
                 repair=repair,
             ),

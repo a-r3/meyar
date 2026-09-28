@@ -14,7 +14,7 @@ from meyar.embedding.serializer import (
     compute_source_sha256,
 )
 from meyar.models.agent_conversation import AgentConversation
-from meyar.models.agent_result_set import AgentResultSet, AgentResultSetMember
+from meyar.models.agent_result_set import AgentResultSet, AgentResultSetKind, AgentResultSetMember
 from meyar.search.schemas import CandidateSearchRequest, SearchMode
 from meyar.services.agent_result_set_repo import compute_corpus_fingerprint
 from meyar.services.browser_session_repo import get_browser_session_by_id
@@ -210,6 +210,8 @@ async def seed_active_result_set(
         tenant_id=tenant_id,
         browser_session_id=browser_session_id,
         context_epoch=conversation.context_epoch,
+        result_set_kind=AgentResultSetKind.SEARCH.value,
+        parent_result_set_id=None,
         request_sha256="0" * 64,
         canonical_search_request=request.model_dump(mode="json"),
         planner_policy_version="test-planner-policy-v1",

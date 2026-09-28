@@ -219,6 +219,63 @@ unlabeled number but never guesses that an arbitrary identifier is a phone.
   `candidate_ref` only for the `ORDINAL_OUT_OF_RANGE` reason (a small int
   the caller itself supplied, not identity).
 
+## Conversational result-set refinement authority (issue #49, D-084)
+
+- `REFINE_CANDIDATE_RESULTS` never lets the model supply membership: the
+  decision schema carries only bounded `filter_query`/`limit` intent, never
+  a `result_set_id`, `candidate_id`, `candidate_profile_version_id`,
+  `candidate_embedding_version_id`, candidate list, or ordinal membership
+  list. The server alone resolves the active `AgentResultSet` and computes
+  the derived membership/order.
+- The model-facing context exposes only
+  `active_result_context_present = (conversation.active_result_set_id is not
+  None)` plus the separately validated `available_candidate_refs` ordinal
+  list. The boolean discloses no ResultSet/candidate/profile/embedding id or
+  membership and grants no authority: zero-member, stale, expired, foreign,
+  and tampered pointers may all be context-present with no available
+  ordinals, after which normal server validation remains fail-closed.
+- **Derived members ⊆ parent members, always.** A refinement's
+  authoritative input universe is exactly the active result set's own
+  members in their existing order; a candidate absent from that set can
+  never enter the derived set, regardless of what a fresh tenant-wide
+  search for the same criterion would return — `meyar.search.service.
+  search_candidates` is never invoked by a refinement.
+- `filter_query` reuses the exact same frozen NL search-planner pipeline
+  (prohibited-attribute denylist, no-silent-weakening rule) `SEARCH_
+  CANDIDATES` already uses — no second, weaker filter-extraction path. A
+  non-executable or SEMANTIC_ONLY/HYBRID plan is rejected with a fixed
+  clarification; it is never silently downgraded to STRUCTURED_ONLY and
+  never executed as a global search. Only `required_filters` (the hard
+  eligibility gate) is evaluated — `preferred_filters` is never applied
+  (no reranking within a refinement).
+- `create_result_set_from_refinement` reuses `resolve_active_candidate_ref`'s
+  own tenant/session/context-epoch/expiry/corpus-fingerprint validation via
+  a shared `_validate_active_result_set` helper (one authoritative
+  definition, never a second staleness policy) — plus a defense-in-depth
+  check that each source member's recorded `candidate_profile_version_id`
+  still equals the candidate's CURRENT authorized profile version, failing
+  the WHOLE refinement closed (never partially) on any mismatch.
+- A derived `AgentResultSet`'s `expires_at` is inherited exactly from its
+  parent — a refinement never extends validity. Its `canonical_search_
+  request`/`planner_*`/`search_policy_version`/`search_mode` fields are
+  copied verbatim from the parent, never overwritten with the refinement's
+  own filter text; `canonical_refinement_request` (the validated filter
+  request + limit) is its own DB-only persisted provenance, subject to the
+  exact same "never copied into audit metadata" rule as `canonical_search_
+  request`.
+- `meyar.services.agent_result_set_repo` and `meyar.models.agent_result_set`
+  (both extended by this feature) remain within the existing
+  `CandidateIdentity`-import structural test — `CandidateIdentity` is never
+  imported by, or read from within, refinement authority code.
+- Audit event `agent.result_set.refined` (success) / `agent.result_set.
+  refine_rejected` (failure) carry only ids/enums/counts/bools
+  (source_result_set_id, result_set_id, context_epoch, source_result_count,
+  result_count, refinement_request_sha256, refinement_policy_version,
+  requested_limit, has_filter, or the closed `reason` code) — never the raw
+  HR filter/query text, never a candidate name/email/phone.
+- A refinement is always read-only with respect to business entities — it
+  never creates a `Job`/`JobCriteriaVersion`/`Evaluation` row.
+
 ## Local-only Ollama operating contract
 
 Two distinct guarantees are in play, and they must not be conflated —

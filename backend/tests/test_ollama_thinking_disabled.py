@@ -64,6 +64,7 @@ async def test_agent_decision_request_disables_thinking() -> None:
     await provider.decide_agent_action(
         recent_turns=[("user", "Java bilən namizədləri göstər")],
         last_tool_result_summary=None,
+        active_result_context_present=False,
         available_candidate_refs=[],
     )
 

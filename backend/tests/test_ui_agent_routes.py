@@ -3183,6 +3183,186 @@ async def test_real_ui_agent_route_serializes_concurrent_same_session_turns(
     assert await db_session.scalar(select(func.count()).select_from(Evaluation)) == 0
 
 
+async def test_real_ui_agent_route_serializes_concurrent_same_session_refinements(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
+) -> None:
+    """issue #49 PR49-2 — two concurrent REFINE_CANDIDATE_RESULTS turns on
+    the SAME browser session (each on its own DB connection/transaction,
+    against the ACTUAL POST /ui/agent route) must serialize into ONE
+    coherent chain (R0 -> R1 -> R2), never two siblings both derived
+    independently from R0 with a lost/competing active pointer. Mirrors
+    test_real_ui_agent_route_serializes_concurrent_same_session_turns
+    (PR49-1) exactly, adapted for REFINE_CANDIDATE_RESULTS being
+    turn-terminal (exactly one decide_agent_action call per turn, not
+    two)."""
+    from conftest import TEST_DATABASE_URL
+    from search_helpers import seed_active_result_set
+    from sqlalchemy import func, select
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from meyar.db import get_db
+    from meyar.models.agent_result_set import (
+        AgentResultSet,
+        AgentResultSetKind,
+        AgentResultSetMember,
+    )
+    from meyar.models.audit_event import AuditEvent
+    from meyar.models.browser_session import BrowserSession
+    from meyar.models.evaluation import Evaluation
+    from meyar.models.job import Job as JobModel
+    from meyar.models.job_criteria_version import JobCriteriaVersion
+    from meyar.services.agent_conversation_repo import get_or_create_conversation
+
+    tenant, user, password, _membership = tenant_and_user
+    candidate_a, _ = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=_profile("SQL")
+    )
+    candidate_b, _ = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=_profile("SQL")
+    )
+    candidate_c, _ = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=_profile("Python")
+    )
+    await db_session.commit()
+
+    # The real /ui/login flow creates the actual BrowserSession this
+    # csrf/cookie belongs to — build the root result set against THAT
+    # session (never a throwaway one) so the concurrent REFINE turns below
+    # resolve against it exactly like a real HR user's own prior search.
+    csrf = await _login_and_csrf(client, user.username, password)
+    login_session = await db_session.scalar(
+        select(BrowserSession)
+        .where(BrowserSession.user_id == user.id)
+        .order_by(BrowserSession.created_at.desc())
+    )
+    assert login_session is not None
+    conversation = await get_or_create_conversation(
+        db_session, tenant_id=tenant.id, browser_session_id=login_session.id
+    )
+    root = await seed_active_result_set(
+        db_session,
+        tenant_id=tenant.id,
+        browser_session_id=login_session.id,
+        conversation=conversation,
+        candidate_ids=[candidate_a.id, candidate_b.id, candidate_c.id],
+    )
+    await db_session.commit()
+
+    class _DelayedOnFirstRefineLLM(FakeLLMProvider):
+        """See _DelayedOnFirstSearchLLM (PR49-1) — REFINE_CANDIDATE_RESULTS
+        is turn-terminal, so each turn makes exactly ONE
+        decide_agent_action call; the FIRST call of EACH of the two
+        concurrent turns (indices 0 and 1 on this shared instance) sleeps
+        while holding the row lock."""
+
+        async def decide_agent_action(self, **kwargs):
+            if self.agent_call_count in (0, 1):
+                await asyncio.sleep(0.15)
+            return await super().decide_agent_action(**kwargs)
+
+    fake = _DelayedOnFirstRefineLLM(
+        agent_decisions=[
+            AgentDecision(action=AgentActionType.REFINE_CANDIDATE_RESULTS, limit=2),
+            AgentDecision(
+                action=AgentActionType.REFINE_CANDIDATE_RESULTS,
+                filter_query="SQL bilən namizədləri göstər",
+            ),
+        ],
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake
+
+    engine_a = create_async_engine(TEST_DATABASE_URL)
+    engine_b = create_async_engine(TEST_DATABASE_URL)
+    factory_a = async_sessionmaker(engine_a, expire_on_commit=False)
+    factory_b = async_sessionmaker(engine_b, expire_on_commit=False)
+    assigned: list[str] = []
+
+    async def _round_robin_get_db():
+        factory = factory_a if not assigned else factory_b
+        assigned.append("taken")
+        async with factory() as session:
+            yield session
+
+    app.dependency_overrides[get_db] = _round_robin_get_db
+
+    loop = asyncio.get_event_loop()
+    started = loop.time()
+    try:
+        response_1, response_2 = await asyncio.gather(
+            client.post("/ui/agent", data={"message": "ilk 2", "csrf_token": csrf}),
+            client.post(
+                "/ui/agent",
+                data={"message": "bunlardan SQL bilənlər", "csrf_token": csrf},
+            ),
+        )
+    finally:
+        elapsed = loop.time() - started
+        await engine_a.dispose()
+        await engine_b.dispose()
+
+        async def _restore_get_db():
+            yield db_session
+
+        app.dependency_overrides[get_db] = _restore_get_db
+
+    assert response_1.status_code == 200
+    assert response_2.status_code == 200
+    assert elapsed >= 0.28
+
+    await db_session.refresh(conversation)
+    refined_events = (
+        await db_session.scalars(
+            select(AuditEvent).where(
+                AuditEvent.tenant_id == tenant.id,
+                AuditEvent.event_type == "agent.result_set.refined",
+            )
+        )
+    ).all()
+    assert len(refined_events) == 2
+    first_event, second_event = refined_events
+    if first_event.event_metadata["source_result_set_id"] != str(root.id):
+        first_event, second_event = second_event, first_event
+    # The forbidden pattern is R0 -> R1 and R0 -> R2 (both siblings of the
+    # root, a lost/competing active pointer) — proven absent here because
+    # the SECOND event's source is the FIRST event's own derived id, never
+    # the root again.
+    assert first_event.event_metadata["source_result_set_id"] == str(root.id)
+    assert second_event.event_metadata["source_result_set_id"] == first_event.event_metadata[
+        "result_set_id"
+    ]
+    assert conversation.active_result_set_id is not None
+    assert str(conversation.active_result_set_id) == second_event.event_metadata["result_set_id"]
+
+    derived_result_sets = (
+        await db_session.scalars(
+            select(AgentResultSet).where(
+                AgentResultSet.tenant_id == tenant.id,
+                AgentResultSet.result_set_kind == AgentResultSetKind.REFINEMENT.value,
+            )
+        )
+    ).all()
+    assert len(derived_result_sets) == 2
+    root_candidate_ids = {candidate_a.id, candidate_b.id, candidate_c.id}
+    for derived in derived_result_sets:
+        members = (
+            await db_session.scalars(
+                select(AgentResultSetMember).where(
+                    AgentResultSetMember.result_set_id == derived.id
+                )
+            )
+        ).all()
+        # derived members ⊆ parent(root) members, every time, regardless
+        # of which concurrent request's refinement ran first.
+        assert {m.candidate_id for m in members}.issubset(root_candidate_ids)
+
+    assert await db_session.scalar(select(func.count()).select_from(JobModel)) == 0
+    assert await db_session.scalar(select(func.count()).select_from(JobCriteriaVersion)) == 0
+    assert await db_session.scalar(select(func.count()).select_from(Evaluation)) == 0
+
+
 async def test_real_ui_agent_route_does_not_serialize_across_different_browser_sessions(
     client: AsyncClient,
     db_session: AsyncSession,

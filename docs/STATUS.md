@@ -201,16 +201,39 @@ recovery hardening, M9) remain OPEN, untouched by PR49-1. Issue #50
 #49) is a post-presentation capability-backlog item — **planned, not
 implemented.**
 
-**PR49-1 for issue #49 (D-083) is implemented, pending quality-gate/PR
-review.** Replaces `AgentConversation.last_search_candidate_ids` with
-tenant/session/context-epoch-scoped `AgentResultSet`/`AgentResultSetMember`
-rows (migration `d2a8f6c1b3e9`) — a `candidate_ref` still only ever comes
-from the model, but resolution is now `agent_result_set_repo.
-resolve_active_candidate_ref`'s 8-step ordered check (tenant/session/
-context-epoch/expiry/corpus-fingerprint/ordinal-range/authorization),
-distinguishing `RESULT_SET_STALE`/`RESULT_SET_EXPIRED` from
-`CANDIDATE_REF_NOT_FOUND`. No Target-Mac work performed; #35/#36/#46
-untouched by this PR.
+**PR49-1 for issue #49 (D-083) is MERGED — squash SHA
+`203ff1f178c11e8b47ab7cb9cc8d3de23e79a97d` on `main` (PR #77).** Replaces
+`AgentConversation.last_search_candidate_ids` with tenant/session/context-
+epoch-scoped `AgentResultSet`/`AgentResultSetMember` rows (migration
+`d2a8f6c1b3e9`) — a `candidate_ref` still only ever comes from the model,
+but resolution is now `agent_result_set_repo.resolve_active_candidate_ref`'s
+8-step ordered check (tenant/session/context-epoch/expiry/corpus-
+fingerprint/ordinal-range/authorization), distinguishing
+`RESULT_SET_STALE`/`RESULT_SET_EXPIRED` from `CANDIDATE_REF_NOT_FOUND`. No
+Target-Mac work performed; #35/#36/#46 untouched by this PR.
+
+**PR49-2 for issue #49 (D-084) is implemented on `feat/49-conversational-
+refinement`, branched from that exact accepted `main`, pending quality-
+gate/PR review — issue #49 is NOT closed by this PR.** Adds the
+`REFINE_CANDIDATE_RESULTS` agent action completing conversational result-
+set continuation ("ilk üçü", "bunlardan SQL bilənlər", "5 nəfərə endir")
+on top of D-083's authority: the model expresses only bounded
+`filter_query`/`limit` intent; the server alone resolves the active
+`AgentResultSet`, evaluates the Slice 8 structured-filter gate against
+its own current members only (derived members ⊆ parent members, never a
+fresh tenant-wide search), preserves parent order, truncates by limit,
+and persists a new immutable `REFINEMENT`-kind `AgentResultSet`
+(`parent_result_set_id`, `refinement_request_sha256`,
+`canonical_refinement_request`, `refinement_policy_version` — migration
+`543c60f7efc5`, chained on `d2a8f6c1b3e9`) that becomes the new active
+context. Reuses (never duplicates) D-083's tenant/session/context-epoch/
+expiry/corpus-fingerprint validation via a shared
+`_validate_active_result_set` helper. Model context separately carries a
+pointer-derived `active_result_context_present` boolean and validated ordinal
+availability, so a zero-member active set remains refinable after reload while
+stale/expired/tampered pointers still reach fail-closed server validation.
+No semantic reranking, no Job/Evaluation side effect, no Target-Mac work;
+#35/#36/#46 untouched by this PR. See D-084 for full detail.
 
 The detailed narrative immediately below (the D-055 through D-063 passes,
 and the earlier M7 HR UI productization detail) is retained as historical
