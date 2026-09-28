@@ -3242,12 +3242,14 @@ async def test_real_ui_agent_route_does_not_serialize_across_different_browser_s
         )
         llm_assigned: list[str] = []
 
-        def _round_robin_get_llm_provider():
-            # Single-threaded event loop, no `await` in this sync callable:
-            # FastAPI's dependency resolution cannot interleave with
-            # another request's resolution mid-body, so this assignment is
-            # race-free even though two concurrent requests call it (same
-            # reasoning as `_round_robin_get_db` below).
+        async def _round_robin_get_llm_provider():
+            # `async def` dependency: FastAPI runs it directly on the event
+            # loop (never the threadpool, which is reserved for sync `def`
+            # dependencies). There is no `await`/yield point between the
+            # list check and the append, so this assignment section cannot
+            # interleave with the other concurrent request's call to this
+            # same dependency — race-free (same reasoning as
+            # `_round_robin_get_db` below, which is already `async def`).
             provider = fake_a if not llm_assigned else fake_b
             llm_assigned.append("taken")
             return provider
