@@ -12,9 +12,10 @@ typed schema validation (meyar.agent.schemas), tenant-scoped service calls
 the existing frozen NL search-planner pipeline's prohibited-attribute and
 no-silent-weakening rules (D-027, D-031). A ``candidate_ref`` is never
 trusted as a raw candidate_id: it is always resolved against this
-conversation's OWN server-held ``last_search_candidate_ids`` (see
-``_resolve_candidate_ref``), so the model's own memory of what it was
-shown is never the authority for which candidate a tool call touches."""
+conversation's OWN server-held ``active_result_set_id`` (issue #49; see
+``meyar.services.agent_result_set_repo.resolve_active_candidate_ref``), so
+the model's own memory of what it was shown is never the authority for
+which candidate a tool call touches."""
 
 import re
 import uuid
@@ -88,6 +89,12 @@ from meyar.services.agent_conversation_repo import (
     ASSISTANT_TEXT_AUTHORITY_SERVER,
     ASSISTANT_TEXT_AUTHORITY_VERSION,
     save_conversation_state,
+)
+from meyar.services.agent_result_set_repo import (
+    ResultSetResolutionFailure,
+    active_result_set_size,
+    create_result_set_from_search,
+    resolve_active_candidate_ref,
 )
 from meyar.services.audit_repo import record_event
 from meyar.services.profile_authority import get_current_authorized_profile
@@ -180,21 +187,23 @@ def _agent_response_text(code: AgentResponseCode) -> str:
     return _AGENT_RESPONSE_TEXT[code]
 
 
-def _resolve_candidate_ref(
-    *, last_search_candidate_ids: list[str], candidate_ref: int
-) -> uuid.UUID | None:
-    """The ONLY place a candidate_ref (a small model-produced ordinal)
-    becomes a real candidate_id — resolved purely against this
-    conversation's own server-held state, never against anything the
-    model asserts about a candidate_id directly (the model is never shown
-    one). An out-of-range/stale ordinal simply fails to resolve."""
-    index = candidate_ref - 1
-    if index < 0 or index >= len(last_search_candidate_ids):
-        return None
-    try:
-        return uuid.UUID(last_search_candidate_ids[index])
-    except ValueError:
-        return None
+def _outcome_for_resolution_failure(
+    failure: ResultSetResolutionFailure | None,
+) -> AgentTurnOutcome:
+    """Maps a candidate_ref resolution failure (issue #49) to the turn
+    outcome HR sees. STALE/EXPIRED get their own truthful outcome (re-run
+    the search); every other reason (no active result set, cross-tenant/
+    cross-session/cross-epoch mismatch, out-of-range ordinal, or the
+    candidate losing authorization) is the same CANDIDATE_REF_NOT_FOUND
+    outcome the ordinal-memory mechanism always used — deliberately not
+    distinguished further outward, so cross-tenant/cross-session probing
+    can never learn anything from the outcome text (see
+    meyar.services.agent_result_set_repo.ResultSetResolutionFailure)."""
+    if failure == ResultSetResolutionFailure.STALE:
+        return AgentTurnOutcome.RESULT_SET_STALE
+    if failure == ResultSetResolutionFailure.EXPIRED:
+        return AgentTurnOutcome.RESULT_SET_EXPIRED
+    return AgentTurnOutcome.CANDIDATE_REF_NOT_FOUND
 
 
 def _summarize_tool_result(result: AgentToolResult) -> dict:
@@ -233,15 +242,22 @@ async def _dispatch_search(
     llm: LLMProvider,
     *,
     tenant_id: uuid.UUID,
+    browser_session_id: uuid.UUID,
+    context_epoch: int,
+    previous_result_set_id: uuid.UUID | None,
     decision: AgentDecision,
     as_of_date: date,
     embedding_config: EmbeddingSearchConfig,
     embedding_provider: EmbeddingProvider | None,
-) -> tuple[AgentToolResult, list[str] | None]:
+) -> tuple[AgentToolResult, uuid.UUID | None]:
     """Forwards decision.search_query, unmodified, into the existing
     frozen NL search-planner pipeline (D-031) — this module never
     re-implements filter extraction, prohibited-attribute checks, or the
-    no-silent-weakening rule; it only reuses them."""
+    no-silent-weakening rule; it only reuses them. On an executable
+    search, persists a brand-new server-owned AgentResultSet (issue #49)
+    and returns its id; a non-executable/failed search never clears a
+    prior valid active_result_set_id — only a successful search replaces
+    it (returns None to signal "keep the existing pointer")."""
     assert decision.search_query is not None
     planned = await plan_and_search_candidates(
         db,
@@ -257,13 +273,15 @@ async def _dispatch_search(
         search=AgentSearchToolResult(response=planned),
     )
     if planned.plan.executable and planned.search_response is not None:
-        updated_ids = [
-            str(item.candidate_id)
-            for item in sorted(planned.search_response.results, key=lambda r: r.rank)
-        ]
-        return tool_result, updated_ids
-    # A non-executable/failed search never clears a prior valid
-    # candidate_ref table — only a successful search replaces it.
+        result_set = await create_result_set_from_search(
+            db,
+            tenant_id=tenant_id,
+            browser_session_id=browser_session_id,
+            context_epoch=context_epoch,
+            planned=planned,
+            previous_result_set_id=previous_result_set_id,
+        )
+        return tool_result, result_set.id
     return tool_result, None
 
 
@@ -272,24 +290,33 @@ async def _dispatch_profile(
     *,
     tenant_id: uuid.UUID,
     decision: AgentDecision,
-    last_search_candidate_ids: list[str],
-) -> tuple[AgentToolResult, CandidateProfileExtraction | None]:
-    """Returns (tool result, the raw validated profile when found) — the
-    profile is handed back separately so run_agent_turn can build grounded
-    -answer facts (D-037/D-038) without a second, redundant DB fetch."""
+    conversation: AgentConversation,
+) -> tuple[AgentToolResult, CandidateProfileExtraction | None, ResultSetResolutionFailure | None]:
+    """Returns (tool result, the raw validated profile when found, the
+    resolution failure reason when not) — the profile is handed back
+    separately so run_agent_turn can build grounded-answer facts (D-037/
+    D-038) without a second, redundant DB fetch. candidate_ref resolution
+    (issue #49) is entirely owned by
+    meyar.services.agent_result_set_repo.resolve_active_candidate_ref —
+    this function never resolves an ordinal itself."""
     assert decision.candidate_ref is not None
-    candidate_id = _resolve_candidate_ref(
-        last_search_candidate_ids=last_search_candidate_ids,
+    resolved = await resolve_active_candidate_ref(
+        db,
+        tenant_id=tenant_id,
+        browser_session_id=conversation.browser_session_id,
+        conversation=conversation,
         candidate_ref=decision.candidate_ref,
     )
-    if candidate_id is None:
+    if isinstance(resolved, ResultSetResolutionFailure):
         return (
             AgentToolResult(
                 tool_name=AgentActionType.GET_CANDIDATE_PROFILE,
                 profile=AgentProfileToolResult(candidate_ref=decision.candidate_ref, found=False),
             ),
             None,
+            resolved,
         )
+    candidate_id = resolved.candidate_id
     authorized = await get_current_authorized_profile(
         db, tenant_id=tenant_id, candidate_id=candidate_id
     )
@@ -305,6 +332,7 @@ async def _dispatch_profile(
                 ),
             ),
             None,
+            None,
         )
     version, profile = authorized
     return (
@@ -319,6 +347,7 @@ async def _dispatch_profile(
             ),
         ),
         profile,
+        None,
     )
 
 
@@ -355,19 +384,22 @@ async def _dispatch_evidence(
     *,
     tenant_id: uuid.UUID,
     decision: AgentDecision,
-    last_search_candidate_ids: list[str],
-) -> tuple[AgentToolResult, CandidateProfileExtraction | None]:
-    """Returns (tool result, the raw validated profile when found) — see
-    _dispatch_profile's docstring; the same profile backs D-037/D-038
-    grounded-answer synthesis for both tools identically (never the raw
-    evidence quote text, which stays server-rendered-only, never model
-    input)."""
+    conversation: AgentConversation,
+) -> tuple[AgentToolResult, CandidateProfileExtraction | None, ResultSetResolutionFailure | None]:
+    """Returns (tool result, the raw validated profile when found, the
+    resolution failure reason when not) — see _dispatch_profile's
+    docstring; the same profile backs D-037/D-038 grounded-answer
+    synthesis for both tools identically (never the raw evidence quote
+    text, which stays server-rendered-only, never model input)."""
     assert decision.candidate_ref is not None
-    candidate_id = _resolve_candidate_ref(
-        last_search_candidate_ids=last_search_candidate_ids,
+    resolved = await resolve_active_candidate_ref(
+        db,
+        tenant_id=tenant_id,
+        browser_session_id=conversation.browser_session_id,
+        conversation=conversation,
         candidate_ref=decision.candidate_ref,
     )
-    if candidate_id is None:
+    if isinstance(resolved, ResultSetResolutionFailure):
         return (
             AgentToolResult(
                 tool_name=AgentActionType.GET_CANDIDATE_EVIDENCE,
@@ -377,7 +409,9 @@ async def _dispatch_evidence(
                 ),
             ),
             None,
+            resolved,
         )
+    candidate_id = resolved.candidate_id
     authorized = await get_current_authorized_profile(
         db, tenant_id=tenant_id, candidate_id=candidate_id
     )
@@ -392,6 +426,7 @@ async def _dispatch_evidence(
                     profile_status=None,
                 ),
             ),
+            None,
             None,
         )
     version, profile = authorized
@@ -429,6 +464,7 @@ async def _dispatch_evidence(
             ),
         ),
         profile,
+        None,
     )
 
 
@@ -1624,7 +1660,7 @@ async def _finish_turn(
     *,
     tenant_id: uuid.UUID,
     turns: list[dict],
-    last_search_candidate_ids: list[str],
+    active_result_set_id: uuid.UUID | None,
     max_context_turns: int,
     result: AgentTurnResult,
 ) -> AgentTurnResult:
@@ -1662,7 +1698,7 @@ async def _finish_turn(
         db,
         conversation,
         turns=turns,
-        last_search_candidate_ids=last_search_candidate_ids,
+        active_result_set_id=active_result_set_id,
     )
     await record_event(
         db,
@@ -1692,7 +1728,7 @@ async def run_agent_turn(
 ) -> AgentTurnResult:
     """One bounded orchestration turn. Never persists a mutation to any
     candidate/job/evaluation row — only this conversation's own
-    session-scoped state (turns, last_search_candidate_ids). Caller is
+    session-scoped state (turns, active_result_set_id). Caller is
     responsible for the surrounding db.commit()/rollback().
 
     ``explicit_action``: PR #42 owner correction (issue #33, D-043/D-044)
@@ -1707,7 +1743,6 @@ async def run_agent_turn(
     if explicit_action is not None and explicit_action != AgentActionType.DRAFT_JOB_CRITERIA:
         raise ValueError(f"Unsupported explicit_action: {explicit_action}")
     turns: list[dict] = [*conversation.turns, {"role": "user", "text": user_message}]
-    last_search_candidate_ids = list(conversation.last_search_candidate_ids)
     pending_draft = _latest_pending_job_draft(conversation)
     if (
         explicit_action is None
@@ -1746,7 +1781,7 @@ async def run_agent_turn(
             conversation,
             tenant_id=tenant_id,
             turns=turns,
-            last_search_candidate_ids=last_search_candidate_ids,
+            active_result_set_id=conversation.active_result_set_id,
             max_context_turns=max_context_turns,
             result=result,
         )
@@ -1774,13 +1809,25 @@ async def run_agent_turn(
             decision = AgentDecision(action=explicit_action)
             explicit_action = None
         else:
+            # Advisory only — how many ordinals are currently legally
+            # referenceable, purely to tell the model what it may ask
+            # about next. Never itself an authorization decision: the
+            # actual authority is always resolve_active_candidate_ref,
+            # called again independently the moment the model references
+            # an ordinal (see _dispatch_profile/_dispatch_evidence).
+            available_ref_count = await active_result_set_size(
+                db,
+                tenant_id=tenant_id,
+                browser_session_id=conversation.browser_session_id,
+                conversation=conversation,
+            )
             decision = None
             for attempt in range(1, MAX_DECISION_ATTEMPTS + 1):
                 try:
                     decision, provenance = await llm.decide_agent_action(
                         recent_turns=[(t["role"], t["text"]) for t in turns[-max_context_turns:]],
                         last_tool_result_summary=last_tool_summary,
-                        available_candidate_refs=list(range(1, len(last_search_candidate_ids) + 1)),
+                        available_candidate_refs=list(range(1, available_ref_count + 1)),
                         repair=attempt > 1,
                     )
                 except ModelSchemaInvalidError:
@@ -1808,7 +1855,7 @@ async def run_agent_turn(
                         conversation,
                         tenant_id=tenant_id,
                         turns=turns,
-                        last_search_candidate_ids=last_search_candidate_ids,
+                        active_result_set_id=conversation.active_result_set_id,
                         max_context_turns=max_context_turns,
                         result=result,
                     )
@@ -1831,7 +1878,7 @@ async def run_agent_turn(
                 conversation,
                 tenant_id=tenant_id,
                 turns=turns,
-                last_search_candidate_ids=last_search_candidate_ids,
+                active_result_set_id=conversation.active_result_set_id,
                 max_context_turns=max_context_turns,
                 result=result,
             )
@@ -1858,7 +1905,7 @@ async def run_agent_turn(
                 conversation,
                 tenant_id=tenant_id,
                 turns=turns,
-                last_search_candidate_ids=last_search_candidate_ids,
+                active_result_set_id=conversation.active_result_set_id,
                 max_context_turns=max_context_turns,
                 result=result,
             )
@@ -1876,7 +1923,7 @@ async def run_agent_turn(
                 conversation,
                 tenant_id=tenant_id,
                 turns=turns,
-                last_search_candidate_ids=last_search_candidate_ids,
+                active_result_set_id=conversation.active_result_set_id,
                 max_context_turns=max_context_turns,
                 result=result,
             )
@@ -1902,7 +1949,7 @@ async def run_agent_turn(
                     conversation,
                     tenant_id=tenant_id,
                     turns=turns,
-                    last_search_candidate_ids=last_search_candidate_ids,
+                    active_result_set_id=conversation.active_result_set_id,
                     max_context_turns=max_context_turns,
                     result=result,
                 )
@@ -1934,7 +1981,7 @@ async def run_agent_turn(
                     conversation,
                     tenant_id=tenant_id,
                     turns=turns,
-                    last_search_candidate_ids=last_search_candidate_ids,
+                    active_result_set_id=conversation.active_result_set_id,
                     max_context_turns=max_context_turns,
                     result=result,
                 )
@@ -1958,37 +2005,48 @@ async def run_agent_turn(
                 conversation,
                 tenant_id=tenant_id,
                 turns=turns,
-                last_search_candidate_ids=last_search_candidate_ids,
+                active_result_set_id=conversation.active_result_set_id,
                 max_context_turns=max_context_turns,
                 result=result,
             )
 
         matched_profile: CandidateProfileExtraction | None = None
+        resolution_failure: ResultSetResolutionFailure | None = None
         if decision.action == AgentActionType.SEARCH_CANDIDATES:
-            tool_result, updated_ids = await _dispatch_search(
+            previous_result_set_id = conversation.active_result_set_id
+            tool_result, new_result_set_id = await _dispatch_search(
                 db,
                 llm,
                 tenant_id=tenant_id,
+                browser_session_id=conversation.browser_session_id,
+                context_epoch=conversation.context_epoch,
+                previous_result_set_id=previous_result_set_id,
                 decision=decision,
                 as_of_date=as_of_date,
                 embedding_config=embedding_config,
                 embedding_provider=embedding_provider,
             )
-            if updated_ids is not None:
-                last_search_candidate_ids = updated_ids
+            if new_result_set_id is not None:
+                # Kept in sync eagerly (not deferred to _finish_turn) so a
+                # later GET_CANDIDATE_PROFILE/EVIDENCE call within this
+                # SAME turn, and this turn's own available_candidate_refs
+                # computation, both see the freshly created result set
+                # immediately — mirrors the old local-variable semantics
+                # of last_search_candidate_ids exactly.
+                conversation.active_result_set_id = new_result_set_id
         elif decision.action == AgentActionType.GET_CANDIDATE_PROFILE:
-            tool_result, matched_profile = await _dispatch_profile(
+            tool_result, matched_profile, resolution_failure = await _dispatch_profile(
                 db,
                 tenant_id=tenant_id,
                 decision=decision,
-                last_search_candidate_ids=last_search_candidate_ids,
+                conversation=conversation,
             )
         else:
-            tool_result, matched_profile = await _dispatch_evidence(
+            tool_result, matched_profile, resolution_failure = await _dispatch_evidence(
                 db,
                 tenant_id=tenant_id,
                 decision=decision,
-                last_search_candidate_ids=last_search_candidate_ids,
+                conversation=conversation,
             )
 
         tool_calls_made += 1
@@ -2037,7 +2095,7 @@ async def run_agent_turn(
                 outcome=(
                     AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
                     if found
-                    else AgentTurnOutcome.CANDIDATE_REF_NOT_FOUND
+                    else _outcome_for_resolution_failure(resolution_failure)
                 ),
                 message=synthesized_message,
                 tool_results=tool_results,
@@ -2049,7 +2107,7 @@ async def run_agent_turn(
                 conversation,
                 tenant_id=tenant_id,
                 turns=turns,
-                last_search_candidate_ids=last_search_candidate_ids,
+                active_result_set_id=conversation.active_result_set_id,
                 max_context_turns=max_context_turns,
                 result=result,
             )

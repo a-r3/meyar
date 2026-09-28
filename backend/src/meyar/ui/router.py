@@ -558,11 +558,16 @@ async def agent_turn(
     from meyar.agent.service import run_agent_turn
     from meyar.services.agent_conversation_repo import (
         get_or_create_conversation,
+        get_or_create_conversation_for_update,
         sync_last_turn_display_text,
     )
     from meyar.ui.service import build_agent_turn_view
 
-    conversation = await get_or_create_conversation(
+    # PR #77 review fix (issue #49): hold this session's own
+    # AgentConversation row lock for the entire state-changing turn — see
+    # get_or_create_conversation_for_update's docstring. Held until the
+    # db.commit() below (or the rollback in the except block).
+    conversation = await get_or_create_conversation_for_update(
         db, tenant_id=ctx.tenant_id, browser_session_id=ctx.session_id
     )
     # Same "current date is a trusted-runtime value, never user/model

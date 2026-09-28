@@ -177,3 +177,42 @@ async def search_compatible_embeddings(
         )
     )
     return [(r[0], r[1], r[2], r[3]) for r in result.all()]
+
+
+async def list_compatible_embedding_version_ids(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    profile_version_source_hashes: Mapping[uuid.UUID, str],
+    provider: str,
+    model_name: str,
+    model_revision: str,
+    serializer_version: str,
+    embedding_dimensions: int,
+) -> dict[uuid.UUID, uuid.UUID]:
+    """Existence-only sibling of ``search_compatible_embeddings`` (issue
+    #49) — same tenant/profile-version+source-hash/six-field-config
+    compatibility notion, but never touches the embedding vector column or
+    computes a similarity distance (there is no query to rank against).
+    Used only by meyar.services.agent_result_set_repo.
+    compute_corpus_fingerprint to fold "does this candidate currently have
+    a compatible embedding, and which version" into the fingerprint — never
+    for ranking. Returns candidate_id -> embedding_version_id."""
+    if not profile_version_source_hashes:
+        return {}
+    pairs = list(profile_version_source_hashes.items())
+    result = await db.execute(
+        select(CandidateEmbeddingVersion.candidate_id, CandidateEmbeddingVersion.id).where(
+            CandidateEmbeddingVersion.tenant_id == tenant_id,
+            tuple_(
+                CandidateEmbeddingVersion.candidate_profile_version_id,
+                CandidateEmbeddingVersion.source_sha256,
+            ).in_(pairs),
+            CandidateEmbeddingVersion.provider == provider,
+            CandidateEmbeddingVersion.model_name == model_name,
+            CandidateEmbeddingVersion.model_revision == model_revision,
+            CandidateEmbeddingVersion.serializer_version == serializer_version,
+            CandidateEmbeddingVersion.embedding_dimensions == embedding_dimensions,
+        )
+    )
+    return {row[0]: row[1] for row in result.all()}

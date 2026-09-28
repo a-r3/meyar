@@ -184,6 +184,41 @@ unlabeled number but never guesses that an arbitrary identifier is a phone.
   there. The configured business date is resolved once at the UI boundary and
   passed explicitly into deterministic services.
 
+## Server-owned result-set candidate_ref authority (issue #49, D-083)
+
+- A model-produced `candidate_ref` (small ordinal) is never resolved
+  against anything the model asserts about a `candidate_id` directly — the
+  model is never shown one. Resolution is exclusively
+  `meyar.services.agent_result_set_repo.resolve_active_candidate_ref`,
+  scoped by tenant, `browser_session_id`, and the owning conversation's
+  `context_epoch` (bumped on every "Yeni söhbət" reset), and bounded by the
+  `AgentResultSet`'s own `expires_at` (tied to the owning `BrowserSession`).
+  A tenant/session/epoch mismatch, expiry, ordinal out of range, or a
+  corpus-fingerprint mismatch all fail closed to a non-identifying outcome
+  — cross-tenant/cross-session probing cannot distinguish "exists but not
+  yours" from "does not exist."
+- `AgentResultSet.canonical_search_request` (the validated
+  `CandidateSearchRequest`, including HR-authored semantic query text) is
+  DB-only persisted provenance — never copied into audit metadata, never
+  read by the model.
+- `AgentResultSet`/`AgentResultSetMember` never carry a `CandidateIdentity`
+  field (name/email/phone); membership order and staleness are
+  professional-fact/provenance concepts only.
+- `AgentResultSetMember.candidate_id`/`candidate_profile_version_id`/
+  `candidate_embedding_version_id` are immutable snapshot references (no DB
+  foreign key against the live candidate/profile/embedding tables) — a
+  later hard candidate delete is never blocked by, and never corrupts, a
+  historical membership row; a stale reference is detected via the corpus
+  fingerprint, not a foreign-key violation.
+- Audit events `agent.result_set.created`, `agent.result_set.
+  reference_resolved`, and `agent.result_set.reference_rejected` carry only
+  ids/enums/counts/version strings (result_set_id, candidate_id,
+  candidate_profile_version_id, context_epoch, search_mode, a closed
+  `reason` code) — never the canonical search request, semantic query
+  text, or candidate name/email/phone. `reference_rejected` includes
+  `candidate_ref` only for the `ORDINAL_OUT_OF_RANGE` reason (a small int
+  the caller itself supplied, not identity).
+
 ## Local-only Ollama operating contract
 
 Two distinct guarantees are in play, and they must not be conflated —

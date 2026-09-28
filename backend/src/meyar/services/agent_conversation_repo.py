@@ -1,6 +1,7 @@
 import uuid
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.agent.schemas import AgentJobDraftToolResult, ConfirmedAgentJobDraft
@@ -52,10 +53,57 @@ async def get_or_create_conversation(
         tenant_id=tenant_id,
         browser_session_id=browser_session_id,
         turns=[],
-        last_search_candidate_ids=[],
+        context_epoch=1,
+        active_result_set_id=None,
     )
     db.add(conversation)
     await db.flush()
+    return conversation
+
+
+async def get_or_create_conversation_for_update(
+    db: AsyncSession, *, tenant_id: uuid.UUID, browser_session_id: uuid.UUID
+) -> AgentConversation:
+    """PR #77 review fix (issue #49 concurrency blocker): the real
+    ``/ui/agent`` POST turn mutation boundary must hold this
+    AgentConversation row's own PostgreSQL ``SELECT ... FOR UPDATE`` lock
+    for the complete state-changing turn — not an in-process lock, so it
+    still serializes correctly across multiple worker processes. A second
+    concurrent turn on the SAME browser_session_id blocks here, on the
+    database row lock itself, until the first turn's transcript/
+    context_epoch/active_result_set_id commit lands, then observes that
+    committed state rather than a stale pre-race snapshot. Row-level, not
+    global — a different session's row is never blocked by this.
+
+    First-turn creation (no existing row yet) is race-safe: if two
+    concurrent callers both observe no existing row and both attempt to
+    INSERT, the unique ``browser_session_id`` constraint aborts the
+    loser's INSERT; the loser rolls back its own aborted subtransaction
+    and re-runs the locking SELECT, which now blocks on the winner's row
+    lock and returns that single committed row once available — never two
+    rows, never an unhandled 500."""
+    conversation = await get_conversation_for_update_by_session(
+        db, tenant_id=tenant_id, browser_session_id=browser_session_id
+    )
+    if conversation is not None:
+        return conversation
+    conversation = AgentConversation(
+        tenant_id=tenant_id,
+        browser_session_id=browser_session_id,
+        turns=[],
+        context_epoch=1,
+        active_result_set_id=None,
+    )
+    db.add(conversation)
+    try:
+        await db.flush()
+    except IntegrityError:
+        await db.rollback()
+        conversation = await get_conversation_for_update_by_session(
+            db, tenant_id=tenant_id, browser_session_id=browser_session_id
+        )
+        if conversation is None:
+            raise
     return conversation
 
 
@@ -64,10 +112,10 @@ async def save_conversation_state(
     conversation: AgentConversation,
     *,
     turns: list[dict],
-    last_search_candidate_ids: list[str],
+    active_result_set_id: uuid.UUID | None,
 ) -> None:
     conversation.turns = turns
-    conversation.last_search_candidate_ids = last_search_candidate_ids
+    conversation.active_result_set_id = active_result_set_id
     await db.flush()
 
 
@@ -107,13 +155,22 @@ async def sync_last_turn_display_text(
 
 async def reset_conversation(db: AsyncSession, conversation: AgentConversation) -> None:
     """Slice 4 (issue #33): the "Yeni söhbət" capability — clears this
-    session's own server-held conversation state (turns and the ordinal
-    candidate_ref resolution table) without touching any other tenant/
-    candidate/job row. Same tenant/session scoping as every other call
-    site here; the caller resolves ``conversation`` via
-    get_or_create_conversation first, so it is always already this
-    request's own row."""
-    await save_conversation_state(db, conversation, turns=[], last_search_candidate_ids=[])
+    session's own server-held conversation state (turns and the active
+    result-set pointer) without touching any other tenant/candidate/job
+    row, and increments ``context_epoch`` (issue #49) so a previously
+    created AgentResultSet — even one a tampered/stale
+    ``active_result_set_id`` still points at — can never resolve a
+    candidate_ref again after this reset (see
+    meyar.services.agent_result_set_repo.resolve_active_candidate_ref).
+    Same tenant/session scoping as every other call site here; the caller
+    resolves ``conversation`` via get_or_create_conversation first, so it
+    is always already this request's own row. Never deletes any
+    AgentResultSet/AgentResultSetMember row — only repoints/invalidates
+    this conversation's own reference to one."""
+    conversation.turns = []
+    conversation.active_result_set_id = None
+    conversation.context_epoch += 1
+    await db.flush()
 
 
 def get_pending_job_draft(
@@ -155,7 +212,7 @@ async def replace_pending_job_draft(
         db,
         conversation,
         turns=turns,
-        last_search_candidate_ids=conversation.last_search_candidate_ids,
+        active_result_set_id=conversation.active_result_set_id,
     )
 
 
@@ -206,5 +263,5 @@ async def mark_pending_job_draft_confirmed(
         db,
         conversation,
         turns=turns,
-        last_search_candidate_ids=conversation.last_search_candidate_ids,
+        active_result_set_id=conversation.active_result_set_id,
     )

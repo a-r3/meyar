@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 from fakes import FakeLLMProvider
+from search_helpers import seed_active_result_set
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.agent.schemas import AgentActionType, AgentDecision, AgentTurnOutcome
@@ -188,7 +189,13 @@ async def test_legacy_completed_python_claim_with_excel_only_evidence_is_not_aut
     conversation = await get_or_create_conversation(
         db_session, tenant_id=tenant.id, browser_session_id=browser_session.id
     )
-    conversation.last_search_candidate_ids = [str(seeded.candidate.id)]
+    await seed_active_result_set(
+        db_session,
+        tenant_id=tenant.id,
+        browser_session_id=browser_session.id,
+        conversation=conversation,
+        candidate_ids=[seeded.candidate.id],
+    )
     await db_session.commit()
 
     search_response = await search_candidates(

@@ -683,6 +683,19 @@ class AgentTurnOutcome(StrEnum):
     ANSWERED_FROM_TOOL_RESULT = "ANSWERED_FROM_TOOL_RESULT"
     CLARIFICATION_REQUESTED = "CLARIFICATION_REQUESTED"
     CANDIDATE_REF_NOT_FOUND = "CANDIDATE_REF_NOT_FOUND"
+    # issue #49: the referenced AgentResultSet was found and otherwise
+    # valid (tenant/session/context_epoch/expiry all matched), but the
+    # tenant's searchable corpus has since drifted (a member's profile was
+    # re-extracted, a new candidate became searchable, or — for semantic/
+    # hybrid — the compatible embedding version changed) since it was
+    # created. Distinct from CANDIDATE_REF_NOT_FOUND (which also covers an
+    # ordinal that never resolves at all, e.g. no active result set) so HR
+    # is told to re-run the search rather than that the candidate itself
+    # was never found. See meyar.services.agent_result_set_repo.
+    RESULT_SET_STALE = "RESULT_SET_STALE"
+    # issue #49: the referenced AgentResultSet's own expires_at (bound to
+    # the owning BrowserSession's expiry) has passed.
+    RESULT_SET_EXPIRED = "RESULT_SET_EXPIRED"
     # DRAFT_JOB_CRITERIA's own drafting call never produced a usable
     # result (provider failure or repeated schema-invalid output) —
     # tool_results is always empty for this outcome, same as

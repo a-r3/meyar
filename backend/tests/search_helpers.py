@@ -13,12 +13,20 @@ from meyar.embedding.serializer import (
     build_professional_embedding_text,
     compute_source_sha256,
 )
+from meyar.models.agent_conversation import AgentConversation
+from meyar.models.agent_result_set import AgentResultSet, AgentResultSetMember
+from meyar.search.schemas import CandidateSearchRequest, SearchMode
+from meyar.services.agent_result_set_repo import compute_corpus_fingerprint
+from meyar.services.browser_session_repo import get_browser_session_by_id
 from meyar.services.candidate_document_repo import (
     create_candidate_document,
     create_canonical_document,
 )
 from meyar.services.candidate_embedding_repo import create_embedding_version
-from meyar.services.candidate_profile_repo import create_profile_version
+from meyar.services.candidate_profile_repo import (
+    create_profile_version,
+    get_current_profile_version,
+)
 from meyar.services.candidate_repo import create_candidate
 
 DEFAULT_AS_OF_DATE = date(2026, 1, 1)
@@ -172,6 +180,91 @@ async def seed_next_profile_version(
         status="COMPLETED",
         profile_content=stored_profile_content,
     )
+
+
+async def seed_active_result_set(
+    db_session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    browser_session_id: uuid.UUID,
+    conversation: AgentConversation,
+    candidate_ids: list[uuid.UUID],
+) -> AgentResultSet:
+    """Test-only shortcut (issue #49) replacing the old direct assignment
+    ``conversation.last_search_candidate_ids = [...]`` — builds one real,
+    self-consistent AgentResultSet (+ ordered members, ordinal 1..N) that
+    resolve_active_candidate_ref will accept immediately: the corpus
+    fingerprint is computed live against whatever candidates already exist
+    in the DB at call time, exactly like production. Always
+    STRUCTURED_ONLY (no embedding_config) — semantic/hybrid-specific
+    fixtures build their own AgentResultSet directly where that distinction
+    matters. Also points `conversation.active_result_set_id` at the new
+    row, matching its own context_epoch."""
+    session = await get_browser_session_by_id(db_session, browser_session_id=browser_session_id)
+    assert session is not None
+    request = CandidateSearchRequest(mode=SearchMode.STRUCTURED_ONLY)
+    fingerprint = await compute_corpus_fingerprint(
+        db_session, tenant_id=tenant_id, embedding_config=None
+    )
+    result_set = AgentResultSet(
+        tenant_id=tenant_id,
+        browser_session_id=browser_session_id,
+        context_epoch=conversation.context_epoch,
+        request_sha256="0" * 64,
+        canonical_search_request=request.model_dump(mode="json"),
+        planner_policy_version="test-planner-policy-v1",
+        planner_prompt_version="test-planner-prompt-v1",
+        planner_schema_version="test-planner-schema-v1",
+        planner_model_provider="test",
+        planner_model_name="test-model",
+        planner_model_revision="",
+        search_policy_version="test-search-policy-v1",
+        search_mode=SearchMode.STRUCTURED_ONLY.value,
+        result_count=len(candidate_ids),
+        corpus_fingerprint_sha256=fingerprint,
+        expires_at=session.expires_at,
+    )
+    db_session.add(result_set)
+    await db_session.flush()
+    for ordinal, candidate_id in enumerate(candidate_ids, start=1):
+        profile_version = await get_current_profile_version(
+            db_session, tenant_id=tenant_id, candidate_id=candidate_id
+        )
+        assert profile_version is not None
+        db_session.add(
+            AgentResultSetMember(
+                result_set_id=result_set.id,
+                ordinal=ordinal,
+                candidate_id=candidate_id,
+                candidate_profile_version_id=profile_version.id,
+                candidate_embedding_version_id=None,
+                relevance_score=1.0,
+                structured_score=None,
+                semantic_score=None,
+            )
+        )
+    await db_session.flush()
+    conversation.active_result_set_id = result_set.id
+    await db_session.flush()
+    return result_set
+
+
+async def active_result_set_candidate_ids(
+    db_session: AsyncSession, *, result_set_id: uuid.UUID
+) -> list[str]:
+    """Ordinal-ordered candidate_id strings for one AgentResultSet — the
+    test-assertion equivalent of the old
+    ``conversation.last_search_candidate_ids`` list."""
+    from sqlalchemy import select
+
+    rows = (
+        await db_session.execute(
+            select(AgentResultSetMember)
+            .where(AgentResultSetMember.result_set_id == result_set_id)
+            .order_by(AgentResultSetMember.ordinal.asc())
+        )
+    ).scalars()
+    return [str(row.candidate_id) for row in rows]
 
 
 async def seed_embedding(
