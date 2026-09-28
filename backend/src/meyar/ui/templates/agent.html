@@ -9,21 +9,16 @@
   {% for item in items %}<article class="fact"><h4>{{ item.title }}</h4>{% if item.detail %}<p>{{ item.detail }}</p>{% endif %}{% if item.evidence %}<details><summary>Sübut</summary>{{ evidence_partial.evidence_items(item.evidence) }}</details>{% endif %}</article>{% endfor %}
 </section>
 {% endmacro %}
-{% macro turn_cards(latest) %}
-{% for tool_result in latest.tool_results %}
-  {% if tool_result.tool_name == "SEARCH_CANDIDATES" and tool_result.search_outcome.executable %}
-  {% if not tool_result.search_results %}
-  <div class="empty-state"><h2>Nəticə tapılmadı</h2><p>Sorğu şərtləri əsasında uyğun namizəd yoxdur.</p></div>
-  {% endif %}
+{% macro result_card_list(results, show_semantic) %}
   <div class="result-list">
-    {% for item in tool_result.search_results %}
+    {% for item in results %}
     <article class="result-card">
       <div class="rank">{{ item.rank }}</div>
       <div class="result-body">
         <img class="candidate-avatar" src="/ui/candidates/{{ item.candidate_id }}/photo" alt="Namizəd üçün təqdimat şəkli" loading="lazy">
         <div class="card-heading">
           <div><h2>{{ item.full_name or "Ad məlumatı yoxdur" }}</h2></div>
-          {% if tool_result.search_outcome.mode in ("SEMANTIC_ONLY", "HYBRID") %}
+          {% if show_semantic %}
           <span class="score-pill">Semantik yaxınlıq {{ "%.0f"|format(item.relevance_score * 100) }}%</span>
           {% endif %}
         </div>
@@ -38,6 +33,19 @@
     </article>
     {% endfor %}
   </div>
+{% endmacro %}
+{% macro turn_cards(latest) %}
+{% for tool_result in latest.tool_results %}
+  {% if tool_result.tool_name == "SEARCH_CANDIDATES" and tool_result.search_outcome.executable %}
+  {% if not tool_result.search_results %}
+  <div class="empty-state"><h2>Nəticə tapılmadı</h2><p>Sorğu şərtləri əsasında uyğun namizəd yoxdur.</p></div>
+  {% endif %}
+  {{ result_card_list(tool_result.search_results, tool_result.search_outcome.mode in ("SEMANTIC_ONLY", "HYBRID")) }}
+  {% elif tool_result.tool_name == "REFINE_CANDIDATE_RESULTS" %}
+  {% if not tool_result.search_results %}
+  <div class="empty-state"><h2>Nəticə tapılmadı</h2><p>Cari nəticələr daxilində uyğun namizəd yoxdur.</p></div>
+  {% endif %}
+  {{ result_card_list(tool_result.search_results, false) }}
   {% elif tool_result.tool_name == "GET_CANDIDATE_PROFILE" %}
     {% if not tool_result.not_found_ref %}
     <section class="panel">

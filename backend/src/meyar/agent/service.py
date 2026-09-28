@@ -19,6 +19,7 @@ which candidate a tool call touches."""
 
 import re
 import uuid
+from dataclasses import dataclass
 from datetime import date
 
 from pydantic import ValidationError
@@ -33,6 +34,7 @@ from meyar.agent.schemas import (
     AgentEvidenceToolResult,
     AgentJobDraftToolResult,
     AgentProfileToolResult,
+    AgentRefineToolResult,
     AgentResponseCode,
     AgentSearchToolResult,
     AgentToolResult,
@@ -83,16 +85,24 @@ from meyar.schemas.criteria import (
     ProhibitedCriterionError,
     find_prohibited_term,
 )
-from meyar.search.planner_service import plan_and_search_candidates
-from meyar.search.schemas import EmbeddingSearchConfig
+from meyar.search.planner_service import plan_and_search_candidates, plan_candidate_search
+from meyar.search.schemas import (
+    CandidateSearchRequest,
+    CandidateSearchResponse,
+    CandidateSearchResult,
+    EmbeddingSearchConfig,
+    SearchMode,
+)
 from meyar.services.agent_conversation_repo import (
     ASSISTANT_TEXT_AUTHORITY_SERVER,
     ASSISTANT_TEXT_AUTHORITY_VERSION,
     save_conversation_state,
 )
 from meyar.services.agent_result_set_repo import (
+    RefinementResult,
     ResultSetResolutionFailure,
     active_result_set_size,
+    create_result_set_from_refinement,
     create_result_set_from_search,
     resolve_active_candidate_ref,
 )
@@ -180,6 +190,10 @@ _AGENT_RESPONSE_TEXT: dict[AgentResponseCode, str] = {
         "MEYAR sübutları və deterministik qiymətləndirməni təqdim edir; işə qəbul "
         "qərarını səlahiyyətli insan verir."
     ),
+    AgentResponseCode.RESULT_CONTEXT_REQUIRED: (
+        "Əvvəlcə namizəd axtarışı aparın, sonra cari nəticələr üzərində əməliyyat "
+        "edə bilərsiniz (məsələn, \"ilk üçü\" və ya \"bunlardan SQL bilənlər\")."
+    ),
 }
 
 
@@ -204,6 +218,27 @@ def _outcome_for_resolution_failure(
     if failure == ResultSetResolutionFailure.EXPIRED:
         return AgentTurnOutcome.RESULT_SET_EXPIRED
     return AgentTurnOutcome.CANDIDATE_REF_NOT_FOUND
+
+
+def _outcome_and_message_for_refinement_failure(
+    failure: ResultSetResolutionFailure,
+) -> tuple[AgentTurnOutcome, str | None]:
+    """Maps a REFINE_CANDIDATE_RESULTS active-result-set validation
+    failure (issue #49 PR49-2) to the turn outcome/message HR sees.
+    STALE/EXPIRED get the same truthful, dedicated outcome candidate_ref
+    resolution uses (re-run the search); every other reason (no active
+    result set at all, or a cross-tenant/cross-session/cross-epoch
+    mismatch) collapses to one deterministic clarification — deliberately
+    not distinguished further outward, mirroring
+    _outcome_for_resolution_failure's own fail-closed discipline."""
+    if failure == ResultSetResolutionFailure.STALE:
+        return AgentTurnOutcome.RESULT_SET_STALE, None
+    if failure == ResultSetResolutionFailure.EXPIRED:
+        return AgentTurnOutcome.RESULT_SET_EXPIRED, None
+    return (
+        AgentTurnOutcome.CLARIFICATION_REQUESTED,
+        _agent_response_text(AgentResponseCode.RESULT_CONTEXT_REQUIRED),
+    )
 
 
 def _summarize_tool_result(result: AgentToolResult) -> dict:
@@ -377,6 +412,126 @@ _EVIDENCE_CATEGORIES = (
     ("skill_experience", lambda item: item.skill_name),
     ("domain_experience", lambda item: item.domain),
 )
+
+
+@dataclass
+class RefineDispatchResult:
+    """Exactly one of (tool_result, resolution_failure, rejection_message)
+    is set on any given call to _dispatch_refine — see its docstring."""
+
+    tool_result: AgentToolResult | None = None
+    new_result_set_id: uuid.UUID | None = None
+    resolution_failure: ResultSetResolutionFailure | None = None
+    # Set when decision.filter_query could not be safely interpreted/
+    # executed as a deterministic structured filter (non-executable plan,
+    # or one that would require semantic/hybrid behavior) — fixed,
+    # server-owned copy, never the raw planner rejection reason or the
+    # HR's own filter text.
+    rejection_message: str | None = None
+
+
+async def _dispatch_refine(
+    db: AsyncSession,
+    llm: LLMProvider,
+    *,
+    tenant_id: uuid.UUID,
+    conversation: AgentConversation,
+    decision: AgentDecision,
+    as_of_date: date,
+    embedding_config: EmbeddingSearchConfig,
+) -> RefineDispatchResult:
+    """REFINE_CANDIDATE_RESULTS dispatch (issue #49 PR49-2). When
+    decision.filter_query is set, it is forwarded UNMODIFIED into the
+    existing frozen NL search-planner pipeline (meyar.search.
+    planner_service.plan_candidate_search — planning only, never
+    meyar.search.service.search_candidates itself, so this never becomes a
+    fresh tenant-wide search) to derive a validated, deterministic
+    RequiredFilters shape — the exact same prohibited-attribute/no-silent-
+    weakening discipline SEARCH_CANDIDATES already gets, reused rather
+    than reimplemented. A non-executable plan, or one that would require
+    SEMANTIC_ONLY/HYBRID mode, fails closed with a fixed clarification —
+    it is never silently downgraded to STRUCTURED_ONLY and never executed
+    as a global search (docs/DECISIONS.md D-084).
+
+    All actual membership/ordering/limit authority is
+    meyar.services.agent_result_set_repo.create_result_set_from_refinement
+    — this function never computes membership itself."""
+    filter_request: CandidateSearchRequest | None = None
+    if decision.filter_query is not None:
+        plan = await plan_candidate_search(
+            db,
+            llm,
+            tenant_id=tenant_id,
+            natural_language_request=decision.filter_query,
+            as_of_date=as_of_date,
+            embedding_config=embedding_config,
+        )
+        if not plan.executable or plan.search_request is None:
+            return RefineDispatchResult(
+                rejection_message=_agent_response_text(AgentResponseCode.UNSUPPORTED_REQUEST)
+            )
+        if plan.search_request.mode != SearchMode.STRUCTURED_ONLY:
+            return RefineDispatchResult(
+                rejection_message=_agent_response_text(AgentResponseCode.UNSUPPORTED_REQUEST)
+            )
+        filter_request = plan.search_request
+
+    outcome = await create_result_set_from_refinement(
+        db,
+        tenant_id=tenant_id,
+        browser_session_id=conversation.browser_session_id,
+        conversation=conversation,
+        filter_request=filter_request,
+        requested_limit=decision.limit,
+    )
+    if isinstance(outcome, ResultSetResolutionFailure):
+        return RefineDispatchResult(resolution_failure=outcome)
+
+    assert isinstance(outcome, RefinementResult)
+    search_mode = SearchMode(outcome.result_set.search_mode)
+    response = CandidateSearchResponse(
+        mode=search_mode,
+        policy_version=outcome.result_set.search_policy_version,
+        results=[
+            CandidateSearchResult(
+                candidate_id=member.candidate_id,
+                rank=member.ordinal,
+                mode=search_mode,
+                relevance_score=member.relevance_score,
+                structured_score=member.structured_score,
+                semantic_score=member.semantic_score,
+                # Deliberately empty — a refined member's matched-filter
+                # provenance is not re-derived for presentation in this
+                # PR; the candidate card still renders identity/summary
+                # normally, just without the "Məcburi uyğunluqlar" badge.
+                required_filters_matched=[],
+                preferred_filters_matched=[],
+                candidate_profile_version_id=member.candidate_profile_version_id,
+                candidate_embedding_version_id=member.candidate_embedding_version_id,
+                search_policy_version=outcome.result_set.search_policy_version,
+            )
+            for member in outcome.members
+        ],
+        result_count=len(outcome.members),
+        eligible_profile_count=outcome.source_result_count,
+        compatible_embedding_count=0,
+        excluded_missing_embedding_count=0,
+        limit=decision.limit or outcome.source_result_count,
+        embedding_config=None,
+    )
+    tool_result = AgentToolResult(
+        tool_name=AgentActionType.REFINE_CANDIDATE_RESULTS,
+        refine=AgentRefineToolResult(
+            response=response,
+            source_result_count=outcome.source_result_count,
+            has_filter=filter_request is not None,
+            requested_limit=decision.limit,
+            limit_truncated=outcome.limit_truncated,
+        ),
+    )
+    return RefineDispatchResult(
+        tool_result=tool_result, new_result_set_id=outcome.result_set.id
+    )
 
 
 async def _dispatch_evidence(
@@ -1987,6 +2142,93 @@ async def run_agent_turn(
                 )
             tool_calls_made += 1
             tool_results.append(job_draft_result)
+            await record_event(
+                db,
+                tenant_id=tenant_id,
+                event_type="agent.tool.executed",
+                metadata={"tool_name": decision.action.value, "tool_call_index": tool_calls_made},
+            )
+            result = _build_result(
+                outcome=AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT,
+                message=None,
+                tool_results=tool_results,
+                tool_call_count=tool_calls_made,
+                provenance=provenance,
+            )
+            return await _finish_turn(
+                db,
+                conversation,
+                tenant_id=tenant_id,
+                turns=turns,
+                active_result_set_id=conversation.active_result_set_id,
+                max_context_turns=max_context_turns,
+                result=result,
+            )
+
+        if decision.action == AgentActionType.REFINE_CANDIDATE_RESULTS:
+            # Always turn-terminal (issue #49 PR49-2, docs/DECISIONS.md
+            # D-084) — never let the model keep looping and accidentally
+            # launch a fresh search after a valid refinement. Handled as
+            # its own branch (not the uniform tool_result/matched_profile
+            # shape below): a rejection here means "the active result set
+            # is untouched", never a candidate_ref resolution outcome.
+            refine_dispatch = await _dispatch_refine(
+                db,
+                llm,
+                tenant_id=tenant_id,
+                conversation=conversation,
+                decision=decision,
+                as_of_date=as_of_date,
+                embedding_config=embedding_config,
+            )
+            if refine_dispatch.rejection_message is not None:
+                result = _build_result(
+                    outcome=AgentTurnOutcome.CLARIFICATION_REQUESTED,
+                    message=refine_dispatch.rejection_message,
+                    tool_results=tool_results,
+                    tool_call_count=tool_calls_made,
+                    provenance=provenance,
+                )
+                return await _finish_turn(
+                    db,
+                    conversation,
+                    tenant_id=tenant_id,
+                    turns=turns,
+                    active_result_set_id=conversation.active_result_set_id,
+                    max_context_turns=max_context_turns,
+                    result=result,
+                )
+            if refine_dispatch.resolution_failure is not None:
+                failure_outcome, failure_message = _outcome_and_message_for_refinement_failure(
+                    refine_dispatch.resolution_failure
+                )
+                result = _build_result(
+                    outcome=failure_outcome,
+                    message=failure_message,
+                    tool_results=tool_results,
+                    tool_call_count=tool_calls_made,
+                    provenance=provenance,
+                )
+                return await _finish_turn(
+                    db,
+                    conversation,
+                    tenant_id=tenant_id,
+                    turns=turns,
+                    active_result_set_id=conversation.active_result_set_id,
+                    max_context_turns=max_context_turns,
+                    result=result,
+                )
+            assert (
+                refine_dispatch.tool_result is not None
+                and refine_dispatch.new_result_set_id is not None
+            )
+            tool_calls_made += 1
+            tool_results.append(refine_dispatch.tool_result)
+            # Eagerly synced (not deferred to _finish_turn), same as a
+            # successful SEARCH_CANDIDATES result set switch above — the
+            # committed active pointer must be the derived set the moment
+            # this turn ends.
+            conversation.active_result_set_id = refine_dispatch.new_result_set_id
             await record_event(
                 db,
                 tenant_id=tenant_id,

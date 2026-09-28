@@ -86,6 +86,7 @@ from meyar.ui.view_models import (
     AgentEvidenceView,
     AgentJobDraftReviewView,
     AgentJobDraftView,
+    AgentRefineSummaryView,
     AgentToolResultView,
     AgentTurnView,
     CandidateDetailView,
@@ -825,7 +826,7 @@ async def build_agent_turn_view(
             tool_result_views.append(
                 AgentToolResultView(tool_name=tool_result.tool_name.value, profile=profile_view)
             )
-        else:
+        elif tool_result.tool_name == AgentActionType.GET_CANDIDATE_EVIDENCE:
             assert tool_result.evidence is not None
             evidence_result = tool_result.evidence
             if not evidence_result.found or evidence_result.candidate_id is None:
@@ -858,6 +859,29 @@ async def build_agent_turn_view(
                         full_name=identity_values.full_name,
                         topic=evidence_result.topic,
                         matches=match_views,
+                    ),
+                )
+            )
+        else:
+            # AgentActionType.REFINE_CANDIDATE_RESULTS (issue #49 PR49-2).
+            # Reuses build_search_result_views unchanged — a refined
+            # member is presented exactly like a normal search result card
+            # (see meyar.agent.schemas.AgentRefineToolResult docstring).
+            assert tool_result.refine is not None
+            refine_result = tool_result.refine
+            refine_search_results = await build_search_result_views(
+                db, tenant_id=tenant_id, response=refine_result.response
+            )
+            tool_result_views.append(
+                AgentToolResultView(
+                    tool_name=tool_result.tool_name.value,
+                    search_results=refine_search_results,
+                    refine_summary=AgentRefineSummaryView(
+                        source_result_count=refine_result.source_result_count,
+                        result_count=refine_result.response.result_count,
+                        has_filter=refine_result.has_filter,
+                        requested_limit=refine_result.requested_limit,
+                        limit_truncated=refine_result.limit_truncated,
                     ),
                 )
             )
@@ -1045,7 +1069,36 @@ def _agent_turn_headline(
                 f"{len(draft.preferred_rows)} üstünlük tələbi hazırlandı. Nəzərdən keçirin, "
                 f"və təsdiqləyin.{note_text}"
             )
+        if latest_view.tool_name == AgentActionType.REFINE_CANDIDATE_RESULTS.value:
+            return _refine_headline(latest_view.refine_summary)
     return agent_turn_outcome_message(result.outcome.value, None)
+
+
+def _refine_headline(summary: AgentRefineSummaryView | None) -> str:
+    """One deterministic sentence for a successful REFINE_CANDIDATE_RESULTS
+    turn (issue #49 PR49-2, docs/DECISIONS.md D-084) — built purely from
+    already-computed safe counts, never the HR's own raw filter/limit text
+    and never model prose (see AgentRefineSummaryView)."""
+    assert summary is not None
+    if summary.result_count == 0:
+        return "Cari nəticələr daxilində uyğun namizəd tapılmadı."
+    if summary.has_filter and summary.requested_limit is not None:
+        return (
+            f"Cari nəticələr daxilində meyara uyğun {summary.result_count} namizəd "
+            "qaldı."
+        )
+    if summary.has_filter:
+        return (
+            f"Cari nəticələr {summary.source_result_count} namizəddən "
+            f"{summary.result_count} namizədə endirildi (meyara uyğun)."
+        )
+    truncated_note = (
+        " (cari nəticələrdə bundan az namizəd var idi)" if summary.limit_truncated else ""
+    )
+    return (
+        f"Cari nəticələr {summary.source_result_count} namizəddən "
+        f"{summary.result_count} namizədə endirildi.{truncated_note}"
+    )
 
 
 async def list_job_views(

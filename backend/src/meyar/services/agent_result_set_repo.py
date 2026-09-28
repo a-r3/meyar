@@ -14,8 +14,9 @@ and staleness are professional-fact/provenance concepts only (see
 docs/SECURITY_PRIVACY.md)."""
 
 import hashlib
+import json
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 
@@ -25,9 +26,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meyar.agent.schemas import MAX_CANDIDATE_REF
 from meyar.embedding.serializer import build_professional_embedding_text, compute_source_sha256
 from meyar.models.agent_conversation import AgentConversation
-from meyar.models.agent_result_set import AgentResultSet, AgentResultSetMember
+from meyar.models.agent_result_set import AgentResultSet, AgentResultSetKind, AgentResultSetMember
 from meyar.search.planner_schemas import PlannedCandidateSearchResponse
 from meyar.search.schemas import CandidateSearchRequest, EmbeddingSearchConfig
+from meyar.search.structured import evaluate_required_filters
 from meyar.services.audit_repo import record_event
 from meyar.services.browser_session_repo import get_browser_session_by_id
 from meyar.services.candidate_embedding_repo import list_compatible_embedding_version_ids
@@ -37,6 +39,13 @@ from meyar.services.profile_authority import (
     authorize_profile_version,
     get_current_authorized_profile,
 )
+
+# issue #49 PR49-2 — the deterministic policy REFINE_CANDIDATE_RESULTS
+# applies: derived membership is always a subset of the active result
+# set's own members in their existing order (filter never reorders,
+# limit only truncates); bump when that policy itself changes, never for
+# an unrelated code change. See create_result_set_from_refinement.
+REFINEMENT_POLICY_VERSION = "agent-refinement-policy-v1"
 
 
 async def compute_corpus_fingerprint(
@@ -131,6 +140,8 @@ async def create_result_set_from_search(
         tenant_id=tenant_id,
         browser_session_id=browser_session_id,
         context_epoch=context_epoch,
+        result_set_kind=AgentResultSetKind.SEARCH.value,
+        parent_result_set_id=None,
         request_sha256=planned.plan.request_sha256,
         canonical_search_request=request.model_dump(mode="json"),
         planner_policy_version=planned.plan.planner_policy_version,
@@ -228,6 +239,67 @@ class ResolvedCandidateRef:
     candidate_profile_version_id: uuid.UUID
 
 
+async def _validate_active_result_set(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    browser_session_id: uuid.UUID,
+    conversation: AgentConversation,
+) -> AgentResultSet | ResultSetResolutionFailure:
+    """Steps 1-6 of the ordinal-resolution check order shared by EVERY
+    consumer of ``conversation.active_result_set_id`` — a candidate_ref
+    lookup (``resolve_active_candidate_ref``) and a REFINE_CANDIDATE_RESULTS
+    turn (``create_result_set_from_refinement``) both call this ONE
+    function rather than re-implementing the check (issue #49 PR49-2,
+    docs/DECISIONS.md D-084: "one authoritative validation definition").
+    Never fires an audit event itself — callers own their own audit
+    semantics (different event types/metadata for a rejected ordinal vs. a
+    rejected refinement); see each caller's own reject helper.
+
+    1. ``conversation.active_result_set_id`` is set.
+    2. The AgentResultSet row exists AND its own ``tenant_id`` equals
+       ``tenant_id`` — filtered in ONE query on both columns together, so
+       another tenant's row is never even fetched to compare against.
+    3. Its ``browser_session_id`` equals this call's ``browser_session_id``.
+    4. Its ``context_epoch`` equals ``conversation.context_epoch``.
+    5. ``expires_at`` is still in the future.
+    6. Recomputing the corpus fingerprint still matches the one stored at
+       creation.
+    """
+    if conversation.active_result_set_id is None:
+        return ResultSetResolutionFailure.NO_ACTIVE_RESULT_SET
+
+    result_set = await db.scalar(
+        select(AgentResultSet).where(
+            AgentResultSet.id == conversation.active_result_set_id,
+            AgentResultSet.tenant_id == tenant_id,
+        )
+    )
+    if result_set is None:
+        return ResultSetResolutionFailure.NOT_FOUND
+    if result_set.browser_session_id != browser_session_id:
+        return ResultSetResolutionFailure.SESSION_MISMATCH
+    if result_set.context_epoch != conversation.context_epoch:
+        return ResultSetResolutionFailure.CONTEXT_EPOCH_MISMATCH
+    now = datetime.now(UTC)
+    expires_at = result_set.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+    if now >= expires_at:
+        return ResultSetResolutionFailure.EXPIRED
+
+    embedding_config = CandidateSearchRequest.model_validate(
+        result_set.canonical_search_request
+    ).embedding_config
+    current_fingerprint = await compute_corpus_fingerprint(
+        db, tenant_id=tenant_id, embedding_config=embedding_config
+    )
+    if current_fingerprint != result_set.corpus_fingerprint_sha256:
+        return ResultSetResolutionFailure.STALE
+
+    return result_set
+
+
 async def resolve_active_candidate_ref(
     db: AsyncSession,
     *,
@@ -241,19 +313,7 @@ async def resolve_active_candidate_ref(
     ResultSetResolutionFailure, never an exception, never a partial
     result):
 
-    1. ``conversation.active_result_set_id`` is set.
-    2. The AgentResultSet row exists AND its own ``tenant_id`` equals
-       ``tenant_id`` — filtered in ONE query on both columns together, so
-       another tenant's row is never even fetched to compare against
-       (never "fetch by id, then compare tenant_id in Python").
-    3. Its ``browser_session_id`` equals this call's ``browser_session_id``.
-    4. Its ``context_epoch`` equals ``conversation.context_epoch`` (a
-       "Yeni söhbət" reset bumps the conversation's own epoch, so a stale
-       or tampered pointer from a previous epoch never resolves again).
-    5. ``expires_at`` is still in the future.
-    6. Recomputing the corpus fingerprint still matches the one stored at
-       creation (no profile/embedding drift since this result set was
-       built).
+    1-6. See ``_validate_active_result_set``.
     7. ``candidate_ref`` is within the persisted member ordinal range.
     8. The resolved candidate still has a current authorized profile for
        this tenant (defense in depth; see ResultSetResolutionFailure
@@ -263,54 +323,15 @@ async def resolve_active_candidate_ref(
     ``agent.result_set.reference_rejected`` on failure — metadata is
     always ids/enums/small ints only, never query/candidate-identity text.
     """
-    if conversation.active_result_set_id is None:
-        return await _reject(
-            db, tenant_id=tenant_id, conversation=conversation,
-            failure=ResultSetResolutionFailure.NO_ACTIVE_RESULT_SET, candidate_ref=None,
-        )
-
-    result_set = await db.scalar(
-        select(AgentResultSet).where(
-            AgentResultSet.id == conversation.active_result_set_id,
-            AgentResultSet.tenant_id == tenant_id,
-        )
+    validated = await _validate_active_result_set(
+        db, tenant_id=tenant_id, browser_session_id=browser_session_id, conversation=conversation
     )
-    if result_set is None:
+    if isinstance(validated, ResultSetResolutionFailure):
         return await _reject(
             db, tenant_id=tenant_id, conversation=conversation,
-            failure=ResultSetResolutionFailure.NOT_FOUND, candidate_ref=None,
+            failure=validated, candidate_ref=None,
         )
-    if result_set.browser_session_id != browser_session_id:
-        return await _reject(
-            db, tenant_id=tenant_id, conversation=conversation,
-            failure=ResultSetResolutionFailure.SESSION_MISMATCH, candidate_ref=None,
-        )
-    if result_set.context_epoch != conversation.context_epoch:
-        return await _reject(
-            db, tenant_id=tenant_id, conversation=conversation,
-            failure=ResultSetResolutionFailure.CONTEXT_EPOCH_MISMATCH, candidate_ref=None,
-        )
-    now = datetime.now(UTC)
-    expires_at = result_set.expires_at
-    if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=UTC)
-    if now >= expires_at:
-        return await _reject(
-            db, tenant_id=tenant_id, conversation=conversation,
-            failure=ResultSetResolutionFailure.EXPIRED, candidate_ref=None,
-        )
-
-    embedding_config = CandidateSearchRequest.model_validate(
-        result_set.canonical_search_request
-    ).embedding_config
-    current_fingerprint = await compute_corpus_fingerprint(
-        db, tenant_id=tenant_id, embedding_config=embedding_config
-    )
-    if current_fingerprint != result_set.corpus_fingerprint_sha256:
-        return await _reject(
-            db, tenant_id=tenant_id, conversation=conversation,
-            failure=ResultSetResolutionFailure.STALE, candidate_ref=None,
-        )
+    result_set = validated
 
     member = await db.scalar(
         select(AgentResultSetMember).where(
@@ -392,30 +413,236 @@ async def active_result_set_size(
     independently when the model actually references an ordinal. Never
     raises, never leaks which specific failure occurred, and never fires
     an audit event (it is not itself a resolution attempt)."""
-    if conversation.active_result_set_id is None:
+    validated = await _validate_active_result_set(
+        db, tenant_id=tenant_id, browser_session_id=browser_session_id, conversation=conversation
+    )
+    if isinstance(validated, ResultSetResolutionFailure):
         return 0
-    result_set = await db.scalar(
-        select(AgentResultSet).where(
-            AgentResultSet.id == conversation.active_result_set_id,
-            AgentResultSet.tenant_id == tenant_id,
+    return min(validated.result_count, MAX_CANDIDATE_REF)
+
+
+async def _ordered_members(
+    db: AsyncSession, *, result_set_id: uuid.UUID
+) -> list[AgentResultSetMember]:
+    rows = await db.execute(
+        select(AgentResultSetMember)
+        .where(AgentResultSetMember.result_set_id == result_set_id)
+        .order_by(AgentResultSetMember.ordinal.asc())
+    )
+    return list(rows.scalars())
+
+
+async def _reject_refinement(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    conversation: AgentConversation,
+    failure: ResultSetResolutionFailure,
+) -> None:
+    """Mirrors ``_reject`` for a rejected REFINE_CANDIDATE_RESULTS turn —
+    its own event type/metadata shape (never a candidate_ref, which a
+    refinement never carries)."""
+    await record_event(
+        db,
+        tenant_id=tenant_id,
+        event_type="agent.result_set.refine_rejected",
+        metadata={
+            "reason": _AUDIT_REASON_BY_FAILURE[failure],
+            "context_epoch": conversation.context_epoch,
+        },
+    )
+
+
+@dataclass(frozen=True)
+class RefinementResult:
+    """Everything ``meyar.agent.service._dispatch_refine`` needs to build
+    the HR-facing ``AgentRefineToolResult`` — never leaves this module with
+    less than a fully persisted, audited derived AgentResultSet."""
+
+    result_set: AgentResultSet
+    members: list[AgentResultSetMember] = field(default_factory=list)
+    source_result_count: int = 0
+    limit_truncated: bool = False
+
+
+def _canonical_refinement_request_json(
+    *, filter_request: CandidateSearchRequest | None, requested_limit: int | None
+) -> dict:
+    return {
+        "filter_request": (
+            filter_request.model_dump(mode="json") if filter_request is not None else None
+        ),
+        "limit": requested_limit,
+    }
+
+
+async def create_result_set_from_refinement(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    browser_session_id: uuid.UUID,
+    conversation: AgentConversation,
+    filter_request: CandidateSearchRequest | None,
+    requested_limit: int | None,
+) -> RefinementResult | ResultSetResolutionFailure:
+    """REFINE_CANDIDATE_RESULTS's own persistence authority (issue #49
+    PR49-2). ``filter_request`` is an ALREADY-VALIDATED, already-planned
+    ``CandidateSearchRequest`` (STRUCTURED_ONLY only — the caller,
+    meyar.agent.service._dispatch_refine, rejects a semantic/hybrid or
+    non-executable plan before ever calling this function) whose
+    ``required_filters`` this function evaluates directly against the
+    active result set's OWN current members — never a fresh tenant-wide
+    search, never touching ``preferred_filters`` (no reranking within this
+    PR — see docs/DECISIONS.md D-084).
+
+    Authority order:
+    1. The active result set passes the exact same 6-step validation
+       ``resolve_active_candidate_ref`` uses (``_validate_active_result_set``)
+       — STALE/EXPIRED/etc. fail the WHOLE refinement, never partially.
+    2. Each member's recorded ``candidate_profile_version_id`` must still
+       equal the candidate's CURRENT authorized profile version (defense
+       in depth beyond the aggregate corpus fingerprint check above) — any
+       mismatch fails the whole refinement as STALE too.
+    3. When ``filter_request`` is given, a member survives only if
+       ``evaluate_required_filters`` (the exact Slice 8 structured-search
+       gate) is satisfied against its own current profile — the parent's
+       own ordinal order is preserved for every survivor (filtering never
+       reorders).
+    4. ``requested_limit`` truncates that same preserved order — never
+       reorders, never fabricates members when the retained set is
+       smaller than requested (``RefinementResult.limit_truncated``).
+
+    The derived AgentResultSet's search-provenance fields
+    (canonical_search_request/planner_*/search_policy_version/search_mode/
+    corpus_fingerprint_sha256) are copied VERBATIM from the parent — never
+    overwritten with the refinement's own filter text — and
+    ``expires_at`` is inherited exactly (a refinement never extends
+    validity beyond its parent). Fires ``agent.result_set.refined`` on
+    success, ``agent.result_set.refine_rejected`` on failure — metadata is
+    always ids/enums/counts, never raw filter/query text."""
+    validated = await _validate_active_result_set(
+        db, tenant_id=tenant_id, browser_session_id=browser_session_id, conversation=conversation
+    )
+    if isinstance(validated, ResultSetResolutionFailure):
+        await _reject_refinement(
+            db, tenant_id=tenant_id, conversation=conversation, failure=validated
         )
+        return validated
+    source_result_set = validated
+
+    source_members = await _ordered_members(db, result_set_id=source_result_set.id)
+    as_of_year = (
+        filter_request.as_of_date.year
+        if filter_request is not None and filter_request.as_of_date is not None
+        else None
     )
-    if result_set is None or result_set.browser_session_id != browser_session_id:
-        return 0
-    if result_set.context_epoch != conversation.context_epoch:
-        return 0
-    now = datetime.now(UTC)
-    expires_at = result_set.expires_at
-    if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=UTC)
-    if now >= expires_at:
-        return 0
-    embedding_config = CandidateSearchRequest.model_validate(
-        result_set.canonical_search_request
-    ).embedding_config
-    current_fingerprint = await compute_corpus_fingerprint(
-        db, tenant_id=tenant_id, embedding_config=embedding_config
+    as_of_date = filter_request.as_of_date if filter_request is not None else None
+
+    retained: list[tuple[AgentResultSetMember, list]] = []
+    for member in source_members:
+        authorized = await get_current_authorized_profile(
+            db, tenant_id=tenant_id, candidate_id=member.candidate_id
+        )
+        if authorized is None or authorized[0].id != member.candidate_profile_version_id:
+            # A member's own profile has moved since the source result set
+            # was created despite the aggregate corpus fingerprint still
+            # matching (defense in depth — see docstring point 2). Fail
+            # the whole refinement rather than silently evaluating a
+            # different profile version than the one this result set's
+            # own provenance recorded.
+            await _reject_refinement(
+                db, tenant_id=tenant_id, conversation=conversation,
+                failure=ResultSetResolutionFailure.STALE,
+            )
+            return ResultSetResolutionFailure.STALE
+        if filter_request is None:
+            retained.append((member, []))
+            continue
+        _version, profile = authorized
+        evaluation = evaluate_required_filters(
+            profile, filter_request.required_filters, as_of_year=as_of_year, as_of_date=as_of_date
+        )
+        if evaluation.satisfied:
+            retained.append((member, evaluation.matches))
+
+    source_result_count = len(source_members)
+    limit_truncated = requested_limit is not None and requested_limit > len(retained)
+    limited = retained[:requested_limit] if requested_limit is not None else retained
+
+    canonical_refinement_request = _canonical_refinement_request_json(
+        filter_request=filter_request, requested_limit=requested_limit
     )
-    if current_fingerprint != result_set.corpus_fingerprint_sha256:
-        return 0
-    return min(result_set.result_count, MAX_CANDIDATE_REF)
+    refinement_request_sha256 = hashlib.sha256(
+        json.dumps(canonical_refinement_request, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+    derived = AgentResultSet(
+        tenant_id=tenant_id,
+        browser_session_id=browser_session_id,
+        context_epoch=source_result_set.context_epoch,
+        result_set_kind=AgentResultSetKind.REFINEMENT.value,
+        parent_result_set_id=source_result_set.id,
+        # Root search provenance copied verbatim — never overwritten with
+        # this refinement's own filter text. See function docstring.
+        request_sha256=source_result_set.request_sha256,
+        canonical_search_request=source_result_set.canonical_search_request,
+        planner_policy_version=source_result_set.planner_policy_version,
+        planner_prompt_version=source_result_set.planner_prompt_version,
+        planner_schema_version=source_result_set.planner_schema_version,
+        planner_model_provider=source_result_set.planner_model_provider,
+        planner_model_name=source_result_set.planner_model_name,
+        planner_model_revision=source_result_set.planner_model_revision,
+        search_policy_version=source_result_set.search_policy_version,
+        search_mode=source_result_set.search_mode,
+        result_count=len(limited),
+        corpus_fingerprint_sha256=source_result_set.corpus_fingerprint_sha256,
+        # Never extend validity beyond the parent's own expiry.
+        expires_at=source_result_set.expires_at,
+        refinement_request_sha256=refinement_request_sha256,
+        canonical_refinement_request=canonical_refinement_request,
+        refinement_policy_version=REFINEMENT_POLICY_VERSION,
+    )
+    db.add(derived)
+    await db.flush()
+
+    derived_members: list[AgentResultSetMember] = []
+    for ordinal, (member, _matches) in enumerate(limited, start=1):
+        new_member = AgentResultSetMember(
+            result_set_id=derived.id,
+            ordinal=ordinal,
+            candidate_id=member.candidate_id,
+            candidate_profile_version_id=member.candidate_profile_version_id,
+            candidate_embedding_version_id=member.candidate_embedding_version_id,
+            # Scores/provenance copied unchanged from the source member —
+            # a refinement never rescoring/reranks (see function docstring
+            # point 3). The LLM never assigns or modifies these.
+            relevance_score=member.relevance_score,
+            structured_score=member.structured_score,
+            semantic_score=member.semantic_score,
+        )
+        db.add(new_member)
+        derived_members.append(new_member)
+    await db.flush()
+
+    await record_event(
+        db,
+        tenant_id=tenant_id,
+        event_type="agent.result_set.refined",
+        metadata={
+            "source_result_set_id": str(source_result_set.id),
+            "result_set_id": str(derived.id),
+            "context_epoch": derived.context_epoch,
+            "source_result_count": source_result_count,
+            "result_count": len(limited),
+            "refinement_request_sha256": refinement_request_sha256,
+            "refinement_policy_version": REFINEMENT_POLICY_VERSION,
+            "requested_limit": requested_limit,
+            "has_filter": filter_request is not None,
+        },
+    )
+    return RefinementResult(
+        result_set=derived,
+        members=derived_members,
+        source_result_count=source_result_count,
+        limit_truncated=limit_truncated,
+    )

@@ -1,6 +1,6 @@
-"""Alembic upgrade/downgrade/re-upgrade proof for agent_result_sets /
-agent_result_set_members and the AgentConversation.last_search_candidate_ids
--> context_epoch/active_result_set_id replacement (issue #49)."""
+"""Alembic upgrade/downgrade/re-upgrade proof for the AgentResultSet
+refinement-provenance columns (issue #49 PR49-2, revision 543c60f7efc5,
+chained on d2a8f6c1b3e9)."""
 
 import asyncio
 import uuid
@@ -16,15 +16,14 @@ from meyar.config import get_settings
 
 BASE_URL = ADMIN_DATABASE_URL.rsplit("/", 1)[0]
 ADMIN_URL = f"{BASE_URL}/postgres"
-PRIOR_HEAD = "8bd12e7c4a60"
-NEW_HEAD = "d2a8f6c1b3e9"
+PRIOR_HEAD = "d2a8f6c1b3e9"
+NEW_HEAD = "543c60f7efc5"
 
-CONV_ID = "00000000-0000-0000-0000-0000000000c1"
-TENANT_ID = "00000000-0000-0000-0000-0000000000c2"
-SESSION_ID = "00000000-0000-0000-0000-0000000000c3"
-USER_ID = "00000000-0000-0000-0000-0000000000c4"
-MEMBERSHIP_ID = "00000000-0000-0000-0000-0000000000c5"
-LEGACY_CANDIDATE_ID = "11111111-1111-1111-1111-111111111111"
+TENANT_ID = "00000000-0000-0000-0000-0000000000d1"
+SESSION_ID = "00000000-0000-0000-0000-0000000000d2"
+USER_ID = "00000000-0000-0000-0000-0000000000d3"
+MEMBERSHIP_ID = "00000000-0000-0000-0000-0000000000d4"
+RESULT_SET_ID = "00000000-0000-0000-0000-0000000000d5"
 
 
 async def _create_database(name: str) -> None:
@@ -52,7 +51,7 @@ async def _create_vector_extension(database_url: str) -> None:
     await engine.dispose()
 
 
-async def _insert_legacy_conversation(database_url: str) -> None:
+async def _insert_legacy_result_set(database_url: str) -> None:
     statements = [
         (
             "INSERT INTO tenants (id,name,is_active) VALUES (:tenant_id,'Migration Test',true)",
@@ -76,15 +75,15 @@ async def _insert_legacy_conversation(database_url: str) -> None:
             {"session_id": SESSION_ID, "user_id": USER_ID, "membership_id": MEMBERSHIP_ID},
         ),
         (
-            "INSERT INTO agent_conversations "
-            "(id,tenant_id,browser_session_id,turns,last_search_candidate_ids) VALUES "
-            "(:conv_id,:tenant_id,:session_id,'[]',:candidate_ids)",
-            {
-                "conv_id": CONV_ID,
-                "tenant_id": TENANT_ID,
-                "session_id": SESSION_ID,
-                "candidate_ids": f'["{LEGACY_CANDIDATE_ID}"]',
-            },
+            "INSERT INTO agent_result_sets "
+            "(id,tenant_id,browser_session_id,context_epoch,request_sha256,"
+            "canonical_search_request,planner_policy_version,planner_prompt_version,"
+            "planner_schema_version,planner_model_provider,planner_model_name,"
+            "planner_model_revision,search_policy_version,search_mode,result_count,"
+            "corpus_fingerprint_sha256,expires_at) VALUES "
+            "(:id,:tenant_id,:session_id,1,repeat('a',64),'{}','v1','v1','v1','test','test',"
+            "'','v1','STRUCTURED_ONLY',0,repeat('b',64),now() + interval '1 day')",
+            {"id": RESULT_SET_ID, "tenant_id": TENANT_ID, "session_id": SESSION_ID},
         ),
     ]
     engine = create_async_engine(database_url)
@@ -97,50 +96,43 @@ async def _insert_legacy_conversation(database_url: str) -> None:
 async def _assert_upgraded(database_url: str) -> None:
     engine = create_async_engine(database_url)
     async with engine.connect() as connection:
-        assert await connection.scalar(text("SELECT to_regclass('agent_result_sets')"))
-        assert await connection.scalar(text("SELECT to_regclass('agent_result_set_members')"))
-        row = (
-            await connection.execute(
-                text(
-                    "SELECT context_epoch, active_result_set_id FROM agent_conversations "
-                    "WHERE id=:conv_id"
-                ),
-                {"conv_id": CONV_ID},
-            )
-        ).one()
         columns = set(
             (
                 await connection.execute(
                     text(
                         "SELECT column_name FROM information_schema.columns "
-                        "WHERE table_name='agent_conversations'"
+                        "WHERE table_name='agent_result_sets'"
                     )
                 )
             ).scalars()
         )
+        row = (
+            await connection.execute(
+                text(
+                    "SELECT result_set_kind, parent_result_set_id, refinement_request_sha256, "
+                    "canonical_refinement_request, refinement_policy_version FROM "
+                    "agent_result_sets WHERE id=:id"
+                ),
+                {"id": RESULT_SET_ID},
+            )
+        ).one()
         revision = await connection.scalar(text("SELECT version_num FROM alembic_version"))
-        member_constraints = set(
-            (
-                await connection.execute(
-                    text(
-                        "SELECT conname FROM pg_constraint WHERE conrelid = "
-                        "'agent_result_set_members'::regclass"
-                    )
-                )
-            ).scalars()
-        )
     await engine.dispose()
-    assert row.context_epoch == 1
-    assert row.active_result_set_id is None
-    assert "last_search_candidate_ids" not in columns
-    assert "context_epoch" in columns
-    assert "active_result_set_id" in columns
-    assert revision == NEW_HEAD
     assert {
-        "uq_agent_result_set_member_ordinal",
-        "uq_agent_result_set_member_candidate",
-        "ck_agent_result_set_member_ordinal_positive",
-    }.issubset(member_constraints)
+        "result_set_kind",
+        "parent_result_set_id",
+        "refinement_request_sha256",
+        "canonical_refinement_request",
+        "refinement_policy_version",
+    }.issubset(columns)
+    # Truthful backfill — never a fabricated REFINEMENT/provenance for a
+    # row that predates this migration.
+    assert row.result_set_kind == "SEARCH"
+    assert row.parent_result_set_id is None
+    assert row.refinement_request_sha256 is None
+    assert row.canonical_refinement_request is None
+    assert row.refinement_policy_version is None
+    assert revision == NEW_HEAD
 
 
 async def _assert_downgraded(database_url: str) -> None:
@@ -151,22 +143,31 @@ async def _assert_downgraded(database_url: str) -> None:
                 await connection.execute(
                     text(
                         "SELECT column_name FROM information_schema.columns "
-                        "WHERE table_name='agent_conversations'"
+                        "WHERE table_name='agent_result_sets'"
                     )
                 )
             ).scalars()
         )
         revision = await connection.scalar(text("SELECT version_num FROM alembic_version"))
-        assert await connection.scalar(text("SELECT to_regclass('agent_result_sets')")) is None
+        row = (
+            await connection.execute(
+                text("SELECT id FROM agent_result_sets WHERE id=:id"), {"id": RESULT_SET_ID}
+            )
+        ).one()
     await engine.dispose()
-    assert "last_search_candidate_ids" in columns
-    assert "context_epoch" not in columns
-    assert "active_result_set_id" not in columns
+    assert {
+        "result_set_kind",
+        "parent_result_set_id",
+        "refinement_request_sha256",
+        "canonical_refinement_request",
+        "refinement_policy_version",
+    }.isdisjoint(columns)
     assert revision == PRIOR_HEAD
+    assert str(row.id) == RESULT_SET_ID  # the pre-existing row itself survives untouched
 
 
-def test_fresh_agent_result_set_migration(monkeypatch) -> None:
-    name = f"meyar_agent_result_set_{uuid.uuid4().hex}"
+def test_fresh_agent_refinement_migration(monkeypatch) -> None:
+    name = f"meyar_agent_refinement_{uuid.uuid4().hex}"
     url = f"{BASE_URL}/{name}"
     asyncio.run(_create_database(name))
     monkeypatch.setenv("MEYAR_DATABASE_URL", url)
@@ -174,13 +175,7 @@ def test_fresh_agent_result_set_migration(monkeypatch) -> None:
     config = Config(str(Path(__file__).resolve().parent.parent / "alembic.ini"))
     try:
         asyncio.run(_create_vector_extension(url))
-        # Targets this migration's OWN revision explicitly, not "head" —
-        # issue #49 PR49-2 (543c60f7efc5) chains directly on top of this
-        # one, so a fresh install's actual head has moved forward; this
-        # test's own concern is only that a fresh DB reaches (and can run
-        # past) d2a8f6c1b3e9 cleanly. See test_agent_refinement_migration.
-        # test_fresh_agent_refinement_migration for the current-head proof.
-        command.upgrade(config, NEW_HEAD)
+        command.upgrade(config, "head")
         asyncio.run(_verify_fresh(url))
     finally:
         get_settings.cache_clear()
@@ -190,15 +185,30 @@ def test_fresh_agent_result_set_migration(monkeypatch) -> None:
 async def _verify_fresh(database_url: str) -> None:
     engine = create_async_engine(database_url)
     async with engine.connect() as connection:
-        assert await connection.scalar(text("SELECT to_regclass('agent_result_sets')"))
-        assert await connection.scalar(text("SELECT to_regclass('agent_result_set_members')"))
+        columns = set(
+            (
+                await connection.execute(
+                    text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name='agent_result_sets'"
+                    )
+                )
+            ).scalars()
+        )
         revision = await connection.scalar(text("SELECT version_num FROM alembic_version"))
     await engine.dispose()
+    assert {
+        "result_set_kind",
+        "parent_result_set_id",
+        "refinement_request_sha256",
+        "canonical_refinement_request",
+        "refinement_policy_version",
+    }.issubset(columns)
     assert revision == NEW_HEAD
 
 
-def test_agent_result_set_migration_roundtrip_preserves_conversation_row(monkeypatch) -> None:
-    database_name = f"meyar_agent_result_set_rt_{uuid.uuid4().hex}"
+def test_agent_refinement_migration_roundtrip_preserves_prior_result_set(monkeypatch) -> None:
+    database_name = f"meyar_agent_refinement_rt_{uuid.uuid4().hex}"
     database_url = f"{BASE_URL}/{database_name}"
     alembic_config = Config(str(Path(__file__).resolve().parent.parent / "alembic.ini"))
     asyncio.run(_create_database(database_name))
@@ -207,7 +217,7 @@ def test_agent_result_set_migration_roundtrip_preserves_conversation_row(monkeyp
     try:
         asyncio.run(_create_vector_extension(database_url))
         command.upgrade(alembic_config, PRIOR_HEAD)
-        asyncio.run(_insert_legacy_conversation(database_url))
+        asyncio.run(_insert_legacy_result_set(database_url))
         command.upgrade(alembic_config, NEW_HEAD)
         asyncio.run(_assert_upgraded(database_url))
         command.downgrade(alembic_config, PRIOR_HEAD)
