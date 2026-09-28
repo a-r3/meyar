@@ -1022,9 +1022,13 @@ def _agent_turn_headline(
             draft = latest_view.job_draft
             assert draft is not None
             if draft.wrong_mode_guidance:
+                # Mode-free phrasing (issue #79 PR81 correction) — the unified
+                # composer has no mode selector, so this must never instruct
+                # the user to switch modes; matches the review-panel copy in
+                # agent.html's wrong_mode_guidance branch.
                 return (
-                    "Bu mətn namizəd axtarışına bənzəyir. Namizəd axtarışı rejimindən "
-                    "istifadə edin."
+                    "Bu mətn namizəd axtarışına bənzəyir. Namizədləri tapmaq üçün "
+                    "axtarış istəyinizi açıq yazın."
                 )
             total = len(draft.must_have_rows) + len(draft.preferred_rows)
             unsupported_total = len(draft.unsupported_must_have) + len(draft.unsupported_preferred)

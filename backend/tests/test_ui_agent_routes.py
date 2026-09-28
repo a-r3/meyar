@@ -2960,6 +2960,44 @@ async def test_ambiguous_search_or_jd_clarifies_without_model_tool_or_business_r
     assert raw_message not in str(route_event.event_metadata)
 
 
+def test_wrong_mode_guidance_headline_has_no_stale_mode_language() -> None:
+    """Issue #79 PR81 correction — the unified composer has no mode selector,
+    so the wrong_mode_guidance turn headline must never say "rejim"/"mode"
+    (a prior copy said "Namizəd axtarışı rejimindən istifadə edin", stale
+    from the removed selector). Mirrors the already mode-free review-panel
+    copy in agent.html's wrong_mode_guidance branch."""
+    import uuid as uuid_mod
+
+    from meyar.agent.schemas import AgentActionType, AgentTurnOutcome, AgentTurnResult
+    from meyar.ui.service import _agent_turn_headline
+    from meyar.ui.view_models import AgentJobDraftView, AgentToolResultView
+
+    draft = AgentJobDraftView(
+        title=None,
+        draft_id=uuid_mod.uuid4(),
+        result_limit=20,
+        wrong_mode_guidance=True,
+    )
+    tool_view = AgentToolResultView(
+        tool_name=AgentActionType.DRAFT_JOB_CRITERIA.value, job_draft=draft
+    )
+    result = AgentTurnResult(
+        outcome=AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT,
+        tool_call_count=1,
+        agent_policy_version="test",
+        prompt_version="test",
+        model_provider="test",
+        model_name="test",
+    )
+    headline = _agent_turn_headline(result, [tool_view])
+    assert "rejim" not in headline.lower()
+    assert "mode" not in headline.lower()
+    assert headline == (
+        "Bu mətn namizəd axtarışına bənzəyir. Namizədləri tapmaq üçün "
+        "axtarış istəyinizi açıq yazın."
+    )
+
+
 async def _pending_draft_id(db_session: AsyncSession) -> uuid.UUID:
     """Server-held pending draft id — the confirm form/draft_id is never
     rendered while the draft is unconfirmable, so a real repro of a direct
