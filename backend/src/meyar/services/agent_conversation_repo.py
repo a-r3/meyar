@@ -1,6 +1,7 @@
 import uuid
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.agent.schemas import AgentJobDraftToolResult, ConfirmedAgentJobDraft
@@ -57,6 +58,52 @@ async def get_or_create_conversation(
     )
     db.add(conversation)
     await db.flush()
+    return conversation
+
+
+async def get_or_create_conversation_for_update(
+    db: AsyncSession, *, tenant_id: uuid.UUID, browser_session_id: uuid.UUID
+) -> AgentConversation:
+    """PR #77 review fix (issue #49 concurrency blocker): the real
+    ``/ui/agent`` POST turn mutation boundary must hold this
+    AgentConversation row's own PostgreSQL ``SELECT ... FOR UPDATE`` lock
+    for the complete state-changing turn — not an in-process lock, so it
+    still serializes correctly across multiple worker processes. A second
+    concurrent turn on the SAME browser_session_id blocks here, on the
+    database row lock itself, until the first turn's transcript/
+    context_epoch/active_result_set_id commit lands, then observes that
+    committed state rather than a stale pre-race snapshot. Row-level, not
+    global — a different session's row is never blocked by this.
+
+    First-turn creation (no existing row yet) is race-safe: if two
+    concurrent callers both observe no existing row and both attempt to
+    INSERT, the unique ``browser_session_id`` constraint aborts the
+    loser's INSERT; the loser rolls back its own aborted subtransaction
+    and re-runs the locking SELECT, which now blocks on the winner's row
+    lock and returns that single committed row once available — never two
+    rows, never an unhandled 500."""
+    conversation = await get_conversation_for_update_by_session(
+        db, tenant_id=tenant_id, browser_session_id=browser_session_id
+    )
+    if conversation is not None:
+        return conversation
+    conversation = AgentConversation(
+        tenant_id=tenant_id,
+        browser_session_id=browser_session_id,
+        turns=[],
+        context_epoch=1,
+        active_result_set_id=None,
+    )
+    db.add(conversation)
+    try:
+        await db.flush()
+    except IntegrityError:
+        await db.rollback()
+        conversation = await get_conversation_for_update_by_session(
+            db, tenant_id=tenant_id, browser_session_id=browser_session_id
+        )
+        if conversation is None:
+            raise
     return conversation
 
 

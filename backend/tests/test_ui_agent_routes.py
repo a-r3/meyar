@@ -2962,3 +2962,290 @@ async def test_explicit_result_count_control_confirms_and_persists_normally(
 
     assert await db_session.scalar(select(func.count()).select_from(Job)) == 1
     assert await db_session.scalar(select(func.count()).select_from(JobCriteriaVersion)) == 1
+
+
+# --- Concurrency (issue #49, PR #77 review — real /ui/agent route lock) ----
+
+
+async def test_real_ui_agent_route_serializes_concurrent_same_session_turns(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
+) -> None:
+    """PR #77 review blocker: test_agent_result_set.
+    test_concurrent_turns_never_lose_a_context_epoch_update only proves
+    get_conversation_for_update_by_session serializes when called
+    directly — it does not prove the real POST /ui/agent route does. This
+    fires two genuinely concurrent HTTP requests against the ACTUAL
+    route, each on its OWN database connection/transaction (two separate
+    engines, never the shared `db_session`), for the SAME browser
+    session, starting from NO existing AgentConversation row (the rare
+    first-turn creation race)."""
+    from conftest import TEST_DATABASE_URL
+    from sqlalchemy import func, select
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from meyar.db import get_db
+    from meyar.models.agent_conversation import AgentConversation
+    from meyar.models.agent_result_set import AgentResultSet, AgentResultSetMember
+    from meyar.models.audit_event import AuditEvent
+    from meyar.models.evaluation import Evaluation
+    from meyar.models.job import Job as JobModel
+    from meyar.models.job_criteria_version import JobCriteriaVersion
+
+    tenant, user, password, _membership = tenant_and_user
+    candidate_python, _ = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=_profile("Python")
+    )
+    candidate_java, _ = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=_profile("Java")
+    )
+    await db_session.commit()
+
+    csrf = await _login_and_csrf(client, user.username, password)
+
+    class _DelayedOnFirstSearchLLM(FakeLLMProvider):
+        """Sleeps once per turn, right as that turn's OWN first
+        decide_agent_action call is made — which only ever happens after
+        the router has already acquired this session's AgentConversation
+        row lock. Whichever concurrent turn gets there first holds that
+        lock (uncommitted transaction) for the sleep's duration, giving
+        the other turn's own locking SELECT real wall-clock time to
+        genuinely block on it rather than merely interleaving by luck."""
+
+        async def decide_agent_action(self, **kwargs):
+            if self.agent_call_count in (0, 2):
+                await asyncio.sleep(0.15)
+            return await super().decide_agent_action(**kwargs)
+
+    fake = _DelayedOnFirstSearchLLM(
+        planner_drafts=[
+            PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
+            PlannerDraft(required_filters=RequiredFilters(skills=["Java"])),
+        ],
+        agent_decisions=[
+            AgentDecision(
+                action=AgentActionType.SEARCH_CANDIDATES,
+                search_query="Python bilən namizədləri göstər",
+            ),
+            AgentDecision(
+                action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
+            ),
+            AgentDecision(
+                action=AgentActionType.SEARCH_CANDIDATES,
+                search_query="Java bilən namizədləri göstər",
+            ),
+            AgentDecision(
+                action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
+            ),
+        ],
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake
+
+    engine_a = create_async_engine(TEST_DATABASE_URL)
+    engine_b = create_async_engine(TEST_DATABASE_URL)
+    factory_a = async_sessionmaker(engine_a, expire_on_commit=False)
+    factory_b = async_sessionmaker(engine_b, expire_on_commit=False)
+    assigned: list[str] = []
+
+    async def _round_robin_get_db():
+        # Single-threaded event loop: no `await` between the check and the
+        # append below, so this assignment is race-free even though two
+        # concurrent requests call it.
+        factory = factory_a if not assigned else factory_b
+        assigned.append("taken")
+        async with factory() as session:
+            yield session
+
+    app.dependency_overrides[get_db] = _round_robin_get_db
+
+    loop = asyncio.get_event_loop()
+    started = loop.time()
+    try:
+        response_1, response_2 = await asyncio.gather(
+            client.post(
+                "/ui/agent",
+                data={"message": "Python bilən namizədləri göstər", "csrf_token": csrf},
+            ),
+            client.post(
+                "/ui/agent",
+                data={"message": "Java bilən namizədləri göstər", "csrf_token": csrf},
+            ),
+        )
+    finally:
+        elapsed = loop.time() - started
+        await engine_a.dispose()
+        await engine_b.dispose()
+
+        async def _restore_get_db():
+            yield db_session
+
+        app.dependency_overrides[get_db] = _restore_get_db
+
+    assert response_1.status_code == 200
+    assert response_2.status_code == 200
+    # Real DB-lock serialization proof: two independent 0.15s holds, each
+    # gating the OTHER request's row lock acquisition, must run back to
+    # back (>= ~0.3s) rather than in parallel (~0.15s) — see class
+    # docstring above.
+    assert elapsed >= 0.28
+
+    conversation = await db_session.scalar(
+        select(AgentConversation).where(AgentConversation.tenant_id == tenant.id)
+    )
+    assert conversation is not None
+    # No lost transcript update: both (user, assistant) pairs persisted.
+    assert len(conversation.turns) == 4
+    user_messages = {t["text"] for t in conversation.turns if t.get("role") == "user"}
+    assert user_messages == {
+        "Python bilən namizədləri göstər",
+        "Java bilən namizədləri göstər",
+    }
+
+    result_sets = (
+        await db_session.scalars(
+            select(AgentResultSet)
+            .where(AgentResultSet.tenant_id == tenant.id)
+            .order_by(AgentResultSet.created_at)
+        )
+    ).all()
+    assert len(result_sets) == 2
+    first_rs, second_rs = result_sets
+    # Coherent serialized transition: the conversation's active pointer is
+    # the LATEST committed result set, not the pre-race None both turns
+    # originally read.
+    assert conversation.active_result_set_id == second_rs.id
+
+    created_events = (
+        await db_session.scalars(
+            select(AuditEvent)
+            .where(
+                AuditEvent.tenant_id == tenant.id,
+                AuditEvent.event_type == "agent.result_set.created",
+            )
+            .order_by(AuditEvent.created_at)
+        )
+    ).all()
+    assert len(created_events) == 2
+    assert created_events[0].event_metadata["previous_result_set_id"] is None
+    # The second serialized creation's audit event chains onto the FIRST
+    # serialized result_set_id — never back onto the original pre-race
+    # `None` pointer both turns would have read from an un-serialized
+    # snapshot.
+    assert created_events[1].event_metadata["previous_result_set_id"] == str(first_rs.id)
+    assert created_events[1].event_metadata["result_set_id"] == str(second_rs.id)
+
+    first_members = (
+        await db_session.scalars(
+            select(AgentResultSetMember).where(AgentResultSetMember.result_set_id == first_rs.id)
+        )
+    ).all()
+    second_members = (
+        await db_session.scalars(
+            select(AgentResultSetMember).where(AgentResultSetMember.result_set_id == second_rs.id)
+        )
+    ).all()
+    # No member/provenance cross-wire: each result set holds exactly the
+    # one candidate its own search matched, and the two are disjoint.
+    assert {m.candidate_id for m in first_members} | {m.candidate_id for m in second_members} == {
+        candidate_python.id,
+        candidate_java.id,
+    }
+    assert {m.candidate_id for m in first_members}.isdisjoint(
+        {m.candidate_id for m in second_members}
+    )
+    final_active_candidate_id = second_members[0].candidate_id
+
+    # A subsequent ordinal follow-up must resolve only against the final
+    # active result set.
+    fake_profile = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1)
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake_profile
+    followup = await client.post(
+        "/ui/agent", data={"message": "birincini aç", "csrf_token": csrf}
+    )
+    assert followup.status_code == 200
+    assert str(final_active_candidate_id) in followup.text
+
+    # No Job/JobCriteriaVersion/Evaluation side effect from this concurrency
+    # regression.
+    assert await db_session.scalar(select(func.count()).select_from(JobModel)) == 0
+    assert await db_session.scalar(select(func.count()).select_from(JobCriteriaVersion)) == 0
+    assert await db_session.scalar(select(func.count()).select_from(Evaluation)) == 0
+
+
+async def test_real_ui_agent_route_does_not_serialize_across_different_browser_sessions(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
+) -> None:
+    """The SAME lock must never become a global one: two DIFFERENT browser
+    sessions (fresh logins, distinct BrowserSession/AgentConversation
+    rows) must not block on each other's row lock."""
+    from conftest import TEST_DATABASE_URL
+    from httpx import ASGITransport
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from meyar.db import get_db
+
+    _tenant, user, password, _membership = tenant_and_user
+    csrf_a = await _login_and_csrf(client, user.username, password)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as second_client:
+        csrf_b = await _login_and_csrf(second_client, user.username, password)
+
+        class _DelayedOnceLLM(FakeLLMProvider):
+            async def decide_agent_action(self, **kwargs):
+                if self.agent_call_count == 0:
+                    await asyncio.sleep(0.15)
+                return await super().decide_agent_action(**kwargs)
+
+        fake = _DelayedOnceLLM(
+            agent_decision=AgentDecision(
+                action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
+            )
+        )
+        app.dependency_overrides[get_llm_provider] = lambda: fake
+
+        engine_a = create_async_engine(TEST_DATABASE_URL)
+        engine_b = create_async_engine(TEST_DATABASE_URL)
+        factory_a = async_sessionmaker(engine_a, expire_on_commit=False)
+        factory_b = async_sessionmaker(engine_b, expire_on_commit=False)
+        assigned: list[str] = []
+
+        async def _round_robin_get_db():
+            factory = factory_a if not assigned else factory_b
+            assigned.append("taken")
+            async with factory() as session:
+                yield session
+
+        app.dependency_overrides[get_db] = _round_robin_get_db
+
+        loop = asyncio.get_event_loop()
+        started = loop.time()
+        try:
+            response_a, response_b = await asyncio.gather(
+                client.post("/ui/agent", data={"message": "Salam", "csrf_token": csrf_a}),
+                second_client.post("/ui/agent", data={"message": "Salam", "csrf_token": csrf_b}),
+            )
+        finally:
+            elapsed = loop.time() - started
+            await engine_a.dispose()
+            await engine_b.dispose()
+
+            async def _restore_get_db():
+                yield db_session
+
+            app.dependency_overrides[get_db] = _restore_get_db
+
+    assert response_a.status_code == 200
+    assert response_b.status_code == 200
+    # Only ONE decide_agent_action call anywhere ever sleeps. If the two
+    # DIFFERENT sessions' rows were (wrongly) serialized through a shared
+    # lock, this would take >= ~0.3s (two sequential holds); independent
+    # sessions must finish in roughly one sleep's worth of wall time.
+    assert elapsed < 0.28
