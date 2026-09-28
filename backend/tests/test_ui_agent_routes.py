@@ -2908,7 +2908,7 @@ async def test_model_proposed_jd_for_search_is_rejected_without_internal_code_co
     assert rejected_event.event_metadata == {
         "routing_source": "MODEL",
         "routed_action": "CLARIFY",
-        "routing_policy_version": "agent-entry-routing-v1",
+        "routing_policy_version": "agent-entry-routing-v2",
     }
     assert raw_message not in str(rejected_event.event_metadata)
 
@@ -2955,7 +2955,7 @@ async def test_ambiguous_search_or_jd_clarifies_without_model_tool_or_business_r
     assert route_event.event_metadata == {
         "routing_source": "DETERMINISTIC_CLARIFICATION",
         "routed_action": "CLARIFY",
-        "routing_policy_version": "agent-entry-routing-v1",
+        "routing_policy_version": "agent-entry-routing-v2",
     }
     assert raw_message not in str(route_event.event_metadata)
 

@@ -63,3 +63,72 @@ def test_explicit_job_analysis_beats_candidate_terms_inside_the_source() -> None
 
 def test_ordinary_conversation_stays_model_routed() -> None:
     assert route_agent_entry("Salam").route == AgentEntryRoute.MODEL_ROUTED
+
+
+# Issue #79 PR81 independent-review correction: the deterministic router was
+# too narrow for Azerbaijani case morphology on workflow nouns (vakansiya/
+# elan/vəzifə) and too aggressive in treating a bare candidate noun
+# ("namizəd") as search evidence. See intent_routing.py module docstring and
+# the _AZ_CASE_SUFFIX/_JOB_ANALYSIS_ACTION_RE comments for the fix strategy.
+@pytest.mark.parametrize(
+    "message",
+    [
+        # Case A — Azerbaijani accusative case suffix on the workflow noun.
+        "Vakansiyanı analiz et: Python tələb olunur.",
+        # Same, plain-ASCII typing variance (no diacritic keys).
+        "Vakansiyani analiz et: Python teleb olunur.",
+        # Genitive case suffix.
+        "Vakansiyanın tələblərini analiz et: Python mütləqdir.",
+        # Case B — explicit vacancy-scoped evaluate action; must not be
+        # stolen by the generic candidate-noun detector even though
+        # "namizədləri" is present.
+        "bu vakansiyaya uyğun namizədləri qiymətləndir",
+        "Bu vakansiyaya uyğun namizədləri qiymətləndir.",
+        # Case C — requirement-shaped two-line paste using "Namizəd" as a
+        # subject noun; no find/show/list/search request present.
+        "Namizəd Python bilməlidir.\nNamizəd SQL bilməlidir.",
+        "Candidate must know Python.\nCandidate must have SQL experience.",
+        # Structured multi-line JD paste with an explicit vacancy header.
+        "Vakansiya: Backend Mühəndisi.\nPython tələb olunur.\nSQL üstünlükdür.",
+    ],
+)
+def test_workflow_morphology_forces_job_draft(message: str) -> None:
+    assert route_agent_entry(message).route == AgentEntryRoute.FORCE_JOB_DRAFT
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        # A bare candidate/result noun with no requirement modality and no
+        # search/result action is never, by itself, search evidence.
+        "Namizəd haqqında danış.",
+        "Tell me about the candidate.",
+        # Explicit search action wins even when requirement terminology
+        # ("required"/"preferred") and a candidate noun are both present.
+        "Python required, SQL preferred olan namizədləri göstər",
+        "Find candidates with Python and SQL",
+        # Current-ResultSet / ordinal follow-up language must never be
+        # captured by any JD detector.
+        "bunlardan SQL bilənlər",
+        "ilk 3",
+        "ikinci namizəd",
+        "Python bilən namizədləri göstər",
+        "5 il Python təcrübəsi olan 10 namizəd tap",
+    ],
+)
+def test_candidate_noun_alone_is_not_search_authority(message: str) -> None:
+    assert route_agent_entry(message).route == AgentEntryRoute.MODEL_ROUTED
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        # A bare candidate noun combined with requirement modality (but no
+        # search action and no JD structure) is genuinely ambiguous — it
+        # must clarify, not be silently claimed by either JD or search.
+        "Namizəd yaxşı təcrübəyə malikdir.",
+        "Candidate has strong experience.",
+    ],
+)
+def test_candidate_noun_with_requirement_modality_alone_clarifies(message: str) -> None:
+    assert route_agent_entry(message).route == AgentEntryRoute.CLARIFY_AMBIGUOUS

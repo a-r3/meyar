@@ -22,7 +22,7 @@ from meyar.agent.semantic_requirements import analyze_hr_text
 from meyar.core.result_count import ResultCountState
 from meyar.core.text import fold_az_ascii, normalize_azerbaijani_case
 
-ENTRY_ROUTING_POLICY_VERSION = "agent-entry-routing-v1"
+ENTRY_ROUTING_POLICY_VERSION = "agent-entry-routing-v2"
 
 
 class AgentEntryRoute(StrEnum):
@@ -60,8 +60,16 @@ def _fold(text: str) -> str:
     return fold_az_ascii(normalize_azerbaijani_case(text))
 
 
-_CANDIDATE_OR_RESULT_RE = re.compile(
-    r"\b(?:candidates?|applicants?|profiles?|results?|namized\w*|netice\w*)\b",
+
+# A candidate/applicant noun on its own is HR-natural JD vocabulary ("Namizəd
+# Python bilməlidir." reads exactly like "Candidate must know Python.") and is
+# never, by itself, evidence of a search/list action (issue #79 PR81
+# correction). It only becomes search evidence when it co-occurs with actual
+# search/result-set semantics, which the regexes below already detect
+# independently — so a candidate noun is deliberately excluded from the
+# search-cue detector rather than listed and then combined with an action.
+_RESULT_NOUN_RE = re.compile(
+    r"\b(?:results?|netice\w*)\b",
     re.IGNORECASE,
 )
 _SEARCH_ACTION_RE = re.compile(
@@ -76,14 +84,25 @@ _RESULT_CONTEXT_RE = re.compile(
     r"from\s+(?:them|these|those)|these\s+results?)\b|#\s*\d+",
     re.IGNORECASE,
 )
+
+# Bounded Azerbaijani noun case-suffix policy (nominative + the six
+# grammatical cases), expressed in the ASCII-folded alphabet that `_fold`
+# already normalizes text into. This is a fixed, auditable suffix table -
+# not open-ended prefix/stem matching - so it generalizes across the small
+# set of workflow-noun roots below without becoming a technology/phrase
+# dictionary. Longer alternatives are listed before their own prefixes so a
+# short alternative never wins a partial match ahead of the full suffix.
+_AZ_CASE_SUFFIX = r"(?:nin|nun|ini|unu|dan|den|ya|ye|da|de|ni|nu|in|un|i|u|a|e)?"
+_AZ_WORKFLOW_ROOT = r"(?:vakansiya|elan|vezife)" + _AZ_CASE_SUFFIX
 _JOB_NOUN_RE = re.compile(
     r"\b(?:vacancy|job\s+(?:description|posting)|role\s+(?:description|requirements?)|"
-    r"vakansiya|vezife\s+telebleri|vakansiya\s+elani)\b",
+    + _AZ_WORKFLOW_ROOT
+    + r")\b",
     re.IGNORECASE,
 )
 _JOB_ANALYSIS_ACTION_RE = re.compile(
     r"\b(?:analy[sz]e\w*|analysis|draft\w*|criteria|criterion|tehlil\w*|analiz\w*|"
-    r"hazirla\w*|meyar\w*|kriteriya\w*)\b",
+    r"hazirla\w*|meyar\w*|kriteriya\w*|qiymetlendir\w*)\b",
     re.IGNORECASE,
 )
 _VACANCY_HEADER_RE = re.compile(
@@ -127,7 +146,7 @@ def route_agent_entry(message: str) -> AgentEntryRoutingResult:
         )
 
     candidate_search_cue = bool(
-        _CANDIDATE_OR_RESULT_RE.search(folded)
+        _RESULT_NOUN_RE.search(folded)
         or _SEARCH_ACTION_RE.search(folded)
         or _RESULT_CONTEXT_RE.search(folded)
         or analysis.result_count.state != ResultCountState.ABSENT
@@ -142,7 +161,11 @@ def route_agent_entry(message: str) -> AgentEntryRoutingResult:
     vacancy_header = bool(_VACANCY_HEADER_RE.search(message))
     bullet_count = len(_BULLET_LINE_RE.findall(message))
     nonempty_lines = [line for line in message.splitlines() if line.strip()]
-    structured_paste = bullet_count >= 2 or len(nonempty_lines) >= 3
+    # >=2 distinct lines is enough paste structure once each line is
+    # independently confirmed as a material requirement below (Case C,
+    # issue #79 PR81 correction) — a genuinely single-line message never
+    # reaches this threshold regardless of internal punctuation/sentences.
+    structured_paste = bullet_count >= 2 or len(nonempty_lines) >= 2
     if (vacancy_header and material_requirement_count >= 1) or (
         structured_paste and material_requirement_count >= 2
     ):
