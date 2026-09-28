@@ -575,21 +575,9 @@ tbody tr:hover { background: var(--surface-subtle); }
 .composer-toolbar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 10px;
 }
-.composer-mode select {
-  min-height: 34px;
-  width: auto;
-  padding: 5px 30px 5px 12px;
-  border-radius: 999px;
-  border-color: var(--border);
-  background-color: var(--surface-subtle);
-  color: var(--text-muted);
-  font-size: .84rem;
-  font-weight: 650;
-}
-.composer-mode select:hover { border-color: var(--primary); color: var(--text); }
 .composer-send {
   display: inline-flex;
   min-width: 42px;

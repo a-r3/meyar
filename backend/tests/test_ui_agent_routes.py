@@ -140,7 +140,11 @@ async def _render_python_draft(
     app.dependency_overrides[get_llm_provider] = lambda: fake
     csrf = await _login_and_csrf(client, username, password)
     response = await client.post(
-        "/ui/agent", data={"message": "Backend. Python required.", "csrf_token": csrf}
+        "/ui/agent",
+        data={
+            "message": "Analyze this job description:\nBackend.\nPython required.",
+            "csrf_token": csrf,
+        },
     )
     assert response.status_code == 200
     return csrf, _draft_confirm_path(response.text), response.text
@@ -165,6 +169,30 @@ async def test_agent_nav_link_present_on_authenticated_pages(
     home = await client.get("/ui")
     assert 'href="/ui/agent"' in home.text
     assert "MEYAR AI" in home.text
+
+
+async def test_unified_composer_has_one_textarea_one_send_and_no_mode_authority(
+    client: AsyncClient, tenant_and_user, local_ui_settings: Settings
+) -> None:
+    _tenant, user, password, _membership = tenant_and_user
+    csrf = await _login_and_csrf(client, user.username, password)
+    page = await client.get("/ui/agent")
+    composer = re.search(
+        r'<form method="post" action="/ui/agent" class="composer".*?</form>',
+        page.text,
+        re.S,
+    )
+    assert page.status_code == 200
+    assert composer is not None
+    html = composer.group(0)
+    assert html.count("<textarea") == 1
+    assert html.count('type="submit"') == 1
+    assert html.count(">Göndər</button>") == 1
+    assert "<select" not in html
+    assert 'name="intent"' not in html
+    assert 'maxlength="4000"' in html
+    assert f'name="csrf_token" value="{csrf}"' in html
+    assert "Namizəd axtarın, nəticələri dəqiqləşdirin" in html
 
 
 async def test_primary_nav_is_agent_first_classic_tools_are_secondary(
@@ -943,7 +971,7 @@ async def test_draft_job_criteria_renders_static_protected_review_rows(
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake
     csrf = await _login_and_csrf(client, user.username, password)
-    jd_text = "Baş Backend Mühəndisi axtarırıq. Python bilməlidir. AWS üstünlükdür."
+    jd_text = "Vakansiya: Baş Backend Mühəndisi.\nPython bilməlidir.\nAWS üstünlükdür."
     response = await client.post("/ui/agent", data={"message": jd_text, "csrf_token": csrf})
     assert response.status_code == 200
     assert "Baş Backend Mühəndisi" in response.text
@@ -1000,7 +1028,10 @@ async def test_draft_job_criteria_drops_prohibited_item_and_notes_it(
     response = await client.post(
         "/ui/agent",
         data={
-            "message": "Rol üçün namizəd kişi olmalıdır. Python bilməlidir.",
+            "message": (
+                "Bu vakansiya elanını analiz et:\nRol üçün namizəd kişi olmalıdır. "
+                "Python bilməlidir."
+            ),
             "csrf_token": csrf,
         },
     )
@@ -1052,7 +1083,10 @@ async def test_draft_job_criteria_preserves_named_experience_family_for_review(
     response = await client.post(
         "/ui/agent",
         data={
-            "message": "Python bilməlidir. ACAMS sertifikatı üzrə təcrübə tələb olunur.",
+            "message": (
+                "Bu vakansiya elanını analiz et:\nPython bilməlidir. "
+                "ACAMS sertifikatı üzrə təcrübə tələb olunur."
+            ),
             "csrf_token": csrf,
         },
     )
@@ -1066,48 +1100,55 @@ async def test_draft_job_criteria_preserves_named_experience_family_for_review(
     assert "Məlumat üçün — qiymətləndirməyə daxil edilmir" not in response.text
 
 
-async def test_draft_job_criteria_explicit_intent_routes_without_magic_wording(
-    client: AsyncClient, tenant_and_user, local_ui_settings: Settings
+async def test_forged_legacy_intent_cannot_force_job_drafting(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
 ) -> None:
-    """The "JD-dən meyar hazırla" affordance (intent=draft_job_criteria)
-    must reach the review form deterministically for arbitrary pasted
-    text with no explicit lead-in phrase and no routing-decision model
-    call at all — agent_decision is deliberately left unset so a
-    fallback to model routing would fail loudly."""
-    from meyar.agent.schemas import JDCriteriaDraft, JDDraftCriterionItem
-    from meyar.schemas.criteria import CriterionKind
+    from sqlalchemy import func, select
+
+    from meyar.models.evaluation import Evaluation
+    from meyar.models.job import Job
+    from meyar.models.job_criteria_version import JobCriteriaVersion
 
     _tenant, user, password, _membership = tenant_and_user
     fake = FakeLLMProvider(
-        jd_draft=JDCriteriaDraft(
-            title="Rol",
-            must_have=[
-                JDDraftCriterionItem(
-                    span_id="req-0001",
-                    kind=CriterionKind.SKILL, requirement="Python", source_text="Python bilməlidir"
-                )
-            ],
-        ),
+        planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
+        agent_decisions=[
+            AgentDecision(
+                action=AgentActionType.SEARCH_CANDIDATES,
+                search_query="Python bilən namizədləri göstər",
+            ),
+            AgentDecision(
+                action=AgentActionType.FINAL_ANSWER,
+                response_code=AgentResponseCode.ACKNOWLEDGEMENT,
+            ),
+        ],
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake
     csrf = await _login_and_csrf(client, user.username, password)
-    jd_text = "Heç bir açar söz olmadan mətn. Python bilməlidir."
     response = await client.post(
         "/ui/agent",
-        data={"message": jd_text, "intent": "draft_job_criteria", "csrf_token": csrf},
+        data={
+            "message": "Python bilən namizədləri göstər",
+            "intent": "draft_job_criteria",
+            "csrf_token": csrf,
+        },
     )
     assert response.status_code == 200
-    assert 'value="Python"' in response.text
-    assert _draft_confirm_path(response.text).endswith("/confirm")
-    assert fake.agent_call_count == 0
+    assert "Sorğu şərtləri əsasında uyğun namizəd yoxdur." in response.text
+    assert "/confirm" not in response.text
+    assert fake.jd_draft_call_count == 0
+    assert await db_session.scalar(select(func.count()).select_from(Job)) == 0
+    assert await db_session.scalar(select(func.count()).select_from(JobCriteriaVersion)) == 0
+    assert await db_session.scalar(select(func.count()).select_from(Evaluation)) == 0
 
 
-async def test_draft_job_criteria_explicit_intent_never_becomes_a_search(
+async def test_deterministic_jd_never_becomes_a_search_without_mode_field(
     client: AsyncClient, tenant_and_user, local_ui_settings: Settings
 ) -> None:
-    """Even if the (unused) routing decision would have misrouted this
-    text to SEARCH_CANDIDATES, the explicit intent must still deterministically
-    draft criteria — never a candidate-search result."""
+    """A server-confirmed pasted JD bypasses an incorrect model route."""
     from meyar.agent.schemas import JDCriteriaDraft, JDDraftCriterionItem
     from meyar.schemas.criteria import CriterionKind
 
@@ -1131,7 +1172,7 @@ async def test_draft_job_criteria_explicit_intent_never_becomes_a_search(
     csrf = await _login_and_csrf(client, user.username, password)
     response = await client.post(
         "/ui/agent",
-        data={"message": jd_text, "intent": "draft_job_criteria", "csrf_token": csrf},
+        data={"message": jd_text, "csrf_token": csrf},
     )
     assert response.status_code == 200
     assert _draft_confirm_path(response.text).endswith("/confirm")
@@ -1174,7 +1215,7 @@ async def test_confirming_agent_drafted_criteria_lands_on_ranking_not_jobs_list(
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake
     csrf = await _login_and_csrf(client, user.username, password)
-    jd_text = "Baş Backend Mühəndisi axtarırıq. Python bilməlidir."
+    jd_text = "Vakansiya: Baş Backend Mühəndisi.\nPython bilməlidir."
     draft_response = await client.post("/ui/agent", data={"message": jd_text, "csrf_token": csrf})
     assert draft_response.status_code == 200
     confirm_path = _draft_confirm_path(draft_response.text)
@@ -1349,7 +1390,11 @@ async def test_agent_confirmation_rejects_browser_weakened_row_without_persisten
     app.dependency_overrides[get_llm_provider] = lambda: fake
     csrf = await _login_and_csrf(client, user.username, password)
     response = await client.post(
-        "/ui/agent", data={"message": "Backend. Python required.", "csrf_token": csrf}
+        "/ui/agent",
+        data={
+            "message": "Analyze this job description:\nBackend.\nPython required.",
+            "csrf_token": csrf,
+        },
     )
     confirm_path = _draft_confirm_path(response.text)
     span_id = _hidden_value(response.text, "must_span_id_0")
@@ -1542,7 +1587,10 @@ async def test_agent_confirmation_rejects_unsupported_to_scorable_insertion(
     draft = await client.post(
         "/ui/agent",
         data={
-            "message": "Backend. Python required. 5 years Kubernetes experience required.",
+            "message": (
+                "Analyze this job description:\nBackend. Python required. "
+                "5 years Kubernetes experience required."
+            ),
             "csrf_token": csrf,
         },
     )
@@ -1598,7 +1646,9 @@ async def test_agent_confirmation_rejects_prohibited_to_scorable_insertion(
     draft = await client.post(
         "/ui/agent",
         data={
-            "message": "Backend. Python required. Female required.",
+            "message": (
+                "Analyze this job description:\nBackend. Python required. Female required."
+            ),
             "csrf_token": csrf,
         },
     )
@@ -1655,7 +1705,10 @@ async def test_draft_job_criteria_fabricated_requirement_never_rendered(
     response = await client.post(
         "/ui/agent",
         data={
-            "message": "Namizəd ezamiyyətə getməyə hazır olmalıdır.",
+            "message": (
+                "Bu vakansiya elanını analiz et:\n"
+                "Namizəd ezamiyyətə getməyə hazır olmalıdır."
+            ),
             "csrf_token": csrf,
         },
     )
@@ -1700,7 +1753,10 @@ async def test_draft_job_criteria_title_never_persists_as_trusted_assistant_text
     csrf = await _login_and_csrf(client, user.username, password)
     response = await client.post(
         "/ui/agent",
-        data={"message": "Backend role. Python bilməlidir.", "csrf_token": csrf},
+        data={
+            "message": "Bu vakansiya elanını analiz et:\nBackend role. Python bilməlidir.",
+            "csrf_token": csrf,
+        },
     )
     assert response.status_code == 200
     assert adversarial_title not in response.text
@@ -1888,7 +1944,7 @@ async def test_unsupported_requirement_survives_confirmation_and_scores_nothing(
         "/ui/agent",
         data={
             "message": (
-                "Data Analitiki axtarırıq. Python bilməlidir. "
+                "Bu vakansiya elanını analiz et:\nData Analitiki. Python bilməlidir. "
                 "Namizəd ezamiyyətə hazır olması üstünlükdür."
             ),
             "csrf_token": csrf,
@@ -1972,7 +2028,10 @@ async def test_omitted_source_requirement_survives_confirmation_without_scoring(
     )
     await db_session.commit()
 
-    source = "Data Analyst. Python required. Candidate must be willing to travel."
+    source = (
+        "Analyze this job description:\n"
+        "Data Analyst. Python required. Candidate must be willing to travel."
+    )
     fake = FakeLLMProvider(
         agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
         jd_draft=JDCriteriaDraft(
@@ -2249,7 +2308,8 @@ async def test_skill_domain_and_language_draft_renders_complete_review_form(
 
     _tenant, user, password, _membership = tenant_and_user
     source = (
-        "Role. 5 years Python experience required. English B2 required. "
+        "Analyze this job description:\nRole. 5 years Python experience required. "
+        "English B2 required. "
         "Banking experience preferred. Show top 10 candidates."
     )
     fake = FakeLLMProvider(
@@ -2400,7 +2460,8 @@ async def test_primary_hr_request_requires_server_authorized_language_resolution
     )
     await db_session.commit()
     source = (
-        "Senior Backend Developer axtarırıq. Minimum 5 il Python, B2 English, "
+        "Bu vakansiya elanını analiz et: Senior Backend Developer. "
+        "Minimum 5 il Python, B2 English, "
         "bank təcrübəsi üstünlükdür. 10 nəfər namizəd göstər."
     )
     fake = FakeLLMProvider(
@@ -2437,7 +2498,7 @@ async def test_primary_hr_request_requires_server_authorized_language_resolution
     csrf = await _login_and_csrf(client, user.username, password)
     review = await client.post(
         "/ui/agent",
-        data={"message": source, "intent": "draft_job_criteria", "csrf_token": csrf},
+        data={"message": source, "csrf_token": csrf},
     )
     assert review.status_code == 200
     assert 'value="Python"' in review.text
@@ -2546,7 +2607,11 @@ async def test_draft_job_criteria_provider_failure_preserves_grounded_requiremen
     app.dependency_overrides[get_llm_provider] = lambda: fake
     csrf = await _login_and_csrf(client, user.username, password)
     response = await client.post(
-        "/ui/agent", data={"message": "Python tələb olunur.", "csrf_token": csrf}
+        "/ui/agent",
+        data={
+            "message": "Bu vakansiya elanını analiz et:\nPython tələb olunur.",
+            "csrf_token": csrf,
+        },
     )
     assert response.status_code == 200
     assert 'value="Python"' in response.text
@@ -2650,11 +2715,11 @@ async def test_real_route_english_source_spans_render_without_wrappers(
         "/ui/agent",
         data={
             "message": (
-                "We need candidates with at least three years of Power BI experience. "
+                "Analyze this job description: Reporting Analyst. "
+                "At least three years of Power BI experience is required. "
                 "English B2 is required, and retail experience is preferred. "
                 "Show the best 5 candidates."
             ),
-            "intent": "draft_job_criteria",
             "csrf_token": csrf,
         },
     )
@@ -2686,8 +2751,7 @@ async def test_real_route_context_only_modality_followups_persist_both_direction
     initial = await client.post(
         "/ui/agent",
         data={
-            "message": "SQL required. Python preferred.",
-            "intent": "draft_job_criteria",
+            "message": "Vakansiya: Backend.\nSQL required.\nPython preferred.",
             "csrf_token": csrf,
         },
     )
@@ -2762,30 +2826,138 @@ async def test_real_route_duration_search_executes_without_generic_service_failu
     assert await db_session.scalar(select(func.count()).select_from(JobCriteriaVersion)) == 0
 
 
-async def test_wrong_mode_guidance_suppresses_incompatible_review_headings(
-    client: AsyncClient, tenant_and_user, local_ui_settings: Settings
+async def test_required_preferred_language_with_search_cues_stays_search_only(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
 ) -> None:
-    from meyar.agent.schemas import JDCriteriaDraft
+    from sqlalchemy import func, select
+
+    from meyar.models.evaluation import Evaluation
+    from meyar.models.job import Job
+    from meyar.models.job_criteria_version import JobCriteriaVersion
 
     _tenant, user, password, _membership = tenant_and_user
+    message = "Python required, SQL preferred olan namizədləri göstər"
+    fake = FakeLLMProvider(
+        planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
+        agent_decisions=[
+            AgentDecision(action=AgentActionType.SEARCH_CANDIDATES, search_query=message),
+            AgentDecision(
+                action=AgentActionType.FINAL_ANSWER,
+                response_code=AgentResponseCode.ACKNOWLEDGEMENT,
+            ),
+        ],
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake
+    csrf = await _login_and_csrf(client, user.username, password)
+    response = await client.post(
+        "/ui/agent", data={"message": message, "csrf_token": csrf}
+    )
+
+    assert response.status_code == 200
+    assert "Sorğu şərtləri əsasında uyğun namizəd yoxdur." in response.text
+    assert "/confirm" not in response.text
+    assert fake.jd_draft_call_count == 0
+    assert await db_session.scalar(select(func.count()).select_from(Job)) == 0
+    assert await db_session.scalar(select(func.count()).select_from(JobCriteriaVersion)) == 0
+    assert await db_session.scalar(select(func.count()).select_from(Evaluation)) == 0
+
+
+async def test_model_proposed_jd_for_search_is_rejected_without_internal_code_copy(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
+) -> None:
+    from sqlalchemy import func, select
+
+    from meyar.models.audit_event import AuditEvent
+    from meyar.models.evaluation import Evaluation
+    from meyar.models.job import Job
+    from meyar.models.job_criteria_version import JobCriteriaVersion
+
+    tenant, user, password, _membership = tenant_and_user
+    raw_message = "Python bilən namizədləri göstər"
     app.dependency_overrides[get_llm_provider] = lambda: FakeLLMProvider(
-        jd_draft=JDCriteriaDraft(title="unused")
+        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA)
     )
     csrf = await _login_and_csrf(client, user.username, password)
     response = await client.post(
         "/ui/agent",
         data={
-            "message": "Show 5 candidates who know Java.",
-            "intent": "draft_job_criteria",
+            "message": raw_message,
             "csrf_token": csrf,
         },
     )
     assert response.status_code == 200
-    assert "Bu mətn namizəd axtarışına bənzəyir" in response.text
-    assert "Aşağıdan əl ilə kriteriya əlavə edə bilərsiniz" not in response.text
-    assert "Mütləq tələblər" not in response.text
-    assert "Üstünlük tələbləri" not in response.text
-    assert "AI tərəfindən hazırlanmış qaralamadır" not in response.text
+    assert "Bu mətni namizəd axtarışı üçün istifadə etmək" in response.text
+    assert "DRAFT_JOB_CRITERIA" not in response.text
+    assert "SEARCH_CANDIDATES" not in response.text
+    assert await db_session.scalar(select(func.count()).select_from(Job)) == 0
+    assert await db_session.scalar(select(func.count()).select_from(JobCriteriaVersion)) == 0
+    assert await db_session.scalar(select(func.count()).select_from(Evaluation)) == 0
+    rejected_event = await db_session.scalar(
+        select(AuditEvent).where(
+            AuditEvent.tenant_id == tenant.id,
+            AuditEvent.event_type == "agent.entry.action_rejected",
+        )
+    )
+    assert rejected_event is not None
+    assert rejected_event.event_metadata == {
+        "routing_source": "MODEL",
+        "routed_action": "CLARIFY",
+        "routing_policy_version": "agent-entry-routing-v1",
+    }
+    assert raw_message not in str(rejected_event.event_metadata)
+
+
+async def test_ambiguous_search_or_jd_clarifies_without_model_tool_or_business_rows(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
+) -> None:
+    from sqlalchemy import func, select
+
+    from meyar.models.audit_event import AuditEvent
+    from meyar.models.evaluation import Evaluation
+    from meyar.models.job import Job
+    from meyar.models.job_criteria_version import JobCriteriaVersion
+
+    tenant, user, password, _membership = tenant_and_user
+    fake = FakeLLMProvider()
+    app.dependency_overrides[get_llm_provider] = lambda: fake
+    csrf = await _login_and_csrf(client, user.username, password)
+    raw_message = "Python required. SQL preferred."
+    response = await client.post(
+        "/ui/agent", data={"message": raw_message, "csrf_token": csrf}
+    )
+    assert response.status_code == 200
+    assert (
+        "Bu mətni namizəd axtarışı üçün istifadə etmək, yoxsa vakansiya meyarları "
+        "kimi analiz etmək istəyirsiniz?"
+    ) in response.text
+    assert fake.agent_call_count == 0
+    assert fake.jd_draft_call_count == 0
+    assert await db_session.scalar(select(func.count()).select_from(Job)) == 0
+    assert await db_session.scalar(select(func.count()).select_from(JobCriteriaVersion)) == 0
+    assert await db_session.scalar(select(func.count()).select_from(Evaluation)) == 0
+
+    route_event = await db_session.scalar(
+        select(AuditEvent).where(
+            AuditEvent.tenant_id == tenant.id,
+            AuditEvent.event_type == "agent.entry.routed",
+        )
+    )
+    assert route_event is not None
+    assert route_event.event_metadata == {
+        "routing_source": "DETERMINISTIC_CLARIFICATION",
+        "routed_action": "CLARIFY",
+        "routing_policy_version": "agent-entry-routing-v1",
+    }
+    assert raw_message not in str(route_event.event_metadata)
 
 
 async def _pending_draft_id(db_session: AsyncSession) -> uuid.UUID:
@@ -2838,7 +3010,10 @@ async def test_ambiguous_result_count_draft_renders_no_confirm_control(
     response = await client.post(
         "/ui/agent",
         data={
-            "message": "Bir neçə namizəd lazımdır, minimum 4 il Terraform təcrübəsi mütləqdir.",
+            "message": (
+                "Bu vakansiya elanını analiz et:\nBir neçə namizəd lazımdır, "
+                "minimum 4 il Terraform təcrübəsi mütləqdir."
+            ),
             "csrf_token": csrf,
         },
     )
@@ -2887,7 +3062,10 @@ async def test_ambiguous_result_count_direct_confirm_post_is_rejected_without_pe
     draft = await client.post(
         "/ui/agent",
         data={
-            "message": "Bir neçə namizəd lazımdır, minimum 4 il Terraform təcrübəsi mütləqdir.",
+            "message": (
+                "Bu vakansiya elanını analiz et:\nBir neçə namizəd lazımdır, "
+                "minimum 4 il Terraform təcrübəsi mütləqdir."
+            ),
             "csrf_token": csrf,
         },
     )
@@ -2948,7 +3126,10 @@ async def test_explicit_result_count_control_confirms_and_persists_normally(
     draft = await client.post(
         "/ui/agent",
         data={
-            "message": "Minimum 4 il Terraform təcrübəsi mütləqdir.",
+            "message": (
+                "Bu vakansiya elanını analiz et:\n"
+                "Minimum 4 il Terraform təcrübəsi mütləqdir."
+            ),
             "csrf_token": csrf,
         },
     )

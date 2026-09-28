@@ -6480,3 +6480,75 @@ governance bounds):** semantic reranking of the current set, deep candidate
 factual Q&A, candidate-to-candidate comparison, hiring recommendation, LLM
 numeric scoring, new scoring policy, RAG/long-term conversation memory, the
 future unified-composer/sidebar UI redesign.
+
+## D-085 — Unified HR composer with server-owned entry routing (issue #79)
+
+**Decision:** the normal HR agent surface has one composer (one textarea and
+one Send button). The removed HTML `intent` selector is not replaced by a
+hidden client authority: **client UI mode is not authority**, and an unknown
+or forged legacy `intent=draft_job_criteria` form field is ignored. The
+server-owned `meyar.agent.intent_routing` boundary alone decides one of three
+narrow entry outcomes before ordinary agent dispatch:
+
+```text
+FORCE_JOB_DRAFT | MODEL_ROUTED | CLARIFY_AMBIGUOUS
+```
+
+This boundary performs no search and no business mutation. It reuses the
+existing normalized semantic requirement analysis and considers only
+workflow/structural evidence. An explicit vacancy/JD noun plus an explicit
+analyse/draft request is a confirmed draft. A vacancy-labelled source with
+material semantic requirements, or a genuinely pasted multi-line/bulleted
+role description with multiple material professional requirements, is also a
+confirmed draft. Candidate/result nouns, find/show/list verbs, an explicit
+requested candidate count, and current-result/ordinal language strongly
+protect the normal model-routed path. Requirement language by itself is not a
+draft authorization. Requirement-shaped text whose purpose remains genuinely
+unclear receives fixed Azerbaijani clarification asking whether it should be
+used for candidate search or vacancy-criteria analysis; neither the model nor
+a business tool runs for that turn.
+
+**Authority order:**
+
+```text
+server-owned deterministic entry routing where confidence is sufficient
+→ bounded typed AgentDecision for remaining conversational routing
+→ server validation of every proposed action
+→ existing domain authority
+```
+
+The local model continues to receive the strict bounded `AgentDecision`
+schema for normal conversation, search, current-ResultSet refinement, and
+ordinal profile/evidence actions. **LLM intent is proposal, not
+authorization.** A model-proposed `DRAFT_JOB_CRITERIA` from the normal route
+is rejected with fixed HR-facing clarification and no tool execution; it is
+never silently reinterpreted. A deterministically confirmed JD bypasses the
+model and enters the existing source-bound, review-only draft path. Actual
+`Job`/`JobCriteriaVersion` persistence still requires the pre-existing
+explicit human confirmation flow; ordinary candidate search can never
+silently persist a vacancy. `Evaluation` creation is likewise outside entry
+routing.
+
+The existing pending-draft follow-up boundary remains ahead of new-entry
+routing, so bounded required/preferred, result-limit, and supported criterion
+updates continue against the server-held source-bound draft. D-083/D-084
+remain authoritative inside `MODEL_ROUTED`: active ResultSet, zero-result,
+stale/expired, ordinal, tenant/session/context-epoch, and same-session row-lock
+semantics are unchanged. The owning `AgentConversation` row is still locked
+before routing-dependent state mutation, ResultSet changes, pending-draft
+changes, or transcript writes. Existing prohibited-attribute policy remains
+authoritative in both search and JD paths; `CandidateIdentity` gains no
+routing role.
+
+**Audit/privacy:** `agent.entry.routed` records only closed structural values
+(`routing_source`, `routed_action`, and routing policy version).
+`agent.entry.action_rejected` records the same structural routing provenance
+when a model proposes an unauthorized draft. Neither event contains the raw
+message/JD, model raw output, candidate identity, CV/evidence content, or
+internal regex matches. Existing tool/turn events remain the action record;
+the entry event does not duplicate business payloads.
+
+**Non-scope:** persistent conversation sidebar/history (#80), cross-login
+conversation ownership, candidate comparison/deep Q&A (#50), RAG memory,
+hiring recommendations, scoring changes, deployment/Target-Mac work, and an
+unrelated UI redesign.

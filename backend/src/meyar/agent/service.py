@@ -25,6 +25,13 @@ from datetime import date
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meyar.agent.intent_routing import (
+    AMBIGUOUS_SEARCH_OR_JOB_COPY,
+    ENTRY_ROUTING_POLICY_VERSION,
+    AgentEntryRoute,
+    AgentRoutedAction,
+    route_agent_entry,
+)
 from meyar.agent.jd_authority import explicit_modality, segment_requirement_spans
 from meyar.agent.prompts import AGENT_PROMPT_VERSION
 from meyar.agent.schemas import (
@@ -1967,29 +1974,21 @@ async def run_agent_turn(
     embedding_provider: EmbeddingProvider | None,
     max_tool_calls: int,
     max_context_turns: int,
-    explicit_action: AgentActionType | None = None,
 ) -> AgentTurnResult:
     """One bounded orchestration turn. Never persists a mutation to any
     candidate/job/evaluation row — only this conversation's own
     session-scoped state (turns, active_result_set_id). Caller is
     responsible for the surrounding db.commit()/rollback().
 
-    ``explicit_action``: PR #42 owner correction (issue #33, D-043/D-044)
-    — an explicit first-class UI affordance (the composer's "Vakansiya
-    elanını analiz et" mode) lets HR pin this turn's action
-    deterministically, bypassing ``llm.decide_agent_action``
-    entirely for the first decision so a small local model's unreliable
-    intent routing (documented D-042 point 6) can never misroute a pasted
-    JD to SEARCH_CANDIDATES. Only ``AgentActionType.DRAFT_JOB_CRITERIA`` is
-    supported today — the caller (meyar.ui.router) is the only source of
-    this value, never the model or an arbitrary client-supplied string."""
-    if explicit_action is not None and explicit_action != AgentActionType.DRAFT_JOB_CRITERIA:
-        raise ValueError(f"Unsupported explicit_action: {explicit_action}")
+    The high-level JD/search boundary is decided here from the raw message by
+    ``route_agent_entry``.  No form field or model proposal can authorize JD
+    drafting: confirmed JDs bypass the orchestration model, ambiguous source
+    text receives fixed clarification, and an unexpected model-proposed
+    DRAFT_JOB_CRITERIA action fails closed."""
     turns: list[dict] = [*conversation.turns, {"role": "user", "text": user_message}]
     pending_draft = _latest_pending_job_draft(conversation)
     if (
-        explicit_action is None
-        and pending_draft is not None
+        pending_draft is not None
         and _FOLLOWUP_RE.search(_fold(user_message))
     ):
         modified = _apply_pending_draft_followup(pending_draft, user_message)
@@ -2028,6 +2027,37 @@ async def run_agent_turn(
             max_context_turns=max_context_turns,
             result=result,
         )
+
+    entry_routing = route_agent_entry(user_message)
+    await record_event(
+        db,
+        tenant_id=tenant_id,
+        event_type="agent.entry.routed",
+        metadata={
+            "routing_source": entry_routing.routing_source.value,
+            "routed_action": entry_routing.routed_action.value,
+            "routing_policy_version": ENTRY_ROUTING_POLICY_VERSION,
+        },
+    )
+    if entry_routing.route == AgentEntryRoute.CLARIFY_AMBIGUOUS:
+        result = _build_result(
+            outcome=AgentTurnOutcome.CLARIFICATION_REQUESTED,
+            message=AMBIGUOUS_SEARCH_OR_JOB_COPY,
+            tool_results=[],
+            tool_call_count=0,
+            provenance=_configured_provenance(llm),
+        )
+        return await _finish_turn(
+            db,
+            conversation,
+            tenant_id=tenant_id,
+            turns=turns,
+            active_result_set_id=conversation.active_result_set_id,
+            max_context_turns=max_context_turns,
+            result=result,
+        )
+
+    server_authorized_draft = entry_routing.route == AgentEntryRoute.FORCE_JOB_DRAFT
     tool_results: list[AgentToolResult] = []
     last_tool_summary: dict | None = None
     tool_calls_made = 0
@@ -2044,13 +2074,13 @@ async def run_agent_turn(
 
     while True:
         decision: AgentDecision | None
-        if explicit_action is not None:
-            # Deterministic first-class path: no model call, no routing
-            # ambiguity — see the explicit_action docstring above. Only
-            # ever taken once (DRAFT_JOB_CRITERIA is always turn-terminal,
-            # see below), so clearing it here is defensive, not load-bearing.
-            decision = AgentDecision(action=explicit_action)
-            explicit_action = None
+        draft_authorized_for_decision = server_authorized_draft
+        if server_authorized_draft:
+            # Confirmed JDs bypass the orchestration model entirely. Drafting
+            # itself remains source-bound and review-only in
+            # _dispatch_draft_job_criteria below.
+            decision = AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA)
+            server_authorized_draft = False
         else:
             # Two separate advisory facts are sent to the model. Pointer
             # presence says only that a result context exists, including a
@@ -2114,6 +2144,42 @@ async def run_agent_turn(
                     else AgentTurnOutcome.MALFORMED_MODEL_OUTPUT
                 ),
                 message=None,
+                tool_results=tool_results,
+                tool_call_count=tool_calls_made,
+                provenance=provenance,
+            )
+            return await _finish_turn(
+                db,
+                conversation,
+                tenant_id=tenant_id,
+                turns=turns,
+                active_result_set_id=conversation.active_result_set_id,
+                max_context_turns=max_context_turns,
+                result=result,
+            )
+
+        if (
+            decision.action == AgentActionType.DRAFT_JOB_CRITERIA
+            and not draft_authorized_for_decision
+        ):
+            # The deterministic entry route above is the only authority that
+            # can reach the drafting branch. A DRAFT_JOB_CRITERIA proposal
+            # made during normal model routing is not reinterpreted as search
+            # or another action; it receives fixed clarification and has no
+            # tool/business side effect.
+            await record_event(
+                db,
+                tenant_id=tenant_id,
+                event_type="agent.entry.action_rejected",
+                metadata={
+                    "routing_source": "MODEL",
+                    "routed_action": AgentRoutedAction.CLARIFY.value,
+                    "routing_policy_version": ENTRY_ROUTING_POLICY_VERSION,
+                },
+            )
+            result = _build_result(
+                outcome=AgentTurnOutcome.CLARIFICATION_REQUESTED,
+                message=AMBIGUOUS_SEARCH_OR_JOB_COPY,
                 tool_results=tool_results,
                 tool_call_count=tool_calls_made,
                 provenance=provenance,
