@@ -3105,36 +3105,43 @@ async def test_real_ui_agent_route_serializes_concurrent_same_session_turns(
 
     result_sets = (
         await db_session.scalars(
-            select(AgentResultSet)
-            .where(AgentResultSet.tenant_id == tenant.id)
-            .order_by(AgentResultSet.created_at)
+            select(AgentResultSet).where(AgentResultSet.tenant_id == tenant.id)
         )
     ).all()
     assert len(result_sets) == 2
-    first_rs, second_rs = result_sets
+    result_sets_by_id = {str(rs.id): rs for rs in result_sets}
+
+    created_events = (
+        await db_session.scalars(
+            select(AuditEvent).where(
+                AuditEvent.tenant_id == tenant.id,
+                AuditEvent.event_type == "agent.result_set.created",
+            )
+        )
+    ).all()
+    assert len(created_events) == 2
+    # Derive serialized order from the audit transition chain itself,
+    # rather than `created_at`: Postgres `now()` is transaction-time
+    # based, so two transactions committed close together are not a
+    # reliable wall-clock ordering signal. The chain is: the FIRST event
+    # chains onto `previous_result_set_id: None`; the SECOND event's
+    # `previous_result_set_id` must equal the first event's own
+    # `result_set_id` — never back onto the original pre-race `None`
+    # pointer both turns would have read from an un-serialized snapshot.
+    first_event, second_event = created_events
+    if first_event.event_metadata["previous_result_set_id"] is not None:
+        first_event, second_event = second_event, first_event
+    assert first_event.event_metadata["previous_result_set_id"] is None
+    assert second_event.event_metadata["previous_result_set_id"] == first_event.event_metadata[
+        "result_set_id"
+    ]
+    first_rs = result_sets_by_id[first_event.event_metadata["result_set_id"]]
+    second_rs = result_sets_by_id[second_event.event_metadata["result_set_id"]]
+
     # Coherent serialized transition: the conversation's active pointer is
     # the LATEST committed result set, not the pre-race None both turns
     # originally read.
     assert conversation.active_result_set_id == second_rs.id
-
-    created_events = (
-        await db_session.scalars(
-            select(AuditEvent)
-            .where(
-                AuditEvent.tenant_id == tenant.id,
-                AuditEvent.event_type == "agent.result_set.created",
-            )
-            .order_by(AuditEvent.created_at)
-        )
-    ).all()
-    assert len(created_events) == 2
-    assert created_events[0].event_metadata["previous_result_set_id"] is None
-    # The second serialized creation's audit event chains onto the FIRST
-    # serialized result_set_id — never back onto the original pre-race
-    # `None` pointer both turns would have read from an un-serialized
-    # snapshot.
-    assert created_events[1].event_metadata["previous_result_set_id"] == str(first_rs.id)
-    assert created_events[1].event_metadata["result_set_id"] == str(second_rs.id)
 
     first_members = (
         await db_session.scalars(
@@ -3187,9 +3194,11 @@ async def test_real_ui_agent_route_does_not_serialize_across_different_browser_s
     rows) must not block on each other's row lock."""
     from conftest import TEST_DATABASE_URL
     from httpx import ASGITransport
+    from sqlalchemy import select
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
     from meyar.db import get_db
+    from meyar.models.agent_conversation import AgentConversation
 
     _tenant, user, password, _membership = tenant_and_user
     csrf_a = await _login_and_csrf(client, user.username, password)
@@ -3199,17 +3208,51 @@ async def test_real_ui_agent_route_does_not_serialize_across_different_browser_s
         csrf_b = await _login_and_csrf(second_client, user.username, password)
 
         class _DelayedOnceLLM(FakeLLMProvider):
+            """Sleeps once, unconditionally, on its own first (and only)
+            decide_agent_action call. Each concurrent request below gets
+            its OWN instance (never a shared counter), so this oracle
+            cannot be satisfied by luck the way a shared
+            `agent_call_count == 0` check could: both requests are
+            guaranteed to sleep once regardless of which one physically
+            starts first.
+
+            - correct row-level concurrency (each session's turn only
+              holds its OWN AgentConversation row lock): both sleeps run
+              concurrently -> elapsed ~= one sleep (0.15s).
+            - a wrongly shared/global serialization (e.g. a lock keyed
+              coarser than the row, or the whole handler serialized):
+              the second request cannot even begin its own turn until
+              the first fully releases -> elapsed ~= two back-to-back
+              sleeps (0.30s).
+            """
+
             async def decide_agent_action(self, **kwargs):
-                if self.agent_call_count == 0:
-                    await asyncio.sleep(0.15)
+                await asyncio.sleep(0.15)
                 return await super().decide_agent_action(**kwargs)
 
-        fake = _DelayedOnceLLM(
+        fake_a = _DelayedOnceLLM(
             agent_decision=AgentDecision(
                 action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
             )
         )
-        app.dependency_overrides[get_llm_provider] = lambda: fake
+        fake_b = _DelayedOnceLLM(
+            agent_decision=AgentDecision(
+                action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
+            )
+        )
+        llm_assigned: list[str] = []
+
+        def _round_robin_get_llm_provider():
+            # Single-threaded event loop, no `await` in this sync callable:
+            # FastAPI's dependency resolution cannot interleave with
+            # another request's resolution mid-body, so this assignment is
+            # race-free even though two concurrent requests call it (same
+            # reasoning as `_round_robin_get_db` below).
+            provider = fake_a if not llm_assigned else fake_b
+            llm_assigned.append("taken")
+            return provider
+
+        app.dependency_overrides[get_llm_provider] = _round_robin_get_llm_provider
 
         engine_a = create_async_engine(TEST_DATABASE_URL)
         engine_b = create_async_engine(TEST_DATABASE_URL)
@@ -3244,8 +3287,36 @@ async def test_real_ui_agent_route_does_not_serialize_across_different_browser_s
 
     assert response_a.status_code == 200
     assert response_b.status_code == 200
-    # Only ONE decide_agent_action call anywhere ever sleeps. If the two
-    # DIFFERENT sessions' rows were (wrongly) serialized through a shared
-    # lock, this would take >= ~0.3s (two sequential holds); independent
-    # sessions must finish in roughly one sleep's worth of wall time.
+    # Real overlap proof: BOTH requests unconditionally sleep once each
+    # (see _DelayedOnceLLM docstring above), so this is a genuine either/or
+    # oracle rather than a shared-counter race. Independent per-session
+    # row locks let the two 0.15s holds run concurrently (~0.15s total); a
+    # wrongly shared/global lock would force them back-to-back (~0.30s).
     assert elapsed < 0.28
+    # Neither provider's turn was skipped or short-circuited — both really
+    # went through decide_agent_action once, so the timing evidence above
+    # reflects two genuine turns, not one turn plus a no-op.
+    assert fake_a.agent_call_count == 1
+    assert fake_b.agent_call_count == 1
+
+    conversations = (
+        await db_session.scalars(
+            select(AgentConversation).where(AgentConversation.tenant_id == _tenant.id)
+        )
+    ).all()
+    # Two fresh logins -> two distinct BrowserSession rows -> two distinct
+    # (1:1) AgentConversation rows, never one shared row.
+    assert len(conversations) == 2
+    assert conversations[0].id != conversations[1].id
+    for conversation in conversations:
+        # Each conversation retains only its OWN turn: no lost/merged
+        # transcript update, and no cross-session bleed of the other
+        # session's user/assistant text into this row.
+        assert len(conversation.turns) == 2
+        user_turn, assistant_turn = conversation.turns
+        assert user_turn["role"] == "user"
+        assert user_turn["text"] == "Salam"
+        assert assistant_turn["role"] == "assistant"
+        # This turn never produced a search/result set, so no active
+        # ResultSet pointer could have crossed between sessions either.
+        assert conversation.active_result_set_id is None
