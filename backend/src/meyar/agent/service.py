@@ -2052,12 +2052,13 @@ async def run_agent_turn(
             decision = AgentDecision(action=explicit_action)
             explicit_action = None
         else:
-            # Advisory only — how many ordinals are currently legally
-            # referenceable, purely to tell the model what it may ask
-            # about next. Never itself an authorization decision: the
-            # actual authority is always resolve_active_candidate_ref,
-            # called again independently the moment the model references
-            # an ordinal (see _dispatch_profile/_dispatch_evidence).
+            # Two separate advisory facts are sent to the model. Pointer
+            # presence says only that a result context exists, including a
+            # valid zero-member or stale/expired context; it is deliberately
+            # non-authoritative. The validated count says which ordinals may
+            # currently be referenced. Real authority remains the independent
+            # server validation in refinement/profile/evidence dispatch.
+            active_result_context_present = conversation.active_result_set_id is not None
             available_ref_count = await active_result_set_size(
                 db,
                 tenant_id=tenant_id,
@@ -2070,6 +2071,7 @@ async def run_agent_turn(
                     decision, provenance = await llm.decide_agent_action(
                         recent_turns=[(t["role"], t["text"]) for t in turns[-max_context_turns:]],
                         last_tool_result_summary=last_tool_summary,
+                        active_result_context_present=active_result_context_present,
                         available_candidate_refs=list(range(1, available_ref_count + 1)),
                         repair=attempt > 1,
                     )

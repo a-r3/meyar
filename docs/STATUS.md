@@ -228,9 +228,12 @@ and persists a new immutable `REFINEMENT`-kind `AgentResultSet`
 `543c60f7efc5`, chained on `d2a8f6c1b3e9`) that becomes the new active
 context. Reuses (never duplicates) D-083's tenant/session/context-epoch/
 expiry/corpus-fingerprint validation via a shared
-`_validate_active_result_set` helper. No semantic reranking, no Job/
-Evaluation side effect, no Target-Mac work; #35/#36/#46 untouched by this
-PR. See D-084 for full detail.
+`_validate_active_result_set` helper. Model context separately carries a
+pointer-derived `active_result_context_present` boolean and validated ordinal
+availability, so a zero-member active set remains refinable after reload while
+stale/expired/tampered pointers still reach fail-closed server validation.
+No semantic reranking, no Job/Evaluation side effect, no Target-Mac work;
+#35/#36/#46 untouched by this PR. See D-084 for full detail.
 
 The detailed narrative immediately below (the D-055 through D-063 passes,
 and the earlier M7 HR UI productization detail) is retained as historical

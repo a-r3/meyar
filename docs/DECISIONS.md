@@ -6426,6 +6426,21 @@ and becomes the new active context (a later ordinal reference against it
 then fails safely via the normal ordinal-out-of-range path, never
 auto-restoring the parent).
 
+**Model-facing context correction:** orchestration prompt v6 keeps two
+bounded, non-authoritative facts separate on every server request:
+`active_result_context_present` is derived only from
+`conversation.active_result_set_id is not None`, while
+`available_candidate_refs` contains only currently valid individual
+ordinals after normal ResultSet validation. Therefore a valid zero-member,
+stale, expired, foreign, or otherwise tampered pointer is still presented as
+context-present with no ordinal authority. This permits a refinement-shaped
+request to reach the existing server validation and return the truthful
+zero-result child, `RESULT_SET_STALE`, `RESULT_SET_EXPIRED`, or fail-closed
+context clarification. A reset clears the pointer and therefore presents
+context-absent. The model receives only the boolean — never the ResultSet UUID,
+candidate/profile/embedding IDs, or membership — and a true value never
+authorizes `candidate_ref`.
+
 **Turn-terminal, no reranking, no side effects:** `REFINE_CANDIDATE_RESULTS`
 is always turn-terminal (`meyar.agent.service._dispatch_refine`, mirroring
 `GET_CANDIDATE_PROFILE`/`GET_CANDIDATE_EVIDENCE`) — the model never keeps

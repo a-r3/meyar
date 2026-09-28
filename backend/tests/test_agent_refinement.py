@@ -358,18 +358,67 @@ async def test_zero_result_refinement_is_not_an_error_and_becomes_active(
     assert derived.result_count == 0
 
     # A later ordinal reference against the empty active set fails safely.
+    ordinal_llm = FakeLLMProvider(
+        agent_decision=AgentDecision(
+            action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1
+        )
+    )
     followup = await _refine(
         db_session,
-        FakeLLMProvider(
-            agent_decision=AgentDecision(
-                action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1
-            )
-        ),
+        ordinal_llm,
         tenant_id=tenant.id,
         conversation=conversation,
         message="birincini aç",
     )
+    assert ordinal_llm.agent_contexts == [(True, [])]
     assert followup.outcome.value == "CANDIDATE_REF_NOT_FOUND"
+
+
+async def test_zero_result_context_survives_reload_and_can_be_refined_again(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    tenant, user, _password, membership = tenant_and_user
+    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    _candidates, root = await _seed_root(
+        db_session, tenant, conversation, session, ("Python",), ("Java",)
+    )
+
+    first = await _refine(
+        db_session,
+        _refine_llm(filter_query="SQL bilən namizədləri göstər"),
+        tenant_id=tenant.id,
+        conversation=conversation,
+    )
+    assert first.tool_results[0].refine.response.result_count == 0
+    await db_session.refresh(conversation)
+    first_derived_id = conversation.active_result_set_id
+    assert first_derived_id is not None and first_derived_id != root.id
+    await db_session.commit()
+
+    reloaded = await get_conversation_by_session(
+        db_session, tenant_id=tenant.id, browser_session_id=session.id
+    )
+    assert reloaded is not None
+    assert reloaded.active_result_set_id == first_derived_id
+
+    limit_llm = _refine_llm(limit=3)
+    second = await _refine(
+        db_session,
+        limit_llm,
+        tenant_id=tenant.id,
+        conversation=reloaded,
+        message="ilk 3",
+    )
+    assert limit_llm.agent_contexts == [(True, [])]
+    assert second.outcome.value == "ANSWERED_FROM_TOOL_RESULT"
+    assert second.tool_results[0].refine.response.result_count == 0
+    await db_session.refresh(reloaded)
+    second_derived = await db_session.get(AgentResultSet, reloaded.active_result_set_id)
+    assert second_derived is not None
+    assert second_derived.id != first_derived_id
+    assert second_derived.parent_result_set_id == first_derived_id
+    assert second_derived.result_count == 0
+    assert reloaded.active_result_set_id == second_derived.id
 
 
 async def test_requested_limit_greater_than_current_count_returns_truthful_subset(
@@ -551,6 +600,17 @@ async def test_new_conversation_reset_invalidates_refined_context(
     await db_session.commit()
     assert conversation.active_result_set_id is None
 
+    reset_llm = _refine_llm(limit=1)
+    reset_followup = await _refine(
+        db_session,
+        reset_llm,
+        tenant_id=tenant.id,
+        conversation=conversation,
+        message="ilk biri",
+    )
+    assert reset_llm.agent_contexts == [(False, [])]
+    assert reset_followup.outcome.value == "CLARIFICATION_REQUESTED"
+
     # Manually repoint at the (still otherwise valid) old refined set —
     # this must still fail closed under the new epoch.
     conversation.active_result_set_id = old_active
@@ -621,9 +681,11 @@ async def test_no_active_result_set_returns_clarification_not_a_crash(
     tenant, user, _password, membership = tenant_and_user
     conversation, _session = await _new_conversation(db_session, tenant, user, membership)
 
+    llm = _refine_llm(limit=3)
     result = await _refine(
-        db_session, _refine_llm(limit=3), tenant_id=tenant.id, conversation=conversation
+        db_session, llm, tenant_id=tenant.id, conversation=conversation
     )
+    assert llm.agent_contexts == [(False, [])]
     assert result.outcome.value == "CLARIFICATION_REQUESTED"
     assert result.message == (
         "Əvvəlcə namizəd axtarışı aparın, sonra cari nəticələr üzərində əməliyyat "
@@ -662,12 +724,14 @@ async def test_cross_tenant_result_set_pointer_fails_closed(
     other_conversation.context_epoch = conversation.context_epoch
     await db_session.flush()
 
+    llm = _refine_llm(limit=1)
     result = await _refine(
         db_session,
-        _refine_llm(limit=1),
+        llm,
         tenant_id=other_tenant.id,
         conversation=other_conversation,
     )
+    assert llm.agent_contexts == [(True, [])]
     assert result.outcome.value == "CLARIFICATION_REQUESTED"
     assert result.message is not None and "Əvvəlcə namizəd axtarışı" in result.message
     assert other_conversation.active_result_set_id == root.id  # pointer left untouched, unresolved
@@ -687,9 +751,11 @@ async def test_cross_session_result_set_pointer_fails_closed(
     conversation_b.context_epoch = conversation_a.context_epoch
     await db_session.flush()
 
+    llm = _refine_llm(limit=1)
     result = await _refine(
-        db_session, _refine_llm(limit=1), tenant_id=tenant.id, conversation=conversation_b
+        db_session, llm, tenant_id=tenant.id, conversation=conversation_b
     )
+    assert llm.agent_contexts == [(True, [])]
     assert result.outcome.value == "CLARIFICATION_REQUESTED"
 
 
@@ -706,9 +772,11 @@ async def test_old_context_epoch_result_set_pointer_fails_closed(
     await db_session.flush()
     await db_session.commit()
 
+    llm = _refine_llm(limit=1)
     result = await _refine(
-        db_session, _refine_llm(limit=1), tenant_id=tenant.id, conversation=conversation
+        db_session, llm, tenant_id=tenant.id, conversation=conversation
     )
+    assert llm.agent_contexts == [(True, [])]
     assert result.outcome.value == "CLARIFICATION_REQUESTED"
 
 
@@ -916,12 +984,14 @@ async def test_stale_filter_refinement_prevalidates_before_planner_invocation(
 
     monkeypatch.setattr(agent_service, "plan_candidate_search", _fail_if_called)
 
+    llm = _refine_llm(filter_query="SQL bilən namizədləri göstər")
     result = await _refine(
         db_session,
-        _refine_llm(filter_query="SQL bilən namizədləri göstər"),
+        llm,
         tenant_id=tenant.id,
         conversation=conversation,
     )
+    assert llm.agent_contexts == [(True, [])]
     assert result.outcome.value == "RESULT_SET_STALE"
     await db_session.refresh(conversation)
     assert conversation.active_result_set_id == root.id
@@ -945,12 +1015,14 @@ async def test_expired_filter_refinement_prevalidates_before_planner_invocation(
 
     monkeypatch.setattr(agent_service, "plan_candidate_search", _fail_if_called)
 
+    llm = _refine_llm(filter_query="SQL bilən namizədləri göstər")
     result = await _refine(
         db_session,
-        _refine_llm(filter_query="SQL bilən namizədləri göstər"),
+        llm,
         tenant_id=tenant.id,
         conversation=conversation,
     )
+    assert llm.agent_contexts == [(True, [])]
     assert result.outcome.value == "RESULT_SET_EXPIRED"
     await db_session.refresh(conversation)
     assert conversation.active_result_set_id == root.id
@@ -1284,4 +1356,3 @@ async def test_refinement_never_creates_job_or_evaluation_rows(
     assert await db_session.scalar(select(func.count()).select_from(JobModel)) == 0
     assert await db_session.scalar(select(func.count()).select_from(JobCriteriaVersion)) == 0
     assert await db_session.scalar(select(func.count()).select_from(Evaluation)) == 0
-

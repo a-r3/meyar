@@ -60,6 +60,7 @@ class FakeLLMProvider:
         self._agent_fail_first_n_calls = agent_fail_first_n_calls
         self._agent_fail_after_n_calls = agent_fail_after_n_calls
         self.agent_call_count = 0
+        self.agent_contexts: list[tuple[bool, list[int]]] = []
         self._grounded_selection = grounded_selection
         self._grounded_error = grounded_error
         self._grounded_fail_first_n_calls = grounded_fail_first_n_calls
@@ -130,10 +131,14 @@ class FakeLLMProvider:
         *,
         recent_turns: list[tuple[str, str]],
         last_tool_result_summary: dict[str, Any] | None,
+        active_result_context_present: bool,
         available_candidate_refs: list[int],
         repair: bool = False,
     ) -> tuple[AgentDecision, LLMResultProvenance]:
         self.agent_call_count += 1
+        self.agent_contexts.append(
+            (active_result_context_present, list(available_candidate_refs))
+        )
         if self.agent_call_count <= self._agent_fail_first_n_calls:
             from meyar.llm.provider import ModelSchemaInvalidError
 

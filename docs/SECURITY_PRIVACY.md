@@ -227,6 +227,13 @@ unlabeled number but never guesses that an arbitrary identifier is a phone.
   `candidate_embedding_version_id`, candidate list, or ordinal membership
   list. The server alone resolves the active `AgentResultSet` and computes
   the derived membership/order.
+- The model-facing context exposes only
+  `active_result_context_present = (conversation.active_result_set_id is not
+  None)` plus the separately validated `available_candidate_refs` ordinal
+  list. The boolean discloses no ResultSet/candidate/profile/embedding id or
+  membership and grants no authority: zero-member, stale, expired, foreign,
+  and tampered pointers may all be context-present with no available
+  ordinals, after which normal server validation remains fail-closed.
 - **Derived members ⊆ parent members, always.** A refinement's
   authoritative input universe is exactly the active result set's own
   members in their existing order; a candidate absent from that set can
