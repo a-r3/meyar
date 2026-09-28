@@ -29,6 +29,7 @@ from meyar.agent.jd_authority import explicit_modality, segment_requirement_span
 from meyar.agent.prompts import AGENT_PROMPT_VERSION
 from meyar.agent.schemas import (
     AGENT_POLICY_VERSION,
+    MAX_CANDIDATE_REF,
     AgentActionType,
     AgentDecision,
     AgentEvidenceToolResult,
@@ -91,6 +92,7 @@ from meyar.search.schemas import (
     CandidateSearchResponse,
     CandidateSearchResult,
     EmbeddingSearchConfig,
+    PreferredFilters,
     SearchMode,
 )
 from meyar.services.agent_conversation_repo import (
@@ -105,6 +107,7 @@ from meyar.services.agent_result_set_repo import (
     create_result_set_from_refinement,
     create_result_set_from_search,
     resolve_active_candidate_ref,
+    validate_active_result_set_for_refinement,
 )
 from meyar.services.audit_repo import record_event
 from meyar.services.profile_authority import get_current_authorized_profile
@@ -430,6 +433,25 @@ class RefineDispatchResult:
     rejection_message: str | None = None
 
 
+def _preferred_filters_are_empty(filters: PreferredFilters) -> bool:
+    """True only when a STRUCTURED_ONLY plan's preferred_filters carries no
+    soft-ranking signal at all. current-result refinement (issue #49
+    PR49-2) supports required (hard eligibility) filters only — it never
+    reranks — so a populated preferred_filters must reject the WHOLE
+    refinement rather than silently execute only the required portion. See
+    _dispatch_refine."""
+    return not (
+        filters.skills
+        or filters.certifications
+        or filters.languages
+        or filters.education
+        or filters.min_total_experience_years is not None
+        or filters.skill_experience
+        or filters.domain_experience
+        or filters.language_levels
+    )
+
+
 async def _dispatch_refine(
     db: AsyncSession,
     llm: LLMProvider,
@@ -440,23 +462,52 @@ async def _dispatch_refine(
     as_of_date: date,
     embedding_config: EmbeddingSearchConfig,
 ) -> RefineDispatchResult:
-    """REFINE_CANDIDATE_RESULTS dispatch (issue #49 PR49-2). When
-    decision.filter_query is set, it is forwarded UNMODIFIED into the
-    existing frozen NL search-planner pipeline (meyar.search.
-    planner_service.plan_candidate_search — planning only, never
-    meyar.search.service.search_candidates itself, so this never becomes a
-    fresh tenant-wide search) to derive a validated, deterministic
-    RequiredFilters shape — the exact same prohibited-attribute/no-silent-
-    weakening discipline SEARCH_CANDIDATES already gets, reused rather
-    than reimplemented. A non-executable plan, or one that would require
-    SEMANTIC_ONLY/HYBRID mode, fails closed with a fixed clarification —
-    it is never silently downgraded to STRUCTURED_ONLY and never executed
-    as a global search (docs/DECISIONS.md D-084).
+    """REFINE_CANDIDATE_RESULTS dispatch (issue #49 PR49-2, hardened by an
+    independent-audit correction). Authority order:
 
-    All actual membership/ordering/limit authority is
+    1. The active result set is PRE-validated (meyar.services.
+       agent_result_set_repo.validate_active_result_set_for_refinement)
+       BEFORE the planner is ever invoked — a stale/expired/missing/
+       foreign-session active context must fail with its own truthful
+       reason regardless of planner health, never surfaced as a generic
+       planner-unavailable clarification.
+    2. When decision.filter_query is set, it is forwarded UNMODIFIED into
+       the existing frozen NL search-planner pipeline (meyar.search.
+       planner_service.plan_candidate_search — planning only, never
+       meyar.search.service.search_candidates itself, so this never
+       becomes a fresh tenant-wide search) to derive a validated,
+       deterministic RequiredFilters shape — the exact same prohibited-
+       attribute/no-silent-weakening discipline SEARCH_CANDIDATES already
+       gets, reused rather than reimplemented. A non-executable plan, one
+       that would require SEMANTIC_ONLY/HYBRID mode, or one carrying ANY
+       populated preferred_filters (a STRUCTURED_ONLY plan may legitimately
+       have one — current-result refinement supports required filters
+       only, never reranking) fails closed with a fixed clarification — it
+       is never silently downgraded/partially executed and never run as a
+       global search (docs/DECISIONS.md D-084).
+    3. The planner's own validated explicit-limit interpretation
+       (plan.interpretation.result_limit/used_default_limit) is reconciled
+       against decision.limit into one effective_limit: the planner's own
+       default search limit never becomes an implicit refinement
+       truncation, and a genuine conflict between the two is rejected
+       rather than silently resolved one way.
+
+    All actual membership/ordering/limit authority beyond that is
     meyar.services.agent_result_set_repo.create_result_set_from_refinement
-    — this function never computes membership itself."""
+    — including its own internal revalidation (TOCTOU defense-in-depth,
+    kept alongside the pre-validation above) — this function never
+    computes membership itself."""
+    validated_active_result_set = await validate_active_result_set_for_refinement(
+        db,
+        tenant_id=tenant_id,
+        browser_session_id=conversation.browser_session_id,
+        conversation=conversation,
+    )
+    if isinstance(validated_active_result_set, ResultSetResolutionFailure):
+        return RefineDispatchResult(resolution_failure=validated_active_result_set)
+
     filter_request: CandidateSearchRequest | None = None
+    planner_explicit_limit: int | None = None
     if decision.filter_query is not None:
         plan = await plan_candidate_search(
             db,
@@ -474,7 +525,44 @@ async def _dispatch_refine(
             return RefineDispatchResult(
                 rejection_message=_agent_response_text(AgentResponseCode.UNSUPPORTED_REQUEST)
             )
+        if (
+            # semantic_query/embedding_config are already implied None by
+            # STRUCTURED_ONLY's own CandidateSearchRequest validator — kept
+            # as an explicit authority check here rather than assumed.
+            plan.search_request.semantic_query is not None
+            or plan.search_request.embedding_config is not None
+            or not _preferred_filters_are_empty(plan.search_request.preferred_filters)
+        ):
+            return RefineDispatchResult(
+                rejection_message=_agent_response_text(AgentResponseCode.UNSUPPORTED_REQUEST)
+            )
         filter_request = plan.search_request
+        planner_explicit_limit = (
+            None if plan.interpretation.used_default_limit else plan.interpretation.result_limit
+        )
+        if planner_explicit_limit is not None and planner_explicit_limit > MAX_CANDIDATE_REF:
+            # A refinement limit can never exceed the same bound a
+            # candidate_ref ordinal itself is bounded to (see AgentDecision.
+            # limit) — an HR-text count the search policy itself could
+            # produce (up to MAX_SEARCH_LIMIT=100) but a refinement could
+            # never honor fails closed here rather than crashing on the
+            # narrower AgentRefineToolResult.requested_limit bound below.
+            return RefineDispatchResult(
+                rejection_message=_agent_response_text(AgentResponseCode.UNSUPPORTED_REQUEST)
+            )
+
+    if (
+        planner_explicit_limit is not None
+        and decision.limit is not None
+        and decision.limit != planner_explicit_limit
+    ):
+        # The HR text's own explicit count (validated by the planner) and
+        # the small orchestrator's own limit field disagree — the server
+        # must never silently pick one interpretation over the other.
+        return RefineDispatchResult(
+            rejection_message=_agent_response_text(AgentResponseCode.UNSUPPORTED_REQUEST)
+        )
+    effective_limit = decision.limit if planner_explicit_limit is None else planner_explicit_limit
 
     outcome = await create_result_set_from_refinement(
         db,
@@ -482,7 +570,7 @@ async def _dispatch_refine(
         browser_session_id=conversation.browser_session_id,
         conversation=conversation,
         filter_request=filter_request,
-        requested_limit=decision.limit,
+        requested_limit=effective_limit,
     )
     if isinstance(outcome, ResultSetResolutionFailure):
         return RefineDispatchResult(resolution_failure=outcome)
@@ -516,7 +604,7 @@ async def _dispatch_refine(
         eligible_profile_count=outcome.source_result_count,
         compatible_embedding_count=0,
         excluded_missing_embedding_count=0,
-        limit=decision.limit or outcome.source_result_count,
+        limit=effective_limit or outcome.source_result_count,
         embedding_config=None,
     )
     tool_result = AgentToolResult(
@@ -525,7 +613,7 @@ async def _dispatch_refine(
             response=response,
             source_result_count=outcome.source_result_count,
             has_filter=filter_request is not None,
-            requested_limit=decision.limit,
+            requested_limit=effective_limit,
             limit_truncated=outcome.limit_truncated,
         ),
     )

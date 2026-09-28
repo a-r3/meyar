@@ -453,6 +453,37 @@ async def _reject_refinement(
     )
 
 
+async def validate_active_result_set_for_refinement(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    browser_session_id: uuid.UUID,
+    conversation: AgentConversation,
+) -> AgentResultSet | ResultSetResolutionFailure:
+    """REFINE_CANDIDATE_RESULTS's own PRE-validation authority (issue #49
+    PR49-2 independent-audit correction). ``meyar.agent.service.
+    _dispatch_refine`` calls this FIRST, before ever invoking the search
+    planner, so a stale/expired/missing/foreign-session active result set
+    is rejected with its own truthful reason before any planner call is
+    made — never surfaced as a generic planner-unavailable clarification.
+    Reuses the exact same ``_validate_active_result_set`` six-step
+    definition ``create_result_set_from_refinement`` revalidates
+    internally below (TOCTOU defense-in-depth — that second check is
+    intentionally kept, not replaced by this one; see its own docstring).
+    Fires the SAME ``agent.result_set.refine_rejected`` audit event the
+    internal revalidation path fires on failure, so a rejected refinement
+    is audited exactly once regardless of which of the two checks actually
+    caught it."""
+    validated = await _validate_active_result_set(
+        db, tenant_id=tenant_id, browser_session_id=browser_session_id, conversation=conversation
+    )
+    if isinstance(validated, ResultSetResolutionFailure):
+        await _reject_refinement(
+            db, tenant_id=tenant_id, conversation=conversation, failure=validated
+        )
+    return validated
+
+
 @dataclass(frozen=True)
 class RefinementResult:
     """Everything ``meyar.agent.service._dispatch_refine`` needs to build

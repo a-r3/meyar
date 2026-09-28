@@ -123,6 +123,59 @@ def _refine_llm(*, filter_query: str | None = None, limit: int | None = None) ->
     )
 
 
+def _fake_structured_plan(
+    *,
+    required_skills: list[str] | None = None,
+    preferred_skills: list[str] | None = None,
+    result_limit: int | None = None,
+    used_default_limit: bool = True,
+    request_sha256: str = "f" * 64,
+):
+    """Builds a monkeypatch replacement for meyar.agent.service.
+    plan_candidate_search that returns a fixed, already-EXECUTABLE
+    STRUCTURED_ONLY SearchPlanResult with a controlled interpretation
+    summary — isolates _dispatch_refine's own preferred-filter/limit-
+    reconciliation policy from the real planner's own NL interpretation,
+    mirroring test_semantic_or_hybrid_filter_plan_is_rejected_not_downgraded."""
+    from meyar.search.planner_schemas import (
+        PLANNER_SCHEMA_VERSION,
+        PlanInterpretationSummary,
+        PlannerOutcome,
+        SearchPlanResult,
+    )
+    from meyar.search.schemas import (
+        CandidateSearchRequest,
+        PreferredFilters,
+        RequiredFilters,
+        SearchMode,
+    )
+
+    async def _fake_plan(*_args, **_kwargs):
+        request = CandidateSearchRequest(
+            mode=SearchMode.STRUCTURED_ONLY,
+            required_filters=RequiredFilters(skills=required_skills or []),
+            preferred_filters=PreferredFilters(skills=preferred_skills or []),
+        )
+        return SearchPlanResult(
+            executable=True,
+            outcome=PlannerOutcome.EXECUTABLE,
+            search_request=request,
+            planner_policy_version="test-planner-policy-v1",
+            prompt_version="test-planner-prompt-v1",
+            schema_version=PLANNER_SCHEMA_VERSION,
+            model_provider="test",
+            model_name="test-model",
+            model_revision="",
+            attempt_count=0,
+            request_sha256=request_sha256,
+            interpretation=PlanInterpretationSummary(
+                result_limit=result_limit, used_default_limit=used_default_limit
+            ),
+        )
+
+    return _fake_plan
+
+
 async def _member_candidate_ids(db_session: AsyncSession, *, result_set_id: uuid.UUID) -> list[str]:
     rows = (
         await db_session.execute(
@@ -745,6 +798,357 @@ async def test_semantic_or_hybrid_filter_plan_is_rejected_not_downgraded(
     assert result.outcome.value == "CLARIFICATION_REQUESTED"
     await db_session.refresh(conversation)
     assert conversation.active_result_set_id == root.id
+
+
+# --- Preferred filters must never be silently applied -----------------------
+
+
+async def test_preferred_only_filter_plan_is_rejected_not_partially_executed(
+    db_session: AsyncSession, tenant_and_user, monkeypatch
+) -> None:
+    """A STRUCTURED_ONLY plan may legitimately carry preferred filters —
+    current-result refinement supports required (hard) filters only, never
+    reranking, so ANY populated preferred_filters must reject the WHOLE
+    refinement rather than silently retain the parent's own members
+    unfiltered (see meyar.agent.service._dispatch_refine)."""
+    import meyar.agent.service as agent_service
+
+    tenant, user, _password, membership = tenant_and_user
+    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    _candidates, root = await _seed_root(
+        db_session, tenant, conversation, session, ("Python",), ("SQL",), ("Go",)
+    )
+
+    monkeypatch.setattr(
+        agent_service,
+        "plan_candidate_search",
+        _fake_structured_plan(preferred_skills=["SQL"]),
+    )
+
+    result = await _refine(
+        db_session,
+        _refine_llm(filter_query="SQL üstünlük təşkil edir"),
+        tenant_id=tenant.id,
+        conversation=conversation,
+    )
+    assert result.outcome.value == "CLARIFICATION_REQUESTED"
+    assert result.message == (
+        "Bu sorğu mövcud MEYAR alətləri ilə təhlükəsiz şəkildə icra edilmir."
+    )
+    assert result.tool_results == []
+    await db_session.refresh(conversation)
+    assert conversation.active_result_set_id == root.id
+
+    count = await db_session.scalar(
+        select(func.count()).select_from(AgentResultSet).where(
+            AgentResultSet.tenant_id == tenant.id,
+            AgentResultSet.result_set_kind == AgentResultSetKind.REFINEMENT.value,
+        )
+    )
+    assert count == 0
+
+
+async def test_required_and_preferred_filter_plan_rejects_whole_refinement(
+    db_session: AsyncSession, tenant_and_user, monkeypatch
+) -> None:
+    """A plan combining a required filter with a preferred filter must be
+    rejected in full — never partially executed on the required portion
+    alone."""
+    import meyar.agent.service as agent_service
+
+    tenant, user, _password, membership = tenant_and_user
+    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    _candidates, root = await _seed_root(
+        db_session, tenant, conversation, session, ("Python",), ("Python",), ("SQL",)
+    )
+
+    monkeypatch.setattr(
+        agent_service,
+        "plan_candidate_search",
+        _fake_structured_plan(required_skills=["Python"], preferred_skills=["SQL"]),
+    )
+
+    result = await _refine(
+        db_session,
+        _refine_llm(filter_query="Python bilən, SQL üstünlük təşkil edir"),
+        tenant_id=tenant.id,
+        conversation=conversation,
+    )
+    assert result.outcome.value == "CLARIFICATION_REQUESTED"
+    assert result.tool_results == []
+    await db_session.refresh(conversation)
+    assert conversation.active_result_set_id == root.id
+
+    count = await db_session.scalar(
+        select(func.count()).select_from(AgentResultSet).where(
+            AgentResultSet.tenant_id == tenant.id,
+            AgentResultSet.result_set_kind == AgentResultSetKind.REFINEMENT.value,
+        )
+    )
+    assert count == 0
+
+
+# --- Active-result-set prevalidation happens BEFORE the planner is called --
+
+
+async def test_stale_filter_refinement_prevalidates_before_planner_invocation(
+    db_session: AsyncSession, tenant_and_user, monkeypatch
+) -> None:
+    import meyar.agent.service as agent_service
+
+    tenant, user, _password, membership = tenant_and_user
+    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    (candidate,), root = await _seed_root(db_session, tenant, conversation, session, ("Python",))
+
+    # Reprocessing the candidate's profile drifts the corpus fingerprint,
+    # the same trigger test_stale_source_blocks_refinement_and_leaves_
+    # context_untouched uses for a limit-only refinement.
+    await seed_next_profile_version(
+        db_session,
+        tenant_id=tenant.id,
+        candidate=candidate,
+        profile_content=_profile("Python", "SQL"),
+    )
+    await db_session.commit()
+
+    async def _fail_if_called(*_args, **_kwargs):
+        raise AssertionError("planner must not be called when the active result set is stale")
+
+    monkeypatch.setattr(agent_service, "plan_candidate_search", _fail_if_called)
+
+    result = await _refine(
+        db_session,
+        _refine_llm(filter_query="SQL bilən namizədləri göstər"),
+        tenant_id=tenant.id,
+        conversation=conversation,
+    )
+    assert result.outcome.value == "RESULT_SET_STALE"
+    await db_session.refresh(conversation)
+    assert conversation.active_result_set_id == root.id
+
+
+async def test_expired_filter_refinement_prevalidates_before_planner_invocation(
+    db_session: AsyncSession, tenant_and_user, monkeypatch
+) -> None:
+    import meyar.agent.service as agent_service
+
+    tenant, user, _password, membership = tenant_and_user
+    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    (_candidate,), root = await _seed_root(db_session, tenant, conversation, session, ("Python",))
+
+    root.expires_at = datetime.now(UTC) - timedelta(hours=1)
+    await db_session.flush()
+    await db_session.commit()
+
+    async def _fail_if_called(*_args, **_kwargs):
+        raise AssertionError("planner must not be called when the active result set is expired")
+
+    monkeypatch.setattr(agent_service, "plan_candidate_search", _fail_if_called)
+
+    result = await _refine(
+        db_session,
+        _refine_llm(filter_query="SQL bilən namizədləri göstər"),
+        tenant_id=tenant.id,
+        conversation=conversation,
+    )
+    assert result.outcome.value == "RESULT_SET_EXPIRED"
+    await db_session.refresh(conversation)
+    assert conversation.active_result_set_id == root.id
+
+
+async def test_missing_context_filter_refinement_never_invokes_planner(
+    db_session: AsyncSession, tenant_and_user, monkeypatch
+) -> None:
+    import meyar.agent.service as agent_service
+
+    tenant, user, _password, membership = tenant_and_user
+    conversation, _session = await _new_conversation(db_session, tenant, user, membership)
+
+    async def _fail_if_called(*_args, **_kwargs):
+        raise AssertionError("planner must not be called with no active result set")
+
+    monkeypatch.setattr(agent_service, "plan_candidate_search", _fail_if_called)
+
+    result = await _refine(
+        db_session,
+        _refine_llm(filter_query="SQL bilən namizədləri göstər"),
+        tenant_id=tenant.id,
+        conversation=conversation,
+    )
+    assert result.outcome.value == "CLARIFICATION_REQUESTED"
+    assert result.tool_results == []
+
+
+# --- Effective-limit reconciliation between the planner and AgentDecision --
+
+
+async def test_planner_explicit_limit_recovered_when_agent_decision_omits_it(
+    db_session: AsyncSession, tenant_and_user, monkeypatch
+) -> None:
+    import meyar.agent.service as agent_service
+
+    tenant, user, _password, membership = tenant_and_user
+    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    (a, b, c, _d), root = await _seed_root(
+        db_session, tenant, conversation, session, ("SQL",), ("SQL",), ("SQL",), ("SQL",)
+    )
+
+    monkeypatch.setattr(
+        agent_service,
+        "plan_candidate_search",
+        _fake_structured_plan(required_skills=["SQL"], result_limit=3, used_default_limit=False),
+    )
+
+    result = await _refine(
+        db_session,
+        _refine_llm(filter_query="ilk 3 SQL bilən namizədləri göstər"),
+        tenant_id=tenant.id,
+        conversation=conversation,
+    )
+    assert result.outcome.value == "ANSWERED_FROM_TOOL_RESULT"
+    refine = result.tool_results[0].refine
+    assert refine is not None
+    assert refine.requested_limit == 3
+    assert refine.limit_truncated is False
+    ids = [str(r.candidate_id) for r in refine.response.results]
+    assert ids == [str(a.id), str(b.id), str(c.id)]
+
+
+async def test_matching_planner_and_agent_explicit_limit_succeeds(
+    db_session: AsyncSession, tenant_and_user, monkeypatch
+) -> None:
+    import meyar.agent.service as agent_service
+
+    tenant, user, _password, membership = tenant_and_user
+    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    (a, b, c, _d), root = await _seed_root(
+        db_session, tenant, conversation, session, ("SQL",), ("SQL",), ("SQL",), ("SQL",)
+    )
+
+    monkeypatch.setattr(
+        agent_service,
+        "plan_candidate_search",
+        _fake_structured_plan(required_skills=["SQL"], result_limit=3, used_default_limit=False),
+    )
+
+    result = await _refine(
+        db_session,
+        _refine_llm(filter_query="ilk 3 SQL bilən namizədləri göstər", limit=3),
+        tenant_id=tenant.id,
+        conversation=conversation,
+    )
+    assert result.outcome.value == "ANSWERED_FROM_TOOL_RESULT"
+    refine = result.tool_results[0].refine
+    assert refine is not None
+    assert refine.requested_limit == 3
+    ids = [str(r.candidate_id) for r in refine.response.results]
+    assert ids == [str(a.id), str(b.id), str(c.id)]
+
+
+async def test_conflicting_planner_and_agent_explicit_limit_rejects_safely(
+    db_session: AsyncSession, tenant_and_user, monkeypatch
+) -> None:
+    import meyar.agent.service as agent_service
+
+    tenant, user, _password, membership = tenant_and_user
+    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    _candidates, root = await _seed_root(
+        db_session, tenant, conversation, session, ("SQL",), ("SQL",), ("SQL",), ("SQL",)
+    )
+
+    monkeypatch.setattr(
+        agent_service,
+        "plan_candidate_search",
+        _fake_structured_plan(required_skills=["SQL"], result_limit=3, used_default_limit=False),
+    )
+
+    result = await _refine(
+        db_session,
+        _refine_llm(filter_query="ilk 3 SQL bilən namizədləri göstər", limit=2),
+        tenant_id=tenant.id,
+        conversation=conversation,
+    )
+    assert result.outcome.value == "CLARIFICATION_REQUESTED"
+    assert result.tool_results == []
+    await db_session.refresh(conversation)
+    assert conversation.active_result_set_id == root.id
+
+    count = await db_session.scalar(
+        select(func.count()).select_from(AgentResultSet).where(
+            AgentResultSet.tenant_id == tenant.id,
+            AgentResultSet.result_set_kind == AgentResultSetKind.REFINEMENT.value,
+        )
+    )
+    assert count == 0
+
+
+async def test_agent_decision_limit_used_when_planner_finds_no_explicit_count(
+    db_session: AsyncSession, tenant_and_user, monkeypatch
+) -> None:
+    """The planner used its own normal default search limit (no explicit
+    count in the HR text) — AgentDecision's own explicit limit still
+    applies normally."""
+    import meyar.agent.service as agent_service
+
+    tenant, user, _password, membership = tenant_and_user
+    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    (a, b, _c, _d), root = await _seed_root(
+        db_session, tenant, conversation, session, ("SQL",), ("SQL",), ("SQL",), ("SQL",)
+    )
+
+    monkeypatch.setattr(
+        agent_service,
+        "plan_candidate_search",
+        _fake_structured_plan(required_skills=["SQL"], result_limit=20, used_default_limit=True),
+    )
+
+    result = await _refine(
+        db_session,
+        _refine_llm(filter_query="SQL bilən namizədləri göstər", limit=2),
+        tenant_id=tenant.id,
+        conversation=conversation,
+    )
+    assert result.outcome.value == "ANSWERED_FROM_TOOL_RESULT"
+    refine = result.tool_results[0].refine
+    assert refine is not None
+    assert refine.requested_limit == 2
+    ids = [str(r.candidate_id) for r in refine.response.results]
+    assert ids == [str(a.id), str(b.id)]
+
+
+async def test_planner_default_limit_never_becomes_implicit_refinement_truncation(
+    db_session: AsyncSession, tenant_and_user, monkeypatch
+) -> None:
+    """No explicit count anywhere (neither the HR text nor AgentDecision.
+    limit) — the planner's own normal default search limit (e.g. 20) must
+    NOT silently truncate the refined result set."""
+    import meyar.agent.service as agent_service
+
+    tenant, user, _password, membership = tenant_and_user
+    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    (a, b, c), root = await _seed_root(
+        db_session, tenant, conversation, session, ("SQL",), ("SQL",), ("SQL",)
+    )
+
+    monkeypatch.setattr(
+        agent_service,
+        "plan_candidate_search",
+        _fake_structured_plan(required_skills=["SQL"], result_limit=20, used_default_limit=True),
+    )
+
+    result = await _refine(
+        db_session,
+        _refine_llm(filter_query="SQL bilən namizədləri göstər"),
+        tenant_id=tenant.id,
+        conversation=conversation,
+    )
+    assert result.outcome.value == "ANSWERED_FROM_TOOL_RESULT"
+    refine = result.tool_results[0].refine
+    assert refine is not None
+    assert refine.requested_limit is None
+    assert refine.limit_truncated is False
+    ids = [str(r.candidate_id) for r in refine.response.results]
+    assert ids == [str(a.id), str(b.id), str(c.id)]
 
 
 def test_bare_refinement_intent_with_no_operation_is_schema_rejected() -> None:
