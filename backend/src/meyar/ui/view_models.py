@@ -207,6 +207,8 @@ class AgentJobDraftReviewView(BaseModel):
 class AgentJobDraftView(BaseModel):
     title: str | None
     draft_id: uuid.UUID
+    # Set only from the current BrowserSession's live context pointer.
+    can_act: bool = False
     requested_result_limit: int | None = None
     result_limit: int
     result_limit_was_bounded: bool = False

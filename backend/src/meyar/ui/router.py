@@ -54,6 +54,7 @@ from meyar.services.user_repo import get_user_by_username, set_password
 from meyar.storage.base import DocumentStorage
 from meyar.storage.dependency import get_document_storage, get_photo_storage
 from meyar.storage.photo import LocalPhotoStorage
+from meyar.ui.agent_workspace import build_agent_workspace_context
 from meyar.ui.auth import (
     UI_SESSION_COOKIE,
     UIAccessError,
@@ -530,12 +531,49 @@ def _render_conversation_not_found(request: Request, ctx: UIContext) -> HTMLResp
     )
 
 
+async def _render_agent_workspace(
+    request: Request,
+    ctx: UIContext,
+    db: AsyncSession,
+    settings: Settings,
+    *,
+    conversation: object,
+    history_turns: list,
+    latest: object = None,
+    latest_user_message: str | None = None,
+    page: int = 1,
+    status_code: int = status.HTTP_200_OK,
+) -> HTMLResponse:
+    from meyar.models.agent_conversation import AgentConversation
+
+    assert isinstance(conversation, AgentConversation)
+    workspace = await build_agent_workspace_context(
+        db, ctx=ctx, settings=settings, conversation=conversation, page=page
+    )
+    return _render(
+        request,
+        "agent.html",
+        _context(
+            ctx,
+            conversation_id=conversation.id,
+            history_turns=history_turns,
+            latest=latest,
+            latest_user_message=latest_user_message,
+            kind_options=CRITERION_KIND_OPTIONS,
+            **workspace,
+        ),
+        status_code=status_code,
+    )
+
+
 @router.get("/agent", response_class=HTMLResponse)
 async def agent_workspace(
     request: Request,
     conversation: uuid.UUID | None = Query(default=None),
+    page: int = Query(default=1, ge=1, le=1000),
     ctx: UIContext = Depends(require_ui_scopes("candidates:read")),
     db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
 ) -> HTMLResponse:
     from meyar.services.agent_conversation_repo import (
         get_owned_conversation,
@@ -545,7 +583,6 @@ async def agent_workspace(
 
     owner = _conversation_owner(ctx)
     if conversation is not None:
-        # Minimal, unstyled explicit selector (PR80-2 builds the sidebar).
         selected = await get_owned_conversation(db, owner=owner, conversation_id=conversation)
         if selected is None:
             await record_conversation_access_rejected(db, owner=owner)
@@ -567,17 +604,9 @@ async def agent_workspace(
             await db.rollback()
             return _render_conversation_not_found(request, ctx)
     await db.commit()
-    return _render(
-        request,
-        "agent.html",
-        _context(
-            ctx,
-            conversation_id=selected.id,
-            history_turns=_agent_turn_log_views(selected),
-            latest=None,
-            latest_user_message=None,
-            kind_options=CRITERION_KIND_OPTIONS,
-        ),
+    return await _render_agent_workspace(
+        request, ctx, db, settings, conversation=selected,
+        history_turns=_agent_turn_log_views(selected), page=page,
     )
 
 
@@ -681,18 +710,12 @@ async def agent_turn(
         # this failed attempt, so show the HR user's own just-submitted
         # text directly rather than losing it. A conversation created in
         # this same rolled-back transaction simply has no history yet.
-        return _render(
-            request,
-            "agent.html",
-            _context(
-                ctx,
-                conversation_id=reloaded.id if reloaded is not None else None,
-                history_turns=_agent_turn_log_views(reloaded) if reloaded is not None else [],
-                latest=latest,
-                latest_user_message=message,
-                kind_options=CRITERION_KIND_OPTIONS,
-            ),
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        if reloaded is None:
+            return _render_conversation_not_found(request, ctx)
+        return await _render_agent_workspace(
+            request, ctx, db, settings, conversation=reloaded,
+            history_turns=_agent_turn_log_views(reloaded), latest=latest,
+            latest_user_message=message, status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
 
     # D-044: run_agent_turn always persists exactly one new (user,
@@ -702,17 +725,14 @@ async def agent_turn(
     # bubble AND a rich block separated by the composer.
     all_turns = _agent_turn_log_views(conversation)
     history_turns = all_turns[:-2] if len(all_turns) >= 2 else []
-    return _render(
-        request,
-        "agent.html",
-        _context(
-            ctx,
-            conversation_id=resolved_conversation_id,
-            history_turns=history_turns,
-            latest=latest,
-            latest_user_message=message,
-            kind_options=CRITERION_KIND_OPTIONS,
-        ),
+    for tool_result in latest.tool_results:
+        if tool_result.job_draft is not None:
+            tool_result.job_draft.can_act = (
+                session_context.active_pending_draft_id == tool_result.job_draft.draft_id
+            )
+    return await _render_agent_workspace(
+        request, ctx, db, settings, conversation=conversation,
+        history_turns=history_turns, latest=latest, latest_user_message=message,
     )
 
 
@@ -740,7 +760,9 @@ async def agent_reset(
         db, conversation=conversation, browser_session_id=ctx.session_id
     )
     await db.commit()
-    return RedirectResponse("/ui/agent", status_code=status.HTTP_303_SEE_OTHER)
+    return RedirectResponse(
+        f"/ui/agent?conversation={conversation.id}", status_code=status.HTTP_303_SEE_OTHER
+    )
 
 
 @router.get("/library", response_class=HTMLResponse)
@@ -1210,6 +1232,7 @@ async def resolve_agent_job_draft_review(
     criterion_type: str = Form(..., max_length=16),
     ctx: UIContext = Depends(require_ui_scopes("jobs:write", "candidates:read")),
     db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
 ) -> HTMLResponse:
     """Persist one canonical, server-declared human-review resolution."""
     from meyar.agent.service import resolve_job_draft_review_modality
@@ -1271,17 +1294,13 @@ async def resolve_agent_job_draft_review(
             )
         ],
     )
-    return _render(
-        request,
-        "agent.html",
-        _context(
-            ctx,
-            conversation_id=conversation.id,
-            history_turns=all_turns[:-2] if len(all_turns) >= 2 else [],
-            latest=latest,
-            latest_user_message=latest_user_message,
-            kind_options=CRITERION_KIND_OPTIONS,
-        ),
+    draft_view = latest.tool_results[0].job_draft
+    assert draft_view is not None
+    draft_view.can_act = authority.session_context.active_pending_draft_id == resolved.draft_id
+    return await _render_agent_workspace(
+        request, ctx, db, settings, conversation=conversation,
+        history_turns=all_turns[:-2] if len(all_turns) >= 2 else [],
+        latest=latest, latest_user_message=latest_user_message,
     )
 
 

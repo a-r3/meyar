@@ -6,21 +6,24 @@
   <title>{% block title %}MEYAR{% endblock %}</title>
   <link rel="stylesheet" href="/ui/static/styles.css">
 </head>
-<body>
+<body class="{% block body_class %}{% endblock %}">
   <header class="site-header">
-    <a class="brand" href="{{ '/ui/agent' if authenticated else '/ui/login' }}">MEYAR</a>
+    {% block header_leading %}{% endblock %}
+    <a class="brand" href="{{ '/ui/agent' if authenticated else '/ui/login' }}">{% block brand_text %}MEYAR{% endblock %}</a>
     {% if authenticated %}
+    {% block header_nav %}
     <nav aria-label="Əsas naviqasiya">
       <a href="/ui/agent">MEYAR AI</a>
       <a href="/ui/library">Namizədlər</a>
     </nav>
+    {% endblock %}
     <form method="post" action="/ui/logout" class="logout-form">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <button class="button button-secondary" type="submit">Çıxış</button>
     </form>
     {% endif %}
   </header>
-  <main class="page-shell">
+  <main class="page-shell {% block main_class %}{% endblock %}">
     {% block content %}{% endblock %}
   </main>
   <footer>MEYAR qərar dəstəyi təqdim edir. Yekun qərarı insan verir.</footer>

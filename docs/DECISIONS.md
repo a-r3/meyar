@@ -6814,3 +6814,31 @@ text.
 styling, conversation search/deletion/rename, model-generated titles,
 semantic/RAG history, shared conversations, #50, scoring changes,
 deployment work.
+
+## D-087 — PR80-2 conversation workspace presentation (issue #80)
+
+**Status:** proposed for independent code and visual review; issue #80 remains
+OPEN until owner acceptance and merge.
+
+**Decision:** the agent page uses a two-column desktop workspace with a
+bounded conversation-history sidebar and separate Candidate Library and Job
+Library links. The narrow-screen drawer is presentation only. Conversation
+links use the existing owner-validated explicit selector; creation remains
+POST + CSRF and redirects to the newly created durable row. The composer
+retains its single textarea and explicit hidden conversation selector.
+
+History lists 20 summary projections per page, ordered by `updated_at DESC,
+id DESC` under the live tenant/user/membership principal. The query selects
+only id, closed `title_kind`, and `updated_at`; it never loads every transcript
+or one transcript per sidebar item. Local date/time plus a fixed Azerbaijani
+mapping differentiates duplicate safe category labels. The selected item is
+set server-side and receives `aria-current`. An active item outside the
+requested page is shown separately without changing chronology on GET.
+
+BrowserSession remains authentication transport, not durable ownership.
+Opening history never recreates ResultSet, ordinal, refinement, or pending
+draft authority. JD confirmation/review controls use a server-prepared
+`can_act` flag derived from the current session-context draft pointer; old
+historical drafts are never made actionable by transcript rendering. There
+is no raw-content or model-generated title, no conversation RAG, and no
+schema migration. This PR does not implement #50.

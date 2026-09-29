@@ -78,7 +78,8 @@ async def test_new_conversation_creates_a_new_durable_row_and_keeps_history(
     reset = await client.post(
         "/ui/agent/reset", data={"csrf_token": csrf}, follow_redirects=False
     )
-    assert reset.status_code == 303 and reset.headers["location"] == "/ui/agent"
+    assert reset.status_code == 303
+    assert reset.headers["location"].startswith("/ui/agent?conversation=")
     current = await client.get("/ui/agent")
     assert "Salam köhnə söhbət" not in current.text
     new_id = _conversation_id(current.text)
@@ -99,6 +100,13 @@ async def test_new_conversation_creates_a_new_durable_row_and_keeps_history(
     assert new_context.active_result_set_id is None
     assert new_context.active_pending_draft_id is None
     assert new_context.context_epoch == 1
+    assert current.text.count('action="/ui/agent/reset"') == 1
+    assert 'href="/ui/library"' in current.text
+    assert 'href="/ui/jobs"' in current.text
+    assert 'aria-current="page"' in current.text
+    assert "Ümumi söhbət" in current.text
+    assert "Bu gün," in current.text or "sen," in current.text
+    assert "Salam köhnə söhbət</span>" not in current.text
 
     # The historical conversation stays reachable through the minimal
     # explicit selector (PR80-2 renders the sidebar).
@@ -129,6 +137,9 @@ async def test_relogin_shows_history_without_result_or_pending_draft_authority(
         csrf = await _login_and_csrf(relogin, user.username, password)
         workspace = await relogin.get("/ui/agent")
         assert "Python required" in workspace.text  # durable history visible
+        assert "Vakansiya analizi" in workspace.text
+        assert confirm_path not in workspace.text
+        assert "/resolve\"" not in workspace.text
 
         # Old pending draft is NOT live authority in the new BrowserSession.
         stale = await relogin.post(

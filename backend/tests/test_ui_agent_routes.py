@@ -198,28 +198,20 @@ async def test_unified_composer_has_one_textarea_one_send_and_no_mode_authority(
 async def test_primary_nav_is_agent_first_classic_tools_are_secondary(
     client: AsyncClient, tenant_and_user, local_ui_settings: Settings
 ) -> None:
-    """Slice 4 (issue #33, D-030) + PR #42 owner corrections (D-043, D-044):
-    normal HR navigation/discovery is exactly MEYAR AI | Namizədlər |
-    Çıxış — no Vacancies, no classic-search secondary line. The backend
-    job/ranking routes and the classic /ui search page still exist
-    (D-043/D-044), just never discoverable from normal HR nav; a job is
-    reached only via the agent's own JD-drafting confirmation, which
-    lands directly on its ranking result."""
+    """Issue #80 scopes product navigation to the agent sidebar while
+    preserving the existing library and job routes."""
     _tenant, user, password, _membership = tenant_and_user
     await _login_and_csrf(client, user.username, password)
     page = await client.get("/ui/agent")
-    primary_nav = re.search(r'<nav aria-label="Əsas naviqasiya">(.*?)</nav>', page.text, re.S)
-    assert primary_nav is not None
-    assert 'href="/ui/agent"' in primary_nav.group(1)
-    assert 'href="/ui/library"' in primary_nav.group(1)
-    assert 'href="/ui/jobs"' not in primary_nav.group(1)
-    assert 'href="/ui"' not in primary_nav.group(1)
-    # No secondary discovery nav at all any more — Vacancies and classic
-    # search are both backend/supporting capability only (reachable by
-    # direct URL), never surfaced as normal HR destinations.
+    assert '<nav aria-label="Əsas naviqasiya">' not in page.text
+    sidebar_nav = re.search(
+        r'<nav class="agent-sidebar__nav"[^>]*>(.*?)</nav>', page.text, re.S
+    )
+    assert sidebar_nav is not None
+    assert 'href="/ui/library"' in sidebar_nav.group(1)
+    assert 'href="/ui/jobs"' in sidebar_nav.group(1)
+    assert 'href="/ui">' not in sidebar_nav.group(1)
     assert 'class="nav-secondary"' not in page.text
-    assert 'href="/ui/jobs"' not in page.text
-    assert 'href="/ui">' not in page.text
     library = await client.get("/ui/library")
     assert library.status_code == 200
     assert "Namizəd kitabxanası" in library.text
