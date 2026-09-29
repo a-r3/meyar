@@ -12,9 +12,12 @@ from meyar.models.agent_conversation import AgentConversation
 from meyar.services.agent_conversation_repo import (
     ConversationSummary,
     OwnerPrincipal,
+    get_active_pending_job_draft,
+    get_session_context,
     list_owned_conversations,
 )
 from meyar.ui.auth import UIContext
+from meyar.ui.service import build_agent_job_draft_view
 
 HISTORY_PAGE_SIZE = 20
 TITLE_LABELS = {
@@ -64,9 +67,22 @@ async def build_agent_workspace_context(
     ctx: UIContext,
     settings: Settings,
     conversation: AgentConversation,
+    latest_draft_ids: frozenset[uuid.UUID] = frozenset(),
     page: int = 1,
 ) -> dict[str, object]:
-    """One owner-scoped summary query; never scans history transcripts."""
+    """One owner-scoped summary query and one read-only live-context lookup.
+
+    Only the already loaded active conversation can supply a draft payload.
+    A missing BrowserSession context never creates authority on a read.
+    """
+    session_context = await get_session_context(
+        db, conversation=conversation, browser_session_id=ctx.session_id
+    )
+    active_draft = get_active_pending_job_draft(conversation, session_context)
+    active_draft_view = None
+    if active_draft is not None and active_draft.draft_id not in latest_draft_ids:
+        active_draft_view = build_agent_job_draft_view(active_draft)
+        active_draft_view.can_act = True
     history = await list_owned_conversations(
         db,
         owner=OwnerPrincipal(
@@ -87,6 +103,7 @@ async def build_agent_workspace_context(
             conversation, current_id=conversation.id, timezone=settings.business_timezone
         )
     return {
+        "workspace_active_draft": active_draft_view,
         "workspace_history": items,
         "workspace_active_outside_page": active_outside_page,
         "workspace_no_past_conversations": (

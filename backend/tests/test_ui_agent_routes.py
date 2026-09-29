@@ -2526,6 +2526,14 @@ async def test_primary_hr_request_requires_server_authorized_language_resolution
         r'action="(/ui/agent/drafts/[0-9a-f-]+/resolve)"', review.text
     )
     assert resolve_match is not None
+    conversation_match = re.search(r'name="conversation_id" value="([0-9a-f-]{36})"', review.text)
+    assert conversation_match is not None
+    review_reloaded = await client.get(
+        f"/ui/agent?conversation={conversation_match.group(1)}"
+    )
+    assert review_reloaded.status_code == 200
+    assert review_reloaded.text.count(resolve_match.group(1)) == 1
+    assert "Tələbləri təsdiqlə və namizədləri sırala" not in review_reloaded.text
 
     rejected = await client.post(
         resolve_match.group(1),
@@ -2547,6 +2555,12 @@ async def test_primary_hr_request_requires_server_authorized_language_resolution
     )
     assert resolved.status_code == 200
     assert "Tələbləri təsdiqlə və namizədləri sırala" in resolved.text
+    resolved_reloaded = await client.get(
+        f"/ui/agent?conversation={conversation_match.group(1)}"
+    )
+    assert resolved_reloaded.status_code == 200
+    assert resolved_reloaded.text.count(_draft_confirm_path(resolved.text)) == 1
+    assert resolve_match.group(1) not in resolved_reloaded.text
     assert 'value="English"' in resolved.text
     assert 'value="B2"' in resolved.text
 

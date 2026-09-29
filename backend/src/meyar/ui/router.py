@@ -94,7 +94,7 @@ from meyar.ui.service import (
     list_candidate_library,
     list_job_views,
 )
-from meyar.ui.view_models import PlannerOutcomeView
+from meyar.ui.view_models import AgentTurnView, PlannerOutcomeView
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/ui", tags=["internal-ui"], include_in_schema=False)
@@ -539,7 +539,7 @@ async def _render_agent_workspace(
     *,
     conversation: object,
     history_turns: list,
-    latest: object = None,
+    latest: AgentTurnView | None = None,
     latest_user_message: str | None = None,
     page: int = 1,
     status_code: int = status.HTTP_200_OK,
@@ -547,8 +547,14 @@ async def _render_agent_workspace(
     from meyar.models.agent_conversation import AgentConversation
 
     assert isinstance(conversation, AgentConversation)
+    latest_draft_ids = frozenset(
+        result.job_draft.draft_id
+        for result in latest.tool_results
+        if result.job_draft is not None
+    ) if latest is not None else frozenset()
     workspace = await build_agent_workspace_context(
-        db, ctx=ctx, settings=settings, conversation=conversation, page=page
+        db, ctx=ctx, settings=settings, conversation=conversation,
+        latest_draft_ids=latest_draft_ids, page=page,
     )
     return _render(
         request,

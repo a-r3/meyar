@@ -39,55 +39,7 @@
     {% endfor %}
   </div>
 {% endmacro %}
-{% macro turn_cards(latest) %}
-{% for tool_result in latest.tool_results %}
-  {% if tool_result.tool_name == "SEARCH_CANDIDATES" and tool_result.search_outcome.executable %}
-  {% if not tool_result.search_results %}
-  <div class="empty-state"><h2>Nəticə tapılmadı</h2><p>Sorğu şərtləri əsasında uyğun namizəd yoxdur.</p></div>
-  {% endif %}
-  {{ result_card_list(tool_result.search_results, tool_result.search_outcome.mode in ("SEMANTIC_ONLY", "HYBRID")) }}
-  {% elif tool_result.tool_name == "REFINE_CANDIDATE_RESULTS" %}
-  {% if not tool_result.search_results %}
-  <div class="empty-state"><h2>Nəticə tapılmadı</h2><p>Cari nəticələr daxilində uyğun namizəd yoxdur.</p></div>
-  {% endif %}
-  {{ result_card_list(tool_result.search_results, false) }}
-  {% elif tool_result.tool_name == "GET_CANDIDATE_PROFILE" %}
-    {% if not tool_result.not_found_ref %}
-    <section class="panel">
-      <div class="page-heading">
-        <div><h2>{{ tool_result.profile.full_name or "Ad məlumatı yoxdur" }}</h2>{% if tool_result.profile.current_role %}<p class="lede">{{ tool_result.profile.current_role }}</p>{% endif %}</div>
-        <a class="button button-secondary" href="/ui/candidates/{{ tool_result.profile.candidate_id }}">Tam profilə bax</a>
-      </div>
-    </section>
-    <div class="two-column">
-      {{ fact_section("Bacarıqlar", tool_result.profile.skills) }}
-      {{ fact_section("İş təcrübəsi", tool_result.profile.experience) }}
-      {{ fact_section("Təhsil", tool_result.profile.education) }}
-      {{ fact_section("Dillər", tool_result.profile.languages) }}
-      {{ fact_section("Sertifikatlar", tool_result.profile.certifications) }}
-      {{ fact_section("Layihələr", tool_result.profile.projects) }}
-    </div>
-    {% endif %}
-  {% elif tool_result.tool_name == "GET_CANDIDATE_EVIDENCE" %}
-    {% if not tool_result.not_found_ref %}
-    <section class="panel">
-      <div class="page-heading">
-        <h2>{{ tool_result.evidence.full_name or "Ad məlumatı yoxdur" }}{% if tool_result.evidence.topic %} — {{ tool_result.evidence.topic }}{% endif %}</h2>
-        <a class="button button-secondary" href="/ui/candidates/{{ tool_result.evidence.candidate_id }}">Tam profilə bax</a>
-      </div>
-      {% if not tool_result.evidence.matches %}
-      <p class="muted">Bu mövzu üzrə profil daxilində sübut tapılmadı — bu, mövcud olmadığı demək deyil, yalnız CV-də açıq şəkildə göstərilmədiyi deməkdir.</p>
-      {% endif %}
-      {% for match in tool_result.evidence.matches %}
-      <article class="fact">
-        <h4>Uyğun gələn tələb: {{ match.title }} <span class="meta">({{ match.category_label }})</span></h4>
-        {{ evidence_partial.evidence_items(match.evidence) }}
-      </article>
-      {% endfor %}
-    </section>
-    {% endif %}
-  {% elif tool_result.tool_name == "DRAFT_JOB_CRITERIA" %}
-    {% set draft = tool_result.job_draft %}
+{% macro draft_panel(draft) %}
     {% if draft.must_have_rows or draft.preferred_rows or draft.unsupported_must_have or draft.unsupported_preferred or draft.needs_review or draft.prohibited_count or draft.ungrounded_count or draft.unsupported_language or draft.wrong_mode_guidance %}
     {% set has_scorable = draft.must_have_rows or draft.preferred_rows %}
     {% set confirmation_ready = draft.can_act and has_scorable and not draft.requires_resolution %}
@@ -188,6 +140,56 @@
       {% endif %}
     </section>
     {% endif %}
+{% endmacro %}
+{% macro turn_cards(latest) %}
+{% for tool_result in latest.tool_results %}
+  {% if tool_result.tool_name == "SEARCH_CANDIDATES" and tool_result.search_outcome.executable %}
+  {% if not tool_result.search_results %}
+  <div class="empty-state"><h2>Nəticə tapılmadı</h2><p>Sorğu şərtləri əsasında uyğun namizəd yoxdur.</p></div>
+  {% endif %}
+  {{ result_card_list(tool_result.search_results, tool_result.search_outcome.mode in ("SEMANTIC_ONLY", "HYBRID")) }}
+  {% elif tool_result.tool_name == "REFINE_CANDIDATE_RESULTS" %}
+  {% if not tool_result.search_results %}
+  <div class="empty-state"><h2>Nəticə tapılmadı</h2><p>Cari nəticələr daxilində uyğun namizəd yoxdur.</p></div>
+  {% endif %}
+  {{ result_card_list(tool_result.search_results, false) }}
+  {% elif tool_result.tool_name == "GET_CANDIDATE_PROFILE" %}
+    {% if not tool_result.not_found_ref %}
+    <section class="panel">
+      <div class="page-heading">
+        <div><h2>{{ tool_result.profile.full_name or "Ad məlumatı yoxdur" }}</h2>{% if tool_result.profile.current_role %}<p class="lede">{{ tool_result.profile.current_role }}</p>{% endif %}</div>
+        <a class="button button-secondary" href="/ui/candidates/{{ tool_result.profile.candidate_id }}">Tam profilə bax</a>
+      </div>
+    </section>
+    <div class="two-column">
+      {{ fact_section("Bacarıqlar", tool_result.profile.skills) }}
+      {{ fact_section("İş təcrübəsi", tool_result.profile.experience) }}
+      {{ fact_section("Təhsil", tool_result.profile.education) }}
+      {{ fact_section("Dillər", tool_result.profile.languages) }}
+      {{ fact_section("Sertifikatlar", tool_result.profile.certifications) }}
+      {{ fact_section("Layihələr", tool_result.profile.projects) }}
+    </div>
+    {% endif %}
+  {% elif tool_result.tool_name == "GET_CANDIDATE_EVIDENCE" %}
+    {% if not tool_result.not_found_ref %}
+    <section class="panel">
+      <div class="page-heading">
+        <h2>{{ tool_result.evidence.full_name or "Ad məlumatı yoxdur" }}{% if tool_result.evidence.topic %} — {{ tool_result.evidence.topic }}{% endif %}</h2>
+        <a class="button button-secondary" href="/ui/candidates/{{ tool_result.evidence.candidate_id }}">Tam profilə bax</a>
+      </div>
+      {% if not tool_result.evidence.matches %}
+      <p class="muted">Bu mövzu üzrə profil daxilində sübut tapılmadı — bu, mövcud olmadığı demək deyil, yalnız CV-də açıq şəkildə göstərilmədiyi deməkdir.</p>
+      {% endif %}
+      {% for match in tool_result.evidence.matches %}
+      <article class="fact">
+        <h4>Uyğun gələn tələb: {{ match.title }} <span class="meta">({{ match.category_label }})</span></h4>
+        {{ evidence_partial.evidence_items(match.evidence) }}
+      </article>
+      {% endfor %}
+    </section>
+    {% endif %}
+  {% elif tool_result.tool_name == "DRAFT_JOB_CRITERIA" %}
+    {{ draft_panel(tool_result.job_draft) }}
   {% endif %}
 {% endfor %}
 {% endmacro %}
@@ -251,6 +253,9 @@
     {% endif %}
   </ol>
 </section>
+{% endif %}
+{% if workspace_active_draft %}
+{{ draft_panel(workspace_active_draft) }}
 {% endif %}
 {% if not history_turns and not latest %}<section class="agent-main__empty"><h2>Söhbətə başlayın</h2><p>Namizəd axtarın, nəticələri dəqiqləşdirin və ya vakansiya elanını daxil edin.</p></section>{% endif %}
 
