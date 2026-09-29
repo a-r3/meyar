@@ -328,6 +328,50 @@ unlabeled number but never guesses that an arbitrary identifier is a phone.
   propagate. Its audit event carries only the closed source/action/version
   values — never the raw message or exception text.
 
+## Durable conversation vs. live session authority (issue #80, D-086)
+
+- BrowserSession = authentication transport, NOT durable conversation owner.
+  `AgentConversation` = durable tenant/user/membership-owned history with no
+  FK to `browser_sessions`. `AgentConversationSessionContext` =
+  BrowserSession-bound live ResultSet/pending-action authority, unique per
+  (conversation, BrowserSession).
+- Every conversation read/write filters on `tenant_id`, `owner_user_id`, and
+  `owner_membership_id` taken from the live `UIContext`, which
+  `get_ui_context()` re-derives from active User + TenantMembership on every
+  request. A disabled user or membership loses list/open/write access
+  immediately; stored ownership never bypasses live auth.
+- A foreign-tenant, foreign-user, foreign-membership, or nonexistent
+  conversation id yields the same generic 404 (no title/timestamp/existence
+  signal) and the same `agent.conversation.access_rejected` audit event with
+  only `reason_code`.
+- Historical transcript is NOT ResultSet or mutation authority. It never
+  recreates candidate ordinals, the active ResultSet, pending-draft authority,
+  tenant/user identity, or scoring criteria.
+- A new BrowserSession never inherits old ResultSet/pending-draft authority:
+  its context starts with no active ResultSet and no pending draft.
+- `AgentResultSet.conversation_id` binds each candidate universe to its
+  durable conversation. Active-set validation requires tenant, BrowserSession,
+  conversation, context epoch, expiry, and corpus fingerprint; a
+  cross-conversation pointer swap inside one BrowserSession at the same epoch
+  fails closed (`CONVERSATION_MISMATCH`, outward `NOT_FOUND`).
+- A pending JD draft is actionable only when the live owner may access the
+  conversation, the current BrowserSession's context points at that exact
+  draft id, and the payload exists in that conversation's server-held
+  transcript. Modified drafts move the pointer; confirmation clears it;
+  replay relies only on `AgentDraftConfirmation`. The upgrade migration
+  invalidates pre-existing unconfirmed pending-draft authority; HR must
+  re-analyse the vacancy before confirmation.
+- Transcript storage is bounded (`MAX_PERSISTED_AGENT_TURNS = 100`) and
+  separate from the model context window (`agent_max_context_turns`, default
+  8). Stored history is never sent to Ollama as a whole; no new network path
+  exists and no transcript/candidate content reaches any external service.
+- Conversation titles are a closed server-owned `title_kind` enum — never raw
+  message, query, JD, candidate name/contact, or CV text, and never
+  model-generated. Raw conversation UUIDs are not HR-facing text (hidden form
+  field / selector parameter only).
+- Audit metadata for `agent.conversation.created`/`opened`/`access_rejected`
+  is limited to `conversation_id`, `title_kind`, and `reason_code`.
+
 ## Local-only Ollama operating contract
 
 Two distinct guarantees are in play, and they must not be conflated —

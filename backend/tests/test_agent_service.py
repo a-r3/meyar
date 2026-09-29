@@ -9,6 +9,7 @@ from fakes import FakeLLMProvider
 from pydantic import ValidationError
 from search_helpers import (
     active_result_set_candidate_ids,
+    open_test_conversation,
     seed_active_result_set,
     seed_candidate_with_profile,
 )
@@ -25,7 +26,6 @@ from meyar.agent.service import run_agent_turn
 from meyar.llm.provider import ModelTimeoutError, ModelUnavailableError
 from meyar.models.agent_result_set import AgentResultSet, AgentResultSetMember
 from meyar.search.schemas import EmbeddingSearchConfig
-from meyar.services.agent_conversation_repo import get_or_create_conversation
 from meyar.services.browser_session_repo import create_browser_session
 
 AS_OF_DATE = date(2026, 1, 1)
@@ -142,12 +142,13 @@ async def test_agent_owner_compound_search_preserves_filters_and_returns_positiv
             ),
         ]
     )
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
     result = await _run(
         db_session,
         llm,
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
         message=OWNER_COMPOUND_QUERY,
     )
     search = result.tool_results[0].search
@@ -182,10 +183,14 @@ async def _new_conversation(db_session: AsyncSession, tenant, user, membership):
         db_session, user_id=user.id, tenant_membership_id=membership.id, ttl_hours=8
     )
     await db_session.flush()
-    conversation = await get_or_create_conversation(
-        db_session, tenant_id=tenant.id, browser_session_id=session.id
+    conversation, context = await open_test_conversation(
+        db_session,
+        tenant_id=tenant.id,
+        user_id=user.id,
+        membership_id=membership.id,
+        browser_session_id=session.id,
     )
-    return conversation
+    return conversation, context
 
 
 async def _run(
@@ -194,6 +199,7 @@ async def _run(
     *,
     tenant_id,
     conversation,
+    session_context,
     message,
     max_tool_calls=3,
     max_context_turns=8,
@@ -203,6 +209,7 @@ async def _run(
         llm,
         tenant_id=tenant_id,
         conversation=conversation,
+        session_context=session_context,
         user_message=message,
         as_of_date=AS_OF_DATE,
         embedding_config=_embedding_config(),
@@ -314,12 +321,13 @@ async def test_search_candidates_tool_is_tenant_scoped_and_evidence_grounded(
             ),
         ],
     )
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
     result = await _run(
         db_session,
         llm,
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
         message="Python bilən namizədləri göstər",
     )
     assert result.tool_call_count == 1
@@ -335,9 +343,11 @@ async def test_search_candidates_tool_is_tenant_scoped_and_evidence_grounded(
     assert "full_name" not in dumped and "email" not in dumped and "phone" not in dumped
 
     await db_session.refresh(conversation)
-    assert conversation.active_result_set_id is not None
+
+    await db_session.refresh(context)
+    assert context.active_result_set_id is not None
     assert await active_result_set_candidate_ids(
-        db_session, result_set_id=conversation.active_result_set_id
+        db_session, result_set_id=context.active_result_set_id
     ) == [str(candidate.id)]
 
 
@@ -368,12 +378,13 @@ async def test_cross_tenant_search_result_never_leaks(
             ),
         ],
     )
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
     result = await _run(
         db_session,
         llm,
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
         message="Python bilən namizədləri göstər",
     )
     search = result.tool_results[0].search
@@ -410,19 +421,21 @@ async def test_multi_turn_ordinal_reference_resolves_server_side(
             ),
         ],
     )
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
     search_result = await _run(
         db_session,
         llm,
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
         message="Python bilən namizədləri göstər",
     )
     ordered_ids = sorted([first.id, second.id], key=str)
     await db_session.refresh(conversation)
-    assert conversation.active_result_set_id is not None
+    await db_session.refresh(context)
+    assert context.active_result_set_id is not None
     assert await active_result_set_candidate_ids(
-        db_session, result_set_id=conversation.active_result_set_id
+        db_session, result_set_id=context.active_result_set_id
     ) == [str(cid) for cid in ordered_ids]
 
     llm2 = FakeLLMProvider(
@@ -433,6 +446,7 @@ async def test_multi_turn_ordinal_reference_resolves_server_side(
         llm2,
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
         message="birincinin təcrübəsini izah et",
     )
     assert profile_turn.outcome == AgentTurnOutcome.ANSWERED or profile_turn.tool_results
@@ -455,12 +469,12 @@ async def test_evidence_tool_never_fabricates_and_is_grounded(
     )
     await db_session.commit()
 
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
     await seed_active_result_set(
         db_session,
         tenant_id=tenant.id,
-        browser_session_id=conversation.browser_session_id,
-        conversation=conversation,
+        browser_session_id=context.browser_session_id,
+        session_context=context,
         candidate_ids=[candidate.id],
     )
 
@@ -474,6 +488,7 @@ async def test_evidence_tool_never_fabricates_and_is_grounded(
         llm,
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
         message="Python bacarığını sübut et",
     )
     evidence = result.tool_results[0].evidence
@@ -488,13 +503,14 @@ async def test_unknown_candidate_ref_is_never_silently_accepted(
 ) -> None:
     tenant, user, _password, membership = tenant_and_user
     await db_session.commit()
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
     # No prior search this conversation — candidate_ref=1 cannot resolve.
     llm = FakeLLMProvider(
         agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1)
     )
     result = await _run(
-        db_session, llm, tenant_id=tenant.id, conversation=conversation, message="üçüncünü aç"
+        db_session, llm, tenant_id=tenant.id, conversation=conversation,
+            session_context=context, message="üçüncünü aç"
     )
     assert result.outcome == AgentTurnOutcome.CANDIDATE_REF_NOT_FOUND
     assert result.tool_results[0].profile.found is False
@@ -512,7 +528,7 @@ async def test_candidate_ref_from_another_tenants_conversation_cannot_resolve(
     )
     await db_session.commit()
 
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
     # Even if this tenant's own conversation somehow pointed its
     # active_result_set_id at a real AgentResultSet row that actually
     # belongs to another tenant (it never would via normal search, since
@@ -525,7 +541,7 @@ async def test_candidate_ref_from_another_tenants_conversation_cannot_resolve(
     from meyar.services.browser_session_repo import get_browser_session_by_id
 
     session = await get_browser_session_by_id(
-        db_session, browser_session_id=conversation.browser_session_id
+        db_session, browser_session_id=context.browser_session_id
     )
     assert session is not None
     foreign_fingerprint = await compute_corpus_fingerprint(
@@ -533,8 +549,9 @@ async def test_candidate_ref_from_another_tenants_conversation_cannot_resolve(
     )
     foreign_result_set = AgentResultSet(
         tenant_id=foreign_tenant.id,
-        browser_session_id=conversation.browser_session_id,
-        context_epoch=conversation.context_epoch,
+        browser_session_id=context.browser_session_id,
+        conversation_id=context.conversation_id,
+        context_epoch=context.context_epoch,
         request_sha256="0" * 64,
         canonical_search_request=CandidateSearchRequest(
             mode=SearchMode.STRUCTURED_ONLY
@@ -565,14 +582,15 @@ async def test_candidate_ref_from_another_tenants_conversation_cannot_resolve(
             semantic_score=None,
         )
     )
-    conversation.active_result_set_id = foreign_result_set.id
+    context.active_result_set_id = foreign_result_set.id
     await db_session.flush()
 
     llm = FakeLLMProvider(
         agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1)
     )
     result = await _run(
-        db_session, llm, tenant_id=tenant.id, conversation=conversation, message="birincini aç"
+        db_session, llm, tenant_id=tenant.id, conversation=conversation,
+            session_context=context, message="birincini aç"
     )
     assert result.outcome == AgentTurnOutcome.CANDIDATE_REF_NOT_FOUND
 
@@ -586,24 +604,25 @@ async def test_two_browser_sessions_never_share_conversation_state(
     )
     await db_session.commit()
 
-    conversation_a = await _new_conversation(db_session, tenant, user, membership)
+    conversation_a, context_a = await _new_conversation(db_session, tenant, user, membership)
     await seed_active_result_set(
         db_session,
         tenant_id=tenant.id,
-        browser_session_id=conversation_a.browser_session_id,
-        conversation=conversation_a,
+        browser_session_id=context_a.browser_session_id,
+        session_context=context_a,
         candidate_ids=[candidate.id],
     )
 
-    conversation_b = await _new_conversation(db_session, tenant, user, membership)
+    conversation_b, context_b = await _new_conversation(db_session, tenant, user, membership)
     assert conversation_b.id != conversation_a.id
-    assert conversation_b.active_result_set_id is None
+    assert context_b.active_result_set_id is None
 
     llm = FakeLLMProvider(
         agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1)
     )
     result = await _run(
-        db_session, llm, tenant_id=tenant.id, conversation=conversation_b, message="birincini aç"
+        db_session, llm, tenant_id=tenant.id, conversation=conversation_b,
+            session_context=context_b, message="birincini aç"
     )
     assert result.outcome == AgentTurnOutcome.CANDIDATE_REF_NOT_FOUND
 
@@ -613,7 +632,7 @@ async def test_bounded_tool_call_loop_stops_at_configured_maximum(
 ) -> None:
     tenant, user, _password, membership = tenant_and_user
     await db_session.commit()
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
 
     # A misbehaving/adversarial model keeps returning TOOL_CALL decisions
     # forever — the loop must still stop at max_tool_calls, never spin
@@ -639,6 +658,7 @@ async def test_bounded_tool_call_loop_stops_at_configured_maximum(
         llm,
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
         # Model-routed on purpose: this exercises the orchestration loop's
         # own bound, not the server-forced single search.
         message="NoMatch haqqında məlumat ver",
@@ -660,7 +680,7 @@ async def test_repeated_identical_search_finalizes_instead_of_looping(
     must finalize on the existing results instead of repeating the work."""
     tenant, user, _password, membership = tenant_and_user
     await db_session.commit()
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
 
     from meyar.search.planner_schemas import PlannerDraft
     from meyar.search.schemas import RequiredFilters
@@ -680,6 +700,7 @@ async def test_repeated_identical_search_finalizes_instead_of_looping(
         llm,
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
         message="Python bilən namizədləri göstər",
         max_tool_calls=3,
     )
@@ -693,10 +714,11 @@ async def test_model_timeout_is_a_safe_typed_failure_not_an_exception(
 ) -> None:
     tenant, user, _password, membership = tenant_and_user
     await db_session.commit()
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
     llm = FakeLLMProvider(agent_error=ModelTimeoutError("simulated timeout"))
     result = await _run(
-        db_session, llm, tenant_id=tenant.id, conversation=conversation, message="salam"
+        db_session, llm, tenant_id=tenant.id, conversation=conversation,
+            session_context=context, message="salam"
     )
     assert result.outcome == AgentTurnOutcome.AGENT_PROVIDER_FAILURE
 
@@ -706,10 +728,11 @@ async def test_model_unavailable_is_a_safe_typed_failure(
 ) -> None:
     tenant, user, _password, membership = tenant_and_user
     await db_session.commit()
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
     llm = FakeLLMProvider(agent_error=ModelUnavailableError("simulated outage"))
     result = await _run(
-        db_session, llm, tenant_id=tenant.id, conversation=conversation, message="salam"
+        db_session, llm, tenant_id=tenant.id, conversation=conversation,
+            session_context=context, message="salam"
     )
     assert result.outcome == AgentTurnOutcome.AGENT_PROVIDER_FAILURE
 
@@ -719,7 +742,7 @@ async def test_zero_tool_final_answer_uses_only_server_owned_copy(
 ) -> None:
     tenant, user, _password, membership = tenant_and_user
     await db_session.commit()
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
     llm = FakeLLMProvider(
         agent_decision=AgentDecision(
             action=AgentActionType.FINAL_ANSWER,
@@ -728,7 +751,8 @@ async def test_zero_tool_final_answer_uses_only_server_owned_copy(
     )
 
     result = await _run(
-        db_session, llm, tenant_id=tenant.id, conversation=conversation, message="salam"
+        db_session, llm, tenant_id=tenant.id, conversation=conversation,
+            session_context=context, message="salam"
     )
 
     assert result.tool_call_count == 0
@@ -738,6 +762,7 @@ async def test_zero_tool_final_answer_uses_only_server_owned_copy(
         "kömək edə bilərəm."
     )
     await db_session.refresh(conversation)
+    await db_session.refresh(context)
     assert conversation.turns[-1]["text"] == result.message
     assert conversation.turns[-1]["text_authority"] == "SERVER_VALIDATED"
 
@@ -747,7 +772,7 @@ async def test_hiring_request_uses_server_owned_human_decision_copy(
 ) -> None:
     tenant, user, _password, membership = tenant_and_user
     await db_session.commit()
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
     llm = FakeLLMProvider(
         agent_decision=AgentDecision(
             action=AgentActionType.CLARIFY,
@@ -760,6 +785,7 @@ async def test_hiring_request_uses_server_owned_human_decision_copy(
         llm,
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
         message="Who should be hired?",
     )
 
@@ -775,7 +801,7 @@ async def test_repeated_schema_invalid_output_is_a_safe_typed_failure(
 ) -> None:
     tenant, user, _password, membership = tenant_and_user
     await db_session.commit()
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
     llm = FakeLLMProvider(agent_fail_first_n_calls=99, agent_decision=None)
     # Give it a decisions list so the fake doesn't assert-fail on success path.
     llm._agent_decisions = [
@@ -784,7 +810,8 @@ async def test_repeated_schema_invalid_output_is_a_safe_typed_failure(
         )
     ]
     result = await _run(
-        db_session, llm, tenant_id=tenant.id, conversation=conversation, message="salam"
+        db_session, llm, tenant_id=tenant.id, conversation=conversation,
+            session_context=context, message="salam"
     )
     assert result.outcome == AgentTurnOutcome.MALFORMED_MODEL_OUTPUT
 
@@ -816,12 +843,13 @@ async def test_skill_specific_duration_is_never_silently_weakened(
             ),
         ],
     )
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
     result = await _run(
         db_session,
         llm,
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
         message="5 il Java təcrübəsi olanları göstər",
     )
     search = result.tool_results[0].search
@@ -857,12 +885,13 @@ async def test_prohibited_attribute_in_search_query_is_rejected(
             ),
         ],
     )
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
     result = await _run(
         db_session,
         llm,
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
         message="qadın namizədləri göstər",
     )
     search = result.tool_results[0].search
@@ -928,12 +957,13 @@ async def test_successful_search_with_failed_followup_framing_is_not_fatal(
         ),
         agent_fail_after_n_calls=1,  # decision #1 (the search) succeeds; every call after fails
     )
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
     result = await _run(
         db_session,
         llm,
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
         message="Python bilən namizədləri göstər",
     )
     assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
@@ -973,12 +1003,13 @@ async def test_successful_search_with_followup_provider_outage_is_not_fatal(
         agent_fail_after_n_calls=1,
         agent_error=ModelTimeoutError("simulated follow-up timeout"),
     )
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
     result = await _run(
         db_session,
         llm,
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
         message="Python bilən namizədləri göstər",
     )
     assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
@@ -995,7 +1026,7 @@ async def test_no_result_model_failure_stays_a_safe_failure_with_no_tool_results
     shapes."""
     tenant, user, _password, membership = tenant_and_user
     await db_session.commit()
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
 
     llm_malformed = FakeLLMProvider(agent_fail_first_n_calls=99, agent_decision=None)
     llm_malformed._agent_decisions = [
@@ -1004,15 +1035,17 @@ async def test_no_result_model_failure_stays_a_safe_failure_with_no_tool_results
         )
     ]
     result = await _run(
-        db_session, llm_malformed, tenant_id=tenant.id, conversation=conversation, message="salam"
+        db_session, llm_malformed, tenant_id=tenant.id, conversation=conversation,
+            session_context=context, message="salam"
     )
     assert result.outcome == AgentTurnOutcome.MALFORMED_MODEL_OUTPUT
     assert result.tool_results == []
 
-    conversation2 = await _new_conversation(db_session, tenant, user, membership)
+    conversation2, context2 = await _new_conversation(db_session, tenant, user, membership)
     llm_outage = FakeLLMProvider(agent_error=ModelUnavailableError("simulated outage"))
     result2 = await _run(
-        db_session, llm_outage, tenant_id=tenant.id, conversation=conversation2, message="salam"
+        db_session, llm_outage, tenant_id=tenant.id, conversation=conversation2,
+            session_context=context2, message="salam"
     )
     assert result2.outcome == AgentTurnOutcome.AGENT_PROVIDER_FAILURE
     assert result2.tool_results == []
@@ -1043,12 +1076,12 @@ async def test_get_candidate_profile_success_has_no_empty_turn_outcome(
         db_session, tenant_id=tenant.id, profile_content=_profile("Python")
     )
     await db_session.commit()
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
     await seed_active_result_set(
         db_session,
         tenant_id=tenant.id,
-        browser_session_id=conversation.browser_session_id,
-        conversation=conversation,
+        browser_session_id=context.browser_session_id,
+        session_context=context,
         candidate_ids=[candidate.id],
     )
 
@@ -1056,7 +1089,8 @@ async def test_get_candidate_profile_success_has_no_empty_turn_outcome(
         agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1)
     )
     result = await _run(
-        db_session, llm, tenant_id=tenant.id, conversation=conversation, message="birincini aç"
+        db_session, llm, tenant_id=tenant.id, conversation=conversation,
+            session_context=context, message="birincini aç"
     )
     assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
     assert result.message is None
@@ -1084,19 +1118,21 @@ async def test_ordinal_reference_still_resolves_after_followup_framing_failure(
         ),
         agent_fail_after_n_calls=1,
     )
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
     first_result = await _run(
         db_session,
         llm_search,
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
         message="Python bilən namizədləri göstər",
     )
     assert first_result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
     await db_session.refresh(conversation)
-    assert conversation.active_result_set_id is not None
+    await db_session.refresh(context)
+    assert context.active_result_set_id is not None
     assert await active_result_set_candidate_ids(
-        db_session, result_set_id=conversation.active_result_set_id
+        db_session, result_set_id=context.active_result_set_id
     ) == [str(candidate.id)]
 
     llm_profile = FakeLLMProvider(
@@ -1107,6 +1143,7 @@ async def test_ordinal_reference_still_resolves_after_followup_framing_failure(
         llm_profile,
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
         message="birincini aç",
     )
     assert second_result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
@@ -1246,12 +1283,12 @@ async def test_grounded_experience_explanation_uses_only_supplied_facts(
         db_session, tenant_id=tenant.id, profile_content=_profile("Python", "SQL")
     )
     await db_session.commit()
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
     await seed_active_result_set(
         db_session,
         tenant_id=tenant.id,
-        browser_session_id=conversation.browser_session_id,
-        conversation=conversation,
+        browser_session_id=context.browser_session_id,
+        session_context=context,
         candidate_ids=[candidate.id],
     )
 
@@ -1264,6 +1301,7 @@ async def test_grounded_experience_explanation_uses_only_supplied_facts(
         llm,
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
         message="birincinin təcrübəsini izah et",
     )
     assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
@@ -1288,12 +1326,12 @@ async def test_grounded_selection_citing_unknown_fact_id_falls_back_safely(
         db_session, tenant_id=tenant.id, profile_content=_profile("Python")
     )
     await db_session.commit()
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
     await seed_active_result_set(
         db_session,
         tenant_id=tenant.id,
-        browser_session_id=conversation.browser_session_id,
-        conversation=conversation,
+        browser_session_id=context.browser_session_id,
+        session_context=context,
         candidate_ids=[candidate.id],
     )
 
@@ -1306,6 +1344,7 @@ async def test_grounded_selection_citing_unknown_fact_id_falls_back_safely(
         llm,
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
         message="birincinin təcrübəsini izah et",
     )
     assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
@@ -1323,12 +1362,12 @@ async def test_grounded_synthesis_failure_falls_back_to_deterministic_message(
         db_session, tenant_id=tenant.id, profile_content=_profile("Python")
     )
     await db_session.commit()
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
     await seed_active_result_set(
         db_session,
         tenant_id=tenant.id,
-        browser_session_id=conversation.browser_session_id,
-        conversation=conversation,
+        browser_session_id=context.browser_session_id,
+        session_context=context,
         candidate_ids=[candidate.id],
     )
 
@@ -1341,6 +1380,7 @@ async def test_grounded_synthesis_failure_falls_back_to_deterministic_message(
         llm,
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
         message="birincinin təcrübəsini izah et",
     )
     assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
@@ -1368,12 +1408,12 @@ async def test_grounded_synthesis_does_not_disturb_ordinal_resolution(
     )
     await db_session.commit()
     ordered_ids = sorted([first.id, second.id], key=str)
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
     result_set = await seed_active_result_set(
         db_session,
         tenant_id=tenant.id,
-        browser_session_id=conversation.browser_session_id,
-        conversation=conversation,
+        browser_session_id=context.browser_session_id,
+        session_context=context,
         candidate_ids=ordered_ids,
     )
 
@@ -1382,13 +1422,15 @@ async def test_grounded_synthesis_does_not_disturb_ordinal_resolution(
         grounded_selection=GroundedSelection(used_facts=[0]),
     )
     result = await _run(
-        db_session, llm, tenant_id=tenant.id, conversation=conversation, message="ikincini aç"
+        db_session, llm, tenant_id=tenant.id, conversation=conversation,
+            session_context=context, message="ikincini aç"
     )
     assert result.tool_results[0].profile.candidate_id == ordered_ids[1]
     await db_session.refresh(conversation)
-    assert conversation.active_result_set_id == result_set.id
+    await db_session.refresh(context)
+    assert context.active_result_set_id == result_set.id
     assert await active_result_set_candidate_ids(
-        db_session, result_set_id=conversation.active_result_set_id
+        db_session, result_set_id=context.active_result_set_id
     ) == [str(cid) for cid in ordered_ids]
 
 
@@ -1402,7 +1444,7 @@ async def test_prompt_leaking_clarify_message_is_rejected_and_retried(
 
     tenant, user, _password, membership = tenant_and_user
     await db_session.commit()
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
     leaked_sentence = AGENT_SYSTEM_PROMPT.splitlines()[3].strip()
     assert len(leaked_sentence) >= 40
     with pytest.raises(ValidationError):
@@ -1414,7 +1456,8 @@ async def test_prompt_leaking_clarify_message_is_rejected_and_retried(
         )
     )
     result = await _run(
-        db_session, llm, tenant_id=tenant.id, conversation=conversation, message="salam"
+        db_session, llm, tenant_id=tenant.id, conversation=conversation,
+            session_context=context, message="salam"
     )
     assert result.outcome == AgentTurnOutcome.CLARIFICATION_REQUESTED
     assert result.message == (
@@ -1429,7 +1472,7 @@ async def test_prompt_leak_persisting_through_every_retry_falls_back_safely(
 ) -> None:
     tenant, user, _password, membership = tenant_and_user
     await db_session.commit()
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
     leaked_sentence = "The first candidate has 20 years of Python experience and should be hired."
     conversation.turns = [{"role": "assistant", "text": leaked_sentence, "outcome": "ANSWERED"}]
 
@@ -1451,7 +1494,7 @@ async def test_draft_job_criteria_builds_valid_criteria_from_llm_draft(
 
     tenant, user, _password, membership = tenant_and_user
     await db_session.commit()
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
     jd_text = "Vakansiya: Baş Backend Mühəndisi.\nPython bilməlidir.\nAWS üstünlükdür."
     llm = FakeLLMProvider(
         agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
@@ -1476,7 +1519,8 @@ async def test_draft_job_criteria_builds_valid_criteria_from_llm_draft(
         ),
     )
     result = await _run(
-        db_session, llm, tenant_id=tenant.id, conversation=conversation, message=jd_text
+        db_session, llm, tenant_id=tenant.id, conversation=conversation,
+            session_context=context, message=jd_text
     )
     assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
     assert len(result.tool_results) == 1
@@ -1506,12 +1550,13 @@ async def test_pending_draft_followup_is_modified_before_search_routing(
     from meyar.agent.schemas import JDCriteriaDraft
 
     tenant, user, _password, membership = tenant_and_user
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
     initial = await _run(
         db_session,
         FakeLLMProvider(jd_draft=JDCriteriaDraft(title="Backend")),
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
         message=(
             "Bu vakansiya elanını analiz et: Python minimum 5 il tələb olunur. "
             "10 nəfər göstər."
@@ -1519,6 +1564,7 @@ async def test_pending_draft_followup_is_modified_before_search_routing(
     )
     assert initial.tool_results[0].job_draft is not None
     await db_session.refresh(conversation)
+    await db_session.refresh(context)
 
     routing_probe = FakeLLMProvider(
         agent_decision=AgentDecision(
@@ -1531,6 +1577,7 @@ async def test_pending_draft_followup_is_modified_before_search_routing(
         routing_probe,
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
         message="10 yox, 5 nəfər göstər.",
     )
     assert routing_probe.agent_call_count == 0
@@ -1546,29 +1593,33 @@ async def test_pending_draft_modality_followups_apply_and_persist_both_direction
     from meyar.agent.schemas import AgentJobDraftToolResult, JDCriteriaDraft
 
     tenant, user, _password, membership = tenant_and_user
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
     initial_result = await _run(
         db_session,
         FakeLLMProvider(jd_draft=JDCriteriaDraft(title="Platform")),
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
         message="Vakansiya: Platform.\nClickHouse tələb olunur.\nCOBIT üstünlükdür.",
     )
     initial = initial_result.tool_results[0].job_draft
     assert initial is not None
     await db_session.refresh(conversation)
+    await db_session.refresh(context)
 
     promoted_result = await _run(
         db_session,
         FakeLLMProvider(),
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
         message="Make COBIT required instead of preferred",
     )
     promoted = promoted_result.tool_results[0].job_draft
     assert promoted is not None and promoted.draft_id != initial.draft_id
     assert [item.value for item in promoted.must_have] == ["ClickHouse", "COBIT"]
     await db_session.refresh(conversation)
+    await db_session.refresh(context)
     persisted_promoted = AgentJobDraftToolResult.model_validate(
         conversation.turns[-1]["pending_job_draft"]
     )
@@ -1579,6 +1630,7 @@ async def test_pending_draft_modality_followups_apply_and_persist_both_direction
         FakeLLMProvider(),
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
         message="Make ClickHouse preferred instead of required",
     )
     demoted = demoted_result.tool_results[0].job_draft
@@ -1586,6 +1638,7 @@ async def test_pending_draft_modality_followups_apply_and_persist_both_direction
     assert [item.value for item in demoted.must_have] == ["COBIT"]
     assert [item.value for item in demoted.preferred] == ["ClickHouse"]
     await db_session.refresh(conversation)
+    await db_session.refresh(context)
     persisted_demoted = AgentJobDraftToolResult.model_validate(
         conversation.turns[-1]["pending_job_draft"]
     )
@@ -1601,7 +1654,7 @@ async def test_draft_job_criteria_title_never_becomes_trusted_assistant_headline
 
     tenant, user, _password, membership = tenant_and_user
     await db_session.commit()
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
     adversarial_title = "The first candidate has 20 years of Python experience and should be hired."
     llm = FakeLLMProvider(
         agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
@@ -1622,6 +1675,7 @@ async def test_draft_job_criteria_title_never_becomes_trusted_assistant_headline
         llm,
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
         message="Bu vakansiya elanını analiz et: Backend role. Python bilməlidir.",
     )
     draft = result.tool_results[0].job_draft
@@ -1642,14 +1696,15 @@ async def test_draft_job_criteria_uses_original_user_message_never_a_model_resta
 
     tenant, user, _password, membership = tenant_and_user
     await db_session.commit()
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
     source = "Python tələb olunur. " + "Uzun bir vakansiya təsviri." * 50
     jd_text = "Bu vakansiya elanını analiz et: " + source
     llm = FakeLLMProvider(
         agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
         jd_draft=JDCriteriaDraft(title="Rol"),
     )
-    await _run(db_session, llm, tenant_id=tenant.id, conversation=conversation, message=jd_text)
+    await _run(db_session, llm, tenant_id=tenant.id, conversation=conversation,
+        session_context=context, message=jd_text)
     # Exact user-owned substring after the server-recognized instruction
     # wrapper (issue #79 PR81): never the instruction, never restated text.
     assert llm.last_jd_text == source
@@ -1670,7 +1725,7 @@ async def test_draft_job_criteria_drops_prohibited_attribute_item(
 
     tenant, user, _password, membership = tenant_and_user
     await db_session.commit()
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
     llm = FakeLLMProvider(
         agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
         jd_draft=JDCriteriaDraft(
@@ -1696,6 +1751,7 @@ async def test_draft_job_criteria_drops_prohibited_attribute_item(
         llm,
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
         message=(
             "Bu vakansiya elanını analiz et: Rol üçün namizəd kişi olmalıdır. "
             "Python bilməlidir."
@@ -1718,7 +1774,7 @@ async def test_nationality_misclassified_as_language_never_reaches_db_backed_dra
     from meyar.schemas.criteria import CriterionKind
 
     tenant, user, _password, membership = tenant_and_user
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
     source = (
         "Bu vakansiya elanını analiz et: Namizəd Azərbaycan vətəndaşı olmalıdır."
     )
@@ -1741,6 +1797,7 @@ async def test_nationality_misclassified_as_language_never_reaches_db_backed_dra
         llm,
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
         message=source,
     )
     draft = result.tool_results[0].job_draft
@@ -1761,7 +1818,7 @@ async def test_draft_job_criteria_supports_named_experience_without_inventing_du
 
     tenant, user, _password, membership = tenant_and_user
     await db_session.commit()
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
     llm = FakeLLMProvider(
         agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
         jd_draft=JDCriteriaDraft(
@@ -1788,6 +1845,7 @@ async def test_draft_job_criteria_supports_named_experience_without_inventing_du
         llm,
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
         message=(
             "Bu vakansiya elanını analiz et:\nPython bilməlidir. "
             "Backend təcrübəsi tələb olunur."
@@ -1825,7 +1883,7 @@ async def test_draft_job_criteria_other_kind_is_unsupported_never_scored(
 
     tenant, user, _password, membership = tenant_and_user
     await db_session.commit()
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
     llm = FakeLLMProvider(
         agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
         jd_draft=JDCriteriaDraft(
@@ -1853,6 +1911,7 @@ async def test_draft_job_criteria_other_kind_is_unsupported_never_scored(
         llm,
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
         message=(
             "Bu vakansiya elanını analiz et:\nPython bilməlidir. "
             "Namizəd ezamiyyətə hazır olması üstünlükdür."
@@ -1912,7 +1971,7 @@ async def test_draft_job_criteria_drops_fabricated_unrelated_requirement(
 
     tenant, user, _password, membership = tenant_and_user
     await db_session.commit()
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
     jd_text = (
         "Bu vakansiya elanını analiz et: Kredit Analitiki. "
         "Namizəd ezamiyyətə getməyə hazır olmalıdır."
@@ -1953,7 +2012,8 @@ async def test_draft_job_criteria_drops_fabricated_unrelated_requirement(
         ),
     )
     result = await _run(
-        db_session, llm, tenant_id=tenant.id, conversation=conversation, message=jd_text
+        db_session, llm, tenant_id=tenant.id, conversation=conversation,
+            session_context=context, message=jd_text
     )
     draft = result.tool_results[0].job_draft
     assert draft is not None
@@ -1987,7 +2047,7 @@ async def test_server_confirmed_draft_job_criteria_never_calls_the_routing_model
 
     tenant, user, _password, membership = tenant_and_user
     await db_session.commit()
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
     jd_text = "Bu vakansiya elanını analiz et: Backend. Python bilməlidir."
     llm = FakeLLMProvider(
         jd_draft=JDCriteriaDraft(
@@ -2007,6 +2067,7 @@ async def test_server_confirmed_draft_job_criteria_never_calls_the_routing_model
         llm,
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
         message=jd_text,
     )
     assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
@@ -2025,7 +2086,7 @@ async def test_server_confirmed_draft_job_criteria_cannot_become_a_search(
 
     tenant, user, _password, membership = tenant_and_user
     await db_session.commit()
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
     jd_text = "Vakansiya: Backend Mühəndisi. Python bilməlidir."
     llm = FakeLLMProvider(
         agent_decision=AgentDecision(
@@ -2048,6 +2109,7 @@ async def test_server_confirmed_draft_job_criteria_cannot_become_a_search(
         llm,
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
         message=jd_text,
     )
     assert result.tool_results[0].tool_name == AgentActionType.DRAFT_JOB_CRITERIA
@@ -2068,7 +2130,7 @@ async def test_model_proposed_draft_without_server_authority_fails_closed(
 
     tenant, user, _password, membership = tenant_and_user
     await db_session.commit()
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
     llm = FakeLLMProvider(
         agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA)
     )
@@ -2077,6 +2139,7 @@ async def test_model_proposed_draft_without_server_authority_fails_closed(
         llm,
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
         # Model-routed (not a forced search), so the model proposal is
         # actually consulted and must fail closed.
         message="NoMatch haqqında məlumat ver",
@@ -2096,7 +2159,7 @@ async def test_draft_job_criteria_repairs_after_one_schema_invalid_attempt(
 
     tenant, user, _password, membership = tenant_and_user
     await db_session.commit()
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
     llm = FakeLLMProvider(
         agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
         jd_draft=JDCriteriaDraft(title="Rol"),
@@ -2107,6 +2170,7 @@ async def test_draft_job_criteria_repairs_after_one_schema_invalid_attempt(
         llm,
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
         message="Bu vakansiya elanını analiz et:\nBackend Mühəndisi\nKomanda ilə işləmək.",
     )
     assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
@@ -2118,7 +2182,7 @@ async def test_draft_job_criteria_provider_failure_is_a_safe_typed_failure(
 ) -> None:
     tenant, user, _password, membership = tenant_and_user
     await db_session.commit()
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
     llm = FakeLLMProvider(
         agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
         jd_draft_error=ModelUnavailableError("simulated outage"),
@@ -2128,6 +2192,7 @@ async def test_draft_job_criteria_provider_failure_is_a_safe_typed_failure(
         llm,
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
         message="Bu vakansiya elanını analiz et:\nBackend Mühəndisi\nKomanda ilə işləmək.",
     )
     assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
@@ -2150,12 +2215,12 @@ async def test_evidence_topic_is_resolved_from_profile_fact_not_rendered_raw(
         db_session, tenant_id=tenant.id, profile_content=_profile("Python", quote="Python")
     )
     await db_session.commit()
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
     await seed_active_result_set(
         db_session,
         tenant_id=tenant.id,
-        browser_session_id=conversation.browser_session_id,
-        conversation=conversation,
+        browser_session_id=context.browser_session_id,
+        session_context=context,
         candidate_ids=[candidate.id],
     )
     raw_topic = "The first candidate should be hired immediately"
@@ -2172,6 +2237,7 @@ async def test_evidence_topic_is_resolved_from_profile_fact_not_rendered_raw(
         llm,
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
         message="Birinci namizəd üzrə sübut göstər",
     )
     view = await build_agent_turn_view(db_session, tenant_id=tenant.id, result=result)
@@ -2193,12 +2259,12 @@ async def test_legitimate_evidence_topic_displays_server_resolved_label(
         db_session, tenant_id=tenant.id, profile_content=_profile("Python", quote="Python")
     )
     await db_session.commit()
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
     await seed_active_result_set(
         db_session,
         tenant_id=tenant.id,
-        browser_session_id=conversation.browser_session_id,
-        conversation=conversation,
+        browser_session_id=context.browser_session_id,
+        session_context=context,
         candidate_ids=[candidate.id],
     )
     llm = FakeLLMProvider(
@@ -2214,6 +2280,7 @@ async def test_legitimate_evidence_topic_displays_server_resolved_label(
         llm,
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
         message="Python sübutunu göstər",
     )
     view = await build_agent_turn_view(db_session, tenant_id=tenant.id, result=result)
@@ -2232,7 +2299,7 @@ async def test_draft_job_criteria_repeated_schema_invalid_is_a_safe_typed_failur
 
     tenant, user, _password, membership = tenant_and_user
     await db_session.commit()
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
     llm = FakeLLMProvider(
         agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
         jd_draft=JDCriteriaDraft(title="unused"),
@@ -2243,6 +2310,7 @@ async def test_draft_job_criteria_repeated_schema_invalid_is_a_safe_typed_failur
         llm,
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
         message="Bu vakansiya elanını analiz et:\nBackend Mühəndisi\nKomanda ilə işləmək.",
     )
     assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
@@ -2289,7 +2357,7 @@ async def test_explicit_search_is_server_routed_despite_wrong_orchestrator(
 
     tenant, user, _password, membership = tenant_and_user
     await db_session.commit()
-    conversation = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
     llm = FakeLLMProvider(
         planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
         agent_decision=AgentDecision(
@@ -2297,7 +2365,8 @@ async def test_explicit_search_is_server_routed_despite_wrong_orchestrator(
         ),
     )
     result = await _run(
-        db_session, llm, tenant_id=tenant.id, conversation=conversation, message=message
+        db_session, llm, tenant_id=tenant.id, conversation=conversation,
+            session_context=context, message=message
     )
     assert llm.agent_call_count == 0
     assert llm.jd_draft_call_count == 0

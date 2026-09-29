@@ -2,15 +2,38 @@
 
 ## Current phase
 
-**Current authority correction (issue #79 working baseline):** accepted
-`main` is `f89bd4b137ad4b79f465c31eadbd46aa8648eb61`. Issue #49 is CLOSED.
-Issue #79 is OPEN under milestone 9 and is being implemented on
-`feat/79-unified-hr-composer-routing`; it is not accepted until independent
-review and an owner merge. Issue #80 depends on #79 and remains OPEN and
-untouched. Issue #50 remains OPEN and separate. Issues #35, #36, and #46
-remain OPEN. The older phase narrative below is retained as historical
-delivery context where its individual PR facts still apply; it is not a
-replacement for this live correction.
+**Current authority correction (issue #80 PR80-1 working baseline):**
+accepted `main` is `a7de84e4ee1c893309d15c74800cd758f4843fdb` (PR #81,
+issue #79 CLOSED/completed). Issue #80 is OPEN; PR80-1 ("Durable
+Conversation Authority Foundation") is implemented on
+`feat/80-durable-conversation-authority` and is not accepted until
+independent review and an owner merge. PR80-2 (visual workspace/sidebar,
+mobile drawer) is NOT implemented and not started. Issue #50 remains OPEN and
+untouched. Issues #35, #36, and #46 remain OPEN and untouched.
+
+PR80-1 adopts D-086: BrowserSession = authentication transport, NOT durable
+conversation owner. `AgentConversation` = durable tenant/user/membership-owned
+history; `AgentConversationSessionContext` = BrowserSession-bound live
+ResultSet/pending-action authority. Historical transcript is NOT ResultSet or
+mutation authority, and a new BrowserSession never inherits old
+ResultSet/pending-draft authority. `AgentResultSet` gains a non-null
+`conversation_id` binding so a cross-conversation pointer swap fails closed
+even inside one BrowserSession at the same epoch. Durable transcript storage
+is bounded at 100 turns, separate from the unchanged 8-turn model context
+window. History listing is a bounded, paginated repository contract only (no
+sidebar yet). "Yeni söhbət" now creates a new durable conversation instead of
+clearing the old one. Migration `b7e3c9d41f28` backfills owners/contexts/
+ResultSet bindings without fabricating ownership and intentionally
+invalidates pre-existing unconfirmed pending-draft authority (HR must
+re-analyse the vacancy before confirmation). Its downgrade fails closed unless
+all authority is still losslessly 1:1-representable (one context per
+conversation, one conversation per session, owner/session/tenant and
+ResultSet bindings agree, no live or transcript pending-draft authority); it
+never deletes history, revives a draft, or rebinds a ResultSet (D-086).
+
+**Historical snapshot (issue #79 working baseline):** accepted `main` was
+`f89bd4b137ad4b79f465c31eadbd46aa8648eb61`; issue #79 has since been merged
+via PR #81 and closed.
 
 Issue #79 adopts D-085: the HR agent now has one composer, while a narrow
 server-owned entry boundary protects vacancy/JD drafting from candidate

@@ -225,6 +225,7 @@
 <section class="composer-panel">
   <form method="post" action="/ui/agent" class="composer" id="agent-composer">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    {% if conversation_id %}<input type="hidden" name="conversation_id" value="{{ conversation_id }}">{% endif %}
     <label for="message" class="sr-only">Namizəd axtarışı və ya vakansiya elanı</label>
     <textarea id="message" name="message" rows="1" maxlength="4000" placeholder="Namizəd axtarın, nəticələri dəqiqləşdirin və ya vakansiya elanını yapışdırın…"></textarea>
     <div class="composer-toolbar">

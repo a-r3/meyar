@@ -175,7 +175,11 @@ def test_fresh_agent_refinement_migration(monkeypatch) -> None:
     config = Config(str(Path(__file__).resolve().parent.parent / "alembic.ini"))
     try:
         asyncio.run(_create_vector_extension(url))
-        command.upgrade(config, "head")
+        # Targets this migration's OWN revision explicitly, not "head" —
+        # issue #80 PR80-1 (b7e3c9d41f28) chains directly on top of this
+        # one. See test_agent_conversation_authority_migration for the
+        # current-head proof.
+        command.upgrade(config, NEW_HEAD)
         asyncio.run(_verify_fresh(url))
     finally:
         get_settings.cache_clear()

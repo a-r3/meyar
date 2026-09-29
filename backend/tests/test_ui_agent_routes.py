@@ -1267,6 +1267,24 @@ async def test_confirming_agent_drafted_criteria_lands_on_ranking_not_jobs_list(
     assert await db_session.scalar(select(func.count()).select_from(AgentDraftConfirmation)) == 1
 
 
+async def _only_context(db_session: AsyncSession, conversation):
+    """The single live session context of ``conversation`` (issue #80:
+    ResultSet authority lives there, never on the durable row)."""
+    from sqlalchemy import select
+
+    from meyar.models.agent_conversation import AgentConversationSessionContext
+
+    rows = (
+        await db_session.scalars(
+            select(AgentConversationSessionContext)
+            .where(AgentConversationSessionContext.conversation_id == conversation.id)
+            .execution_options(populate_existing=True)
+        )
+    ).all()
+    assert len(rows) == 1
+    return rows[0]
+
+
 async def test_confirmation_survives_transcript_reset_and_new_database_session(
     client: AsyncClient,
     db_session: AsyncSession,
@@ -1281,7 +1299,6 @@ async def test_confirmation_survives_transcript_reset_and_new_database_session(
     from meyar.models.browser_session import BrowserSession
     from meyar.models.job import Job
     from meyar.models.job_criteria_version import JobCriteriaVersion
-    from meyar.services.agent_conversation_repo import reset_conversation
     from meyar.services.agent_draft_confirmation_repo import get_draft_confirmation
 
     tenant, user, password, _membership = tenant_and_user
@@ -1317,7 +1334,9 @@ async def test_confirmation_survives_transcript_reset_and_new_database_session(
     assert disagreement_replay.status_code == 200
     assert "Reytinq nəticələri" in disagreement_replay.text
 
-    await reset_conversation(db_session, conversation)
+    # issue #80: transcript JSON is never replay authority — wiping it
+    # entirely must not affect the durable confirmation identity.
+    conversation.turns = []
     await db_session.commit()
 
     assert db_session.bind is not None
@@ -2196,7 +2215,7 @@ async def test_concurrent_confirmation_creates_exactly_one_canonical_object(
             )
             cookies = login_client.cookies
 
-        original_lock = agent_conversation_repo.get_conversation_for_update_by_session
+        original_lock = agent_conversation_repo.get_owned_conversation_for_update
         both_entered = asyncio.Event()
         arrival_count = 0
 
@@ -2210,7 +2229,7 @@ async def test_concurrent_confirmation_creates_exactly_one_canonical_object(
 
         monkeypatch.setattr(
             agent_conversation_repo,
-            "get_conversation_for_update_by_session",
+            "get_owned_conversation_for_update",
             synchronized_lock,
         )
         data = _python_confirmation_data(html, csrf)
@@ -3019,7 +3038,7 @@ async def test_unrepresentable_long_input_renders_structure_clarification_not_50
         select(AgentConversation).where(AgentConversation.tenant_id == tenant.id)
     )
     assert conversation is not None
-    assert conversation.active_result_set_id is None
+    assert (await _only_context(db_session, conversation)).active_result_set_id is None
     assert [turn["role"] for turn in conversation.turns][-2:] == ["user", "assistant"]
 
     route_event = await db_session.scalar(
@@ -3461,7 +3480,7 @@ async def test_real_ui_agent_route_serializes_concurrent_same_session_turns(
     # Coherent serialized transition: the conversation's active pointer is
     # the LATEST committed result set, not the pre-race None both turns
     # originally read.
-    assert conversation.active_result_set_id == second_rs.id
+    assert (await _only_context(db_session, conversation)).active_result_set_id == second_rs.id
 
     first_members = (
         await db_session.scalars(
@@ -3519,7 +3538,7 @@ async def test_real_ui_agent_route_serializes_concurrent_same_session_refinement
     turn-terminal (exactly one decide_agent_action call per turn, not
     two)."""
     from conftest import TEST_DATABASE_URL
-    from search_helpers import seed_active_result_set
+    from search_helpers import open_test_conversation, seed_active_result_set
     from sqlalchemy import func, select
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -3534,7 +3553,6 @@ async def test_real_ui_agent_route_serializes_concurrent_same_session_refinement
     from meyar.models.evaluation import Evaluation
     from meyar.models.job import Job as JobModel
     from meyar.models.job_criteria_version import JobCriteriaVersion
-    from meyar.services.agent_conversation_repo import get_or_create_conversation
 
     tenant, user, password, _membership = tenant_and_user
     candidate_a, _ = await seed_candidate_with_profile(
@@ -3559,14 +3577,18 @@ async def test_real_ui_agent_route_serializes_concurrent_same_session_refinement
         .order_by(BrowserSession.created_at.desc())
     )
     assert login_session is not None
-    conversation = await get_or_create_conversation(
-        db_session, tenant_id=tenant.id, browser_session_id=login_session.id
+    conversation, context = await open_test_conversation(
+        db_session,
+        tenant_id=tenant.id,
+        user_id=user.id,
+        membership_id=_membership.id,
+        browser_session_id=login_session.id,
     )
     root = await seed_active_result_set(
         db_session,
         tenant_id=tenant.id,
         browser_session_id=login_session.id,
-        conversation=conversation,
+        session_context=context,
         candidate_ids=[candidate_a.id, candidate_b.id, candidate_c.id],
     )
     await db_session.commit()
@@ -3655,8 +3677,9 @@ async def test_real_ui_agent_route_serializes_concurrent_same_session_refinement
     assert second_event.event_metadata["source_result_set_id"] == first_event.event_metadata[
         "result_set_id"
     ]
-    assert conversation.active_result_set_id is not None
-    assert str(conversation.active_result_set_id) == second_event.event_metadata["result_set_id"]
+    assert (await _only_context(db_session, conversation)).active_result_set_id is not None
+    live_context = await _only_context(db_session, conversation)
+    assert str(live_context.active_result_set_id) == second_event.event_metadata["result_set_id"]
 
     derived_result_sets = (
         await db_session.scalars(
@@ -3691,9 +3714,9 @@ async def test_real_ui_agent_route_does_not_serialize_across_different_browser_s
     tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
-    """The SAME lock must never become a global one: two DIFFERENT browser
-    sessions (fresh logins, distinct BrowserSession/AgentConversation
-    rows) must not block on each other's row lock."""
+    """The SAME lock must never become a global one: two DIFFERENT durable
+    conversations (issue #80 — here one per fresh login, each opened with
+    "Yeni söhbət") must not block on each other's row lock."""
     from conftest import TEST_DATABASE_URL
     from httpx import ASGITransport
     from sqlalchemy import select
@@ -3708,28 +3731,34 @@ async def test_real_ui_agent_route_does_not_serialize_across_different_browser_s
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as second_client:
         csrf_b = await _login_and_csrf(second_client, user.username, password)
+        # issue #80: conversations are durable per owner, not per session —
+        # each session explicitly opens its own new conversation first.
+        await client.post("/ui/agent/reset", data={"csrf_token": csrf_a})
+        await second_client.post("/ui/agent/reset", data={"csrf_token": csrf_b})
+
+        # issue #80: deterministic overlap oracle (replaces a wall-clock
+        # threshold that event-loop/render overhead could exceed without
+        # any real serialization). Each turn reaches decide_agent_action
+        # only while already holding its OWN conversation row lock, then
+        # waits until BOTH turns are inside it simultaneously.
+        # - correct row-level concurrency: both arrive, the barrier opens.
+        # - any shared/global serialization: the second turn cannot reach
+        #   this point while the first holds the lock, so the first times
+        #   out and the turn fails.
+        inside_decision = 0
+        both_inside = asyncio.Event()
 
         class _DelayedOnceLLM(FakeLLMProvider):
-            """Sleeps once, unconditionally, on its own first (and only)
-            decide_agent_action call. Each concurrent request below gets
-            its OWN instance (never a shared counter), so this oracle
-            cannot be satisfied by luck the way a shared
-            `agent_call_count == 0` check could: both requests are
-            guaranteed to sleep once regardless of which one physically
-            starts first.
-
-            - correct row-level concurrency (each session's turn only
-              holds its OWN AgentConversation row lock): both sleeps run
-              concurrently -> elapsed ~= one sleep (0.15s).
-            - a wrongly shared/global serialization (e.g. a lock keyed
-              coarser than the row, or the whole handler serialized):
-              the second request cannot even begin its own turn until
-              the first fully releases -> elapsed ~= two back-to-back
-              sleeps (0.30s).
-            """
+            """Each concurrent request below gets its OWN instance (never a
+            shared counter), and each waits on the shared overlap barrier
+            exactly once on its only decide_agent_action call."""
 
             async def decide_agent_action(self, **kwargs):
-                await asyncio.sleep(0.15)
+                nonlocal inside_decision
+                inside_decision += 1
+                if inside_decision == 2:
+                    both_inside.set()
+                await asyncio.wait_for(both_inside.wait(), timeout=5)
                 return await super().decide_agent_action(**kwargs)
 
         fake_a = _DelayedOnceLLM(
@@ -3791,12 +3820,10 @@ async def test_real_ui_agent_route_does_not_serialize_across_different_browser_s
 
     assert response_a.status_code == 200
     assert response_b.status_code == 200
-    # Real overlap proof: BOTH requests unconditionally sleep once each
-    # (see _DelayedOnceLLM docstring above), so this is a genuine either/or
-    # oracle rather than a shared-counter race. Independent per-session
-    # row locks let the two 0.15s holds run concurrently (~0.15s total); a
-    # wrongly shared/global lock would force them back-to-back (~0.30s).
-    assert elapsed < 0.28
+    # Real overlap proof: both turns were inside decide_agent_action at the
+    # same time while each held its own conversation row lock.
+    assert both_inside.is_set()
+    assert elapsed < 5
     # Neither provider's turn was skipped or short-circuited — both really
     # went through decide_agent_action once, so the timing evidence above
     # reflects two genuine turns, not one turn plus a no-op.
@@ -3808,8 +3835,8 @@ async def test_real_ui_agent_route_does_not_serialize_across_different_browser_s
             select(AgentConversation).where(AgentConversation.tenant_id == _tenant.id)
         )
     ).all()
-    # Two fresh logins -> two distinct BrowserSession rows -> two distinct
-    # (1:1) AgentConversation rows, never one shared row.
+    # Two sessions, each on its own new durable conversation -> two
+    # distinct AgentConversation rows, never one shared row.
     assert len(conversations) == 2
     assert conversations[0].id != conversations[1].id
     for conversation in conversations:
@@ -3823,7 +3850,7 @@ async def test_real_ui_agent_route_does_not_serialize_across_different_browser_s
         assert assistant_turn["role"] == "assistant"
         # This turn never produced a search/result set, so no active
         # ResultSet pointer could have crossed between sessions either.
-        assert conversation.active_result_set_id is None
+        assert (await _only_context(db_session, conversation)).active_result_set_id is None
 
 
 # --- Issue #79 PR81 visual-acceptance correction: deterministic search ------
@@ -3916,7 +3943,7 @@ async def test_explicit_search_bypasses_wrong_orchestrator_then_ilk_3_refines(
         select(AgentConversation).where(AgentConversation.tenant_id == tenant.id)
     )
     assert conversation is not None
-    assert conversation.active_result_set_id == search_set.id
+    assert (await _only_context(db_session, conversation)).active_result_set_id == search_set.id
     assert "pending_job_draft" not in conversation.turns[-1]
 
     route_event = await db_session.scalar(
@@ -3942,7 +3969,8 @@ async def test_explicit_search_bypasses_wrong_orchestrator_then_ilk_3_refines(
     assert "Cari nəticələr 4 namizəddən 3 namizədə endirildi." in followup.text
 
     await db_session.refresh(conversation)
-    refined = await db_session.get(AgentResultSet, conversation.active_result_set_id)
+    live_context = await _only_context(db_session, conversation)
+    refined = await db_session.get(AgentResultSet, live_context.active_result_set_id)
     assert refined is not None
     assert refined.result_set_kind == "REFINEMENT"
     assert refined.parent_result_set_id == search_set.id
@@ -4053,7 +4081,7 @@ async def test_job_analysis_command_without_source_asks_for_vacancy_text(
     )
     assert conversation is not None
     assert all("pending_job_draft" not in turn for turn in conversation.turns)
-    assert conversation.active_result_set_id is None
+    assert (await _only_context(db_session, conversation)).active_result_set_id is None
     route_event = await db_session.scalar(
         select(AuditEvent).where(
             AuditEvent.tenant_id == tenant.id,

@@ -508,24 +508,72 @@ def _agent_turn_log_views(conversation) -> list:
     return views
 
 
+def _conversation_owner(ctx: UIContext):  # noqa: ANN202 - OwnerPrincipal (lazy import)
+    """The durable-conversation owner is ALWAYS the live, re-derived UIContext
+    principal (issue #80) — never a stored or client-supplied owner."""
+    from meyar.services.agent_conversation_repo import OwnerPrincipal
+
+    return OwnerPrincipal(
+        tenant_id=ctx.tenant_id, user_id=ctx.user_id, membership_id=ctx.membership_id
+    )
+
+
+def _render_conversation_not_found(request: Request, ctx: UIContext) -> HTMLResponse:
+    """Identical for a foreign-tenant, foreign-user, foreign-membership, or
+    nonexistent conversation id — no existence/ownership/title/timestamp
+    distinction is ever revealed."""
+    return _render(
+        request,
+        "error.html",
+        _context(ctx, title="Tapılmadı", message="Söhbət tapılmadı."),
+        status_code=status.HTTP_404_NOT_FOUND,
+    )
+
+
 @router.get("/agent", response_class=HTMLResponse)
 async def agent_workspace(
     request: Request,
+    conversation: uuid.UUID | None = Query(default=None),
     ctx: UIContext = Depends(require_ui_scopes("candidates:read")),
     db: AsyncSession = Depends(get_db),
 ) -> HTMLResponse:
-    from meyar.services.agent_conversation_repo import get_or_create_conversation
-
-    conversation = await get_or_create_conversation(
-        db, tenant_id=ctx.tenant_id, browser_session_id=ctx.session_id
+    from meyar.services.agent_conversation_repo import (
+        get_owned_conversation,
+        record_conversation_access_rejected,
+        resolve_or_create_current_conversation,
     )
+
+    owner = _conversation_owner(ctx)
+    if conversation is not None:
+        # Minimal, unstyled explicit selector (PR80-2 builds the sidebar).
+        selected = await get_owned_conversation(db, owner=owner, conversation_id=conversation)
+        if selected is None:
+            await record_conversation_access_rejected(db, owner=owner)
+            await db.commit()
+            return _render_conversation_not_found(request, ctx)
+        await record_event(
+            db,
+            tenant_id=ctx.tenant_id,
+            event_type="agent.conversation.opened",
+            metadata={"conversation_id": str(selected.id), "title_kind": selected.title_kind},
+            actor_type=ACTOR_HUMAN_USER,
+            actor_id=ctx.user_id,
+        )
+    else:
+        selected = await resolve_or_create_current_conversation(
+            db, owner=owner, browser_session_id=ctx.session_id
+        )
+        if selected is None:
+            await db.rollback()
+            return _render_conversation_not_found(request, ctx)
     await db.commit()
     return _render(
         request,
         "agent.html",
         _context(
             ctx,
-            history_turns=_agent_turn_log_views(conversation),
+            conversation_id=selected.id,
+            history_turns=_agent_turn_log_views(selected),
             latest=None,
             latest_user_message=None,
             kind_options=CRITERION_KIND_OPTIONS,
@@ -538,6 +586,7 @@ async def agent_turn(
     request: Request,
     message: str = Form(..., min_length=1, max_length=4000),
     csrf_token: str = Form(...),
+    conversation_id: uuid.UUID | None = Form(default=None),
     ctx: UIContext = Depends(require_ui_scopes("candidates:read")),
     db: AsyncSession = Depends(get_db),
     llm: LLMProvider = Depends(get_llm_provider),
@@ -548,19 +597,49 @@ async def agent_turn(
     verify_csrf(ctx.csrf_token, csrf_token)
     from meyar.agent.service import run_agent_turn
     from meyar.services.agent_conversation_repo import (
-        get_or_create_conversation,
-        get_or_create_conversation_for_update,
+        get_or_create_session_context,
+        get_owned_conversation,
+        get_owned_conversation_for_update,
+        record_conversation_access_rejected,
+        resolve_or_create_current_conversation,
         sync_last_turn_display_text,
+        touch_session_context,
     )
     from meyar.ui.service import build_agent_turn_view
 
-    # PR #77 review fix (issue #49): hold this session's own
-    # AgentConversation row lock for the entire state-changing turn — see
-    # get_or_create_conversation_for_update's docstring. Held until the
-    # db.commit() below (or the rollback in the except block).
-    conversation = await get_or_create_conversation_for_update(
-        db, tenant_id=ctx.tenant_id, browser_session_id=ctx.session_id
+    owner = _conversation_owner(ctx)
+    explicit_selector = conversation_id is not None
+    if conversation_id is None:
+        # Legacy form without a selector: resolve (or race-safely create)
+        # this session's current conversation in its OWN short transaction,
+        # so the per-owner membership lock is released before the turn.
+        current = await resolve_or_create_current_conversation(
+            db, owner=owner, browser_session_id=ctx.session_id
+        )
+        if current is None:
+            await db.rollback()
+            return _render_conversation_not_found(request, ctx)
+        conversation_id = current.id
+        await db.commit()
+    # issue #80: hold the DURABLE conversation row's own PostgreSQL lock for
+    # the entire state-changing turn (two tabs/sessions on one conversation
+    # never lose a transcript update); held until commit/rollback below.
+    conversation = await get_owned_conversation_for_update(
+        db, owner=owner, conversation_id=conversation_id
     )
+    if conversation is None:
+        await db.rollback()
+        if explicit_selector:
+            await record_conversation_access_rejected(db, owner=owner)
+            await db.commit()
+        return _render_conversation_not_found(request, ctx)
+    resolved_conversation_id = conversation.id
+    # This BrowserSession's own live context for this conversation. A new
+    # session (relogin) gets a clean one: no ResultSet, no pending draft.
+    session_context = await get_or_create_session_context(
+        db, conversation=conversation, browser_session_id=ctx.session_id
+    )
+    touch_session_context(session_context)
     # Same "current date is a trusted-runtime value, never user/model
     # supplied" boundary as /ui/search (docs/DECISIONS.md D-023).
     as_of_date = resolve_business_date(settings.business_timezone)
@@ -570,6 +649,7 @@ async def agent_turn(
             llm,
             tenant_id=ctx.tenant_id,
             conversation=conversation,
+            session_context=session_context,
             user_message=message,
             as_of_date=as_of_date,
             embedding_config=embedding_config,
@@ -594,22 +674,20 @@ async def agent_turn(
             message="MEYAR AI xidməti hazırda əlçatan deyil. Bir qədər sonra yenidən cəhd edin.",
             headline="MEYAR AI xidməti hazırda əlçatan deyil. Bir qədər sonra yenidən cəhd edin.",
         )
-        conversation = await get_or_create_conversation(
-            db, tenant_id=ctx.tenant_id, browser_session_id=ctx.session_id
+        reloaded = await get_owned_conversation(
+            db, owner=owner, conversation_id=resolved_conversation_id
         )
         # D-044 (PR #42 owner UX correction): nothing was persisted for
-        # this failed attempt (the exception happened before
-        # run_agent_turn's own _finish_turn), so `conversation.turns`
-        # does not contain it — show the HR user's own just-submitted
-        # text directly rather than losing it, still adjacent to its own
-        # explanation (chat-hierarchy requirement) instead of history
-        # being silently missing a turn.
+        # this failed attempt, so show the HR user's own just-submitted
+        # text directly rather than losing it. A conversation created in
+        # this same rolled-back transaction simply has no history yet.
         return _render(
             request,
             "agent.html",
             _context(
                 ctx,
-                history_turns=_agent_turn_log_views(conversation),
+                conversation_id=reloaded.id if reloaded is not None else None,
+                history_turns=_agent_turn_log_views(reloaded) if reloaded is not None else [],
                 latest=latest,
                 latest_user_message=message,
                 kind_options=CRITERION_KIND_OPTIONS,
@@ -629,6 +707,7 @@ async def agent_turn(
         "agent.html",
         _context(
             ctx,
+            conversation_id=resolved_conversation_id,
             history_turns=history_turns,
             latest=latest,
             latest_user_message=message,
@@ -644,25 +723,21 @@ async def agent_reset(
     ctx: UIContext = Depends(require_ui_scopes("candidates:read")),
     db: AsyncSession = Depends(get_db),
 ) -> Response:
-    """"Yeni söhbət" — clears this browser session's own server-held agent
-    conversation state (turns + last_search_candidate_ids). Never affects
-    another session, tenant, candidate, or job row."""
+    """"Yeni söhbət" (issue #80) — creates a NEW durable AgentConversation
+    (title_kind NEW, empty transcript) plus a clean live context for THIS
+    BrowserSession (no ResultSet, ordinal, pending draft, or scoring state).
+    The previous conversation is never deleted or cleared and stays
+    reachable as history; another session's current conversation is never
+    switched."""
     verify_csrf(ctx.csrf_token, csrf_token)
     from meyar.services.agent_conversation_repo import (
-        get_or_create_conversation,
-        reset_conversation,
+        create_conversation,
+        get_or_create_session_context,
     )
 
-    conversation = await get_or_create_conversation(
-        db, tenant_id=ctx.tenant_id, browser_session_id=ctx.session_id
-    )
-    await reset_conversation(db, conversation)
-    await record_event(
-        db,
-        tenant_id=ctx.tenant_id,
-        event_type="agent.conversation.reset",
-        actor_type=ACTOR_HUMAN_USER,
-        actor_id=ctx.user_id,
+    conversation = await create_conversation(db, owner=_conversation_owner(ctx))
+    await get_or_create_session_context(
+        db, conversation=conversation, browser_session_id=ctx.session_id
     )
     await db.commit()
     return RedirectResponse("/ui/agent", status_code=status.HTTP_303_SEE_OTHER)
@@ -1140,9 +1215,8 @@ async def resolve_agent_job_draft_review(
     from meyar.agent.service import resolve_job_draft_review_modality
     from meyar.schemas.criteria import CriterionType
     from meyar.services.agent_conversation_repo import (
-        get_conversation_for_update_by_session,
-        get_pending_job_draft,
         replace_pending_job_draft,
+        resolve_pending_draft_authority,
     )
     from meyar.ui.service import build_agent_job_draft_view
     from meyar.ui.view_models import AgentToolResultView, AgentTurnView
@@ -1150,18 +1224,22 @@ async def resolve_agent_job_draft_review(
     verify_csrf(ctx.csrf_token, csrf_token)
     try:
         resolved_type = CriterionType(criterion_type)
-        conversation = await get_conversation_for_update_by_session(
-            db, tenant_id=ctx.tenant_id, browser_session_id=ctx.session_id
+        # issue #80: live pending authority only — owner + this
+        # BrowserSession's context pointer + transcript payload, all
+        # required (see resolve_pending_draft_authority).
+        authority = await resolve_pending_draft_authority(
+            db,
+            owner=_conversation_owner(ctx),
+            browser_session_id=ctx.session_id,
+            draft_id=draft_id,
         )
-        if conversation is None:
+        if authority is None:
             raise UIServiceInputError("Qaralama bu sessiyada tapılmadı.")
-        pending = get_pending_job_draft(conversation, draft_id=draft_id)
-        if pending is None:
-            raise UIServiceInputError("Qaralama bu sessiyada tapılmadı.")
+        conversation = authority.conversation
         resolved = resolve_job_draft_review_modality(
-            pending, span_id=span_id, criterion_type=resolved_type
+            authority.draft, span_id=span_id, criterion_type=resolved_type
         )
-        await replace_pending_job_draft(db, conversation, draft=resolved)
+        await replace_pending_job_draft(db, authority, draft=resolved)
         await record_event(
             db,
             tenant_id=ctx.tenant_id,
@@ -1198,6 +1276,7 @@ async def resolve_agent_job_draft_review(
         "agent.html",
         _context(
             ctx,
+            conversation_id=conversation.id,
             history_turns=all_turns[:-2] if len(all_turns) >= 2 else [],
             latest=latest,
             latest_user_message=latest_user_message,
@@ -1226,10 +1305,8 @@ async def confirm_agent_job_draft(
     """
     from meyar.agent.schemas import ConfirmedAgentJobDraft
     from meyar.services.agent_conversation_repo import (
-        get_confirmed_job_draft,
-        get_conversation_for_update_by_session,
-        get_pending_job_draft,
         mark_pending_job_draft_confirmed,
+        resolve_pending_draft_authority,
     )
     from meyar.services.agent_draft_confirmation_repo import (
         create_draft_confirmation,
@@ -1241,71 +1318,44 @@ async def confirm_agent_job_draft(
     form = await request.form()
 
     try:
-        conversation = await get_conversation_for_update_by_session(
-            db, tenant_id=ctx.tenant_id, browser_session_id=ctx.session_id
-        )
-        durable_confirmation = await get_draft_confirmation(
+        # issue #80: live pending authority only — owner + this
+        # BrowserSession's context pointer + transcript payload. A relogin,
+        # another conversation's context, or a superseded draft id never
+        # resolves here. Holds the conversation row lock on success.
+        authority = await resolve_pending_draft_authority(
             db,
-            tenant_id=ctx.tenant_id,
+            owner=_conversation_owner(ctx),
             browser_session_id=ctx.session_id,
             draft_id=draft_id,
         )
-        if durable_confirmation is not None:
-            # Conversation JSON is optional UI state only. Confirmation identity
-            # comes from the independent server-owned row; the render below
-            # reloads result policy and disclosures from the immutable criteria
-            # version.
-            transcript_confirmation = (
-                get_confirmed_job_draft(conversation, draft_id=draft_id)
-                if conversation is not None
-                else None
-            )
-            transcript_agrees = (
-                transcript_confirmation is not None
-                and transcript_confirmation.job_id == durable_confirmation.job_id
-                and transcript_confirmation.criteria_version_id
-                == durable_confirmation.criteria_version_id
-            )
-            confirmed = ConfirmedAgentJobDraft(
-                draft_id=durable_confirmation.draft_id,
-                job_id=durable_confirmation.job_id,
-                criteria_version_id=durable_confirmation.criteria_version_id,
-                unsupported_requirements=(
-                    transcript_confirmation.unsupported_requirements
-                    if transcript_agrees and transcript_confirmation is not None
-                    else []
-                ),
-                needs_review_requirements=(
-                    transcript_confirmation.needs_review_requirements
-                    if transcript_agrees and transcript_confirmation is not None
-                    else []
-                ),
-            )
-            # Release any conversation row lock before potentially expensive
-            # ranking. Replay resolves to the database-owned identity.
-            await db.commit()
-            return await _render_job_ranking(
-                request,
-                ctx,
+        if authority is None:
+            # Checked AFTER the lock attempt so a concurrent duplicate
+            # confirmation observes the winner's committed row. Replay /
+            # idempotency authority is ONLY the independent
+            # AgentDraftConfirmation row (same tenant + BrowserSession) —
+            # never transcript scanning. Disclosures are reloaded from the
+            # immutable criteria version inside _render_job_ranking.
+            durable_confirmation = await get_draft_confirmation(
                 db,
-                job_criteria_version_id=confirmed.criteria_version_id,
-                unsupported_requirements=confirmed.unsupported_requirements,
-                needs_review_requirements=confirmed.needs_review_requirements,
-                confirmation_succeeded=True,
-                evaluation_as_of_date=evaluation_as_of_date,
+                tenant_id=ctx.tenant_id,
+                browser_session_id=ctx.session_id,
+                draft_id=draft_id,
             )
-
-        if conversation is None:
-            raise UIServiceInputError(
-                "Qaralama təsdiqi tapılmadı; elanı yenidən analiz edin."
-            )
-
-        pending = get_pending_job_draft(conversation, draft_id=draft_id)
-        if pending is None:
+            if durable_confirmation is not None:
+                await db.commit()
+                return await _render_job_ranking(
+                    request,
+                    ctx,
+                    db,
+                    job_criteria_version_id=durable_confirmation.criteria_version_id,
+                    confirmation_succeeded=True,
+                    evaluation_as_of_date=evaluation_as_of_date,
+                )
             raise UIServiceInputError(
                 "Qaralama təsdiqi tapılmadı və ya bu sessiyaya aid deyil; "
                 "elanı yenidən analiz edin."
             )
+        pending = authority.draft
 
         canonical_title = pending.title or "Vakansiya qaralaması"
         submitted_authority = "title" in form or any(
@@ -1418,9 +1468,7 @@ async def confirm_agent_job_draft(
             job_id=job.id,
             criteria_version_id=version.id,
         )
-        await mark_pending_job_draft_confirmed(
-            db, conversation, confirmation=confirmation
-        )
+        await mark_pending_job_draft_confirmed(db, authority, confirmation=confirmation)
         await db.commit()
     except UIServiceInputError as exc:
         await db.rollback()

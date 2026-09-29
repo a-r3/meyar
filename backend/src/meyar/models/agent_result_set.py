@@ -40,9 +40,10 @@ class AgentResultSet(Base):
 
     A ``candidate_ref`` the model produces is never trusted directly — it
     is resolved through ``AgentResultSetMember.ordinal`` against exactly
-    one ``AgentResultSet`` row: the one this conversation's own
-    ``active_result_set_id`` currently points at, and only while every one
-    of tenant/session/context-epoch/expiry/corpus-freshness still holds
+    one ``AgentResultSet`` row: the one the BrowserSession-bound
+    AgentConversationSessionContext's ``active_result_set_id`` currently
+    points at (issue #80), and only while every one of tenant/session/
+    conversation/context-epoch/expiry/corpus-freshness still holds
     (see meyar.services.agent_result_set_repo.resolve_active_candidate_ref).
     A REFINEMENT row resolves through the EXACT SAME check — it is just
     another AgentResultSet row, never a second authority definition.
@@ -71,12 +72,20 @@ class AgentResultSet(Base):
     browser_session_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("browser_sessions.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    # The owning conversation's context_epoch AT THE MOMENT this result set
+    # issue #80: explicit durable-conversation binding. One BrowserSession
+    # may now hold several conversations' live contexts at the same epoch,
+    # so session+epoch alone no longer identify the owning candidate
+    # universe — active-set validation additionally requires this to equal
+    # the resolving session context's own conversation_id (defense in
+    # depth, never a replacement for the session/epoch checks).
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("agent_conversations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # The owning session context's context_epoch AT THE MOMENT this result set
     # was created — resolution requires this to still equal the live
-    # conversation's own context_epoch (see AgentConversation.context_epoch
-    # docstring); a "Yeni söhbət" reset always invalidates every previously
-    # created result set for this session, even one still pointed at by a
-    # tampered/stale active_result_set_id.
+    # session context's own context_epoch (see
+    # AgentConversationSessionContext), so a stale/tampered
+    # active_result_set_id from another epoch never resolves.
     context_epoch: Mapped[int] = mapped_column(Integer, nullable=False)
     # SEARCH (default) for a root SEARCH_CANDIDATES result, REFINEMENT for
     # one derived by REFINE_CANDIDATE_RESULTS. See AgentResultSetKind and
