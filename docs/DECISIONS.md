@@ -6767,8 +6767,23 @@ empty ones `NEW`. **The migration invalidates pre-existing unconfirmed
 pending draft authority (`active_pending_draft_id = NULL`); HR must
 re-analyse the vacancy before confirmation.** Already confirmed Jobs,
 criteria versions, and `AgentDraftConfirmation` rows are untouched.
-Downgrade is lossy by necessity (each session keeps its most recently used
-conversation).
+**Downgrade fails closed.** `b7e3c9d41f28` downgrade is permitted only while
+conversation/session state remains losslessly representable by the previous
+1:1 schema. Before any DDL it refuses (RuntimeError, database stays on
+`b7e3c9d41f28`) if any conversation has a session-context count other than
+exactly one (none, or one conversation opened by multiple BrowserSessions),
+any BrowserSession holds more than one conversation context, or any ResultSet's
+`browser_session_id`/tenant differs from its conversation's single context.
+Once multiple conversations exist in one BrowserSession, or one conversation
+has been opened by multiple BrowserSessions, schema downgrade fails closed. It
+never picks a "most recent" conversation, never deletes durable history, and
+never drops `agent_result_sets.conversation_id` while that could orphan or
+re-attribute a ResultSet (a later re-upgrade's session-based backfill would
+otherwise silently fabricate provenance). In the representable case every
+conversation is retained and the old `browser_session_id`/`context_epoch`/
+`active_result_set_id` are copied from its single context. Production rollback
+continues to follow the accepted release/schema compatibility policy, never
+arbitrary Alembic downgrade.
 
 **Audit:** `agent.conversation.created` (`conversation_id`, `title_kind`),
 `agent.conversation.opened` (explicit selector only — plain GET refreshes are

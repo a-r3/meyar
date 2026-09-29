@@ -2,7 +2,9 @@
 543c60f7efc5): durable owner backfill, one session context per migrated
 conversation, ResultSet conversation binding, removal of the old live
 columns, invalidated pending-draft authority, constraints, fail-closed
-integrity abort, downgrade/re-upgrade, fresh install, and a single head."""
+integrity abort, lossless downgrade/re-upgrade of 1:1-representable state,
+fail-closed downgrade of post-#80 multi-conversation/multi-session state,
+fresh install, and a single head."""
 
 import asyncio
 import json
@@ -332,6 +334,123 @@ def test_upgrade_refuses_to_fabricate_ownership_across_tenants(monkeypatch) -> N
             )
         )
         assert "owner_user_id" not in {row[0] for row in columns}
+    finally:
+        get_settings.cache_clear()
+        asyncio.run(_admin(f'DROP DATABASE IF EXISTS "{name}"'))
+
+
+RESULT_SET_A = "00000000-0000-0000-0000-0000000080f3"
+RESULT_SET_B = "00000000-0000-0000-0000-0000000080f4"
+TURNS_B = [{"role": "user", "text": "Synthetic second conversation"}]
+
+
+def _new_conversation(conversation_id: str, turns: list) -> tuple[str, dict]:
+    return (
+        "INSERT INTO agent_conversations "
+        "(id,tenant_id,owner_user_id,owner_membership_id,turns,title_kind) "
+        "VALUES (:c,:t,:u,:m,CAST(:turns AS json),'GENERAL')",
+        {"c": conversation_id, "t": TENANT, "u": USER, "m": MEMBERSHIP, "turns": json.dumps(turns)},
+    )
+
+
+def _new_context(conversation_id: str, session_id: str, active: str | None) -> tuple[str, dict]:
+    return (
+        "INSERT INTO agent_conversation_session_contexts "
+        "(id,tenant_id,conversation_id,browser_session_id,context_epoch,active_result_set_id) "
+        "VALUES (gen_random_uuid(),:t,:c,:s,1,:rs)",
+        {"t": TENANT, "c": conversation_id, "s": session_id, "rs": active},
+    )
+
+
+def _new_result_set(result_set_id: str, session_id: str, conversation_id: str) -> tuple[str, dict]:
+    statement, params = _result_set_insert(result_set_id, session_id, 1)
+    statement = statement.replace("(id,tenant_id,", "(id,conversation_id,tenant_id,").replace(
+        "(:id,:tenant,", "(:id,:conversation,:tenant,"
+    )
+    return statement, {**params, "conversation": conversation_id}
+
+
+# Real post-#80 states the previous 1:1 schema cannot represent.
+_UNREPRESENTABLE = {
+    "two_conversations_one_session": (
+        [
+            _new_conversation(CONVERSATION_1, TURNS_1),
+            _new_conversation(CONVERSATION_2, TURNS_B),
+            _new_result_set(RESULT_SET_A, SESSION_1, CONVERSATION_1),
+            _new_result_set(RESULT_SET_B, SESSION_1, CONVERSATION_2),
+            _new_context(CONVERSATION_1, SESSION_1, RESULT_SET_A),
+            _new_context(CONVERSATION_2, SESSION_1, RESULT_SET_B),
+        ],
+        "BrowserSessions holding multiple conversations",
+        {RESULT_SET_A: CONVERSATION_1, RESULT_SET_B: CONVERSATION_2},
+        {CONVERSATION_1: TURNS_1, CONVERSATION_2: TURNS_B},
+        2,
+    ),
+    "one_conversation_two_sessions": (
+        [
+            _new_conversation(CONVERSATION_1, TURNS_1),
+            _new_result_set(RESULT_SET_A, SESSION_1, CONVERSATION_1),
+            _new_result_set(RESULT_SET_B, SESSION_2, CONVERSATION_1),
+            _new_context(CONVERSATION_1, SESSION_1, RESULT_SET_A),
+            _new_context(CONVERSATION_1, SESSION_2, RESULT_SET_B),
+        ],
+        "without exactly one session context",
+        {RESULT_SET_A: CONVERSATION_1, RESULT_SET_B: CONVERSATION_1},
+        {CONVERSATION_1: TURNS_1},
+        2,
+    ),
+    "conversation_without_context": (
+        [_new_conversation(CONVERSATION_1, TURNS_1)],
+        "without exactly one session context",
+        {},
+        {CONVERSATION_1: TURNS_1},
+        0,
+    ),
+}
+
+
+@pytest.mark.parametrize("scenario", sorted(_UNREPRESENTABLE))
+def test_downgrade_fails_closed_on_unrepresentable_state(monkeypatch, scenario: str) -> None:
+    """Downgrade never picks a winner, deletes history, or rebinds a
+    ResultSet: non-1:1 state aborts before DDL and stays on NEW_HEAD."""
+    rows, message, result_sets, transcripts, context_count = _UNREPRESENTABLE[scenario]
+    name, url = _with_database(monkeypatch, "meyar_conv80_down")
+    config = _config()
+    try:
+        command.upgrade(config, NEW_HEAD)
+        asyncio.run(_execute(url, [*_identity_rows(), *rows]))
+        with pytest.raises(RuntimeError, match=message):
+            command.downgrade(config, PRIOR_HEAD)
+
+        revision = asyncio.run(_query(url, "SELECT version_num FROM alembic_version"))
+        assert revision[0][0] == NEW_HEAD
+        conversations = {
+            str(row.id): row.turns
+            for row in asyncio.run(_query(url, "SELECT id, turns FROM agent_conversations"))
+        }
+        assert conversations == transcripts  # every transcript survives verbatim
+        bindings = {
+            str(row.id): str(row.conversation_id)
+            for row in asyncio.run(
+                _query(url, "SELECT id, conversation_id FROM agent_result_sets")
+            )
+        }
+        assert bindings == result_sets  # no ResultSet deleted or rebound
+        contexts = asyncio.run(
+            _query(url, "SELECT count(*) FROM agent_conversation_session_contexts")
+        )
+        assert contexts[0][0] == context_count
+        columns = {
+            row[0]
+            for row in asyncio.run(
+                _query(
+                    url,
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name='agent_conversations'",
+                )
+            )
+        }
+        assert "browser_session_id" not in columns and "owner_user_id" in columns
     finally:
         get_settings.cache_clear()
         asyncio.run(_admin(f'DROP DATABASE IF EXISTS "{name}"'))

@@ -25,7 +25,10 @@ sidebar yet). "Yeni söhbət" now creates a new durable conversation instead of
 clearing the old one. Migration `b7e3c9d41f28` backfills owners/contexts/
 ResultSet bindings without fabricating ownership and intentionally
 invalidates pre-existing unconfirmed pending-draft authority (HR must
-re-analyse the vacancy before confirmation).
+re-analyse the vacancy before confirmation). Its downgrade fails closed unless
+state is still losslessly 1:1-representable (no multi-conversation session,
+no multi-session conversation); it never deletes history or rebinds a
+ResultSet (D-086).
 
 **Historical snapshot (issue #79 working baseline):** accepted `main` was
 `f89bd4b137ad4b79f465c31eadbd46aa8648eb61`; issue #79 has since been merged

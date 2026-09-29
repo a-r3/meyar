@@ -36,9 +36,15 @@ mutation authority from historical transcript JSON; HR must re-analyse the
 vacancy before confirmation. Already confirmed Jobs/criteria versions and
 AgentDraftConfirmation rows are untouched.
 
-Downgrade is lossy by necessity (N conversations per session cannot map
-back onto a 1:1 schema): each BrowserSession keeps its most recently used
-conversation; conversations with no mappable session are deleted.
+Downgrade fails closed unless the state is losslessly representable by the
+previous 1:1 schema: every conversation has exactly one session context,
+every BrowserSession holds at most one conversation context, and every
+ResultSet belongs to the session of its conversation's single context. Any
+multi-conversation-per-session or multi-session-per-conversation state (or a
+conversation with no live context) raises before any DDL runs. Downgrade
+never picks a "winner", never deletes durable history, and never rebinds a
+ResultSet. Production rollback follows the release/schema compatibility
+policy, not arbitrary Alembic downgrade.
 """
 from collections.abc import Sequence
 
@@ -232,7 +238,48 @@ def upgrade() -> None:
     op.drop_column("agent_conversations", "browser_session_id")
 
 
+def _assert_downgrade_representable(connection: sa.Connection) -> None:
+    """Refuse downgrade unless new-schema state maps 1:1 onto the old schema.
+
+    Runs before any DDL so a refusal leaves the database untouched on this
+    revision (transcripts, contexts and ResultSet provenance intact).
+    """
+    hint = (
+        "b7e3c9d41f28 downgrade is permitted only while conversation/session state "
+        "is losslessly representable by the previous 1:1 schema; production rollback "
+        "must follow the release/schema compatibility policy (D-086)"
+    )
+    _abort_if(
+        connection,
+        "SELECT count(*) FROM agent_conversations AS ac WHERE ("
+        "SELECT count(*) FROM agent_conversation_session_contexts AS ctx "
+        "WHERE ctx.conversation_id = ac.id) <> 1",
+        "agent_conversations without exactly one session context (none, or opened by "
+        f"multiple BrowserSessions) cannot be downgraded; {hint}",
+    )
+    _abort_if(
+        connection,
+        "SELECT count(*) FROM (SELECT browser_session_id "
+        "FROM agent_conversation_session_contexts "
+        "GROUP BY browser_session_id HAVING count(*) > 1) shared",
+        f"BrowserSessions holding multiple conversations cannot be downgraded; {hint}",
+    )
+    _abort_if(
+        connection,
+        "SELECT count(*) FROM agent_result_sets AS ars "
+        "JOIN agent_conversation_session_contexts AS ctx "
+        "ON ctx.conversation_id = ars.conversation_id "
+        "WHERE ctx.browser_session_id <> ars.browser_session_id "
+        "OR ctx.tenant_id <> ars.tenant_id",
+        "agent_result_sets whose session differs from their conversation's single "
+        f"session context would be re-attributed by downgrade; {hint}",
+    )
+
+
 def downgrade() -> None:
+    connection = op.get_bind()
+    _assert_downgrade_representable(connection)
+
     op.add_column(
         "agent_conversations", sa.Column("browser_session_id", sa.Uuid(), nullable=True)
     )
@@ -243,29 +290,30 @@ def downgrade() -> None:
     op.add_column(
         "agent_conversations", sa.Column("active_result_set_id", sa.Uuid(), nullable=True)
     )
-    # Lossy: each BrowserSession keeps only its most recently used
-    # conversation (see module docstring).
+    # Exactly one context per conversation (asserted above): a lossless copy.
     op.execute(
         """
         UPDATE agent_conversations AS ac
-        SET browser_session_id = picked.browser_session_id,
-            context_epoch = picked.context_epoch,
-            active_result_set_id = picked.active_result_set_id
-        FROM (
-            SELECT DISTINCT ON (browser_session_id)
-                   conversation_id, browser_session_id, context_epoch, active_result_set_id
-            FROM agent_conversation_session_contexts
-            ORDER BY browser_session_id, updated_at DESC, id DESC
-        ) AS picked
-        WHERE picked.conversation_id = ac.id
+        SET browser_session_id = ctx.browser_session_id,
+            context_epoch = ctx.context_epoch,
+            active_result_set_id = ctx.active_result_set_id
+        FROM agent_conversation_session_contexts AS ctx
+        WHERE ctx.conversation_id = ac.id
         """
     )
+    _abort_if(
+        connection,
+        "SELECT count(*) FROM agent_conversations WHERE browser_session_id IS NULL",
+        "agent_conversations could not be mapped to a BrowserSession",
+    )
+    # Every conversation is retained, so each ResultSet's browser_session_id
+    # now identifies its original conversation exactly; the binding column
+    # can be dropped without orphaning or re-attributing any ResultSet.
     op.drop_index("ix_agent_result_sets_conversation_id", table_name="agent_result_sets")
     op.drop_constraint(
         "fk_agent_result_sets_conversation", "agent_result_sets", type_="foreignkey"
     )
     op.drop_column("agent_result_sets", "conversation_id")
-    op.execute("DELETE FROM agent_conversations WHERE browser_session_id IS NULL")
     op.drop_table("agent_conversation_session_contexts")
     op.alter_column("agent_conversations", "browser_session_id", nullable=False)
     op.create_foreign_key(
