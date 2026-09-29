@@ -6768,22 +6768,40 @@ pending draft authority (`active_pending_draft_id = NULL`); HR must
 re-analyse the vacancy before confirmation.** Already confirmed Jobs,
 criteria versions, and `AgentDraftConfirmation` rows are untouched.
 **Downgrade fails closed.** `b7e3c9d41f28` downgrade is permitted only while
-conversation/session state remains losslessly representable by the previous
-1:1 schema. Before any DDL it refuses (RuntimeError, database stays on
-`b7e3c9d41f28`) if any conversation has a session-context count other than
-exactly one (none, or one conversation opened by multiple BrowserSessions),
-any BrowserSession holds more than one conversation context, or any ResultSet's
-`browser_session_id`/tenant differs from its conversation's single context.
-Once multiple conversations exist in one BrowserSession, or one conversation
-has been opened by multiple BrowserSessions, schema downgrade fails closed. It
-never picks a "most recent" conversation, never deletes durable history, and
-never drops `agent_result_sets.conversation_id` while that could orphan or
-re-attribute a ResultSet (a later re-upgrade's session-based backfill would
-otherwise silently fabricate provenance). In the representable case every
-conversation is retained and the old `browser_session_id`/`context_epoch`/
-`active_result_set_id` are copied from its single context. Production rollback
-continues to follow the accepted release/schema compatibility policy, never
-arbitrary Alembic downgrade.
+ALL conversation/session/draft authority remains losslessly representable by
+the previous 1:1 schema. Before any DDL it refuses (RuntimeError; the
+database stays on `b7e3c9d41f28` with no column, table, transcript, pointer,
+or ResultSet change) unless:
+
+- every conversation has exactly one session context (none, or one
+  conversation opened by multiple BrowserSessions, is rejected);
+- every BrowserSession holds at most one conversation context;
+- owner/session/tenant identity agrees: context tenant = conversation tenant,
+  and the context's BrowserSession user/membership (and that membership's
+  user/tenant) equal the conversation's `owner_user_id`/`owner_membership_id`/
+  `tenant_id` — the old schema makes `browser_session_id` the ownership
+  boundary, so a mismatch would transfer a durable conversation;
+- every ResultSet's `browser_session_id`/tenant equals its conversation's
+  single context (otherwise a later re-upgrade's session-based backfill would
+  silently fabricate provenance);
+- NO live pending-draft authority (`active_pending_draft_id IS NULL`); and
+- NO transcript turn carries a `pending_job_draft` payload.
+
+The pending-draft restriction exists because pre-#80 code treats transcript
+`pending_job_draft` payloads as actionable authority (the latest payload is
+the follow-up draft and any payload id is confirmable), while #80
+deliberately does not — only `active_pending_draft_id` is authority. The old
+schema cannot express "historical payload vs one active pointer", so a
+downgrade would revive migrated-invalidated or superseded drafts. This
+deliberately shrinks the safe downgrade subset (the migration's own legacy
+pending-draft invalidation is itself not downgradable). Downgrade never picks
+a "most recent" conversation or draft, never deletes, truncates, or rewrites
+durable history, never copies draft authority into another field, and never
+rebinds a ResultSet. In the representable case every conversation is
+retained and the old `browser_session_id`/`context_epoch`/
+`active_result_set_id` are copied from its single context. Production
+rollback remains compatibility-aware release rollback under the accepted
+release/schema compatibility policy, never arbitrary Alembic downgrade.
 
 **Audit:** `agent.conversation.created` (`conversation_id`, `title_kind`),
 `agent.conversation.opened` (explicit selector only — plain GET refreshes are

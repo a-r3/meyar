@@ -2,9 +2,12 @@
 543c60f7efc5): durable owner backfill, one session context per migrated
 conversation, ResultSet conversation binding, removal of the old live
 columns, invalidated pending-draft authority, constraints, fail-closed
-integrity abort, lossless downgrade/re-upgrade of 1:1-representable state,
-fail-closed downgrade of post-#80 multi-conversation/multi-session state,
-fresh install, and a single head."""
+integrity abort, lossless downgrade/re-upgrade of fully 1:1-representable
+state (no pending-draft payload), fail-closed downgrade of every state whose
+authority the pre-#80 schema cannot represent (multi-conversation session,
+multi-session conversation, missing context, ResultSet/session mismatch,
+owner/session mismatch, live or transcript pending-draft authority), fresh
+install, and a single head."""
 
 import asyncio
 import json
@@ -38,6 +41,12 @@ ACTIVE_SET = "00000000-0000-0000-0000-0000000080f1"
 OLD_SET = "00000000-0000-0000-0000-0000000080f2"
 DRAFT_ID = "00000000-0000-0000-0000-000000008099"
 
+# Genuinely lossless legacy transcript: no pending_job_draft payload.
+TURNS_CLEAN = [
+    {"role": "user", "text": "Synthetic search"},
+    {"role": "assistant", "text": "Nəticə", "outcome": "ANSWERED_FROM_TOOL_RESULT"},
+]
+# Legacy transcript carrying pending-draft authority under pre-#80 code.
 TURNS_1 = [
     {"role": "user", "text": "Synthetic vacancy text"},
     {
@@ -117,7 +126,7 @@ def _identity_rows(membership_tenant: str = TENANT) -> list[tuple[str, dict]]:
     ]
 
 
-def _legacy_rows() -> list[tuple[str, dict]]:
+def _legacy_rows(turns: list = TURNS_CLEAN) -> list[tuple[str, dict]]:
     return [
         *_identity_rows(),
         _result_set_insert(OLD_SET, SESSION_1, 2),
@@ -130,7 +139,7 @@ def _legacy_rows() -> list[tuple[str, dict]]:
                 "c": CONVERSATION_1,
                 "t": TENANT,
                 "s": SESSION_1,
-                "turns": json.dumps(TURNS_1),
+                "turns": json.dumps(turns),
                 "rs": ACTIVE_SET,
             },
         ),
@@ -150,7 +159,7 @@ async def _query(url: str, sql: str, params: dict | None = None) -> list:
     return rows
 
 
-async def _assert_upgraded(url: str) -> None:
+async def _assert_upgraded(url: str, turns: list = TURNS_CLEAN) -> None:
     conversation_columns = {
         row[0]
         for row in await _query(
@@ -176,7 +185,7 @@ async def _assert_upgraded(url: str) -> None:
         assert (str(row.owner_user_id), str(row.owner_membership_id)) == (USER, MEMBERSHIP)
     assert conversations[CONVERSATION_1].title_kind == "GENERAL"
     assert conversations[CONVERSATION_2].title_kind == "NEW"
-    assert conversations[CONVERSATION_1].turns == TURNS_1  # transcript survives verbatim
+    assert conversations[CONVERSATION_1].turns == turns  # transcript survives verbatim
 
     contexts = {
         str(row.conversation_id): row
@@ -339,9 +348,116 @@ def test_upgrade_refuses_to_fabricate_ownership_across_tenants(monkeypatch) -> N
         asyncio.run(_admin(f'DROP DATABASE IF EXISTS "{name}"'))
 
 
+async def _snapshot(url: str) -> dict:
+    """Everything a rejected downgrade must leave untouched."""
+
+    async def rows(sql: str) -> list:
+        return sorted(tuple(str(value) for value in row) for row in await _query(url, sql))
+
+    return {
+        "revision": await rows("SELECT version_num FROM alembic_version"),
+        "conversations": await rows(
+            "SELECT id, tenant_id, owner_user_id, owner_membership_id, title_kind, "
+            "turns::text FROM agent_conversations"
+        ),
+        "contexts": await rows(
+            "SELECT id, tenant_id, conversation_id, browser_session_id, context_epoch, "
+            "active_result_set_id, active_pending_draft_id FROM "
+            "agent_conversation_session_contexts"
+        ),
+        "result_sets": await rows(
+            "SELECT id, tenant_id, browser_session_id, conversation_id FROM agent_result_sets"
+        ),
+        "conversation_columns": await rows(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name='agent_conversations'"
+        ),
+        "result_set_columns": await rows(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name='agent_result_sets'"
+        ),
+        "contexts_table": await rows(
+            "SELECT to_regclass('agent_conversation_session_contexts')::text"
+        ),
+        "mutations": await rows(
+            "SELECT (SELECT count(*) FROM jobs), (SELECT count(*) FROM job_criteria_versions),"
+            " (SELECT count(*) FROM evaluations), (SELECT count(*) FROM agent_draft_confirmations)"
+        ),
+    }
+
+
+def _assert_rejected_unchanged(url: str, before: dict) -> None:
+    after = asyncio.run(_snapshot(url))
+    assert after == before  # no DDL, no data mutation, no delete/rebind
+    assert after["revision"] == [(NEW_HEAD,)]
+    assert ("browser_session_id",) not in after["conversation_columns"]
+    assert ("owner_user_id",) in after["conversation_columns"]
+    assert ("conversation_id",) in after["result_set_columns"]
+    assert after["contexts_table"] == [("agent_conversation_session_contexts",)]
+    assert after["mutations"] == [("0", "0", "0", "0")]
+
+
+def test_migrated_legacy_pending_draft_blocks_downgrade(monkeypatch) -> None:
+    """#80 invalidates a legacy transcript pending draft (NULL pointer) but
+    keeps the transcript; pre-#80 code would revive it from the transcript,
+    so downgrade must refuse and change nothing."""
+    name, url = _with_database(monkeypatch, "meyar_conv80_pend")
+    config = _config()
+    try:
+        command.upgrade(config, PRIOR_HEAD)
+        asyncio.run(_execute(url, _legacy_rows(turns=TURNS_1)))
+        command.upgrade(config, NEW_HEAD)
+        asyncio.run(_assert_upgraded(url, turns=TURNS_1))  # transcript kept, pointer NULL
+        before = asyncio.run(_snapshot(url))
+        with pytest.raises(RuntimeError, match="pending_job_draft payload"):
+            command.downgrade(config, PRIOR_HEAD)
+        _assert_rejected_unchanged(url, before)
+        asyncio.run(_assert_upgraded(url, turns=TURNS_1))
+    finally:
+        get_settings.cache_clear()
+        asyncio.run(_admin(f'DROP DATABASE IF EXISTS "{name}"'))
+
+
 RESULT_SET_A = "00000000-0000-0000-0000-0000000080f3"
 RESULT_SET_B = "00000000-0000-0000-0000-0000000080f4"
 TURNS_B = [{"role": "user", "text": "Synthetic second conversation"}]
+DRAFT_1 = "00000000-0000-0000-0000-000000008091"
+DRAFT_2 = "00000000-0000-0000-0000-000000008092"
+OTHER_USER = "00000000-0000-0000-0000-0000000080b2"
+OTHER_MEMBERSHIP = "00000000-0000-0000-0000-0000000080c2"
+SESSION_3 = "00000000-0000-0000-0000-0000000080d3"
+
+
+def _draft_turn(draft_id: str) -> dict:
+    return {
+        "role": "assistant",
+        "text": "Qaralama",
+        "outcome": "ANSWERED_FROM_TOOL_RESULT",
+        "pending_job_draft": {"draft_id": draft_id, "title": "Synthetic"},
+    }
+
+
+TURNS_ACTIVE = [{"role": "user", "text": "Synthetic vacancy"}, _draft_turn(DRAFT_1)]
+TURNS_SUPERSEDED = [*TURNS_ACTIVE, {"role": "user", "text": "Dəyiş"}, _draft_turn(DRAFT_2)]
+# Another user's BrowserSession in the same tenant.
+_OTHER_OWNER_ROWS = [
+    (
+        "INSERT INTO users (id,username,password_hash,is_active) VALUES "
+        "(:u,'migration-80-other','hash',true)",
+        {"u": OTHER_USER},
+    ),
+    (
+        "INSERT INTO tenant_memberships (id,user_id,tenant_id,role,is_active) VALUES "
+        "(:m,:u,:t,'HR_USER',true)",
+        {"m": OTHER_MEMBERSHIP, "u": OTHER_USER, "t": TENANT},
+    ),
+    (
+        "INSERT INTO browser_sessions "
+        "(id,user_id,tenant_membership_id,session_token_hash,csrf_secret,expires_at) "
+        "VALUES (:s,:u,:m,repeat('e',64),repeat('b',64),now() + interval '1 day')",
+        {"s": SESSION_3, "u": OTHER_USER, "m": OTHER_MEMBERSHIP},
+    ),
+]
 
 
 def _new_conversation(conversation_id: str, turns: list) -> tuple[str, dict]:
@@ -353,12 +469,14 @@ def _new_conversation(conversation_id: str, turns: list) -> tuple[str, dict]:
     )
 
 
-def _new_context(conversation_id: str, session_id: str, active: str | None) -> tuple[str, dict]:
+def _new_context(
+    conversation_id: str, session_id: str, active: str | None, pending: str | None = None
+) -> tuple[str, dict]:
     return (
         "INSERT INTO agent_conversation_session_contexts "
-        "(id,tenant_id,conversation_id,browser_session_id,context_epoch,active_result_set_id) "
-        "VALUES (gen_random_uuid(),:t,:c,:s,1,:rs)",
-        {"t": TENANT, "c": conversation_id, "s": session_id, "rs": active},
+        "(id,tenant_id,conversation_id,browser_session_id,context_epoch,active_result_set_id,"
+        "active_pending_draft_id) VALUES (gen_random_uuid(),:t,:c,:s,1,:rs,:pd)",
+        {"t": TENANT, "c": conversation_id, "s": session_id, "rs": active, "pd": pending},
     )
 
 
@@ -400,11 +518,65 @@ _UNREPRESENTABLE = {
         2,
     ),
     "conversation_without_context": (
-        [_new_conversation(CONVERSATION_1, TURNS_1)],
+        [_new_conversation(CONVERSATION_1, TURNS_CLEAN)],
         "without exactly one session context",
         {},
-        {CONVERSATION_1: TURNS_1},
+        {CONVERSATION_1: TURNS_CLEAN},
         0,
+    ),
+    "result_set_session_mismatch": (
+        [
+            _new_conversation(CONVERSATION_1, TURNS_CLEAN),
+            _new_result_set(RESULT_SET_A, SESSION_2, CONVERSATION_1),
+            _new_context(CONVERSATION_1, SESSION_1, None),
+        ],
+        "would be re-attributed by downgrade",
+        {RESULT_SET_A: CONVERSATION_1},
+        {CONVERSATION_1: TURNS_CLEAN},
+        1,
+    ),
+    "owner_session_mismatch": (
+        [
+            *_OTHER_OWNER_ROWS,
+            _new_conversation(CONVERSATION_1, TURNS_CLEAN),
+            _new_context(CONVERSATION_1, SESSION_3, None),
+        ],
+        "would transfer ownership on downgrade",
+        {},
+        {CONVERSATION_1: TURNS_CLEAN},
+        1,
+    ),
+    "active_pending_draft": (
+        [
+            _new_conversation(CONVERSATION_1, TURNS_ACTIVE),
+            _new_context(CONVERSATION_1, SESSION_1, None, pending=DRAFT_1),
+        ],
+        "live pending-draft authority",
+        {},
+        {CONVERSATION_1: TURNS_ACTIVE},
+        1,
+    ),
+    "superseded_historical_pending_drafts": (
+        [
+            _new_conversation(CONVERSATION_1, TURNS_SUPERSEDED),
+            _new_context(CONVERSATION_1, SESSION_1, None, pending=DRAFT_2),
+        ],
+        "live pending-draft authority",
+        {},
+        {CONVERSATION_1: TURNS_SUPERSEDED},
+        1,
+    ),
+    # Pointer already cleared but D1/D2 payloads remain in the transcript:
+    # pre-#80 code would make either confirmable again.
+    "superseded_drafts_null_pointer": (
+        [
+            _new_conversation(CONVERSATION_1, TURNS_SUPERSEDED),
+            _new_context(CONVERSATION_1, SESSION_1, None),
+        ],
+        "pending_job_draft payload",
+        {},
+        {CONVERSATION_1: TURNS_SUPERSEDED},
+        1,
     ),
 }
 
@@ -419,11 +591,11 @@ def test_downgrade_fails_closed_on_unrepresentable_state(monkeypatch, scenario: 
     try:
         command.upgrade(config, NEW_HEAD)
         asyncio.run(_execute(url, [*_identity_rows(), *rows]))
+        before = asyncio.run(_snapshot(url))
         with pytest.raises(RuntimeError, match=message):
             command.downgrade(config, PRIOR_HEAD)
+        _assert_rejected_unchanged(url, before)
 
-        revision = asyncio.run(_query(url, "SELECT version_num FROM alembic_version"))
-        assert revision[0][0] == NEW_HEAD
         conversations = {
             str(row.id): row.turns
             for row in asyncio.run(_query(url, "SELECT id, turns FROM agent_conversations"))
@@ -440,17 +612,6 @@ def test_downgrade_fails_closed_on_unrepresentable_state(monkeypatch, scenario: 
             _query(url, "SELECT count(*) FROM agent_conversation_session_contexts")
         )
         assert contexts[0][0] == context_count
-        columns = {
-            row[0]
-            for row in asyncio.run(
-                _query(
-                    url,
-                    "SELECT column_name FROM information_schema.columns "
-                    "WHERE table_name='agent_conversations'",
-                )
-            )
-        }
-        assert "browser_session_id" not in columns and "owner_user_id" in columns
     finally:
         get_settings.cache_clear()
         asyncio.run(_admin(f'DROP DATABASE IF EXISTS "{name}"'))

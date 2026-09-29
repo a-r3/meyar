@@ -36,15 +36,30 @@ mutation authority from historical transcript JSON; HR must re-analyse the
 vacancy before confirmation. Already confirmed Jobs/criteria versions and
 AgentDraftConfirmation rows are untouched.
 
-Downgrade fails closed unless the state is losslessly representable by the
-previous 1:1 schema: every conversation has exactly one session context,
-every BrowserSession holds at most one conversation context, and every
-ResultSet belongs to the session of its conversation's single context. Any
-multi-conversation-per-session or multi-session-per-conversation state (or a
-conversation with no live context) raises before any DDL runs. Downgrade
-never picks a "winner", never deletes durable history, and never rebinds a
-ResultSet. Production rollback follows the release/schema compatibility
-policy, not arbitrary Alembic downgrade.
+Downgrade fails closed unless ALL authority is losslessly representable by
+the previous 1:1 schema. Before any DDL it requires:
+
+- exactly one session context per conversation (none, or one conversation
+  opened by several BrowserSessions, is rejected);
+- at most one conversation context per BrowserSession;
+- the context's tenant and BrowserSession user/membership (and that
+  membership's user/tenant) equal the conversation's durable
+  tenant/owner_user/owner_membership, because the old schema makes
+  ``browser_session_id`` the ownership boundary;
+- every ResultSet's session/tenant equals its conversation's single context;
+- NO live pending-draft authority (``active_pending_draft_id IS NULL``); and
+- NO transcript turn carrying a ``pending_job_draft`` payload.
+
+The pending-draft restriction exists because pre-#80 code treats transcript
+``pending_job_draft`` payloads as actionable mutation authority (latest
+payload = follow-up draft; any payload id = confirmable), while #80
+deliberately does not: only ``active_pending_draft_id`` is authority. The old
+schema cannot express "historical payload" vs "one active pointer", so
+downgrading would revive invalidated or superseded drafts. Downgrade never
+picks a "winner", never deletes or rewrites durable history, never copies
+draft authority elsewhere, and never rebinds a ResultSet. Production rollback
+follows the release/schema compatibility policy, not arbitrary Alembic
+downgrade.
 """
 from collections.abc import Sequence
 
@@ -239,7 +254,7 @@ def upgrade() -> None:
 
 
 def _assert_downgrade_representable(connection: sa.Connection) -> None:
-    """Refuse downgrade unless new-schema state maps 1:1 onto the old schema.
+    """Refuse downgrade unless all new-schema authority maps 1:1 onto the old schema.
 
     Runs before any DDL so a refusal leaves the database untouched on this
     revision (transcripts, contexts and ResultSet provenance intact).
@@ -273,6 +288,39 @@ def _assert_downgrade_representable(connection: sa.Connection) -> None:
         "OR ctx.tenant_id <> ars.tenant_id",
         "agent_result_sets whose session differs from their conversation's single "
         f"session context would be re-attributed by downgrade; {hint}",
+    )
+    _abort_if(
+        connection,
+        "SELECT count(*) FROM agent_conversation_session_contexts AS ctx "
+        "JOIN agent_conversations AS ac ON ac.id = ctx.conversation_id "
+        "LEFT JOIN browser_sessions AS bs ON bs.id = ctx.browser_session_id "
+        "LEFT JOIN tenant_memberships AS tm ON tm.id = bs.tenant_membership_id "
+        "WHERE NOT (ctx.tenant_id = ac.tenant_id "
+        "AND bs.user_id IS NOT DISTINCT FROM ac.owner_user_id "
+        "AND bs.tenant_membership_id IS NOT DISTINCT FROM ac.owner_membership_id "
+        "AND tm.user_id IS NOT DISTINCT FROM ac.owner_user_id "
+        "AND tm.tenant_id IS NOT DISTINCT FROM ac.tenant_id)",
+        "session contexts whose BrowserSession/membership/tenant differs from the "
+        "conversation's durable owner would transfer ownership on downgrade; "
+        f"{hint}",
+    )
+    # Pre-#80 code treats transcript pending_job_draft payloads as actionable
+    # authority; #80 only trusts active_pending_draft_id. Neither may exist.
+    _abort_if(
+        connection,
+        "SELECT count(*) FROM agent_conversation_session_contexts "
+        "WHERE active_pending_draft_id IS NOT NULL",
+        "session contexts holding live pending-draft authority cannot be "
+        f"downgraded; {hint}",
+    )
+    _abort_if(
+        connection,
+        "SELECT count(*) FROM agent_conversations AS ac WHERE EXISTS ("
+        "SELECT 1 FROM json_array_elements(ac.turns) AS turn "
+        "WHERE json_typeof(turn) = 'object' AND turn -> 'pending_job_draft' IS NOT NULL)",
+        "agent_conversations whose transcript carries a pending_job_draft payload "
+        "would revive draft authority under pre-#80 code; "
+        f"{hint}",
     )
 
 
