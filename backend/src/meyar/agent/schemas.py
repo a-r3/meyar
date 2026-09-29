@@ -79,13 +79,11 @@ class AgentActionType(StrEnum):
     # the derived membership/order (see
     # meyar.services.agent_result_set_repo.create_result_set_from_refinement).
     REFINE_CANDIDATE_RESULTS = "REFINE_CANDIDATE_RESULTS"
-    # Slice 4 (issue #33, D-030/D-032): the user pasted/described a JD or
-    # role and wants candidate-evaluation criteria drafted from it. No
-    # argument on the decision itself — the server uses the user's OWN
-    # already-known message text as the JD input for a second, narrower
-    # LLM call (meyar.agent.service._dispatch_draft_job_criteria), exactly
-    # like GET_CANDIDATE_EVIDENCE never asks the model to restate CV text.
-    # Nothing is persisted by this action — see AgentJobDraftToolResult.
+    # Slice 4's typed draft action remains the internal service/tool result
+    # identity, but issue #79 makes its execution authority server-owned.
+    # Confirmed JDs are routed before model orchestration; a model-produced
+    # value by itself is rejected. Nothing is persisted by this action — see
+    # AgentJobDraftToolResult.
     DRAFT_JOB_CRITERIA = "DRAFT_JOB_CRITERIA"
     FINAL_ANSWER = "FINAL_ANSWER"
     CLARIFY = "CLARIFY"

@@ -276,6 +276,58 @@ unlabeled number but never guesses that an arbitrary identifier is a phone.
 - A refinement is always read-only with respect to business entities — it
   never creates a `Job`/`JobCriteriaVersion`/`Evaluation` row.
 
+## Unified-composer entry-routing authority (issue #79, D-085)
+
+- The normal HR composer contains no mode selector. Client UI mode is not
+  authority: the `/ui/agent` route accepts the message and CSRF token as its
+  authoritative inputs, while a forged/legacy `intent=draft_job_criteria`
+  field is merely an ignored unknown form field and cannot authorize a draft.
+- `meyar.agent.intent_routing` is a small server-owned, non-mutating boundary.
+  It deterministically confirms strong vacancy/JD source shapes, preserves
+  explicit candidate-search/current-result/ordinal cues for normal routing,
+  and returns fixed clarification when requirement-shaped text is genuinely
+  ambiguous. It never performs candidate search and never writes business
+  rows.
+- LLM intent is proposal, not authorization. The model still returns the
+  bounded typed `AgentDecision`, but a model-proposed `DRAFT_JOB_CRITERIA`
+  from the normal route is rejected with fixed HR-facing clarification and no
+  tool execution. Only a server-confirmed JD may enter the existing
+  source-bound review-draft path.
+- The server deterministically protects the JD/search boundary. Ordinary
+  candidate search can never silently persist a vacancy: search,
+  refinement, and clarification create no `Job`, `JobCriteriaVersion`, or
+  `Evaluation`; actual vacancy persistence still requires the existing
+  explicit human-confirmation path.
+- Pending JD draft follow-ups remain bound to the server-held draft and are
+  handled before new-entry routing. D-083/D-084 ResultSet authority,
+  zero-result distinction, stale/expired validation, tenant/session/context
+  epoch, prohibited-attribute checks, and same-session conversation row
+  locking are unchanged. `CandidateIdentity` is not routing or suitability
+  authority.
+- `agent.entry.routed` and `agent.entry.action_rejected` carry only closed
+  routing source/action/version metadata. They never include the raw user
+  message or JD, regex matches, model raw output, candidate names,
+  email/phone, or CV/evidence content. Existing tool and turn events remain
+  the authoritative execution record.
+- Routing policy `agent-entry-routing-v3` adds `FORCE_CANDIDATE_SEARCH`
+  (`DETERMINISTIC_SEARCH`/`SEARCH_CANDIDATES`), `FORCE_RESULT_LIMIT`
+  (`DETERMINISTIC_RESULT_CONTEXT`/`REFINE_CANDIDATE_RESULTS`, a count-only
+  follow-up validated by the unchanged #49 refinement dispatch) and
+  `CLARIFY_JOB_SOURCE_REQUIRED`. A forced search only authorizes the existing
+  `SEARCH_CANDIDATES` action with the user's exact text; filters,
+  prohibited-attribute rejection and no-silent-weakening remain the existing
+  planner's authority, and a search can never create a `Job`,
+  `JobCriteriaVersion` or `Evaluation`. The JD source slice after an
+  instruction wrapper is an exact substring by offsets, never rewritten and
+  never audited. Current-result/ordinal language keeps precedence over new
+  search so #49 ResultSet semantics are unchanged.
+- Routing policy `agent-entry-routing-v4` makes entry routing total over
+  valid composer input: only the known `SourceOccurrence.text` length
+  overflow maps to `CLARIFY_INPUT_STRUCTURE` (fixed clarification, no model,
+  planner or JD tool call, no truncation); unrelated validation errors still
+  propagate. Its audit event carries only the closed source/action/version
+  values — never the raw message or exception text.
+
 ## Local-only Ollama operating contract
 
 Two distinct guarantees are in play, and they must not be conflated —

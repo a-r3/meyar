@@ -103,6 +103,7 @@ select:focus-visible, summary:focus-visible {
   font-size: .92rem;
   font-weight: 650;
   text-decoration: none;
+  white-space: nowrap;
 }
 .site-header nav a:hover, .site-header nav a:focus-visible {
   background: color-mix(in srgb, var(--surface) 14%, transparent);
@@ -472,10 +473,17 @@ tbody tr:hover { background: var(--surface-subtle); }
 }
 
 @media (max-width: 800px) {
-  .site-header { align-items: flex-start; flex-wrap: wrap; gap: 8px 16px; }
+  /* Row 1: brand + logout; row 2: nav. `flex: 1` on the desktop nav has a
+     0 basis, so the mobile nav needs an explicit full-width basis or it
+     shrinks back into row 1 beside the brand/logout (PR81 visual review). */
+  .site-header { align-items: center; flex-wrap: wrap; gap: 8px 16px; }
+  .site-header .brand { order: 1; }
+  .site-header .logout-form { order: 2; margin-left: auto; }
   .site-header nav {
-    width: 100%;
+    flex: 0 0 100%;
     order: 3;
+    min-width: 0;
+    margin-left: -11px;
     padding-bottom: 2px;
     overflow-x: auto;
   }
@@ -546,10 +554,10 @@ tbody tr:hover { background: var(--surface-subtle); }
 }
 
 /* PR #42 owner correction (issue #33, D-045) — composer productization:
-   one visually merged, chat-style input (textarea + mode + send) instead
-   of three stacked full-width form elements, so the agent reads as an
-   assistant, not a developer form. The JD mode stays an explicit select
-   (no magic prompt detection) — only its presentation changes. */
+   one visually merged, chat-style input (textarea + send) so the agent
+   reads as an assistant, not a developer form. Since issue #79 (D-085)
+   there is no mode select: search-vs-JD routing is decided server-side
+   by meyar.agent.intent_routing. */
 .composer-panel { margin: 18px 0; }
 .composer {
   display: flex;
@@ -562,6 +570,8 @@ tbody tr:hover { background: var(--surface-subtle); }
   box-shadow: var(--shadow-subtle);
 }
 .composer:focus-within { border-color: var(--accent); }
+/* Separates the "Yeni söhbət" heading row from the first turn bubble. */
+.agent-conversation > .page-heading { margin-bottom: 16px; }
 .composer textarea {
   min-height: 26px;
   max-height: 220px;
@@ -575,21 +585,9 @@ tbody tr:hover { background: var(--surface-subtle); }
 .composer-toolbar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 10px;
 }
-.composer-mode select {
-  min-height: 34px;
-  width: auto;
-  padding: 5px 30px 5px 12px;
-  border-radius: 999px;
-  border-color: var(--border);
-  background-color: var(--surface-subtle);
-  color: var(--text-muted);
-  font-size: .84rem;
-  font-weight: 650;
-}
-.composer-mode select:hover { border-color: var(--primary); color: var(--text); }
 .composer-send {
   display: inline-flex;
   min-width: 42px;
@@ -606,6 +604,11 @@ tbody tr:hover { background: var(--surface-subtle); }
 }
 .composer-send:hover { background: var(--primary-hover); }
 .composer-send:disabled { background: var(--border-strong); }
+/* Narrow screens wrap the one-line placeholder: give the empty textarea
+   room for the whole hint (desktop stays compact). */
+@media (max-width: 640px) {
+  .composer textarea { min-height: 4.4em; }
+}
 
 /* PR #42 owner correction (issue #33, D-045) — criteria review noise
    reduction: the requirement text column dominates the row, the

@@ -6480,3 +6480,158 @@ governance bounds):** semantic reranking of the current set, deep candidate
 factual Q&A, candidate-to-candidate comparison, hiring recommendation, LLM
 numeric scoring, new scoring policy, RAG/long-term conversation memory, the
 future unified-composer/sidebar UI redesign.
+
+## D-085 — Unified HR composer with server-owned entry routing (issue #79)
+
+**Decision:** the normal HR agent surface has one composer (one textarea and
+one Send button). The removed HTML `intent` selector is not replaced by a
+hidden client authority: **client UI mode is not authority**, and an unknown
+or forged legacy `intent=draft_job_criteria` form field is ignored. The
+server-owned `meyar.agent.intent_routing` boundary alone decides one of three
+narrow entry outcomes before ordinary agent dispatch:
+
+```text
+FORCE_JOB_DRAFT | MODEL_ROUTED | CLARIFY_AMBIGUOUS
+```
+
+This boundary performs no search and no business mutation. It reuses the
+existing normalized semantic requirement analysis and considers only
+workflow/structural evidence. An explicit vacancy/JD noun plus an explicit
+analyse/draft request is a confirmed draft. A vacancy-labelled source with
+material semantic requirements, or a genuinely pasted multi-line/bulleted
+role description with multiple material professional requirements, is also a
+confirmed draft. Candidate/result nouns, find/show/list verbs, an explicit
+requested candidate count, and current-result/ordinal language strongly
+protect the normal model-routed path. Requirement language by itself is not a
+draft authorization. Requirement-shaped text whose purpose remains genuinely
+unclear receives fixed Azerbaijani clarification asking whether it should be
+used for candidate search or vacancy-criteria analysis; neither the model nor
+a business tool runs for that turn.
+
+**Authority order:**
+
+```text
+server-owned deterministic entry routing where confidence is sufficient
+→ bounded typed AgentDecision for remaining conversational routing
+→ server validation of every proposed action
+→ existing domain authority
+```
+
+The local model continues to receive the strict bounded `AgentDecision`
+schema for normal conversation, search, current-ResultSet refinement, and
+ordinal profile/evidence actions. **LLM intent is proposal, not
+authorization.** A model-proposed `DRAFT_JOB_CRITERIA` from the normal route
+is rejected with fixed HR-facing clarification and no tool execution; it is
+never silently reinterpreted. A deterministically confirmed JD bypasses the
+model and enters the existing source-bound, review-only draft path. Actual
+`Job`/`JobCriteriaVersion` persistence still requires the pre-existing
+explicit human confirmation flow; ordinary candidate search can never
+silently persist a vacancy. `Evaluation` creation is likewise outside entry
+routing.
+
+The existing pending-draft follow-up boundary remains ahead of new-entry
+routing, so bounded required/preferred, result-limit, and supported criterion
+updates continue against the server-held source-bound draft. D-083/D-084
+remain authoritative inside `MODEL_ROUTED`: active ResultSet, zero-result,
+stale/expired, ordinal, tenant/session/context-epoch, and same-session row-lock
+semantics are unchanged. The owning `AgentConversation` row is still locked
+before routing-dependent state mutation, ResultSet changes, pending-draft
+changes, or transcript writes. Existing prohibited-attribute policy remains
+authoritative in both search and JD paths; `CandidateIdentity` gains no
+routing role.
+
+**Audit/privacy:** `agent.entry.routed` records only closed structural values
+(`routing_source`, `routed_action`, and routing policy version).
+`agent.entry.action_rejected` records the same structural routing provenance
+when a model proposes an unauthorized draft. Neither event contains the raw
+message/JD, model raw output, candidate identity, CV/evidence content, or
+internal regex matches. Existing tool/turn events remain the action record;
+the entry event does not duplicate business payloads.
+
+**Non-scope:** persistent conversation sidebar/history (#80), cross-login
+conversation ownership, candidate comparison/deep Q&A (#50), RAG memory,
+hiring recommendations, scoring changes, deployment/Target-Mac work, and an
+unrelated UI redesign.
+
+**Amendment — routing policy `agent-entry-routing-v3` (PR #81 visual
+acceptance correction).** Real-Ollama visual review showed that leaving an
+explicit new search to the orchestration model is unsafe: the local model
+routed `Python bilən namizədləri göstər` to `REFINE_CANDIDATE_RESULTS` with no
+active ResultSet, so HR received result-context-required copy and no search.
+The entry outcomes are now:
+
+```text
+FORCE_JOB_DRAFT | FORCE_CANDIDATE_SEARCH | FORCE_RESULT_LIMIT | MODEL_ROUTED
+| CLARIFY_AMBIGUOUS | CLARIFY_JOB_SOURCE_REQUIRED
+```
+
+Precedence (named predicates in `meyar.agent.intent_routing`):
+
+```text
+pending draft follow-up (caller, unchanged)
+→ explicit vacancy-analysis request (JD draft, or source-required clarification)
+→ count-only current-result follow-up (FORCE_RESULT_LIMIT, #49 limit)
+→ other current ResultSet / refinement / ordinal language (MODEL_ROUTED, #49)
+→ explicit new-search imperative (FORCE_CANDIDATE_SEARCH)
+→ structurally strong pasted JD (FORCE_JOB_DRAFT)
+→ requirement ambiguity (CLARIFY_AMBIGUOUS)
+→ ordinary MODEL_ROUTED
+```
+
+- **Deterministic search authority.** A search imperative in imperative
+  position (Azerbaijani verb ending the request — `göstər`, `tap`, `axtar`,
+  … optionally `-in/-iniz` and a polite tail; English verb starting it —
+  `find`, `show`, `list`, …) plus a candidate noun, a source-bound material
+  requirement, or an explicit result count. Inflected verbs inside
+  requirement sentences (`göstərməlidir`, `must show`) and a bare candidate
+  noun never qualify. The server builds
+  `AgentDecision(SEARCH_CANDIDATES, search_query=<exact user text>)`; the
+  router parses no filters. The existing validated planner (deterministic
+  fast path or local LLM planner), search service and ResultSet authority run
+  unchanged, and the validated tool result ends the turn — the orchestration
+  decision call is not consulted for such an entry. Audit:
+  `routing_source=DETERMINISTIC_SEARCH`, `routed_action=SEARCH_CANDIDATES`.
+- **Count-only follow-up.** Live review also showed the local model shaping
+  `ilk 3` as `REFINE_CANDIDATE_RESULTS(filter_query="ilk 3")` (no limit), which
+  the refine planner cannot execute. When the WHOLE message is only a count on
+  the current results (`ilk 3`, `ilk üçü`, `first 3`, `top 5`, `5 nəfərə
+  endir`, 1..`MAX_CANDIDATE_REF`), the server builds
+  `AgentDecision(REFINE_CANDIDATE_RESULTS, limit=N)` and the existing #49
+  refinement dispatch validates the active ResultSet (truthful
+  result-context-required copy when none). Any filter text (`bunlardan SQL
+  bilən ilk 3`) stays model-routed. Audit:
+  `routing_source=DETERMINISTIC_RESULT_CONTEXT`,
+  `routed_action=REFINE_CANDIDATE_RESULTS`.
+- **Exact JD source slice.** When an explicit analysis instruction is the
+  leading segment before the first `:`/newline ("Vakansiyanı analiz et:"),
+  the router returns exact offsets of the remaining user-owned text and only
+  that substring reaches JD extraction/fallback. No rewrite, no LLM
+  stripping. A structural header (`Vakansiya: Senior Backend…`) has no
+  analysis verb and keeps the full source. Offsets are ephemeral; the slice
+  is never audited.
+- **Source required.** An explicit analysis command with no useful source
+  (no material requirement; for a wrapper, also no multi-line source) returns
+  fixed clarification asking for the vacancy text/requirements. No
+  extraction, no pending empty draft.
+- The orchestration prompt (`agent-orchestrator-prompt-v8`) now states that
+  confirmed JDs and explicit new searches are handled before its call; it
+  gains no authority.
+
+**Amendment — routing policy `agent-entry-routing-v4` (PR #81 final
+blocker).** Entry routing now runs deterministic semantic analysis on every
+`/ui/agent` turn, which made a pre-existing parser limit reachable from the
+browser: one long unpunctuated clause (e.g. `"Python " * 400 + "tələb
+olunur"`, well under the 4000-character composer cap) cannot be represented
+as a bounded exact `SourceOccurrence` (`text` max 500) and raised an unhandled
+Pydantic `ValidationError` (HTTP 500). `route_agent_entry` is now total over
+valid composer input: it catches `ValidationError` only when the validated
+model is `SourceOccurrence` and every error is `string_too_long` on `text`,
+and returns the new outcome `CLARIFY_INPUT_STRUCTURE`
+(`routing_source=DETERMINISTIC_CLARIFICATION`, `routed_action=CLARIFY`) with
+fixed copy asking HR to split the requirements into shorter sentences or
+separate lines. Any other validation failure propagates as an internal
+defect. The text is never truncated, never sent to the orchestration model,
+search planner or JD extraction, and no ResultSet/Job/JobCriteriaVersion/
+Evaluation is created. Audit metadata stays structural only (source, action,
+version); the raw message and exception text are never recorded. The
+orchestration prompt contract is unchanged.

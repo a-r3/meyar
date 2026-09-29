@@ -367,6 +367,14 @@ def _number_value(token: str) -> float:
     return float(normalized.replace(",", "."))
 
 
+def count_token_value(token: str) -> int | None:
+    """Whole-number value of a digit or a known number word, else None."""
+    normalized = _fold(token)
+    if normalized in _NUMBER_WORDS:
+        return _NUMBER_WORDS[normalized]
+    return int(normalized) if normalized.isdigit() else None
+
+
 def _occurrence(jd_text: str, start: int, end: int) -> SourceOccurrence:
     return SourceOccurrence(start_offset=start, end_offset=end, text=jd_text[start:end])
 

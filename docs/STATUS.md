@@ -2,7 +2,40 @@
 
 ## Current phase
 
-**Accepted `main` is `7c911cbc850d21999eae2239e6b51bfedc570d4a`.**
+**Current authority correction (issue #79 working baseline):** accepted
+`main` is `f89bd4b137ad4b79f465c31eadbd46aa8648eb61`. Issue #49 is CLOSED.
+Issue #79 is OPEN under milestone 9 and is being implemented on
+`feat/79-unified-hr-composer-routing`; it is not accepted until independent
+review and an owner merge. Issue #80 depends on #79 and remains OPEN and
+untouched. Issue #50 remains OPEN and separate. Issues #35, #36, and #46
+remain OPEN. The older phase narrative below is retained as historical
+delivery context where its individual PR facts still apply; it is not a
+replacement for this live correction.
+
+Issue #79 adopts D-085: the HR agent now has one composer, while a narrow
+server-owned entry boundary protects vacancy/JD drafting from candidate
+search. Client UI mode is not authority; LLM intent is proposal, not
+authorization; the server deterministically protects the JD/search boundary.
+Confirmed JDs bypass model routing into the existing review-only draft path,
+ambiguous requirement-shaped input receives fixed clarification, and an
+unauthorized model draft proposal is rejected without tool execution.
+Ordinary candidate search can never silently persist a vacancy. Existing
+ResultSet refinement/ordinal/zero-result/stale/expiry authority, pending-draft
+follow-ups, prohibited-attribute checks, audit privacy, CSRF/session controls,
+and same-session conversation row locking remain in force.
+
+PR #81 acceptance correction (routing `agent-entry-routing-v3`): explicit
+new candidate searches are server-routed to the existing planner/search path
+without an orchestration-model decision, count-only follow-ups ("ilk 3") are
+server-routed to the existing #49 limit refinement, explicit JD-analysis instructions
+are sliced off the exact user source, a source-less analysis command asks for
+the vacancy text, and mobile header/composer copy/layout defects from visual
+review are fixed. Final blocker (routing `agent-entry-routing-v4`): a valid
+long unpunctuated requirement that the source-bound analyzer cannot represent
+now receives fixed structure clarification instead of an unhandled 500.
+
+**Historical snapshot: accepted `main` was
+`7c911cbc850d21999eae2239e6b51bfedc570d4a`.**
 PR12 / PR #75 is merged and post-merge verified. PR13 is the current
 engineering proposal for diagnostics and lifecycle acceptance tooling.
 Issue #35 is OPEN. Issue #46 is OPEN. Issue #36 is OPEN, explicitly next

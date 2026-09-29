@@ -102,7 +102,7 @@
         {% if draft.unsupported_language %}
         <div class="alert alert-warning"><p><strong>Bu dil hazırda dəstəklənmir.</strong> Vakansiya mətnini Azərbaycan və ya ingilis dilində göndərin. Heç bir sıralama meyarı yaradılmadı.</p></div>
         {% elif draft.wrong_mode_guidance %}
-        <div class="alert alert-info"><p><strong>Bu mətn namizəd axtarışına bənzəyir.</strong> Namizədləri vakansiya yaratmadan tapmaq üçün “Namizəd axtarışı” rejimindən istifadə edin; vakansiya rejimində isə tələbləri və onların məcburi/üstünlük statusunu qeyd edin.</p></div>
+        <div class="alert alert-info"><p><strong>Bu mətn namizəd axtarışına bənzəyir.</strong> Namizədləri vakansiya yaratmadan tapmaq üçün axtarış istəyinizi açıq yazın; vakansiya analizi üçün isə elanı və tələblərin məcburi/üstünlük statusunu qeyd edin.</p></div>
         {% else %}
         <div class="alert alert-warning">
           <p><strong>Avtomatik sıralama üçün hazır meyar yoxdur.</strong> Mənbə tələbləri aşağıda görünür, lakin onlar insan baxışı tələb edir və ya sistem tərəfindən hələ ölçülmür. Tələbləri dəqiqləşdirib elanı yenidən analiz edin.</p>
@@ -225,16 +225,9 @@
 <section class="composer-panel">
   <form method="post" action="/ui/agent" class="composer" id="agent-composer">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <label for="message" class="sr-only">Mesajınız</label>
-    <textarea id="message" name="message" rows="1" maxlength="4000" placeholder="Məsələn: Python bilən namizədləri göstər, ya da bir vakansiya elanını buraya yapışdırın"></textarea>
+    <label for="message" class="sr-only">Namizəd axtarışı və ya vakansiya elanı</label>
+    <textarea id="message" name="message" rows="1" maxlength="4000" placeholder="Namizəd axtarın, nəticələri dəqiqləşdirin və ya vakansiya elanını yapışdırın…"></textarea>
     <div class="composer-toolbar">
-      <label class="composer-mode" for="intent">
-        <span class="sr-only">Rejim</span>
-        <select id="intent" name="intent" aria-label="Rejim">
-          <option value="">Adi söhbət</option>
-          <option value="draft_job_criteria">Vakansiya elanını analiz et</option>
-        </select>
-      </label>
       <button id="composer-send" class="composer-send" type="submit" aria-label="Göndər">Göndər</button>
     </div>
   </form>

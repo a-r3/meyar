@@ -197,7 +197,6 @@ async def _run(
     message,
     max_tool_calls=3,
     max_context_turns=8,
-    explicit_action=None,
 ):
     return await run_agent_turn(
         db_session,
@@ -210,7 +209,6 @@ async def _run(
         embedding_provider=None,
         max_tool_calls=max_tool_calls,
         max_context_turns=max_context_turns,
-        explicit_action=explicit_action,
     )
 
 
@@ -641,7 +639,9 @@ async def test_bounded_tool_call_loop_stops_at_configured_maximum(
         llm,
         tenant_id=tenant.id,
         conversation=conversation,
-        message="NoMatch bilən namizədləri göstər",
+        # Model-routed on purpose: this exercises the orchestration loop's
+        # own bound, not the server-forced single search.
+        message="NoMatch haqqında məlumat ver",
         max_tool_calls=2,
     )
     assert result.outcome == AgentTurnOutcome.TOOL_CALL_LIMIT_EXCEEDED
@@ -1452,7 +1452,7 @@ async def test_draft_job_criteria_builds_valid_criteria_from_llm_draft(
     tenant, user, _password, membership = tenant_and_user
     await db_session.commit()
     conversation = await _new_conversation(db_session, tenant, user, membership)
-    jd_text = "Baş Backend Mühəndisi axtarırıq. Python bilməlidir. AWS üstünlükdür."
+    jd_text = "Vakansiya: Baş Backend Mühəndisi.\nPython bilməlidir.\nAWS üstünlükdür."
     llm = FakeLLMProvider(
         agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
         jd_draft=JDCriteriaDraft(
@@ -1497,7 +1497,7 @@ async def test_draft_job_criteria_builds_valid_criteria_from_llm_draft(
     jobs = (await db_session.execute(select(Job).where(Job.tenant_id == tenant.id))).scalars().all()
     assert jobs == []
     # Turn-terminal like GET_CANDIDATE_PROFILE/EVIDENCE — no second decision call.
-    assert llm.agent_call_count == 1
+    assert llm.agent_call_count == 0
 
 
 async def test_pending_draft_followup_is_modified_before_search_routing(
@@ -1512,8 +1512,10 @@ async def test_pending_draft_followup_is_modified_before_search_routing(
         FakeLLMProvider(jd_draft=JDCriteriaDraft(title="Backend")),
         tenant_id=tenant.id,
         conversation=conversation,
-        message="Python minimum 5 il tələb olunur. 10 nəfər göstər.",
-        explicit_action=AgentActionType.DRAFT_JOB_CRITERIA,
+        message=(
+            "Bu vakansiya elanını analiz et: Python minimum 5 il tələb olunur. "
+            "10 nəfər göstər."
+        ),
     )
     assert initial.tool_results[0].job_draft is not None
     await db_session.refresh(conversation)
@@ -1550,8 +1552,7 @@ async def test_pending_draft_modality_followups_apply_and_persist_both_direction
         FakeLLMProvider(jd_draft=JDCriteriaDraft(title="Platform")),
         tenant_id=tenant.id,
         conversation=conversation,
-        message="ClickHouse tələb olunur. COBIT üstünlükdür.",
-        explicit_action=AgentActionType.DRAFT_JOB_CRITERIA,
+        message="Vakansiya: Platform.\nClickHouse tələb olunur.\nCOBIT üstünlükdür.",
     )
     initial = initial_result.tool_results[0].job_draft
     assert initial is not None
@@ -1591,37 +1592,6 @@ async def test_pending_draft_modality_followups_apply_and_persist_both_direction
     assert persisted_demoted == demoted
 
 
-@pytest.mark.parametrize(
-    "message",
-    ["ClickHouse bilən namizədləri göstər", "Show candidates who know ClickHouse"],
-)
-async def test_vacancy_mode_simple_search_has_bilingual_guidance_and_no_persistence(
-    db_session: AsyncSession, tenant_and_user, message: str
-) -> None:
-    from sqlalchemy import select
-
-    from meyar.agent.schemas import JDCriteriaDraft
-    from meyar.models.job import Job
-
-    tenant, user, _password, membership = tenant_and_user
-    conversation = await _new_conversation(db_session, tenant, user, membership)
-    provider = FakeLLMProvider(jd_draft=JDCriteriaDraft(title="unused"))
-    result = await _run(
-        db_session,
-        provider,
-        tenant_id=tenant.id,
-        conversation=conversation,
-        message=message,
-        explicit_action=AgentActionType.DRAFT_JOB_CRITERIA,
-    )
-    draft = result.tool_results[0].job_draft
-    assert draft is not None and draft.wrong_mode_guidance
-    assert draft.must_have == draft.preferred == []
-    assert provider.jd_draft_call_count == 0
-    jobs = (await db_session.execute(select(Job).where(Job.tenant_id == tenant.id))).scalars().all()
-    assert jobs == []
-
-
 async def test_draft_job_criteria_title_never_becomes_trusted_assistant_headline(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
@@ -1652,7 +1622,7 @@ async def test_draft_job_criteria_title_never_becomes_trusted_assistant_headline
         llm,
         tenant_id=tenant.id,
         conversation=conversation,
-        message="Backend role. Python bilməlidir.",
+        message="Bu vakansiya elanını analiz et: Backend role. Python bilməlidir.",
     )
     draft = result.tool_results[0].job_draft
     assert draft is not None
@@ -1673,13 +1643,17 @@ async def test_draft_job_criteria_uses_original_user_message_never_a_model_resta
     tenant, user, _password, membership = tenant_and_user
     await db_session.commit()
     conversation = await _new_conversation(db_session, tenant, user, membership)
-    jd_text = "Uzun bir vakansiya təsviri." * 50
+    source = "Python tələb olunur. " + "Uzun bir vakansiya təsviri." * 50
+    jd_text = "Bu vakansiya elanını analiz et: " + source
     llm = FakeLLMProvider(
         agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
         jd_draft=JDCriteriaDraft(title="Rol"),
     )
     await _run(db_session, llm, tenant_id=tenant.id, conversation=conversation, message=jd_text)
-    assert llm.last_jd_text == jd_text
+    # Exact user-owned substring after the server-recognized instruction
+    # wrapper (issue #79 PR81): never the instruction, never restated text.
+    assert llm.last_jd_text == source
+    assert "analiz et" not in llm.last_jd_text
 
 
 async def test_draft_job_criteria_drops_prohibited_attribute_item(
@@ -1722,7 +1696,10 @@ async def test_draft_job_criteria_drops_prohibited_attribute_item(
         llm,
         tenant_id=tenant.id,
         conversation=conversation,
-        message="Rol üçün namizəd kişi olmalıdır. Python bilməlidir.",
+        message=(
+            "Bu vakansiya elanını analiz et: Rol üçün namizəd kişi olmalıdır. "
+            "Python bilməlidir."
+        ),
     )
     draft = result.tool_results[0].job_draft
     assert draft is not None
@@ -1742,7 +1719,9 @@ async def test_nationality_misclassified_as_language_never_reaches_db_backed_dra
 
     tenant, user, _password, membership = tenant_and_user
     conversation = await _new_conversation(db_session, tenant, user, membership)
-    source = "Namizəd Azərbaycan vətəndaşı olmalıdır."
+    source = (
+        "Bu vakansiya elanını analiz et: Namizəd Azərbaycan vətəndaşı olmalıdır."
+    )
     llm = FakeLLMProvider(
         agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
         jd_draft=JDCriteriaDraft(
@@ -1809,7 +1788,10 @@ async def test_draft_job_criteria_supports_named_experience_without_inventing_du
         llm,
         tenant_id=tenant.id,
         conversation=conversation,
-        message="Python bilməlidir. Backend təcrübəsi tələb olunur.",
+        message=(
+            "Bu vakansiya elanını analiz et:\nPython bilməlidir. "
+            "Backend təcrübəsi tələb olunur."
+        ),
     )
     draft = result.tool_results[0].job_draft
     assert draft is not None
@@ -1871,7 +1853,10 @@ async def test_draft_job_criteria_other_kind_is_unsupported_never_scored(
         llm,
         tenant_id=tenant.id,
         conversation=conversation,
-        message="Python bilməlidir. Namizəd ezamiyyətə hazır olması üstünlükdür.",
+        message=(
+            "Bu vakansiya elanını analiz et:\nPython bilməlidir. "
+            "Namizəd ezamiyyətə hazır olması üstünlükdür."
+        ),
     )
     draft = result.tool_results[0].job_draft
     assert draft is not None
@@ -1928,7 +1913,10 @@ async def test_draft_job_criteria_drops_fabricated_unrelated_requirement(
     tenant, user, _password, membership = tenant_and_user
     await db_session.commit()
     conversation = await _new_conversation(db_session, tenant, user, membership)
-    jd_text = "Vakansiya: Kredit Analitiki. Namizəd ezamiyyətə getməyə hazır olmalıdır."
+    jd_text = (
+        "Bu vakansiya elanını analiz et: Kredit Analitiki. "
+        "Namizəd ezamiyyətə getməyə hazır olmalıdır."
+    )
     llm = FakeLLMProvider(
         agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
         jd_draft=JDCriteriaDraft(
@@ -1987,26 +1975,20 @@ async def test_draft_job_criteria_drops_fabricated_unrelated_requirement(
     assert "İngilis dili" not in rendered
 
 
-# --- D-043 (PR #42 owner correction, issue #33): explicit_action deterministic routing ---
+# --- Issue #79: server-owned deterministic entry routing ---
 
 
-async def test_explicit_draft_job_criteria_action_never_calls_the_routing_model(
+async def test_server_confirmed_draft_job_criteria_never_calls_the_routing_model(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
-    """The first-class "JD-dən meyar hazırla" affordance must route
-    deterministically — no dependence on a small local model correctly
-    inferring DRAFT_JOB_CRITERIA from arbitrary pasted text (D-042 point
-    6's documented unreliability). ``agent_decision`` is deliberately left
-    unset: if the code fell back to calling llm.decide_agent_action, the
-    FakeLLMProvider would raise (no decision configured), failing the
-    test loudly rather than silently routing correctly by coincidence."""
+    """An explicit JD analysis request routes without an orchestrator call."""
     from meyar.agent.schemas import AgentActionType, JDCriteriaDraft, JDDraftCriterionItem
     from meyar.schemas.criteria import CriterionKind
 
     tenant, user, _password, membership = tenant_and_user
     await db_session.commit()
     conversation = await _new_conversation(db_session, tenant, user, membership)
-    jd_text = "Bir mətn, heç bir açıq açar söz olmadan. Python bilməlidir."
+    jd_text = "Bu vakansiya elanını analiz et: Backend. Python bilməlidir."
     llm = FakeLLMProvider(
         jd_draft=JDCriteriaDraft(
             title="Rol",
@@ -2026,7 +2008,6 @@ async def test_explicit_draft_job_criteria_action_never_calls_the_routing_model(
         tenant_id=tenant.id,
         conversation=conversation,
         message=jd_text,
-        explicit_action=AgentActionType.DRAFT_JOB_CRITERIA,
     )
     assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
     assert result.tool_results[0].tool_name == AgentActionType.DRAFT_JOB_CRITERIA
@@ -2035,13 +2016,10 @@ async def test_explicit_draft_job_criteria_action_never_calls_the_routing_model(
     assert llm.jd_draft_call_count == 1
 
 
-async def test_explicit_draft_job_criteria_action_cannot_become_a_search(
+async def test_server_confirmed_draft_job_criteria_cannot_become_a_search(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
-    """Even when the configured routing decision would misroute a pasted
-    JD to SEARCH_CANDIDATES (the exact D-042 point 6 failure mode), the
-    explicit affordance must still deterministically draft criteria — the
-    routing model's own (unused) decision can never leak through."""
+    """A strongly identified pasted JD bypasses a wrong model decision."""
     from meyar.agent.schemas import AgentActionType, JDCriteriaDraft, JDDraftCriterionItem
     from meyar.schemas.criteria import CriterionKind
 
@@ -2071,34 +2049,44 @@ async def test_explicit_draft_job_criteria_action_cannot_become_a_search(
         tenant_id=tenant.id,
         conversation=conversation,
         message=jd_text,
-        explicit_action=AgentActionType.DRAFT_JOB_CRITERIA,
     )
     assert result.tool_results[0].tool_name == AgentActionType.DRAFT_JOB_CRITERIA
     assert llm.agent_call_count == 0
     assert llm.call_count == 0  # plan_candidate_search was never reached
 
 
-async def test_run_agent_turn_rejects_unsupported_explicit_action(
+async def test_model_proposed_draft_without_server_authority_fails_closed(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
-    """explicit_action is a server-controlled value (meyar.ui.router), not
-    a client-supplied one — but defensively reject anything other than
-    the one supported bare action rather than silently ignoring it."""
-    from meyar.agent.schemas import AgentActionType
+    """A model DRAFT proposal is not authorization and cannot run a tool."""
+
+    from sqlalchemy import func, select
+
+    from meyar.models.evaluation import Evaluation
+    from meyar.models.job import Job
+    from meyar.models.job_criteria_version import JobCriteriaVersion
 
     tenant, user, _password, membership = tenant_and_user
     await db_session.commit()
     conversation = await _new_conversation(db_session, tenant, user, membership)
-    llm = FakeLLMProvider()
-    with pytest.raises(ValueError):
-        await _run(
-            db_session,
-            llm,
-            tenant_id=tenant.id,
-            conversation=conversation,
-            message="salam",
-            explicit_action=AgentActionType.GET_CANDIDATE_PROFILE,
-        )
+    llm = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA)
+    )
+    result = await _run(
+        db_session,
+        llm,
+        tenant_id=tenant.id,
+        conversation=conversation,
+        # Model-routed (not a forced search), so the model proposal is
+        # actually consulted and must fail closed.
+        message="NoMatch haqqında məlumat ver",
+    )
+    assert result.outcome == AgentTurnOutcome.CLARIFICATION_REQUESTED
+    assert result.tool_results == []
+    assert llm.jd_draft_call_count == 0
+    assert await db_session.scalar(select(func.count()).select_from(Job)) == 0
+    assert await db_session.scalar(select(func.count()).select_from(JobCriteriaVersion)) == 0
+    assert await db_session.scalar(select(func.count()).select_from(Evaluation)) == 0
 
 
 async def test_draft_job_criteria_repairs_after_one_schema_invalid_attempt(
@@ -2115,7 +2103,11 @@ async def test_draft_job_criteria_repairs_after_one_schema_invalid_attempt(
         jd_draft_fail_first_n_calls=1,
     )
     result = await _run(
-        db_session, llm, tenant_id=tenant.id, conversation=conversation, message="JD mətni"
+        db_session,
+        llm,
+        tenant_id=tenant.id,
+        conversation=conversation,
+        message="Bu vakansiya elanını analiz et:\nBackend Mühəndisi\nKomanda ilə işləmək.",
     )
     assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
     assert llm.jd_draft_call_count == 2
@@ -2132,7 +2124,11 @@ async def test_draft_job_criteria_provider_failure_is_a_safe_typed_failure(
         jd_draft_error=ModelUnavailableError("simulated outage"),
     )
     result = await _run(
-        db_session, llm, tenant_id=tenant.id, conversation=conversation, message="JD mətni"
+        db_session,
+        llm,
+        tenant_id=tenant.id,
+        conversation=conversation,
+        message="Bu vakansiya elanını analiz et:\nBackend Mühəndisi\nKomanda ilə işləmək.",
     )
     assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
     assert len(result.tool_results) == 1
@@ -2243,7 +2239,11 @@ async def test_draft_job_criteria_repeated_schema_invalid_is_a_safe_typed_failur
         jd_draft_fail_first_n_calls=99,
     )
     result = await _run(
-        db_session, llm, tenant_id=tenant.id, conversation=conversation, message="JD mətni"
+        db_session,
+        llm,
+        tenant_id=tenant.id,
+        conversation=conversation,
+        message="Bu vakansiya elanını analiz et:\nBackend Mühəndisi\nKomanda ilə işləmək.",
     )
     assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
     assert len(result.tool_results) == 1
@@ -2253,3 +2253,61 @@ async def test_draft_job_criteria_repeated_schema_invalid_is_a_safe_typed_failur
     assert draft.preferred == []
     assert draft.wrong_mode_guidance is False
     assert draft.requirements == []
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Python bilən namizədləri göstər",
+        "Python və SQL bilən 5 namizəd göstər",
+        "Show candidates with at least 5 years of Java",
+    ],
+)
+async def test_explicit_search_is_server_routed_despite_wrong_orchestrator(
+    db_session: AsyncSession, tenant_and_user, message: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #79 PR81: a deliberately WRONG orchestration proposal is never
+    consulted for an explicit new search; the existing planner runs with
+    the user's own text and the validated search result ends the turn."""
+    from sqlalchemy import func, select
+
+    import meyar.agent.service as agent_service
+    from meyar.models.evaluation import Evaluation
+    from meyar.models.job import Job
+    from meyar.models.job_criteria_version import JobCriteriaVersion
+    from meyar.search.planner_schemas import PlannerDraft
+    from meyar.search.schemas import RequiredFilters
+
+    planner_requests: list[str] = []
+    original_plan_and_search = agent_service.plan_and_search_candidates
+
+    async def _spy(*args, **kwargs):
+        planner_requests.append(kwargs["natural_language_request"])
+        return await original_plan_and_search(*args, **kwargs)
+
+    monkeypatch.setattr(agent_service, "plan_and_search_candidates", _spy)
+
+    tenant, user, _password, membership = tenant_and_user
+    await db_session.commit()
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    llm = FakeLLMProvider(
+        planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
+        agent_decision=AgentDecision(
+            action=AgentActionType.REFINE_CANDIDATE_RESULTS, filter_query="SQL"
+        ),
+    )
+    result = await _run(
+        db_session, llm, tenant_id=tenant.id, conversation=conversation, message=message
+    )
+    assert llm.agent_call_count == 0
+    assert llm.jd_draft_call_count == 0
+    assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
+    assert result.tool_call_count == 1
+    assert [r.tool_name for r in result.tool_results] == [AgentActionType.SEARCH_CANDIDATES]
+    search = result.tool_results[0].search
+    assert search is not None
+    # The existing planner ran exactly once, with the user's own text.
+    assert planner_requests == [message]
+    assert await db_session.scalar(select(func.count()).select_from(Job)) == 0
+    assert await db_session.scalar(select(func.count()).select_from(JobCriteriaVersion)) == 0
+    assert await db_session.scalar(select(func.count()).select_from(Evaluation)) == 0

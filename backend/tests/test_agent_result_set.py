@@ -436,10 +436,13 @@ async def test_second_search_creates_new_result_set_and_switches_pointer(
         )
     )
     assert len(events) == 2
-    assert events[0].event_metadata["result_set_id"] == str(first_result_set_id)
-    assert events[0].event_metadata["previous_result_set_id"] is None
-    assert events[1].event_metadata["result_set_id"] == str(second_result_set_id)
-    assert events[1].event_metadata["previous_result_set_id"] == str(first_result_set_id)
+    # No ORDER BY is meaningful here (both events share one transaction, so
+    # created_at ties); identify each event by its own result_set_id.
+    by_result_set = {event.event_metadata["result_set_id"]: event for event in events}
+    first_event = by_result_set[str(first_result_set_id)]
+    second_event = by_result_set[str(second_result_set_id)]
+    assert first_event.event_metadata["previous_result_set_id"] is None
+    assert second_event.event_metadata["previous_result_set_id"] == str(first_result_set_id)
 
 
 # --- Resolution --------------------------------------------------------

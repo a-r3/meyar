@@ -538,14 +538,6 @@ async def agent_turn(
     request: Request,
     message: str = Form(..., min_length=1, max_length=4000),
     csrf_token: str = Form(...),
-    # PR #42 owner correction (issue #33, D-043/D-044): the composer's
-    # "Vakansiya elanını analiz et" mode option submits this fixed value
-    # so the JD-drafting path is deterministic — never relying on a small
-    # local model to infer DRAFT_JOB_CRITERIA routing from arbitrary
-    # pasted text (D-042 point 6). Only this one literal value is ever
-    # recognized; any other/absent value (the default "Adi söhbət" mode)
-    # falls back to normal model-routed conversation, unchanged.
-    intent: str | None = Form(default=None, max_length=32),
     ctx: UIContext = Depends(require_ui_scopes("candidates:read")),
     db: AsyncSession = Depends(get_db),
     llm: LLMProvider = Depends(get_llm_provider),
@@ -554,7 +546,6 @@ async def agent_turn(
     settings: Settings = Depends(get_settings),
 ) -> HTMLResponse:
     verify_csrf(ctx.csrf_token, csrf_token)
-    from meyar.agent.schemas import AgentActionType
     from meyar.agent.service import run_agent_turn
     from meyar.services.agent_conversation_repo import (
         get_or_create_conversation,
@@ -573,9 +564,6 @@ async def agent_turn(
     # Same "current date is a trusted-runtime value, never user/model
     # supplied" boundary as /ui/search (docs/DECISIONS.md D-023).
     as_of_date = resolve_business_date(settings.business_timezone)
-    explicit_action = (
-        AgentActionType.DRAFT_JOB_CRITERIA if intent == "draft_job_criteria" else None
-    )
     try:
         result = await run_agent_turn(
             db,
@@ -588,7 +576,6 @@ async def agent_turn(
             embedding_provider=embedding_provider,
             max_tool_calls=settings.agent_max_tool_calls,
             max_context_turns=settings.agent_max_context_turns,
-            explicit_action=explicit_action,
         )
         latest = await build_agent_turn_view(db, tenant_id=ctx.tenant_id, result=result)
         # D-045 (PR #42 owner correction, issue #33): make the persisted

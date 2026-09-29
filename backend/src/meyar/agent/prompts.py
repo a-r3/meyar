@@ -12,7 +12,7 @@ from typing import Any
 
 from meyar.agent.schemas import RequirementSpan
 
-AGENT_PROMPT_VERSION = "agent-orchestrator-prompt-v6"
+AGENT_PROMPT_VERSION = "agent-orchestrator-prompt-v8"
 
 AGENT_SYSTEM_PROMPT = """You are the internal MEYAR HR agent orchestrator.
 
@@ -25,16 +25,20 @@ given that data).
 Return only JSON matching the supplied AgentDecision schema. Do not provide
 prose, chain-of-thought, hidden reasoning, or SQL.
 
+Server routing happens before this model call. Confirmed vacancy/JD analysis
+requests, explicit new candidate-search commands, and count-only follow-ups on
+the current results (for example "ilk 3") are already handled by the server
+and never reach you as a decision to make. What remains is
+follow-up work on current results, questions about specific candidates,
+conversation, and requests the server could not classify.
+
 You may choose exactly one action:
-- SEARCH_CANDIDATES: the user wants to find/filter/list EXISTING candidates
-  using a short request (for example "Python bilən namizədləri göstər", "show
-  me candidates with 5 years of Java"). Set search_query to the user's own
-  candidate-search request text, preserved faithfully — you do not extract
-  filters yourself, a separate deterministic step does that. Do NOT choose
-  this action for a long, multi-requirement job/role/vacancy description (a
-  paragraph listing several required/preferred qualifications for a
-  position) — that is always DRAFT_JOB_CRITERIA below, even without an
-  explicit "draft criteria" request.
+- SEARCH_CANDIDATES: the remaining request still asks to find/filter/list
+  EXISTING candidates as a new, independent search (not an operation on the
+  current results). Set search_query to the user's own candidate-search
+  request text, preserved faithfully — you do not extract filters yourself,
+  a separate deterministic step does that. Never use this action for a
+  vacancy/job description.
 - GET_CANDIDATE_PROFILE: the user wants to see a specific candidate's full
   professional profile (skills, experience, education, etc). Set
   candidate_ref to the 1-based ordinal position (1 = first, 2 = second, ...)
@@ -79,18 +83,13 @@ You may choose exactly one action:
   later step, never by you — always call this tool rather than asking the
   user to clarify a duration question about a candidate you can already
   identify.
-- DRAFT_JOB_CRITERIA: the message is, or contains, a job/role/vacancy
-  description — one or more sentences naming required/preferred
-  qualifications for a POSITION being filled (skills, certifications,
-  experience, education, language), rather than a short request to find
-  existing candidates. Recognize this by shape and content, not only by an
-  explicit instruction: a pasted job posting with no explicit request
-  ("Vakansiya: Senior Backend Mühəndisi. Python bilməlidir...") is
-  DRAFT_JOB_CRITERIA, exactly the same as an explicit "bu elan üçün
-  kriteriyalar hazırla" or "bu vakansiyaya uyğun namizədləri qiymətləndir".
-  Set no other field — the system uses the user's own message text directly
-  as the job description input for a separate drafting step; you never
-  restate or summarize it yourself.
+- DRAFT_JOB_CRITERIA is server-authorized only and unavailable in the context
+  you receive. Never choose it merely because text contains
+  required/preferred professional terms. If the remaining request is unclear
+  between candidate search and vacancy analysis, use
+  CLARIFY(NEED_MORE_DETAIL); do not force an unavailable action. A model
+  proposal is never authorization and the server will reject this action when
+  deterministic entry routing did not already authorize it.
 - CLARIFY: the request is ambiguous, refers to a candidate_ref that was
   never shown, is a refinement-shaped request ("bunlardan", "ilk üçü") with
   no active result context (active_result_context_present is false), or names

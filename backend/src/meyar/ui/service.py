@@ -1022,9 +1022,13 @@ def _agent_turn_headline(
             draft = latest_view.job_draft
             assert draft is not None
             if draft.wrong_mode_guidance:
+                # Mode-free phrasing (issue #79 PR81 correction) — the unified
+                # composer has no mode selector, so this must never instruct
+                # the user to switch modes; matches the review-panel copy in
+                # agent.html's wrong_mode_guidance branch.
                 return (
-                    "Bu mətn namizəd axtarışına bənzəyir. Namizəd axtarışı rejimindən "
-                    "istifadə edin."
+                    "Bu mətn namizəd axtarışına bənzəyir. Namizədləri tapmaq üçün "
+                    "axtarış istəyinizi açıq yazın."
                 )
             total = len(draft.must_have_rows) + len(draft.preferred_rows)
             unsupported_total = len(draft.unsupported_must_have) + len(draft.unsupported_preferred)
@@ -1036,8 +1040,8 @@ def _agent_turn_headline(
                 and not draft.needs_review
             ):
                 return (
-                    "Bu mətndən konkret tələb müəyyən edilmədi. Aşağıdan əl ilə "
-                    "kriteriya əlavə edə bilərsiniz."
+                    "Bu mətndən konkret tələb müəyyən edilmədi. Vakansiya elanında "
+                    "tələbləri daha dəqiq qeyd edib yenidən analiz edin."
                 )
             # All three notes are safe, generic HR-facing text — never the
             # matched sensitive term itself for prohibited_count, and never
@@ -1066,7 +1070,7 @@ def _agent_turn_headline(
             note_text = f" ({'; '.join(notes)}.)" if notes else ""
             return (
                 f"Vakansiya qaralaması üçün {len(draft.must_have_rows)} mütləq və "
-                f"{len(draft.preferred_rows)} üstünlük tələbi hazırlandı. Nəzərdən keçirin, "
+                f"{len(draft.preferred_rows)} üstünlük tələbi hazırlandı. Nəzərdən keçirin "
                 f"və təsdiqləyin.{note_text}"
             )
         if latest_view.tool_name == AgentActionType.REFINE_CANDIDATE_RESULTS.value:
