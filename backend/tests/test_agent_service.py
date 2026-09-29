@@ -639,7 +639,9 @@ async def test_bounded_tool_call_loop_stops_at_configured_maximum(
         llm,
         tenant_id=tenant.id,
         conversation=conversation,
-        message="NoMatch bilən namizədləri göstər",
+        # Model-routed on purpose: this exercises the orchestration loop's
+        # own bound, not the server-forced single search.
+        message="NoMatch haqqında məlumat ver",
         max_tool_calls=2,
     )
     assert result.outcome == AgentTurnOutcome.TOOL_CALL_LIMIT_EXCEEDED
@@ -1641,13 +1643,17 @@ async def test_draft_job_criteria_uses_original_user_message_never_a_model_resta
     tenant, user, _password, membership = tenant_and_user
     await db_session.commit()
     conversation = await _new_conversation(db_session, tenant, user, membership)
-    jd_text = "Bu vakansiya elanını analiz et: " + "Uzun bir vakansiya təsviri." * 50
+    source = "Python tələb olunur. " + "Uzun bir vakansiya təsviri." * 50
+    jd_text = "Bu vakansiya elanını analiz et: " + source
     llm = FakeLLMProvider(
         agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
         jd_draft=JDCriteriaDraft(title="Rol"),
     )
     await _run(db_session, llm, tenant_id=tenant.id, conversation=conversation, message=jd_text)
-    assert llm.last_jd_text == jd_text
+    # Exact user-owned substring after the server-recognized instruction
+    # wrapper (issue #79 PR81): never the instruction, never restated text.
+    assert llm.last_jd_text == source
+    assert "analiz et" not in llm.last_jd_text
 
 
 async def test_draft_job_criteria_drops_prohibited_attribute_item(
@@ -2071,7 +2077,9 @@ async def test_model_proposed_draft_without_server_authority_fails_closed(
         llm,
         tenant_id=tenant.id,
         conversation=conversation,
-        message="Python bilən namizədləri göstər",
+        # Model-routed (not a forced search), so the model proposal is
+        # actually consulted and must fail closed.
+        message="NoMatch haqqında məlumat ver",
     )
     assert result.outcome == AgentTurnOutcome.CLARIFICATION_REQUESTED
     assert result.tool_results == []
@@ -2099,7 +2107,7 @@ async def test_draft_job_criteria_repairs_after_one_schema_invalid_attempt(
         llm,
         tenant_id=tenant.id,
         conversation=conversation,
-        message="Bu vakansiya elanını analiz et.",
+        message="Bu vakansiya elanını analiz et:\nBackend Mühəndisi\nKomanda ilə işləmək.",
     )
     assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
     assert llm.jd_draft_call_count == 2
@@ -2120,7 +2128,7 @@ async def test_draft_job_criteria_provider_failure_is_a_safe_typed_failure(
         llm,
         tenant_id=tenant.id,
         conversation=conversation,
-        message="Bu vakansiya elanını analiz et.",
+        message="Bu vakansiya elanını analiz et:\nBackend Mühəndisi\nKomanda ilə işləmək.",
     )
     assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
     assert len(result.tool_results) == 1
@@ -2235,7 +2243,7 @@ async def test_draft_job_criteria_repeated_schema_invalid_is_a_safe_typed_failur
         llm,
         tenant_id=tenant.id,
         conversation=conversation,
-        message="Bu vakansiya elanını analiz et.",
+        message="Bu vakansiya elanını analiz et:\nBackend Mühəndisi\nKomanda ilə işləmək.",
     )
     assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
     assert len(result.tool_results) == 1
@@ -2245,3 +2253,61 @@ async def test_draft_job_criteria_repeated_schema_invalid_is_a_safe_typed_failur
     assert draft.preferred == []
     assert draft.wrong_mode_guidance is False
     assert draft.requirements == []
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Python bilən namizədləri göstər",
+        "Python və SQL bilən 5 namizəd göstər",
+        "Show candidates with at least 5 years of Java",
+    ],
+)
+async def test_explicit_search_is_server_routed_despite_wrong_orchestrator(
+    db_session: AsyncSession, tenant_and_user, message: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #79 PR81: a deliberately WRONG orchestration proposal is never
+    consulted for an explicit new search; the existing planner runs with
+    the user's own text and the validated search result ends the turn."""
+    from sqlalchemy import func, select
+
+    import meyar.agent.service as agent_service
+    from meyar.models.evaluation import Evaluation
+    from meyar.models.job import Job
+    from meyar.models.job_criteria_version import JobCriteriaVersion
+    from meyar.search.planner_schemas import PlannerDraft
+    from meyar.search.schemas import RequiredFilters
+
+    planner_requests: list[str] = []
+    original_plan_and_search = agent_service.plan_and_search_candidates
+
+    async def _spy(*args, **kwargs):
+        planner_requests.append(kwargs["natural_language_request"])
+        return await original_plan_and_search(*args, **kwargs)
+
+    monkeypatch.setattr(agent_service, "plan_and_search_candidates", _spy)
+
+    tenant, user, _password, membership = tenant_and_user
+    await db_session.commit()
+    conversation = await _new_conversation(db_session, tenant, user, membership)
+    llm = FakeLLMProvider(
+        planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
+        agent_decision=AgentDecision(
+            action=AgentActionType.REFINE_CANDIDATE_RESULTS, filter_query="SQL"
+        ),
+    )
+    result = await _run(
+        db_session, llm, tenant_id=tenant.id, conversation=conversation, message=message
+    )
+    assert llm.agent_call_count == 0
+    assert llm.jd_draft_call_count == 0
+    assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
+    assert result.tool_call_count == 1
+    assert [r.tool_name for r in result.tool_results] == [AgentActionType.SEARCH_CANDIDATES]
+    search = result.tool_results[0].search
+    assert search is not None
+    # The existing planner ran exactly once, with the user's own text.
+    assert planner_requests == [message]
+    assert await db_session.scalar(select(func.count()).select_from(Job)) == 0
+    assert await db_session.scalar(select(func.count()).select_from(JobCriteriaVersion)) == 0
+    assert await db_session.scalar(select(func.count()).select_from(Evaluation)) == 0

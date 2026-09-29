@@ -6552,3 +6552,67 @@ the entry event does not duplicate business payloads.
 conversation ownership, candidate comparison/deep Q&A (#50), RAG memory,
 hiring recommendations, scoring changes, deployment/Target-Mac work, and an
 unrelated UI redesign.
+
+**Amendment — routing policy `agent-entry-routing-v3` (PR #81 visual
+acceptance correction).** Real-Ollama visual review showed that leaving an
+explicit new search to the orchestration model is unsafe: the local model
+routed `Python bilən namizədləri göstər` to `REFINE_CANDIDATE_RESULTS` with no
+active ResultSet, so HR received result-context-required copy and no search.
+The entry outcomes are now:
+
+```text
+FORCE_JOB_DRAFT | FORCE_CANDIDATE_SEARCH | FORCE_RESULT_LIMIT | MODEL_ROUTED
+| CLARIFY_AMBIGUOUS | CLARIFY_JOB_SOURCE_REQUIRED
+```
+
+Precedence (named predicates in `meyar.agent.intent_routing`):
+
+```text
+pending draft follow-up (caller, unchanged)
+→ explicit vacancy-analysis request (JD draft, or source-required clarification)
+→ count-only current-result follow-up (FORCE_RESULT_LIMIT, #49 limit)
+→ other current ResultSet / refinement / ordinal language (MODEL_ROUTED, #49)
+→ explicit new-search imperative (FORCE_CANDIDATE_SEARCH)
+→ structurally strong pasted JD (FORCE_JOB_DRAFT)
+→ requirement ambiguity (CLARIFY_AMBIGUOUS)
+→ ordinary MODEL_ROUTED
+```
+
+- **Deterministic search authority.** A search imperative in imperative
+  position (Azerbaijani verb ending the request — `göstər`, `tap`, `axtar`,
+  … optionally `-in/-iniz` and a polite tail; English verb starting it —
+  `find`, `show`, `list`, …) plus a candidate noun, a source-bound material
+  requirement, or an explicit result count. Inflected verbs inside
+  requirement sentences (`göstərməlidir`, `must show`) and a bare candidate
+  noun never qualify. The server builds
+  `AgentDecision(SEARCH_CANDIDATES, search_query=<exact user text>)`; the
+  router parses no filters. The existing validated planner (deterministic
+  fast path or local LLM planner), search service and ResultSet authority run
+  unchanged, and the validated tool result ends the turn — the orchestration
+  decision call is not consulted for such an entry. Audit:
+  `routing_source=DETERMINISTIC_SEARCH`, `routed_action=SEARCH_CANDIDATES`.
+- **Count-only follow-up.** Live review also showed the local model shaping
+  `ilk 3` as `REFINE_CANDIDATE_RESULTS(filter_query="ilk 3")` (no limit), which
+  the refine planner cannot execute. When the WHOLE message is only a count on
+  the current results (`ilk 3`, `ilk üçü`, `first 3`, `top 5`, `5 nəfərə
+  endir`, 1..`MAX_CANDIDATE_REF`), the server builds
+  `AgentDecision(REFINE_CANDIDATE_RESULTS, limit=N)` and the existing #49
+  refinement dispatch validates the active ResultSet (truthful
+  result-context-required copy when none). Any filter text (`bunlardan SQL
+  bilən ilk 3`) stays model-routed. Audit:
+  `routing_source=DETERMINISTIC_RESULT_CONTEXT`,
+  `routed_action=REFINE_CANDIDATE_RESULTS`.
+- **Exact JD source slice.** When an explicit analysis instruction is the
+  leading segment before the first `:`/newline ("Vakansiyanı analiz et:"),
+  the router returns exact offsets of the remaining user-owned text and only
+  that substring reaches JD extraction/fallback. No rewrite, no LLM
+  stripping. A structural header (`Vakansiya: Senior Backend…`) has no
+  analysis verb and keeps the full source. Offsets are ephemeral; the slice
+  is never audited.
+- **Source required.** An explicit analysis command with no useful source
+  (no material requirement; for a wrapper, also no multi-line source) returns
+  fixed clarification asking for the vacancy text/requirements. No
+  extraction, no pending empty draft.
+- The orchestration prompt (`agent-orchestrator-prompt-v8`) now states that
+  confirmed JDs and explicit new searches are handled before its call; it
+  gains no authority.

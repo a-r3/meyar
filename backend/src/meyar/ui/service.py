@@ -1040,8 +1040,8 @@ def _agent_turn_headline(
                 and not draft.needs_review
             ):
                 return (
-                    "Bu mətndən konkret tələb müəyyən edilmədi. Aşağıdan əl ilə "
-                    "kriteriya əlavə edə bilərsiniz."
+                    "Bu mətndən konkret tələb müəyyən edilmədi. Vakansiya elanında "
+                    "tələbləri daha dəqiq qeyd edib yenidən analiz edin."
                 )
             # All three notes are safe, generic HR-facing text — never the
             # matched sensitive term itself for prohibited_count, and never
@@ -1070,7 +1070,7 @@ def _agent_turn_headline(
             note_text = f" ({'; '.join(notes)}.)" if notes else ""
             return (
                 f"Vakansiya qaralaması üçün {len(draft.must_have_rows)} mütləq və "
-                f"{len(draft.preferred_rows)} üstünlük tələbi hazırlandı. Nəzərdən keçirin, "
+                f"{len(draft.preferred_rows)} üstünlük tələbi hazırlandı. Nəzərdən keçirin "
                 f"və təsdiqləyin.{note_text}"
             )
         if latest_view.tool_name == AgentActionType.REFINE_CANDIDATE_RESULTS.value:

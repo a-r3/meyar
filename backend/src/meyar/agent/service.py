@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meyar.agent.intent_routing import (
     AMBIGUOUS_SEARCH_OR_JOB_COPY,
     ENTRY_ROUTING_POLICY_VERSION,
+    JOB_SOURCE_REQUIRED_COPY,
     AgentEntryRoute,
     AgentRoutedAction,
     route_agent_entry,
@@ -1984,7 +1985,10 @@ async def run_agent_turn(
     ``route_agent_entry``.  No form field or model proposal can authorize JD
     drafting: confirmed JDs bypass the orchestration model, ambiguous source
     text receives fixed clarification, and an unexpected model-proposed
-    DRAFT_JOB_CRITERIA action fails closed."""
+    DRAFT_JOB_CRITERIA action fails closed.  An explicit new candidate search
+    also bypasses the orchestration decision: the server builds the typed
+    SEARCH_CANDIDATES action with the user's own text, the existing validated
+    planner/search path runs, and the validated tool result ends the turn."""
     turns: list[dict] = [*conversation.turns, {"role": "user", "text": user_message}]
     pending_draft = _latest_pending_job_draft(conversation)
     if (
@@ -2039,10 +2043,17 @@ async def run_agent_turn(
             "routing_policy_version": ENTRY_ROUTING_POLICY_VERSION,
         },
     )
-    if entry_routing.route == AgentEntryRoute.CLARIFY_AMBIGUOUS:
+    if entry_routing.route in (
+        AgentEntryRoute.CLARIFY_AMBIGUOUS,
+        AgentEntryRoute.CLARIFY_JOB_SOURCE_REQUIRED,
+    ):
         result = _build_result(
             outcome=AgentTurnOutcome.CLARIFICATION_REQUESTED,
-            message=AMBIGUOUS_SEARCH_OR_JOB_COPY,
+            message=(
+                AMBIGUOUS_SEARCH_OR_JOB_COPY
+                if entry_routing.route == AgentEntryRoute.CLARIFY_AMBIGUOUS
+                else JOB_SOURCE_REQUIRED_COPY
+            ),
             tool_results=[],
             tool_call_count=0,
             provenance=_configured_provenance(llm),
@@ -2058,6 +2069,20 @@ async def run_agent_turn(
         )
 
     server_authorized_draft = entry_routing.route == AgentEntryRoute.FORCE_JOB_DRAFT
+    # Exact user-owned source (offsets into user_message), never rewritten.
+    job_draft_source = entry_routing.draft_source(user_message)
+    server_authorized_search = entry_routing.route == AgentEntryRoute.FORCE_CANDIDATE_SEARCH
+    # Search forced by the entry router is turn-terminal once the existing
+    # planner/search path returns: no second orchestration guess is needed.
+    search_turn_terminal = server_authorized_search
+    # Count-only current-result follow-up ("ilk 3"): the server supplies the
+    # typed limit; the existing #49 refinement dispatch validates the active
+    # ResultSet and rejects truthfully when there is none.
+    server_result_limit = (
+        entry_routing.result_limit
+        if entry_routing.route == AgentEntryRoute.FORCE_RESULT_LIMIT
+        else None
+    )
     tool_results: list[AgentToolResult] = []
     last_tool_summary: dict | None = None
     tool_calls_made = 0
@@ -2081,6 +2106,19 @@ async def run_agent_turn(
             # _dispatch_draft_job_criteria below.
             decision = AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA)
             server_authorized_draft = False
+        elif server_authorized_search:
+            # Explicit new searches bypass the orchestration model's action
+            # classification. The user's text is forwarded unmodified into
+            # the existing validated NL planner in _dispatch_search.
+            decision = AgentDecision(
+                action=AgentActionType.SEARCH_CANDIDATES, search_query=user_message
+            )
+            server_authorized_search = False
+        elif server_result_limit is not None:
+            decision = AgentDecision(
+                action=AgentActionType.REFINE_CANDIDATE_RESULTS, limit=server_result_limit
+            )
+            server_result_limit = None
         else:
             # Two separate advisory facts are sent to the model. Pointer
             # presence says only that a result context exists, including a
@@ -2272,7 +2310,7 @@ async def run_agent_turn(
             # (a real LLM call, not a deterministic DB lookup), so it is
             # handled as its own branch rather than forced into the
             # uniform tool_result/matched_profile shape below.
-            job_draft_result = await _dispatch_draft_job_criteria(llm, jd_text=user_message)
+            job_draft_result = await _dispatch_draft_job_criteria(llm, jd_text=job_draft_source)
             if job_draft_result is None:
                 await record_event(
                     db,
@@ -2456,6 +2494,27 @@ async def run_agent_turn(
             event_type="agent.tool.executed",
             metadata={"tool_name": decision.action.value, "tool_call_index": tool_calls_made},
         )
+
+        if search_turn_terminal and decision.action == AgentActionType.SEARCH_CANDIDATES:
+            # Server-authorized search: the validated planner/search result
+            # (executable, empty, or a truthful non-executable plan) is the
+            # whole answer.
+            result = _build_result(
+                outcome=AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT,
+                message=None,
+                tool_results=tool_results,
+                tool_call_count=tool_calls_made,
+                provenance=provenance,
+            )
+            return await _finish_turn(
+                db,
+                conversation,
+                tenant_id=tenant_id,
+                turns=turns,
+                active_result_set_id=conversation.active_result_set_id,
+                max_context_turns=max_context_turns,
+                result=result,
+            )
 
         # GET_CANDIDATE_PROFILE / GET_CANDIDATE_EVIDENCE are always
         # turn-terminal, found or not: each is already a complete,

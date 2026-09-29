@@ -407,7 +407,10 @@ async def test_zero_result_context_survives_reload_and_can_be_refined_again(
         limit_llm,
         tenant_id=tenant.id,
         conversation=reloaded,
-        message="ilk 3",
+        # "bunlardan ..." keeps this model-routed (a bare "ilk 3" is now a
+        # server-routed count-only follow-up, issue #79 PR81); this test is
+        # about the advisory context the model receives.
+        message="bunlardan ilk 3",
     )
     assert limit_llm.agent_contexts == [(True, [])]
     assert second.outcome.value == "ANSWERED_FROM_TOOL_RESULT"
@@ -606,7 +609,7 @@ async def test_new_conversation_reset_invalidates_refined_context(
         reset_llm,
         tenant_id=tenant.id,
         conversation=conversation,
-        message="ilk biri",
+        message="bunlardan ilk biri",
     )
     assert reset_llm.agent_contexts == [(False, [])]
     assert reset_followup.outcome.value == "CLARIFICATION_REQUESTED"

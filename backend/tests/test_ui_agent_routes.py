@@ -402,7 +402,9 @@ async def test_equivalent_zero_result_search_tools_render_one_empty_state(
     csrf = await _login_and_csrf(client, user.username, password)
 
     response = await client.post(
-        "/ui/agent", data={"message": "NoMatch namizədlərini göstər", "csrf_token": csrf}
+        # Model-routed on purpose: two model-proposed equivalent searches are
+        # what this presentation-collapse test exercises.
+        "/ui/agent", data={"message": "NoMatch haqqında məlumat ver", "csrf_token": csrf}
     )
 
     assert response.status_code == 200
@@ -2879,7 +2881,9 @@ async def test_model_proposed_jd_for_search_is_rejected_without_internal_code_co
     from meyar.models.job_criteria_version import JobCriteriaVersion
 
     tenant, user, password, _membership = tenant_and_user
-    raw_message = "Python bilən namizədləri göstər"
+    # Model-routed input (an explicit search imperative is server-forced
+    # and never consults the model), so the wrong model proposal is real.
+    raw_message = "NoMatch haqqında məlumat ver"
     app.dependency_overrides[get_llm_provider] = lambda: FakeLLMProvider(
         agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA)
     )
@@ -2908,7 +2912,7 @@ async def test_model_proposed_jd_for_search_is_rejected_without_internal_code_co
     assert rejected_event.event_metadata == {
         "routing_source": "MODEL",
         "routed_action": "CLARIFY",
-        "routing_policy_version": "agent-entry-routing-v2",
+        "routing_policy_version": "agent-entry-routing-v3",
     }
     assert raw_message not in str(rejected_event.event_metadata)
 
@@ -2955,7 +2959,7 @@ async def test_ambiguous_search_or_jd_clarifies_without_model_tool_or_business_r
     assert route_event.event_metadata == {
         "routing_source": "DETERMINISTIC_CLARIFICATION",
         "routed_action": "CLARIFY",
-        "routing_policy_version": "agent-entry-routing-v2",
+        "routing_policy_version": "agent-entry-routing-v3",
     }
     assert raw_message not in str(route_event.event_metadata)
 
@@ -3191,6 +3195,7 @@ async def test_real_ui_agent_route_serializes_concurrent_same_session_turns(
     db_session: AsyncSession,
     tenant_and_user,
     local_ui_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """PR #77 review blocker: test_agent_result_set.
     test_concurrent_turns_never_lose_a_context_epoch_update only proves
@@ -3224,21 +3229,26 @@ async def test_real_ui_agent_route_serializes_concurrent_same_session_turns(
 
     csrf = await _login_and_csrf(client, user.username, password)
 
-    class _DelayedOnFirstSearchLLM(FakeLLMProvider):
-        """Sleeps once per turn, right as that turn's OWN first
-        decide_agent_action call is made — which only ever happens after
-        the router has already acquired this session's AgentConversation
-        row lock. Whichever concurrent turn gets there first holds that
-        lock (uncommitted transaction) for the sleep's duration, giving
-        the other turn's own locking SELECT real wall-clock time to
-        genuinely block on it rather than merely interleaving by luck."""
+    # Sleeps once per turn, right as that turn's OWN search planning starts
+    # — which only ever happens after the router has already acquired this
+    # session's AgentConversation row lock. The explicit searches below are
+    # server-routed (issue #79 PR81) and served by the planner's
+    # deterministic fast path, so no model call exists to hook; the existing
+    # planner entry point is wrapped instead. Whichever concurrent turn gets
+    # there first holds that lock (uncommitted transaction) for the sleep's
+    # duration, giving the other turn's own locking SELECT real wall-clock
+    # time to genuinely block on it rather than merely interleaving by luck.
+    import meyar.agent.service as agent_service
 
-        async def decide_agent_action(self, **kwargs):
-            if self.agent_call_count in (0, 2):
-                await asyncio.sleep(0.15)
-            return await super().decide_agent_action(**kwargs)
+    original_plan_and_search = agent_service.plan_and_search_candidates
 
-    fake = _DelayedOnFirstSearchLLM(
+    async def _delayed_plan_and_search(*args, **kwargs):
+        await asyncio.sleep(0.15)
+        return await original_plan_and_search(*args, **kwargs)
+
+    monkeypatch.setattr(agent_service, "plan_and_search_candidates", _delayed_plan_and_search)
+
+    fake = FakeLLMProvider(
         planner_drafts=[
             PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
             PlannerDraft(required_filters=RequiredFilters(skills=["Java"])),
@@ -3304,6 +3314,9 @@ async def test_real_ui_agent_route_serializes_concurrent_same_session_turns(
 
     assert response_1.status_code == 200
     assert response_2.status_code == 200
+    # Both explicit searches were server-routed under the lock: the
+    # orchestration decision was never consulted.
+    assert fake.agent_call_count == 0
     # Real DB-lock serialization proof: two independent 0.15s holds, each
     # gating the OTHER request's row lock acquisition, must run back to
     # back (>= ~0.3s) rather than in parallel (~0.15s) — see class
@@ -3511,7 +3524,9 @@ async def test_real_ui_agent_route_serializes_concurrent_same_session_refinement
     started = loop.time()
     try:
         response_1, response_2 = await asyncio.gather(
-            client.post("/ui/agent", data={"message": "ilk 2", "csrf_token": csrf}),
+            # Model-routed on purpose (a bare "ilk 2" is server-routed and
+            # would skip the delayed model call this test relies on).
+            client.post("/ui/agent", data={"message": "bunlardan ilk 2", "csrf_token": csrf}),
             client.post(
                 "/ui/agent",
                 data={"message": "bunlardan SQL bilənlər", "csrf_token": csrf},
@@ -3721,3 +3736,312 @@ async def test_real_ui_agent_route_does_not_serialize_across_different_browser_s
         # This turn never produced a search/result set, so no active
         # ResultSet pointer could have crossed between sessions either.
         assert conversation.active_result_set_id is None
+
+
+# --- Issue #79 PR81 visual-acceptance correction: deterministic search ------
+
+
+async def _count_business_rows(db_session: AsyncSession) -> tuple[int, int, int]:
+    from sqlalchemy import func, select
+
+    from meyar.models.evaluation import Evaluation
+    from meyar.models.job import Job
+    from meyar.models.job_criteria_version import JobCriteriaVersion
+
+    return (
+        await db_session.scalar(select(func.count()).select_from(Job)) or 0,
+        await db_session.scalar(select(func.count()).select_from(JobCriteriaVersion)) or 0,
+        await db_session.scalar(select(func.count()).select_from(Evaluation)) or 0,
+    )
+
+
+async def test_explicit_search_bypasses_wrong_orchestrator_then_ilk_3_refines(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real-Ollama reproduction: the local orchestration model routed
+    "Python bilən namizədləri göstər" to REFINE_CANDIDATE_RESULTS with no
+    active result set, so HR saw RESULT_CONTEXT_REQUIRED copy instead of a
+    search. The server now authorizes the search itself; the deliberately
+    WRONG model proposal below is never consulted for that entry, the
+    existing planner/search still runs. The follow-up "ilk 3" (which the
+    real model also mis-shaped as filter_query="ilk 3") is a count-only
+    current-result request: the server supplies limit=3 and the existing #49
+    refinement dispatch validates it against the active ResultSet."""
+    from sqlalchemy import select
+
+    import meyar.agent.service as agent_service
+    from meyar.models.agent_conversation import AgentConversation
+    from meyar.models.agent_result_set import AgentResultSet
+    from meyar.models.audit_event import AuditEvent
+
+    tenant, user, password, _membership = tenant_and_user
+    for _ in range(4):
+        await seed_candidate_with_profile(
+            db_session, tenant_id=tenant.id, profile_content=_profile("Python")
+        )
+    await db_session.commit()
+
+    planner_calls: list[str] = []
+    original_plan_and_search = agent_service.plan_and_search_candidates
+
+    async def _spy_plan_and_search(*args, **kwargs):
+        planner_calls.append(kwargs["natural_language_request"])
+        return await original_plan_and_search(*args, **kwargs)
+
+    monkeypatch.setattr(agent_service, "plan_and_search_candidates", _spy_plan_and_search)
+
+    # The exact wrong proposal the real local model made in review.
+    fake = FakeLLMProvider(
+        planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
+        agent_decision=AgentDecision(
+            action=AgentActionType.REFINE_CANDIDATE_RESULTS, filter_query="ilk 3"
+        ),
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake
+    csrf = await _login_and_csrf(client, user.username, password)
+
+    raw_message = "Python bilən namizədləri göstər"
+    response = await client.post("/ui/agent", data={"message": raw_message, "csrf_token": csrf})
+    assert response.status_code == 200
+    # Entry classification never asked the orchestration model.
+    assert fake.agent_call_count == 0
+    assert fake.jd_draft_call_count == 0
+    # The existing validated planner/search path ran with the user's text.
+    assert planner_calls == [raw_message]
+    assert "Əvvəlcə namizəd axtarışı aparın" not in response.text
+    assert response.text.count('class="agent-turn agent-turn-assistant"') == 1
+
+    result_sets = (
+        await db_session.scalars(
+            select(AgentResultSet).where(AgentResultSet.tenant_id == tenant.id)
+        )
+    ).all()
+    assert len(result_sets) == 1
+    search_set = result_sets[0]
+    assert search_set.result_set_kind == "SEARCH"
+    assert search_set.result_count == 4
+    conversation = await db_session.scalar(
+        select(AgentConversation).where(AgentConversation.tenant_id == tenant.id)
+    )
+    assert conversation is not None
+    assert conversation.active_result_set_id == search_set.id
+    assert "pending_job_draft" not in conversation.turns[-1]
+
+    route_event = await db_session.scalar(
+        select(AuditEvent).where(
+            AuditEvent.tenant_id == tenant.id,
+            AuditEvent.event_type == "agent.entry.routed",
+        )
+    )
+    assert route_event is not None
+    assert route_event.event_metadata == {
+        "routing_source": "DETERMINISTIC_SEARCH",
+        "routed_action": "SEARCH_CANDIDATES",
+        "routing_policy_version": "agent-entry-routing-v3",
+    }
+    assert "Python" not in str(route_event.event_metadata)
+    assert await _count_business_rows(db_session) == (0, 0, 0)
+
+    # Same conversation: "ilk 3" operates on the active search ResultSet.
+    followup = await client.post("/ui/agent", data={"message": "ilk 3", "csrf_token": csrf})
+    assert followup.status_code == 200
+    assert fake.agent_call_count == 0
+    assert planner_calls == [raw_message]
+    assert "Cari nəticələr 4 namizəddən 3 namizədə endirildi." in followup.text
+
+    await db_session.refresh(conversation)
+    refined = await db_session.get(AgentResultSet, conversation.active_result_set_id)
+    assert refined is not None
+    assert refined.result_set_kind == "REFINEMENT"
+    assert refined.parent_result_set_id == search_set.id
+    assert refined.result_count == 3
+    assert await _count_business_rows(db_session) == (0, 0, 0)
+
+
+async def test_forced_search_with_zero_matches_is_truthful_search_output(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
+) -> None:
+    tenant, user, password, _membership = tenant_and_user
+    fake = FakeLLMProvider(
+        planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["NoMatch"])),
+        agent_decision=AgentDecision(
+            action=AgentActionType.CLARIFY,
+            response_code=AgentResponseCode.RESULT_CONTEXT_REQUIRED,
+        ),
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake
+    csrf = await _login_and_csrf(client, user.username, password)
+    response = await client.post(
+        "/ui/agent",
+        data={"message": "Find candidates with NoMatch and SQL", "csrf_token": csrf},
+    )
+    assert response.status_code == 200
+    assert fake.agent_call_count == 0
+    assert "Əvvəlcə namizəd axtarışı aparın" not in response.text
+    assert response.text.count('class="empty-state"') == 1
+    assert await _count_business_rows(db_session) == (0, 0, 0)
+
+
+async def test_job_analysis_wrapper_never_reaches_jd_extraction(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
+) -> None:
+    """Real reproduction: "Vakansiyanı analiz et: Python tələb olunur."
+    produced a draft titled/criterion'd with the instruction itself."""
+    from sqlalchemy import select
+
+    from meyar.llm.provider import ModelUnavailableError
+    from meyar.models.agent_conversation import AgentConversation
+
+    tenant, user, password, _membership = tenant_and_user
+    # Provider outage forces the server's own source-bound fallback, so the
+    # draft content is derived purely from the source actually passed in.
+    fake = FakeLLMProvider(jd_draft_error=ModelUnavailableError("simulated outage"))
+    app.dependency_overrides[get_llm_provider] = lambda: fake
+    csrf = await _login_and_csrf(client, user.username, password)
+    response = await client.post(
+        "/ui/agent",
+        data={"message": "Vakansiyanı analiz et: Python tələb olunur.", "csrf_token": csrf},
+    )
+    assert response.status_code == 200
+    assert fake.agent_call_count == 0
+    assert fake.last_jd_text == "Python tələb olunur."
+
+    conversation = await db_session.scalar(
+        select(AgentConversation).where(AgentConversation.tenant_id == tenant.id)
+    )
+    assert conversation is not None
+    pending = conversation.turns[-1]["pending_job_draft"]
+    serialized = str(pending)
+    assert "analiz et" not in serialized
+    assert "Vakansiyanı" not in serialized
+    labels = [item["label"] for item in pending["must_have"]]
+    assert len(labels) == 1
+    assert "Python" in labels[0]
+    # Review-only: nothing persisted until the explicit confirm path.
+    assert await _count_business_rows(db_session) == (0, 0, 0)
+    assert "Nəzərdən keçirin və təsdiqləyin." in response.text
+    assert "keçirin, və" not in response.text
+
+
+async def test_job_analysis_command_without_source_asks_for_vacancy_text(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
+) -> None:
+    from sqlalchemy import select
+
+    from meyar.models.agent_conversation import AgentConversation
+    from meyar.models.audit_event import AuditEvent
+
+    tenant, user, password, _membership = tenant_and_user
+    fake = FakeLLMProvider(
+        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA)
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake
+    csrf = await _login_and_csrf(client, user.username, password)
+    raw_message = "bu vakansiyaya uyğun namizədləri qiymətləndir"
+    response = await client.post("/ui/agent", data={"message": raw_message, "csrf_token": csrf})
+    assert response.status_code == 200
+    assert (
+        "Vakansiya elanının mətnini və ya namizədə qoyulan tələbləri göndərin, "
+        "sonra onları analiz edim."
+    ) in response.text
+    assert "Aşağıdan əl ilə" not in response.text
+    assert fake.agent_call_count == 0
+    assert fake.jd_draft_call_count == 0
+    conversation = await db_session.scalar(
+        select(AgentConversation).where(AgentConversation.tenant_id == tenant.id)
+    )
+    assert conversation is not None
+    assert all("pending_job_draft" not in turn for turn in conversation.turns)
+    assert conversation.active_result_set_id is None
+    route_event = await db_session.scalar(
+        select(AuditEvent).where(
+            AuditEvent.tenant_id == tenant.id,
+            AuditEvent.event_type == "agent.entry.routed",
+        )
+    )
+    assert route_event is not None
+    assert route_event.event_metadata == {
+        "routing_source": "DETERMINISTIC_CLARIFICATION",
+        "routed_action": "CLARIFY",
+        "routing_policy_version": "agent-entry-routing-v3",
+    }
+    assert await _count_business_rows(db_session) == (0, 0, 0)
+
+
+async def test_zero_requirement_draft_copy_does_not_advertise_missing_controls(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
+) -> None:
+    from meyar.llm.provider import ModelUnavailableError
+
+    _tenant, user, password, _membership = tenant_and_user
+    fake = FakeLLMProvider(jd_draft_error=ModelUnavailableError("simulated outage"))
+    app.dependency_overrides[get_llm_provider] = lambda: fake
+    csrf = await _login_and_csrf(client, user.username, password)
+    response = await client.post(
+        "/ui/agent",
+        data={
+            "message": "Bu vakansiya elanını analiz et:\nBackend Mühəndisi\nKomanda ilə işləmək.",
+            "csrf_token": csrf,
+        },
+    )
+    assert response.status_code == 200
+    assert "Bu mətndən konkret tələb müəyyən edilmədi." in response.text
+    assert "tələbləri daha dəqiq qeyd edib yenidən analiz edin" in response.text
+    assert "Aşağıdan əl ilə" not in response.text
+    assert "kriteriya əlavə edə bilərsiniz" not in response.text
+
+
+async def test_count_only_followup_without_result_set_is_truthful_context_required(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
+) -> None:
+    from sqlalchemy import func, select
+
+    from meyar.models.agent_result_set import AgentResultSet
+    from meyar.models.audit_event import AuditEvent
+
+    tenant, user, password, _membership = tenant_and_user
+    fake = FakeLLMProvider(
+        agent_decision=AgentDecision(
+            action=AgentActionType.SEARCH_CANDIDATES, search_query="ilk 3"
+        )
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake
+    csrf = await _login_and_csrf(client, user.username, password)
+    response = await client.post("/ui/agent", data={"message": "ilk 3", "csrf_token": csrf})
+    assert response.status_code == 200
+    assert fake.agent_call_count == 0
+    assert fake.call_count == 0
+    assert "Əvvəlcə namizəd axtarışı aparın" in response.text
+    assert await db_session.scalar(select(func.count()).select_from(AgentResultSet)) == 0
+    route_event = await db_session.scalar(
+        select(AuditEvent).where(
+            AuditEvent.tenant_id == tenant.id,
+            AuditEvent.event_type == "agent.entry.routed",
+        )
+    )
+    assert route_event is not None
+    assert route_event.event_metadata == {
+        "routing_source": "DETERMINISTIC_RESULT_CONTEXT",
+        "routed_action": "REFINE_CANDIDATE_RESULTS",
+        "routing_policy_version": "agent-entry-routing-v3",
+    }
+    assert await _count_business_rows(db_session) == (0, 0, 0)

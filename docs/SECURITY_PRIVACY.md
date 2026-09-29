@@ -309,6 +309,18 @@ unlabeled number but never guesses that an arbitrary identifier is a phone.
   message or JD, regex matches, model raw output, candidate names,
   email/phone, or CV/evidence content. Existing tool and turn events remain
   the authoritative execution record.
+- Routing policy `agent-entry-routing-v3` adds `FORCE_CANDIDATE_SEARCH`
+  (`DETERMINISTIC_SEARCH`/`SEARCH_CANDIDATES`), `FORCE_RESULT_LIMIT`
+  (`DETERMINISTIC_RESULT_CONTEXT`/`REFINE_CANDIDATE_RESULTS`, a count-only
+  follow-up validated by the unchanged #49 refinement dispatch) and
+  `CLARIFY_JOB_SOURCE_REQUIRED`. A forced search only authorizes the existing
+  `SEARCH_CANDIDATES` action with the user's exact text; filters,
+  prohibited-attribute rejection and no-silent-weakening remain the existing
+  planner's authority, and a search can never create a `Job`,
+  `JobCriteriaVersion` or `Evaluation`. The JD source slice after an
+  instruction wrapper is an exact substring by offsets, never rewritten and
+  never audited. Current-result/ordinal language keeps precedence over new
+  search so #49 ResultSet semantics are unchanged.
 
 ## Local-only Ollama operating contract
 

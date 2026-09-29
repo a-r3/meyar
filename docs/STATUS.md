@@ -24,6 +24,14 @@ ResultSet refinement/ordinal/zero-result/stale/expiry authority, pending-draft
 follow-ups, prohibited-attribute checks, audit privacy, CSRF/session controls,
 and same-session conversation row locking remain in force.
 
+PR #81 acceptance correction (routing `agent-entry-routing-v3`): explicit
+new candidate searches are server-routed to the existing planner/search path
+without an orchestration-model decision, count-only follow-ups ("ilk 3") are
+server-routed to the existing #49 limit refinement, explicit JD-analysis instructions
+are sliced off the exact user source, a source-less analysis command asks for
+the vacancy text, and mobile header/composer copy/layout defects from visual
+review are fixed.
+
 **Historical snapshot: accepted `main` was
 `7c911cbc850d21999eae2239e6b51bfedc570d4a`.**
 PR12 / PR #75 is merged and post-merge verified. PR13 is the current
