@@ -419,6 +419,7 @@ async def test_current_authority_all_consumers_and_immutable_history(
     from decimal import Decimal
 
     from fakes import FakeLLMProvider
+    from search_helpers import open_test_conversation
     from test_candidate_factual_authority_backstop import _embedding_config
 
     from meyar.agent.schemas import AgentDecision
@@ -430,7 +431,6 @@ async def test_current_authority_all_consumers_and_immutable_history(
     from meyar.scoring.policy import SCORING_POLICY_VERSION
     from meyar.search.schemas import CandidateSearchRequest
     from meyar.search.service import search_candidates
-    from meyar.services.agent_conversation_repo import get_or_create_conversation
     from meyar.services.browser_session_repo import create_browser_session
     from meyar.services.evaluation_repo import create_evaluation
     from meyar.services.job_criteria_repo import create_criteria_version
@@ -541,14 +541,18 @@ async def test_current_authority_all_consumers_and_immutable_history(
     session, _ = await create_browser_session(
         db_session, user_id=user.id, tenant_membership_id=membership.id, ttl_hours=8
     )
-    conversation = await get_or_create_conversation(
-        db_session, tenant_id=tenant.id, browser_session_id=session.id
+    conversation, context = await open_test_conversation(
+        db_session,
+        tenant_id=tenant.id,
+        user_id=user.id,
+        membership_id=membership.id,
+        browser_session_id=session.id,
     )
     await seed_active_result_set(
         db_session,
         tenant_id=tenant.id,
         browser_session_id=session.id,
-        conversation=conversation,
+        session_context=context,
         candidate_ids=[seeded.candidate.id],
     )
     for action in ("GET_CANDIDATE_PROFILE", "GET_CANDIDATE_EVIDENCE"):
@@ -557,6 +561,7 @@ async def test_current_authority_all_consumers_and_immutable_history(
             FakeLLMProvider(agent_decision=AgentDecision(action=action, candidate_ref=1)),
             tenant_id=tenant.id,
             conversation=conversation,
+            session_context=context,
             user_message="Birinci namizəd",
             as_of_date=date(2026, 1, 1),
             embedding_config=_embedding_config(),

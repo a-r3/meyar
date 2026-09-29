@@ -15,6 +15,8 @@ from datetime import UTC, datetime, timedelta
 from conftest import TEST_DATABASE_URL
 from fakes import FakeLLMProvider
 from search_helpers import (
+    open_test_conversation,
+    reload_test_conversation,
     seed_active_result_set,
     seed_candidate_with_profile,
     seed_embedding,
@@ -46,10 +48,9 @@ from meyar.search.schemas import (
     SearchMode,
 )
 from meyar.services.agent_conversation_repo import (
-    get_conversation_by_session,
-    get_conversation_for_update_by_session,
-    get_or_create_conversation,
-    reset_conversation,
+    OwnerPrincipal,
+    get_owned_conversation_for_update,
+    get_session_context_for_update,
 )
 from meyar.services.agent_result_set_repo import (
     ResultSetResolutionFailure,
@@ -158,10 +159,14 @@ async def _new_conversation(db_session, tenant, user, membership):
         db_session, user_id=user.id, tenant_membership_id=membership.id, ttl_hours=8
     )
     await db_session.flush()
-    conversation = await get_or_create_conversation(
-        db_session, tenant_id=tenant.id, browser_session_id=session.id
+    conversation, context = await open_test_conversation(
+        db_session,
+        tenant_id=tenant.id,
+        user_id=user.id,
+        membership_id=membership.id,
+        browser_session_id=session.id,
     )
-    return conversation, session
+    return conversation, context, session
 
 
 # --- Creation / provenance -------------------------------------------------
@@ -178,7 +183,7 @@ async def test_structured_search_creates_result_set_with_correct_members(
         db_session, tenant_id=tenant.id, profile_content=_profile("Python")
     )
     await db_session.commit()
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
 
     request = CandidateSearchRequest(
         mode=SearchMode.STRUCTURED_ONLY, required_filters=RequiredFilters(skills=["Python"])
@@ -201,7 +206,7 @@ async def test_structured_search_creates_result_set_with_correct_members(
         db_session,
         tenant_id=tenant.id,
         browser_session_id=session.id,
-        context_epoch=conversation.context_epoch,
+        session_context=context,
         planned=_planned(request, results),
         previous_result_set_id=None,
     )
@@ -249,7 +254,7 @@ async def test_semantic_search_populates_embedding_version_id(
         profile_content=content,
     )
     await db_session.commit()
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
 
     request = CandidateSearchRequest(
         mode=SearchMode.SEMANTIC_ONLY,
@@ -268,7 +273,7 @@ async def test_semantic_search_populates_embedding_version_id(
         db_session,
         tenant_id=tenant.id,
         browser_session_id=session.id,
-        context_epoch=conversation.context_epoch,
+        session_context=context,
         planned=_planned(request, results),
         previous_result_set_id=None,
     )
@@ -298,7 +303,7 @@ async def test_hybrid_search_populates_both_scores(
         profile_content=content,
     )
     await db_session.commit()
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
 
     request = CandidateSearchRequest(
         mode=SearchMode.HYBRID,
@@ -318,7 +323,7 @@ async def test_hybrid_search_populates_both_scores(
         db_session,
         tenant_id=tenant.id,
         browser_session_id=session.id,
-        context_epoch=conversation.context_epoch,
+        session_context=context,
         planned=_planned(request, results),
         previous_result_set_id=None,
     )
@@ -338,12 +343,12 @@ async def test_failed_search_leaves_prior_active_result_set_untouched(
         db_session, tenant_id=tenant.id, profile_content=_profile("Python")
     )
     await db_session.commit()
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
     seeded = await seed_active_result_set(
         db_session,
         tenant_id=tenant.id,
         browser_session_id=session.id,
-        conversation=conversation,
+        session_context=context,
         candidate_ids=[candidate.id],
     )
     await db_session.commit()
@@ -366,6 +371,7 @@ async def test_failed_search_leaves_prior_active_result_set_untouched(
         llm,
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
         user_message="qadın namizədləri göstər",
         as_of_date=AS_OF_DATE,
         embedding_config=_embedding_config(),
@@ -375,7 +381,8 @@ async def test_failed_search_leaves_prior_active_result_set_untouched(
     )
     assert result.tool_results[0].search.response.plan.executable is False
     await db_session.refresh(conversation)
-    assert conversation.active_result_set_id == seeded.id
+    await db_session.refresh(context)
+    assert context.active_result_set_id == seeded.id
 
 
 async def test_second_search_creates_new_result_set_and_switches_pointer(
@@ -386,7 +393,7 @@ async def test_second_search_creates_new_result_set_and_switches_pointer(
         db_session, tenant_id=tenant.id, profile_content=_profile("Python")
     )
     await db_session.commit()
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
 
     from meyar.search.planner_schemas import PlannerDraft
 
@@ -400,12 +407,14 @@ async def test_second_search_creates_new_result_set_and_switches_pointer(
         ],
     )
     await run_agent_turn(
-        db_session, llm, tenant_id=tenant.id, conversation=conversation, user_message="Python 1",
+        db_session, llm, tenant_id=tenant.id, conversation=conversation,
+            session_context=context, user_message="Python 1",
         as_of_date=AS_OF_DATE, embedding_config=_embedding_config(), embedding_provider=None,
         max_tool_calls=3, max_context_turns=8,
     )
     await db_session.refresh(conversation)
-    first_result_set_id = conversation.active_result_set_id
+    await db_session.refresh(context)
+    first_result_set_id = context.active_result_set_id
     assert first_result_set_id is not None
 
     llm2 = FakeLLMProvider(
@@ -418,12 +427,14 @@ async def test_second_search_creates_new_result_set_and_switches_pointer(
         ],
     )
     await run_agent_turn(
-        db_session, llm2, tenant_id=tenant.id, conversation=conversation, user_message="Python 2",
+        db_session, llm2, tenant_id=tenant.id, conversation=conversation,
+            session_context=context, user_message="Python 2",
         as_of_date=AS_OF_DATE, embedding_config=_embedding_config(), embedding_provider=None,
         max_tool_calls=3, max_context_turns=8,
     )
     await db_session.refresh(conversation)
-    second_result_set_id = conversation.active_result_set_id
+    await db_session.refresh(context)
+    second_result_set_id = context.active_result_set_id
     assert second_result_set_id is not None
     assert second_result_set_id != first_result_set_id
 
@@ -459,12 +470,12 @@ async def test_ordinal_resolves_to_the_right_candidate_for_each_position(
         )
         candidates.append(candidate)
     await db_session.commit()
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
     await seed_active_result_set(
         db_session,
         tenant_id=tenant.id,
         browser_session_id=session.id,
-        conversation=conversation,
+        session_context=context,
         candidate_ids=[c.id for c in candidates],
     )
     await db_session.commit()
@@ -474,7 +485,7 @@ async def test_ordinal_resolves_to_the_right_candidate_for_each_position(
             db_session,
             tenant_id=tenant.id,
             browser_session_id=session.id,
-            conversation=conversation,
+            session_context=context,
             candidate_ref=ordinal,
         )
         assert not isinstance(resolved, ResultSetResolutionFailure)
@@ -487,16 +498,16 @@ async def test_ordinal_out_of_range_fails(db_session: AsyncSession, tenant_and_u
         db_session, tenant_id=tenant.id, profile_content=_profile("Python")
     )
     await db_session.commit()
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
     await seed_active_result_set(
         db_session, tenant_id=tenant.id, browser_session_id=session.id,
-        conversation=conversation, candidate_ids=[candidate.id],
+        session_context=context, candidate_ids=[candidate.id],
     )
     await db_session.commit()
 
     resolved = await resolve_active_candidate_ref(
         db_session, tenant_id=tenant.id, browser_session_id=session.id,
-        conversation=conversation, candidate_ref=2,
+        session_context=context, candidate_ref=2,
     )
     assert resolved == ResultSetResolutionFailure.ORDINAL_OUT_OF_RANGE
 
@@ -512,38 +523,57 @@ async def test_active_result_set_size_reflects_member_count_and_zero_on_failure(
         db_session, tenant_id=tenant.id, profile_content=_profile("Python", quote="second")
     )
     await db_session.commit()
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
 
     async def _size() -> int:
         return await active_result_set_size(
             db_session,
             tenant_id=tenant.id,
             browser_session_id=session.id,
-            conversation=conversation,
+            session_context=context,
         )
 
     assert await _size() == 0
 
     await seed_active_result_set(
         db_session, tenant_id=tenant.id, browser_session_id=session.id,
-        conversation=conversation, candidate_ids=[first.id, second.id],
+        session_context=context, candidate_ids=[first.id, second.id],
     )
     await db_session.commit()
     assert await _size() == 2
 
-    await reset_conversation(db_session, conversation)
+    # issue #80: "Yeni söhbət" is a NEW durable conversation with its own
+    # clean context in the same BrowserSession — it never sees the first
+    # conversation's ResultSet, and the first context is left untouched.
+    _new_conv, new_context = await open_test_conversation(
+        db_session,
+        tenant_id=tenant.id,
+        user_id=user.id,
+        membership_id=membership.id,
+        browser_session_id=session.id,
+    )
     await db_session.commit()
-    assert await _size() == 0
+    assert new_context.active_result_set_id is None
+    assert (
+        await active_result_set_size(
+            db_session,
+            tenant_id=tenant.id,
+            browser_session_id=session.id,
+            session_context=new_context,
+        )
+        == 0
+    )
+    assert await _size() == 2
 
 
 async def test_no_active_result_set_fails(db_session: AsyncSession, tenant_and_user) -> None:
     tenant, user, _password, membership = tenant_and_user
     await db_session.commit()
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
 
     resolved = await resolve_active_candidate_ref(
         db_session, tenant_id=tenant.id, browser_session_id=session.id,
-        conversation=conversation, candidate_ref=1,
+        session_context=context, candidate_ref=1,
     )
     assert resolved == ResultSetResolutionFailure.NO_ACTIVE_RESULT_SET
 
@@ -559,21 +589,21 @@ async def test_resolution_survives_a_fresh_conversation_fetch(
         db_session, tenant_id=tenant.id, profile_content=_profile("Python")
     )
     await db_session.commit()
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
     await seed_active_result_set(
         db_session, tenant_id=tenant.id, browser_session_id=session.id,
-        conversation=conversation, candidate_ids=[candidate.id],
+        session_context=context, candidate_ids=[candidate.id],
     )
     await db_session.commit()
     db_session.expunge(conversation)
 
-    reloaded = await get_conversation_by_session(
-        db_session, tenant_id=tenant.id, browser_session_id=session.id
+    reloaded, reloaded_context = await reload_test_conversation(
+        db_session, conversation=conversation, browser_session_id=session.id
     )
     assert reloaded is not conversation
     resolved = await resolve_active_candidate_ref(
         db_session, tenant_id=tenant.id, browser_session_id=session.id,
-        conversation=reloaded, candidate_ref=1,
+        session_context=reloaded_context, candidate_ref=1,
     )
     assert not isinstance(resolved, ResultSetResolutionFailure)
     assert resolved.candidate_id == candidate.id
@@ -591,7 +621,7 @@ async def test_cross_tenant_result_set_id_fails_closed(
     )
     await db_session.commit()
 
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
 
     # Build a real AgentResultSet that legitimately belongs to the FOREIGN
     # tenant (own browser session would normally differ too), then tamper
@@ -600,14 +630,14 @@ async def test_cross_tenant_result_set_id_fails_closed(
         db_session,
         tenant_id=foreign_tenant.id,
         browser_session_id=session.id,
-        conversation=conversation,
+        session_context=context,
         candidate_ids=[foreign_candidate.id],
     )
     await db_session.commit()
 
     resolved = await resolve_active_candidate_ref(
         db_session, tenant_id=tenant.id, browser_session_id=session.id,
-        conversation=conversation, candidate_ref=1,
+        session_context=context, candidate_ref=1,
     )
     assert resolved == ResultSetResolutionFailure.NOT_FOUND
     del foreign_result_set
@@ -622,26 +652,30 @@ async def test_cross_session_result_set_fails_closed(
     )
     await db_session.commit()
 
-    conversation_a, session_a = await _new_conversation(db_session, tenant, user, membership)
-    conversation_b, session_b = await _new_conversation(db_session, tenant, user, membership)
+    conversation_a, context_a, session_a = await _new_conversation(
+        db_session, tenant, user, membership
+    )
+    conversation_b, context_b, session_b = await _new_conversation(
+        db_session, tenant, user, membership
+    )
     await seed_active_result_set(
         db_session, tenant_id=tenant.id, browser_session_id=session_a.id,
-        conversation=conversation_a, candidate_ids=[candidate.id],
+        session_context=context_a, candidate_ids=[candidate.id],
     )
     await db_session.commit()
     # Tamper conversation_b (a DIFFERENT browser session, same tenant) to
     # point at conversation_a's own result set.
-    conversation_b.active_result_set_id = conversation_a.active_result_set_id
+    context_b.active_result_set_id = context_a.active_result_set_id
     await db_session.flush()
 
     resolved = await resolve_active_candidate_ref(
         db_session, tenant_id=tenant.id, browser_session_id=session_b.id,
-        conversation=conversation_b, candidate_ref=1,
+        session_context=context_b, candidate_ref=1,
     )
     assert resolved == ResultSetResolutionFailure.SESSION_MISMATCH
 
 
-async def test_reset_conversation_invalidates_old_result_set_even_if_repointed(
+async def test_context_epoch_advance_invalidates_old_result_set_even_if_repointed(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
     tenant, user, _password, membership = tenant_and_user
@@ -649,25 +683,25 @@ async def test_reset_conversation_invalidates_old_result_set_even_if_repointed(
         db_session, tenant_id=tenant.id, profile_content=_profile("Python")
     )
     await db_session.commit()
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
     result_set = await seed_active_result_set(
         db_session, tenant_id=tenant.id, browser_session_id=session.id,
-        conversation=conversation, candidate_ids=[candidate.id],
+        session_context=context, candidate_ids=[candidate.id],
     )
     await db_session.commit()
 
-    await reset_conversation(db_session, conversation)
+    context.context_epoch += 1
+    context.active_result_set_id = None
     await db_session.commit()
-    assert conversation.active_result_set_id is None
 
     # Tamper: manually re-point active_result_set_id back at the
-    # pre-reset result set (its own context_epoch is now stale).
-    conversation.active_result_set_id = result_set.id
+    # previous-epoch result set (its own context_epoch is now stale).
+    context.active_result_set_id = result_set.id
     await db_session.flush()
 
     resolved = await resolve_active_candidate_ref(
         db_session, tenant_id=tenant.id, browser_session_id=session.id,
-        conversation=conversation, candidate_ref=1,
+        session_context=context, candidate_ref=1,
     )
     assert resolved == ResultSetResolutionFailure.CONTEXT_EPOCH_MISMATCH
 
@@ -680,28 +714,26 @@ async def test_new_search_under_new_epoch_resolves_normally(
         db_session, tenant_id=tenant.id, profile_content=_profile("Python")
     )
     await db_session.commit()
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
     await seed_active_result_set(
         db_session, tenant_id=tenant.id, browser_session_id=session.id,
-        conversation=conversation, candidate_ids=[candidate.id],
+        session_context=context, candidate_ids=[candidate.id],
     )
     await db_session.commit()
-    old_epoch = conversation.context_epoch
+    old_epoch = context.context_epoch
 
-    await reset_conversation(db_session, conversation)
+    context.context_epoch += 1
+    context.active_result_set_id = None
     await db_session.commit()
-    assert conversation.context_epoch == old_epoch + 1
-    assert conversation.turns == []
-    assert conversation.active_result_set_id is None
 
     new_result_set = await seed_active_result_set(
         db_session, tenant_id=tenant.id, browser_session_id=session.id,
-        conversation=conversation, candidate_ids=[candidate.id],
+        session_context=context, candidate_ids=[candidate.id],
     )
     await db_session.commit()
     resolved = await resolve_active_candidate_ref(
         db_session, tenant_id=tenant.id, browser_session_id=session.id,
-        conversation=conversation, candidate_ref=1,
+        session_context=context, candidate_ref=1,
     )
     assert not isinstance(resolved, ResultSetResolutionFailure)
     assert resolved.result_set_id == new_result_set.id
@@ -719,10 +751,10 @@ async def test_profile_reprocessing_makes_ordinal_stale(
         db_session, tenant_id=tenant.id, profile_content=_profile("Python")
     )
     await db_session.commit()
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
     await seed_active_result_set(
         db_session, tenant_id=tenant.id, browser_session_id=session.id,
-        conversation=conversation, candidate_ids=[candidate.id],
+        session_context=context, candidate_ids=[candidate.id],
     )
     await db_session.commit()
 
@@ -738,7 +770,7 @@ async def test_profile_reprocessing_makes_ordinal_stale(
 
     resolved = await resolve_active_candidate_ref(
         db_session, tenant_id=tenant.id, browser_session_id=session.id,
-        conversation=conversation, candidate_ref=1,
+        session_context=context, candidate_ref=1,
     )
     assert resolved == ResultSetResolutionFailure.STALE
 
@@ -751,10 +783,10 @@ async def test_new_searchable_candidate_makes_ordinal_stale(
         db_session, tenant_id=tenant.id, profile_content=_profile("Python")
     )
     await db_session.commit()
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
     await seed_active_result_set(
         db_session, tenant_id=tenant.id, browser_session_id=session.id,
-        conversation=conversation, candidate_ids=[candidate.id],
+        session_context=context, candidate_ids=[candidate.id],
     )
     await db_session.commit()
 
@@ -765,7 +797,7 @@ async def test_new_searchable_candidate_makes_ordinal_stale(
 
     resolved = await resolve_active_candidate_ref(
         db_session, tenant_id=tenant.id, browser_session_id=session.id,
-        conversation=conversation, candidate_ref=1,
+        session_context=context, candidate_ref=1,
     )
     assert resolved == ResultSetResolutionFailure.STALE
 
@@ -784,7 +816,7 @@ async def test_embedding_reprocessing_makes_semantic_ordinal_stale(
         profile_version_id=pv.id, vector=[0.1] * 8, profile_content=content,
     )
     await db_session.commit()
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
 
     embedding_config = _embedding_config()
     request = CandidateSearchRequest(
@@ -802,10 +834,10 @@ async def test_embedding_reprocessing_makes_semantic_ordinal_stale(
     ]
     result_set = await create_result_set_from_search(
         db_session, tenant_id=tenant.id, browser_session_id=session.id,
-        context_epoch=conversation.context_epoch, planned=_planned(request, results),
+        session_context=context, planned=_planned(request, results),
         previous_result_set_id=None,
     )
-    conversation.active_result_set_id = result_set.id
+    context.active_result_set_id = result_set.id
     await db_session.commit()
 
     # Simulate re-processing: new profile version (same content) + a fresh
@@ -822,7 +854,7 @@ async def test_embedding_reprocessing_makes_semantic_ordinal_stale(
 
     resolved = await resolve_active_candidate_ref(
         db_session, tenant_id=tenant.id, browser_session_id=session.id,
-        conversation=conversation, candidate_ref=1,
+        session_context=context, candidate_ref=1,
     )
     assert resolved == ResultSetResolutionFailure.STALE
 
@@ -835,7 +867,7 @@ async def test_expired_result_set_is_expired_not_stale(
         db_session, tenant_id=tenant.id, profile_content=_profile("Python")
     )
     await db_session.commit()
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
 
     request = CandidateSearchRequest(
         mode=SearchMode.STRUCTURED_ONLY, required_filters=RequiredFilters(skills=["Python"])
@@ -846,7 +878,8 @@ async def test_expired_result_set_is_expired_not_stale(
     result_set = AgentResultSet(
         tenant_id=tenant.id,
         browser_session_id=session.id,
-        context_epoch=conversation.context_epoch,
+        conversation_id=context.conversation_id,
+        context_epoch=context.context_epoch,
         request_sha256="a" * 64,
         canonical_search_request=request.model_dump(mode="json"),
         planner_policy_version="test", planner_prompt_version="test", planner_schema_version="test",
@@ -864,12 +897,12 @@ async def test_expired_result_set_is_expired_not_stale(
             relevance_score=1.0, structured_score=None, semantic_score=None,
         )
     )
-    conversation.active_result_set_id = result_set.id
+    context.active_result_set_id = result_set.id
     await db_session.commit()
 
     resolved = await resolve_active_candidate_ref(
         db_session, tenant_id=tenant.id, browser_session_id=session.id,
-        conversation=conversation, candidate_ref=1,
+        session_context=context, candidate_ref=1,
     )
     assert resolved == ResultSetResolutionFailure.EXPIRED
 
@@ -886,7 +919,7 @@ async def test_result_set_audit_events_never_leak_pii_or_query_text(
         db_session, tenant_id=tenant.id, profile_content=_profile("Python", quote=pii_quote)
     )
     await db_session.commit()
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
 
     secret_query = "John Doe john@example.com +994501234567 Python developer"
     request = CandidateSearchRequest(
@@ -908,19 +941,19 @@ async def test_result_set_audit_events_never_leak_pii_or_query_text(
     ]
     result_set = await create_result_set_from_search(
         db_session, tenant_id=tenant.id, browser_session_id=session.id,
-        context_epoch=conversation.context_epoch, planned=_planned(request, results),
+        session_context=context, planned=_planned(request, results),
         previous_result_set_id=None,
     )
-    conversation.active_result_set_id = result_set.id
+    context.active_result_set_id = result_set.id
     await db_session.commit()
 
     await resolve_active_candidate_ref(
         db_session, tenant_id=tenant.id, browser_session_id=session.id,
-        conversation=conversation, candidate_ref=1,
+        session_context=context, candidate_ref=1,
     )
     await resolve_active_candidate_ref(
         db_session, tenant_id=tenant.id, browser_session_id=session.id,
-        conversation=conversation, candidate_ref=5,  # triggers reference_rejected
+        session_context=context, candidate_ref=5,  # triggers reference_rejected
     )
     await db_session.commit()
 
@@ -958,7 +991,7 @@ async def test_result_set_flow_never_creates_job_or_evaluation_rows(
         db_session, tenant_id=tenant.id, profile_content=_profile("Python")
     )
     await db_session.commit()
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
 
     from meyar.search.planner_schemas import PlannerDraft
 
@@ -970,7 +1003,8 @@ async def test_result_set_flow_never_creates_job_or_evaluation_rows(
         ],
     )
     await run_agent_turn(
-        db_session, llm, tenant_id=tenant.id, conversation=conversation, user_message="Python",
+        db_session, llm, tenant_id=tenant.id, conversation=conversation,
+            session_context=context, user_message="Python",
         as_of_date=AS_OF_DATE, embedding_config=_embedding_config(), embedding_provider=None,
         max_tool_calls=3, max_context_turns=8,
     )
@@ -1000,10 +1034,10 @@ async def test_candidate_hard_delete_is_not_blocked_by_result_set_membership(
         db_session, tenant_id=tenant.id, profile_content=_profile("Python")
     )
     await db_session.commit()
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
     result_set = await seed_active_result_set(
         db_session, tenant_id=tenant.id, browser_session_id=session.id,
-        conversation=conversation, candidate_ids=[candidate.id],
+        session_context=context, candidate_ids=[candidate.id],
     )
     await db_session.commit()
 
@@ -1026,19 +1060,23 @@ async def test_candidate_hard_delete_is_not_blocked_by_result_set_membership(
 async def test_concurrent_turns_never_lose_a_context_epoch_update(
     tenant_and_user, db_session
 ) -> None:
-    """Two concurrent 'requests' against the SAME browser session, each
-    taking the existing SELECT ... FOR UPDATE row lock
-    (get_conversation_for_update_by_session) before mutating
-    context_epoch, must serialize — the final epoch reflects BOTH
-    increments, never a lost update."""
+    """Two concurrent 'requests' against the SAME durable conversation, each
+    taking the conversation row's SELECT ... FOR UPDATE lock
+    (get_owned_conversation_for_update, issue #80) before mutating its
+    transcript and live context, must serialize — the final state reflects
+    BOTH updates, never a lost update."""
     tenant, user, _password, membership = tenant_and_user
     await db_session.commit()
     session, _raw = await create_browser_session(
         db_session, user_id=user.id, tenant_membership_id=membership.id, ttl_hours=8
     )
     await db_session.commit()
-    conversation = await get_or_create_conversation(
-        db_session, tenant_id=tenant.id, browser_session_id=session.id
+    conversation, context = await open_test_conversation(
+        db_session,
+        tenant_id=tenant.id,
+        user_id=user.id,
+        membership_id=membership.id,
+        browser_session_id=session.id,
     )
     await db_session.commit()
 
@@ -1049,12 +1087,20 @@ async def test_concurrent_turns_never_lose_a_context_epoch_update(
 
     async def bump(factory) -> None:
         async with factory() as db:
-            conv = await get_conversation_for_update_by_session(
-                db, tenant_id=tenant.id, browser_session_id=session.id
+            owner = OwnerPrincipal(
+                tenant_id=tenant.id, user_id=user.id, membership_id=membership.id
+            )
+            conv = await get_owned_conversation_for_update(
+                db, owner=owner, conversation_id=conversation.id
             )
             assert conv is not None
+            live = await get_session_context_for_update(
+                db, conversation=conv, browser_session_id=session.id
+            )
+            assert live is not None
             await asyncio.sleep(0.05)
-            conv.context_epoch += 1
+            conv.turns = [*conv.turns, {"role": "user", "text": "synthetic"}]
+            live.context_epoch += 1
             await db.commit()
 
     try:
@@ -1064,7 +1110,9 @@ async def test_concurrent_turns_never_lose_a_context_epoch_update(
         await engine_b.dispose()
 
     await db_session.refresh(conversation)
-    assert conversation.context_epoch == 3  # started at 1, two serialized +1 bumps
+    await db_session.refresh(context)
+    assert context.context_epoch == 3  # started at 1, two serialized +1 bumps
+    assert len(conversation.turns) == 2
 
 
 # --- Identity boundary ------------------------------------------------

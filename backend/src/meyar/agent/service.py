@@ -12,7 +12,8 @@ typed schema validation (meyar.agent.schemas), tenant-scoped service calls
 the existing frozen NL search-planner pipeline's prohibited-attribute and
 no-silent-weakening rules (D-027, D-031). A ``candidate_ref`` is never
 trusted as a raw candidate_id: it is always resolved against this
-conversation's OWN server-held ``active_result_set_id`` (issue #49; see
+conversation's OWN BrowserSession-bound live context
+``active_result_set_id`` (issues #49/#80; see
 ``meyar.services.agent_result_set_repo.resolve_active_candidate_ref``), so
 the model's own memory of what it was shown is never the authority for
 which candidate a tool call touches."""
@@ -86,7 +87,7 @@ from meyar.llm.provider import (
     ModelTimeoutError,
     ModelUnavailableError,
 )
-from meyar.models.agent_conversation import AgentConversation
+from meyar.models.agent_conversation import AgentConversation, AgentConversationSessionContext
 from meyar.schemas.candidate_profile import CandidateProfileExtraction
 from meyar.schemas.criteria import (
     CriterionIn,
@@ -107,7 +108,9 @@ from meyar.search.schemas import (
 from meyar.services.agent_conversation_repo import (
     ASSISTANT_TEXT_AUTHORITY_SERVER,
     ASSISTANT_TEXT_AUTHORITY_VERSION,
-    save_conversation_state,
+    apply_title_kind_transition,
+    get_active_pending_job_draft,
+    save_conversation_turns,
 )
 from meyar.services.agent_result_set_repo import (
     RefinementResult,
@@ -289,8 +292,7 @@ async def _dispatch_search(
     llm: LLMProvider,
     *,
     tenant_id: uuid.UUID,
-    browser_session_id: uuid.UUID,
-    context_epoch: int,
+    session_context: AgentConversationSessionContext,
     previous_result_set_id: uuid.UUID | None,
     decision: AgentDecision,
     as_of_date: date,
@@ -323,8 +325,8 @@ async def _dispatch_search(
         result_set = await create_result_set_from_search(
             db,
             tenant_id=tenant_id,
-            browser_session_id=browser_session_id,
-            context_epoch=context_epoch,
+            browser_session_id=session_context.browser_session_id,
+            session_context=session_context,
             planned=planned,
             previous_result_set_id=previous_result_set_id,
         )
@@ -337,7 +339,7 @@ async def _dispatch_profile(
     *,
     tenant_id: uuid.UUID,
     decision: AgentDecision,
-    conversation: AgentConversation,
+    session_context: AgentConversationSessionContext,
 ) -> tuple[AgentToolResult, CandidateProfileExtraction | None, ResultSetResolutionFailure | None]:
     """Returns (tool result, the raw validated profile when found, the
     resolution failure reason when not) — the profile is handed back
@@ -350,8 +352,8 @@ async def _dispatch_profile(
     resolved = await resolve_active_candidate_ref(
         db,
         tenant_id=tenant_id,
-        browser_session_id=conversation.browser_session_id,
-        conversation=conversation,
+        browser_session_id=session_context.browser_session_id,
+        session_context=session_context,
         candidate_ref=decision.candidate_ref,
     )
     if isinstance(resolved, ResultSetResolutionFailure):
@@ -466,7 +468,7 @@ async def _dispatch_refine(
     llm: LLMProvider,
     *,
     tenant_id: uuid.UUID,
-    conversation: AgentConversation,
+    session_context: AgentConversationSessionContext,
     decision: AgentDecision,
     as_of_date: date,
     embedding_config: EmbeddingSearchConfig,
@@ -509,8 +511,8 @@ async def _dispatch_refine(
     validated_active_result_set = await validate_active_result_set_for_refinement(
         db,
         tenant_id=tenant_id,
-        browser_session_id=conversation.browser_session_id,
-        conversation=conversation,
+        browser_session_id=session_context.browser_session_id,
+        session_context=session_context,
     )
     if isinstance(validated_active_result_set, ResultSetResolutionFailure):
         return RefineDispatchResult(resolution_failure=validated_active_result_set)
@@ -576,8 +578,8 @@ async def _dispatch_refine(
     outcome = await create_result_set_from_refinement(
         db,
         tenant_id=tenant_id,
-        browser_session_id=conversation.browser_session_id,
-        conversation=conversation,
+        browser_session_id=session_context.browser_session_id,
+        session_context=session_context,
         filter_request=filter_request,
         requested_limit=effective_limit,
     )
@@ -636,7 +638,7 @@ async def _dispatch_evidence(
     *,
     tenant_id: uuid.UUID,
     decision: AgentDecision,
-    conversation: AgentConversation,
+    session_context: AgentConversationSessionContext,
 ) -> tuple[AgentToolResult, CandidateProfileExtraction | None, ResultSetResolutionFailure | None]:
     """Returns (tool result, the raw validated profile when found, the
     resolution failure reason when not) — see _dispatch_profile's
@@ -647,8 +649,8 @@ async def _dispatch_evidence(
     resolved = await resolve_active_candidate_ref(
         db,
         tenant_id=tenant_id,
-        browser_session_id=conversation.browser_session_id,
-        conversation=conversation,
+        browser_session_id=session_context.browser_session_id,
+        session_context=session_context,
         candidate_ref=decision.candidate_ref,
     )
     if isinstance(resolved, ResultSetResolutionFailure):
@@ -1725,18 +1727,6 @@ def _requested_followup_modality(text: str) -> CriterionType | None:
     return None
 
 
-def _latest_pending_job_draft(conversation: AgentConversation) -> AgentJobDraftToolResult | None:
-    for turn in reversed(conversation.turns):
-        payload = turn.get("pending_job_draft")
-        if not isinstance(payload, dict):
-            continue
-        try:
-            return AgentJobDraftToolResult.model_validate(payload)
-        except ValueError:
-            continue
-    return None
-
-
 def _modified_requirement_results(
     draft: AgentJobDraftToolResult,
     *,
@@ -1909,11 +1899,10 @@ def _build_result(
 async def _finish_turn(
     db: AsyncSession,
     conversation: AgentConversation,
+    session_context: AgentConversationSessionContext,
     *,
     tenant_id: uuid.UUID,
     turns: list[dict],
-    active_result_set_id: uuid.UUID | None,
-    max_context_turns: int,
     result: AgentTurnResult,
 ) -> AgentTurnResult:
     """Persists this turn's own (outcome, message) as a first pass — the
@@ -1942,16 +1931,20 @@ async def _finish_turn(
         if tool_result.job_draft is not None
     ]
     if pending_drafts:
-        # Session/tenant-scoped server authority used by the dedicated
-        # draft-confirmation operation. Browser fields never recreate it.
-        assistant_turn["pending_job_draft"] = pending_drafts[-1].model_dump(mode="json")
-    turns = [*turns, assistant_turn][-max_context_turns:]
-    await save_conversation_state(
-        db,
-        conversation,
-        turns=turns,
-        active_result_set_id=active_result_set_id,
-    )
+        # issue #80: the transcript only holds the server-side payload; the
+        # live pending AUTHORITY is the session context pointer below. A
+        # modified draft (new draft_id) moves the pointer, so the old id
+        # can never be confirmed again, and a relogin/new BrowserSession
+        # context starts with no pointer at all. Browser fields never
+        # recreate either.
+        latest_draft = pending_drafts[-1]
+        assistant_turn["pending_job_draft"] = latest_draft.model_dump(mode="json")
+        session_context.active_pending_draft_id = latest_draft.draft_id
+    # Durable storage bound (MAX_PERSISTED_AGENT_TURNS) — deliberately NOT
+    # the model context window; see save_conversation_turns.
+    await save_conversation_turns(db, conversation, turns=[*turns, assistant_turn])
+    apply_title_kind_transition(conversation, result)
+    await db.flush()
     await record_event(
         db,
         tenant_id=tenant_id,
@@ -1970,6 +1963,7 @@ async def run_agent_turn(
     *,
     tenant_id: uuid.UUID,
     conversation: AgentConversation,
+    session_context: AgentConversationSessionContext,
     user_message: str,
     as_of_date: date,
     embedding_config: EmbeddingSearchConfig,
@@ -1978,9 +1972,13 @@ async def run_agent_turn(
     max_context_turns: int,
 ) -> AgentTurnResult:
     """One bounded orchestration turn. Never persists a mutation to any
-    candidate/job/evaluation row — only this conversation's own
-    session-scoped state (turns, active_result_set_id). Caller is
-    responsible for the surrounding db.commit()/rollback().
+    candidate/job/evaluation row — only this durable conversation's own
+    transcript/title kind and its BrowserSession-bound live
+    ``session_context`` (active_result_set_id, active_pending_draft_id).
+    ``browser_session_id``/``context_epoch``/``active_result_set_id``/
+    ``active_pending_draft_id`` come ONLY from ``session_context`` — never
+    inferred from the transcript (issue #80). Caller holds the durable
+    conversation row lock and is responsible for commit/rollback.
 
     The high-level JD/search boundary is decided here from the raw message by
     ``route_agent_entry``.  No form field or model proposal can authorize JD
@@ -1990,8 +1988,19 @@ async def run_agent_turn(
     also bypasses the orchestration decision: the server builds the typed
     SEARCH_CANDIDATES action with the user's own text, the existing validated
     planner/search path runs, and the validated tool result ends the turn."""
+    if (
+        session_context.conversation_id != conversation.id
+        or session_context.tenant_id != tenant_id
+        or conversation.tenant_id != tenant_id
+    ):
+        # issue #80: the live context must belong to exactly this durable
+        # conversation and tenant — never mix one conversation's transcript
+        # with another's ResultSet/pending-draft authority.
+        raise ValueError("Session context does not belong to this conversation.")
     turns: list[dict] = [*conversation.turns, {"role": "user", "text": user_message}]
-    pending_draft = _latest_pending_job_draft(conversation)
+    # Live pending authority only (session_context.active_pending_draft_id);
+    # historical transcript payloads alone are never actionable.
+    pending_draft = get_active_pending_job_draft(conversation, session_context)
     if (
         pending_draft is not None
         and _FOLLOWUP_RE.search(_fold(user_message))
@@ -2026,10 +2035,9 @@ async def run_agent_turn(
         return await _finish_turn(
             db,
             conversation,
+            session_context,
             tenant_id=tenant_id,
             turns=turns,
-            active_result_set_id=conversation.active_result_set_id,
-            max_context_turns=max_context_turns,
             result=result,
         )
 
@@ -2060,10 +2068,9 @@ async def run_agent_turn(
         return await _finish_turn(
             db,
             conversation,
+            session_context,
             tenant_id=tenant_id,
             turns=turns,
-            active_result_set_id=conversation.active_result_set_id,
-            max_context_turns=max_context_turns,
             result=result,
         )
 
@@ -2125,17 +2132,19 @@ async def run_agent_turn(
             # non-authoritative. The validated count says which ordinals may
             # currently be referenced. Real authority remains the independent
             # server validation in refinement/profile/evidence dispatch.
-            active_result_context_present = conversation.active_result_set_id is not None
+            active_result_context_present = session_context.active_result_set_id is not None
             available_ref_count = await active_result_set_size(
                 db,
                 tenant_id=tenant_id,
-                browser_session_id=conversation.browser_session_id,
-                conversation=conversation,
+                browser_session_id=session_context.browser_session_id,
+                session_context=session_context,
             )
             decision = None
             for attempt in range(1, MAX_DECISION_ATTEMPTS + 1):
                 try:
                     decision, provenance = await llm.decide_agent_action(
+                        # Model context window only — never the whole
+                        # durable transcript (issue #80).
                         recent_turns=[(t["role"], t["text"]) for t in turns[-max_context_turns:]],
                         last_tool_result_summary=last_tool_summary,
                         active_result_context_present=active_result_context_present,
@@ -2165,10 +2174,9 @@ async def run_agent_turn(
                     return await _finish_turn(
                         db,
                         conversation,
+                        session_context,
                         tenant_id=tenant_id,
                         turns=turns,
-                        active_result_set_id=conversation.active_result_set_id,
-                        max_context_turns=max_context_turns,
                         result=result,
                     )
                 break
@@ -2188,10 +2196,9 @@ async def run_agent_turn(
             return await _finish_turn(
                 db,
                 conversation,
+                session_context,
                 tenant_id=tenant_id,
                 turns=turns,
-                active_result_set_id=conversation.active_result_set_id,
-                max_context_turns=max_context_turns,
                 result=result,
             )
 
@@ -2224,10 +2231,9 @@ async def run_agent_turn(
             return await _finish_turn(
                 db,
                 conversation,
+                session_context,
                 tenant_id=tenant_id,
                 turns=turns,
-                active_result_set_id=conversation.active_result_set_id,
-                max_context_turns=max_context_turns,
                 result=result,
             )
 
@@ -2251,10 +2257,9 @@ async def run_agent_turn(
             return await _finish_turn(
                 db,
                 conversation,
+                session_context,
                 tenant_id=tenant_id,
                 turns=turns,
-                active_result_set_id=conversation.active_result_set_id,
-                max_context_turns=max_context_turns,
                 result=result,
             )
 
@@ -2269,10 +2274,9 @@ async def run_agent_turn(
             return await _finish_turn(
                 db,
                 conversation,
+                session_context,
                 tenant_id=tenant_id,
                 turns=turns,
-                active_result_set_id=conversation.active_result_set_id,
-                max_context_turns=max_context_turns,
                 result=result,
             )
 
@@ -2295,10 +2299,9 @@ async def run_agent_turn(
                 return await _finish_turn(
                     db,
                     conversation,
+                    session_context,
                     tenant_id=tenant_id,
                     turns=turns,
-                    active_result_set_id=conversation.active_result_set_id,
-                    max_context_turns=max_context_turns,
                     result=result,
                 )
             searched_queries.add(normalized_query)
@@ -2327,10 +2330,9 @@ async def run_agent_turn(
                 return await _finish_turn(
                     db,
                     conversation,
+                    session_context,
                     tenant_id=tenant_id,
                     turns=turns,
-                    active_result_set_id=conversation.active_result_set_id,
-                    max_context_turns=max_context_turns,
                     result=result,
                 )
             tool_calls_made += 1
@@ -2351,10 +2353,9 @@ async def run_agent_turn(
             return await _finish_turn(
                 db,
                 conversation,
+                session_context,
                 tenant_id=tenant_id,
                 turns=turns,
-                active_result_set_id=conversation.active_result_set_id,
-                max_context_turns=max_context_turns,
                 result=result,
             )
 
@@ -2369,7 +2370,7 @@ async def run_agent_turn(
                 db,
                 llm,
                 tenant_id=tenant_id,
-                conversation=conversation,
+                session_context=session_context,
                 decision=decision,
                 as_of_date=as_of_date,
                 embedding_config=embedding_config,
@@ -2385,10 +2386,9 @@ async def run_agent_turn(
                 return await _finish_turn(
                     db,
                     conversation,
+                    session_context,
                     tenant_id=tenant_id,
                     turns=turns,
-                    active_result_set_id=conversation.active_result_set_id,
-                    max_context_turns=max_context_turns,
                     result=result,
                 )
             if refine_dispatch.resolution_failure is not None:
@@ -2405,10 +2405,9 @@ async def run_agent_turn(
                 return await _finish_turn(
                     db,
                     conversation,
+                    session_context,
                     tenant_id=tenant_id,
                     turns=turns,
-                    active_result_set_id=conversation.active_result_set_id,
-                    max_context_turns=max_context_turns,
                     result=result,
                 )
             assert (
@@ -2421,7 +2420,7 @@ async def run_agent_turn(
             # successful SEARCH_CANDIDATES result set switch above — the
             # committed active pointer must be the derived set the moment
             # this turn ends.
-            conversation.active_result_set_id = refine_dispatch.new_result_set_id
+            session_context.active_result_set_id = refine_dispatch.new_result_set_id
             await record_event(
                 db,
                 tenant_id=tenant_id,
@@ -2438,23 +2437,21 @@ async def run_agent_turn(
             return await _finish_turn(
                 db,
                 conversation,
+                session_context,
                 tenant_id=tenant_id,
                 turns=turns,
-                active_result_set_id=conversation.active_result_set_id,
-                max_context_turns=max_context_turns,
                 result=result,
             )
 
         matched_profile: CandidateProfileExtraction | None = None
         resolution_failure: ResultSetResolutionFailure | None = None
         if decision.action == AgentActionType.SEARCH_CANDIDATES:
-            previous_result_set_id = conversation.active_result_set_id
+            previous_result_set_id = session_context.active_result_set_id
             tool_result, new_result_set_id = await _dispatch_search(
                 db,
                 llm,
                 tenant_id=tenant_id,
-                browser_session_id=conversation.browser_session_id,
-                context_epoch=conversation.context_epoch,
+                session_context=session_context,
                 previous_result_set_id=previous_result_set_id,
                 decision=decision,
                 as_of_date=as_of_date,
@@ -2468,20 +2465,20 @@ async def run_agent_turn(
                 # computation, both see the freshly created result set
                 # immediately — mirrors the old local-variable semantics
                 # of last_search_candidate_ids exactly.
-                conversation.active_result_set_id = new_result_set_id
+                session_context.active_result_set_id = new_result_set_id
         elif decision.action == AgentActionType.GET_CANDIDATE_PROFILE:
             tool_result, matched_profile, resolution_failure = await _dispatch_profile(
                 db,
                 tenant_id=tenant_id,
                 decision=decision,
-                conversation=conversation,
+                session_context=session_context,
             )
         else:
             tool_result, matched_profile, resolution_failure = await _dispatch_evidence(
                 db,
                 tenant_id=tenant_id,
                 decision=decision,
-                conversation=conversation,
+                session_context=session_context,
             )
 
         tool_calls_made += 1
@@ -2508,10 +2505,9 @@ async def run_agent_turn(
             return await _finish_turn(
                 db,
                 conversation,
+                session_context,
                 tenant_id=tenant_id,
                 turns=turns,
-                active_result_set_id=conversation.active_result_set_id,
-                max_context_turns=max_context_turns,
                 result=result,
             )
 
@@ -2561,9 +2557,8 @@ async def run_agent_turn(
             return await _finish_turn(
                 db,
                 conversation,
+                session_context,
                 tenant_id=tenant_id,
                 turns=turns,
-                active_result_set_id=conversation.active_result_set_id,
-                max_context_turns=max_context_turns,
                 result=result,
             )

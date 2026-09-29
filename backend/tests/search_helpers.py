@@ -13,7 +13,7 @@ from meyar.embedding.serializer import (
     build_professional_embedding_text,
     compute_source_sha256,
 )
-from meyar.models.agent_conversation import AgentConversation
+from meyar.models.agent_conversation import AgentConversation, AgentConversationSessionContext
 from meyar.models.agent_result_set import AgentResultSet, AgentResultSetKind, AgentResultSetMember
 from meyar.search.schemas import CandidateSearchRequest, SearchMode
 from meyar.services.agent_result_set_repo import compute_corpus_fingerprint
@@ -187,7 +187,7 @@ async def seed_active_result_set(
     *,
     tenant_id: uuid.UUID,
     browser_session_id: uuid.UUID,
-    conversation: AgentConversation,
+    session_context: AgentConversationSessionContext,
     candidate_ids: list[uuid.UUID],
 ) -> AgentResultSet:
     """Test-only shortcut (issue #49) replacing the old direct assignment
@@ -198,8 +198,8 @@ async def seed_active_result_set(
     in the DB at call time, exactly like production. Always
     STRUCTURED_ONLY (no embedding_config) — semantic/hybrid-specific
     fixtures build their own AgentResultSet directly where that distinction
-    matters. Also points `conversation.active_result_set_id` at the new
-    row, matching its own context_epoch."""
+    matters. Also points `session_context.active_result_set_id` at the new
+    row, bound to its own conversation_id + context_epoch (issue #80)."""
     session = await get_browser_session_by_id(db_session, browser_session_id=browser_session_id)
     assert session is not None
     request = CandidateSearchRequest(mode=SearchMode.STRUCTURED_ONLY)
@@ -209,7 +209,8 @@ async def seed_active_result_set(
     result_set = AgentResultSet(
         tenant_id=tenant_id,
         browser_session_id=browser_session_id,
-        context_epoch=conversation.context_epoch,
+        conversation_id=session_context.conversation_id,
+        context_epoch=session_context.context_epoch,
         result_set_kind=AgentResultSetKind.SEARCH.value,
         parent_result_set_id=None,
         request_sha256="0" * 64,
@@ -246,7 +247,7 @@ async def seed_active_result_set(
             )
         )
     await db_session.flush()
-    conversation.active_result_set_id = result_set.id
+    session_context.active_result_set_id = result_set.id
     await db_session.flush()
     return result_set
 
@@ -309,3 +310,61 @@ async def seed_embedding(
         embedding_dimensions=len(vector),
         embedding=vector,
     )
+
+
+async def open_test_conversation(
+    db_session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    user_id: uuid.UUID,
+    membership_id: uuid.UUID,
+    browser_session_id: uuid.UUID,
+) -> tuple[AgentConversation, AgentConversationSessionContext]:
+    """issue #80: a fresh durable conversation owned by (tenant, user,
+    membership) plus its clean live context for one BrowserSession."""
+    from meyar.services.agent_conversation_repo import (
+        OwnerPrincipal,
+        create_conversation,
+        get_or_create_session_context,
+    )
+
+    conversation = await create_conversation(
+        db_session,
+        owner=OwnerPrincipal(tenant_id=tenant_id, user_id=user_id, membership_id=membership_id),
+    )
+    context = await get_or_create_session_context(
+        db_session, conversation=conversation, browser_session_id=browser_session_id
+    )
+    return conversation, context
+
+
+async def reload_test_conversation(
+    db_session: AsyncSession,
+    *,
+    conversation: AgentConversation,
+    browser_session_id: uuid.UUID,
+) -> tuple[AgentConversation | None, AgentConversationSessionContext | None]:
+    """Fresh owner-scoped re-fetch of a durable conversation and its live
+    context for one BrowserSession (issue #80)."""
+    from meyar.services.agent_conversation_repo import (
+        OwnerPrincipal,
+        get_owned_conversation,
+        get_session_context,
+    )
+
+    owner = OwnerPrincipal(
+        tenant_id=conversation.tenant_id,
+        user_id=conversation.owner_user_id,
+        membership_id=conversation.owner_membership_id,
+    )
+    conversation_id = conversation.id
+    db_session.expunge_all()
+    reloaded = await get_owned_conversation(
+        db_session, owner=owner, conversation_id=conversation_id
+    )
+    if reloaded is None:
+        return None, None
+    context = await get_session_context(
+        db_session, conversation=reloaded, browser_session_id=browser_session_id
+    )
+    return reloaded, context

@@ -17,6 +17,8 @@ from datetime import UTC, datetime, timedelta
 from fakes import FakeLLMProvider
 from pydantic import ValidationError
 from search_helpers import (
+    open_test_conversation,
+    reload_test_conversation,
     seed_active_result_set,
     seed_candidate_with_profile,
     seed_next_profile_version,
@@ -32,11 +34,6 @@ from meyar.models.evaluation import Evaluation
 from meyar.models.job import Job as JobModel
 from meyar.models.job_criteria_version import JobCriteriaVersion
 from meyar.search.schemas import EmbeddingSearchConfig
-from meyar.services.agent_conversation_repo import (
-    get_conversation_by_session,
-    get_or_create_conversation,
-    reset_conversation,
-)
 from meyar.services.browser_session_repo import create_browser_session
 
 AS_OF_DATE = datetime(2026, 1, 1, tzinfo=UTC).date()
@@ -83,10 +80,14 @@ async def _new_conversation(db_session, tenant, user, membership):
         db_session, user_id=user.id, tenant_membership_id=membership.id, ttl_hours=8
     )
     await db_session.flush()
-    conversation = await get_or_create_conversation(
-        db_session, tenant_id=tenant.id, browser_session_id=session.id
+    conversation, context = await open_test_conversation(
+        db_session,
+        tenant_id=tenant.id,
+        user_id=user.id,
+        membership_id=membership.id,
+        browser_session_id=session.id,
     )
-    return conversation, session
+    return conversation, context, session
 
 
 async def _refine(
@@ -95,6 +96,7 @@ async def _refine(
     *,
     tenant_id,
     conversation,
+    session_context,
     filter_query: str | None = None,
     limit: int | None = None,
     message: str = "refine",
@@ -104,6 +106,7 @@ async def _refine(
         llm,
         tenant_id=tenant_id,
         conversation=conversation,
+        session_context=session_context,
         user_message=message,
         as_of_date=AS_OF_DATE,
         embedding_config=_embedding_config(),
@@ -187,7 +190,7 @@ async def _member_candidate_ids(db_session: AsyncSession, *, result_set_id: uuid
     return [str(row.candidate_id) for row in rows]
 
 
-async def _seed_root(db_session, tenant, conversation, session, *candidate_skill_pairs):
+async def _seed_root(db_session, tenant, context, session, *candidate_skill_pairs):
     """Seeds candidates with the given (skills...) tuples, then builds a
     root SEARCH-kind AgentResultSet over them in the given order via the
     existing seed_active_result_set test shortcut. Returns (candidates,
@@ -203,7 +206,7 @@ async def _seed_root(db_session, tenant, conversation, session, *candidate_skill
         db_session,
         tenant_id=tenant.id,
         browser_session_id=session.id,
-        conversation=conversation,
+        session_context=context,
         candidate_ids=[c.id for c in candidates],
     )
     await db_session.commit()
@@ -217,9 +220,9 @@ async def test_filter_only_keeps_matching_members_in_preserved_order(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
     tenant, user, _password, membership = tenant_and_user
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
     (a, b, c), root = await _seed_root(
-        db_session, tenant, conversation, session, ("Python",), ("SQL",), ("SQL",)
+        db_session, tenant, context, session, ("Python",), ("SQL",), ("SQL",)
     )
 
     result = await _refine(
@@ -227,6 +230,7 @@ async def test_filter_only_keeps_matching_members_in_preserved_order(
         _refine_llm(filter_query="SQL bilən namizədləri göstər"),
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
     )
     assert result.outcome.value == "ANSWERED_FROM_TOOL_RESULT"
     refine = result.tool_results[0].refine
@@ -237,7 +241,9 @@ async def test_filter_only_keeps_matching_members_in_preserved_order(
     assert [r.rank for r in refine.response.results] == [1, 2]
 
     await db_session.refresh(conversation)
-    derived = await db_session.get(AgentResultSet, conversation.active_result_set_id)
+
+    await db_session.refresh(context)
+    derived = await db_session.get(AgentResultSet, context.active_result_set_id)
     assert derived is not None
     assert derived.id != root.id
     assert derived.result_set_kind == AgentResultSetKind.REFINEMENT.value
@@ -255,7 +261,7 @@ async def test_filter_never_admits_a_candidate_outside_the_parent_set(
     """D also knows SQL but was never part of the active result set — it
     must never enter the derived set (derived members ⊆ parent members)."""
     tenant, user, _password, membership = tenant_and_user
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
     # The outsider must already exist in the tenant's searchable corpus
     # BEFORE the root result set is built, so the root's own corpus
     # fingerprint already reflects it — only its ABSENCE from root
@@ -265,7 +271,7 @@ async def test_filter_never_admits_a_candidate_outside_the_parent_set(
     )
     await db_session.commit()
     (a, b), root = await _seed_root(
-        db_session, tenant, conversation, session, ("Python",), ("SQL",)
+        db_session, tenant, context, session, ("Python",), ("SQL",)
     )
 
     result = await _refine(
@@ -273,6 +279,7 @@ async def test_filter_never_admits_a_candidate_outside_the_parent_set(
         _refine_llm(filter_query="SQL bilən namizədləri göstər"),
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
     )
     refine = result.tool_results[0].refine
     assert refine is not None
@@ -285,11 +292,11 @@ async def test_limit_only_takes_first_n_preserving_order(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
     tenant, user, _password, membership = tenant_and_user
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
     candidates, root = await _seed_root(
         db_session,
         tenant,
-        conversation,
+        context,
         session,
         ("Python",),
         ("Java",),
@@ -299,7 +306,8 @@ async def test_limit_only_takes_first_n_preserving_order(
     )
 
     result = await _refine(
-        db_session, _refine_llm(limit=3), tenant_id=tenant.id, conversation=conversation
+        db_session, _refine_llm(limit=3), tenant_id=tenant.id, conversation=conversation,
+            session_context=context
     )
     refine = result.tool_results[0].refine
     assert refine is not None
@@ -314,9 +322,9 @@ async def test_filter_then_limit_preserves_filtered_order_before_truncating(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
     tenant, user, _password, membership = tenant_and_user
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
     (a, b, c, d), root = await _seed_root(
-        db_session, tenant, conversation, session, ("SQL",), ("SQL",), ("SQL",), ("Python",)
+        db_session, tenant, context, session, ("SQL",), ("SQL",), ("SQL",), ("Python",)
     )
 
     result = await _refine(
@@ -324,6 +332,7 @@ async def test_filter_then_limit_preserves_filtered_order_before_truncating(
         _refine_llm(filter_query="SQL bilən namizədləri göstər", limit=2),
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
     )
     refine = result.tool_results[0].refine
     assert refine is not None
@@ -335,9 +344,9 @@ async def test_zero_result_refinement_is_not_an_error_and_becomes_active(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
     tenant, user, _password, membership = tenant_and_user
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
     _candidates, root = await _seed_root(
-        db_session, tenant, conversation, session, ("Python",), ("Java",)
+        db_session, tenant, context, session, ("Python",), ("Java",)
     )
 
     result = await _refine(
@@ -345,6 +354,7 @@ async def test_zero_result_refinement_is_not_an_error_and_becomes_active(
         _refine_llm(filter_query="SQL bilən namizədləri göstər"),
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
     )
     assert result.outcome.value == "ANSWERED_FROM_TOOL_RESULT"
     refine = result.tool_results[0].refine
@@ -352,7 +362,9 @@ async def test_zero_result_refinement_is_not_an_error_and_becomes_active(
     assert refine.response.result_count == 0
 
     await db_session.refresh(conversation)
-    derived = await db_session.get(AgentResultSet, conversation.active_result_set_id)
+
+    await db_session.refresh(context)
+    derived = await db_session.get(AgentResultSet, context.active_result_set_id)
     assert derived is not None
     assert derived.id != root.id
     assert derived.result_count == 0
@@ -368,6 +380,7 @@ async def test_zero_result_refinement_is_not_an_error_and_becomes_active(
         ordinal_llm,
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
         message="birincini aç",
     )
     assert ordinal_llm.agent_contexts == [(True, [])]
@@ -378,9 +391,9 @@ async def test_zero_result_context_survives_reload_and_can_be_refined_again(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
     tenant, user, _password, membership = tenant_and_user
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
     _candidates, root = await _seed_root(
-        db_session, tenant, conversation, session, ("Python",), ("Java",)
+        db_session, tenant, context, session, ("Python",), ("Java",)
     )
 
     first = await _refine(
@@ -388,18 +401,20 @@ async def test_zero_result_context_survives_reload_and_can_be_refined_again(
         _refine_llm(filter_query="SQL bilən namizədləri göstər"),
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
     )
     assert first.tool_results[0].refine.response.result_count == 0
     await db_session.refresh(conversation)
-    first_derived_id = conversation.active_result_set_id
+    await db_session.refresh(context)
+    first_derived_id = context.active_result_set_id
     assert first_derived_id is not None and first_derived_id != root.id
     await db_session.commit()
 
-    reloaded = await get_conversation_by_session(
-        db_session, tenant_id=tenant.id, browser_session_id=session.id
+    reloaded, reloaded_context = await reload_test_conversation(
+        db_session, conversation=conversation, browser_session_id=session.id
     )
     assert reloaded is not None
-    assert reloaded.active_result_set_id == first_derived_id
+    assert reloaded_context.active_result_set_id == first_derived_id
 
     limit_llm = _refine_llm(limit=3)
     second = await _refine(
@@ -407,6 +422,7 @@ async def test_zero_result_context_survives_reload_and_can_be_refined_again(
         limit_llm,
         tenant_id=tenant.id,
         conversation=reloaded,
+        session_context=reloaded_context,
         # "bunlardan ..." keeps this model-routed (a bare "ilk 3" is now a
         # server-routed count-only follow-up, issue #79 PR81); this test is
         # about the advisory context the model receives.
@@ -416,23 +432,25 @@ async def test_zero_result_context_survives_reload_and_can_be_refined_again(
     assert second.outcome.value == "ANSWERED_FROM_TOOL_RESULT"
     assert second.tool_results[0].refine.response.result_count == 0
     await db_session.refresh(reloaded)
-    second_derived = await db_session.get(AgentResultSet, reloaded.active_result_set_id)
+    await db_session.refresh(reloaded_context)
+    second_derived = await db_session.get(AgentResultSet, reloaded_context.active_result_set_id)
     assert second_derived is not None
     assert second_derived.id != first_derived_id
     assert second_derived.parent_result_set_id == first_derived_id
     assert second_derived.result_count == 0
-    assert reloaded.active_result_set_id == second_derived.id
+    assert reloaded_context.active_result_set_id == second_derived.id
 
 
 async def test_requested_limit_greater_than_current_count_returns_truthful_subset(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
     tenant, user, _password, membership = tenant_and_user
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
-    (a, b), root = await _seed_root(db_session, tenant, conversation, session, ("A",), ("B",))
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
+    (a, b), root = await _seed_root(db_session, tenant, context, session, ("A",), ("B",))
 
     result = await _refine(
-        db_session, _refine_llm(limit=10), tenant_id=tenant.id, conversation=conversation
+        db_session, _refine_llm(limit=10), tenant_id=tenant.id, conversation=conversation,
+            session_context=context
     )
     refine = result.tool_results[0].refine
     assert refine is not None
@@ -446,11 +464,11 @@ async def test_chained_refinement_ordinal_resolves_against_final_derived_set(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
     tenant, user, _password, membership = tenant_and_user
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
     (a, b, c, d, e), root = await _seed_root(
         db_session,
         tenant,
-        conversation,
+        context,
         session,
         ("SQL",),
         ("SQL",),
@@ -464,6 +482,7 @@ async def test_chained_refinement_ordinal_resolves_against_final_derived_set(
         _refine_llm(filter_query="SQL bilən namizədləri göstər"),
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
     )
     assert [str(r.candidate_id) for r in filtered.tool_results[0].refine.response.results] == [
         str(a.id),
@@ -472,17 +491,20 @@ async def test_chained_refinement_ordinal_resolves_against_final_derived_set(
         str(e.id),
     ]
     await db_session.refresh(conversation)
-    derived_1_id = conversation.active_result_set_id
+    await db_session.refresh(context)
+    derived_1_id = context.active_result_set_id
 
     limited = await _refine(
-        db_session, _refine_llm(limit=2), tenant_id=tenant.id, conversation=conversation
+        db_session, _refine_llm(limit=2), tenant_id=tenant.id, conversation=conversation,
+            session_context=context
     )
     assert [str(r.candidate_id) for r in limited.tool_results[0].refine.response.results] == [
         str(a.id),
         str(b.id),
     ]
     await db_session.refresh(conversation)
-    derived_2 = await db_session.get(AgentResultSet, conversation.active_result_set_id)
+    await db_session.refresh(context)
+    derived_2 = await db_session.get(AgentResultSet, context.active_result_set_id)
     assert derived_2 is not None
     assert derived_2.parent_result_set_id == derived_1_id
     assert derived_2.id != derived_1_id
@@ -496,6 +518,7 @@ async def test_chained_refinement_ordinal_resolves_against_final_derived_set(
         ),
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
         message="ikinci namizəd",
     )
     assert ordinal_result.tool_results[0].profile.candidate_id == b.id
@@ -508,15 +531,17 @@ async def test_new_independent_search_after_refinement_starts_new_root(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
     tenant, user, _password, membership = tenant_and_user
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
     _candidates, root = await _seed_root(
-        db_session, tenant, conversation, session, ("SQL",), ("Python",)
+        db_session, tenant, context, session, ("SQL",), ("Python",)
     )
     await _refine(
-        db_session, _refine_llm(limit=1), tenant_id=tenant.id, conversation=conversation
+        db_session, _refine_llm(limit=1), tenant_id=tenant.id, conversation=conversation,
+            session_context=context
     )
     await db_session.refresh(conversation)
-    derived_id = conversation.active_result_set_id
+    await db_session.refresh(context)
+    derived_id = context.active_result_set_id
     assert derived_id != root.id
 
     java_candidate, _pv = await seed_candidate_with_profile(
@@ -544,10 +569,12 @@ async def test_new_independent_search_after_refinement_starts_new_root(
         search_llm,
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
         message="Java bilən namizədləri göstər",
     )
     await db_session.refresh(conversation)
-    new_root = await db_session.get(AgentResultSet, conversation.active_result_set_id)
+    await db_session.refresh(context)
+    new_root = await db_session.get(AgentResultSet, context.active_result_set_id)
     assert new_root is not None
     assert new_root.id not in (root.id, derived_id)
     assert new_root.result_set_kind == AgentResultSetKind.SEARCH.value
@@ -558,18 +585,19 @@ async def test_refined_context_survives_conversation_reload(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
     tenant, user, _password, membership = tenant_and_user
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
-    (a, b), root = await _seed_root(db_session, tenant, conversation, session, ("A",), ("B",))
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
+    (a, b), root = await _seed_root(db_session, tenant, context, session, ("A",), ("B",))
     await _refine(
-        db_session, _refine_llm(limit=1), tenant_id=tenant.id, conversation=conversation
+        db_session, _refine_llm(limit=1), tenant_id=tenant.id, conversation=conversation,
+            session_context=context
     )
     await db_session.commit()
 
-    reloaded = await get_conversation_by_session(
-        db_session, tenant_id=tenant.id, browser_session_id=session.id
+    reloaded, reloaded_context = await reload_test_conversation(
+        db_session, conversation=conversation, browser_session_id=session.id
     )
     assert reloaded is not None
-    assert reloaded.active_result_set_id != root.id
+    assert reloaded_context.active_result_set_id != root.id
 
     result = await _refine(
         db_session,
@@ -580,6 +608,7 @@ async def test_refined_context_survives_conversation_reload(
         ),
         tenant_id=tenant.id,
         conversation=reloaded,
+        session_context=reloaded_context,
         message="birinci namizəd",
     )
     assert result.tool_results[0].profile.candidate_id == a.id
@@ -589,34 +618,47 @@ async def test_new_conversation_reset_invalidates_refined_context(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
     tenant, user, _password, membership = tenant_and_user
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
-    (a, b), root = await _seed_root(db_session, tenant, conversation, session, ("A",), ("B",))
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
+    (a, b), root = await _seed_root(db_session, tenant, context, session, ("A",), ("B",))
     await _refine(
-        db_session, _refine_llm(limit=1), tenant_id=tenant.id, conversation=conversation
+        db_session, _refine_llm(limit=1), tenant_id=tenant.id, conversation=conversation,
+            session_context=context
     )
     await db_session.commit()
     await db_session.refresh(conversation)
-    old_active = conversation.active_result_set_id
+    await db_session.refresh(context)
+    old_active = context.active_result_set_id
     assert old_active is not None
 
-    await reset_conversation(db_session, conversation)
+    # issue #80: "Yeni söhbət" = a NEW durable conversation with a clean
+    # context in the SAME BrowserSession (same epoch value, 1).
+    new_conversation, new_context = await open_test_conversation(
+        db_session,
+        tenant_id=tenant.id,
+        user_id=user.id,
+        membership_id=membership.id,
+        browser_session_id=session.id,
+    )
     await db_session.commit()
-    assert conversation.active_result_set_id is None
+    assert new_context.active_result_set_id is None
+    assert new_context.context_epoch == context.context_epoch
 
     reset_llm = _refine_llm(limit=1)
     reset_followup = await _refine(
         db_session,
         reset_llm,
         tenant_id=tenant.id,
-        conversation=conversation,
+        conversation=new_conversation,
+        session_context=new_context,
         message="bunlardan ilk biri",
     )
     assert reset_llm.agent_contexts == [(False, [])]
     assert reset_followup.outcome.value == "CLARIFICATION_REQUESTED"
 
-    # Manually repoint at the (still otherwise valid) old refined set —
-    # this must still fail closed under the new epoch.
-    conversation.active_result_set_id = old_active
+    # Manually repoint the NEW conversation's context at the (still
+    # otherwise valid) old refined set — same tenant, same BrowserSession,
+    # same epoch: must still fail closed on the conversation binding.
+    new_context.active_result_set_id = old_active
     await db_session.flush()
     result = await _refine(
         db_session,
@@ -626,10 +668,14 @@ async def test_new_conversation_reset_invalidates_refined_context(
             )
         ),
         tenant_id=tenant.id,
-        conversation=conversation,
+        conversation=new_conversation,
+        session_context=new_context,
         message="birinci namizəd",
     )
     assert result.outcome.value == "CANDIDATE_REF_NOT_FOUND"
+    # The original conversation's own context was never touched.
+    await db_session.refresh(context)
+    assert context.active_result_set_id == old_active
 
 
 # --- Staleness / expiry / isolation -----------------------------------------
@@ -639,8 +685,8 @@ async def test_stale_source_blocks_refinement_and_leaves_context_untouched(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
     tenant, user, _password, membership = tenant_and_user
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
-    (candidate,), root = await _seed_root(db_session, tenant, conversation, session, ("Python",))
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
+    (candidate,), root = await _seed_root(db_session, tenant, context, session, ("Python",))
 
     # Reprocessing the candidate's profile drifts the corpus fingerprint.
     await seed_next_profile_version(
@@ -652,41 +698,45 @@ async def test_stale_source_blocks_refinement_and_leaves_context_untouched(
     await db_session.commit()
 
     result = await _refine(
-        db_session, _refine_llm(limit=1), tenant_id=tenant.id, conversation=conversation
+        db_session, _refine_llm(limit=1), tenant_id=tenant.id, conversation=conversation,
+            session_context=context
     )
     assert result.outcome.value == "RESULT_SET_STALE"
     await db_session.refresh(conversation)
-    assert conversation.active_result_set_id == root.id
+    await db_session.refresh(context)
+    assert context.active_result_set_id == root.id
 
 
 async def test_expired_source_blocks_refinement(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
     tenant, user, _password, membership = tenant_and_user
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
-    (_candidate,), root = await _seed_root(db_session, tenant, conversation, session, ("Python",))
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
+    (_candidate,), root = await _seed_root(db_session, tenant, context, session, ("Python",))
 
     root.expires_at = datetime.now(UTC) - timedelta(hours=1)
     await db_session.flush()
     await db_session.commit()
 
     result = await _refine(
-        db_session, _refine_llm(limit=1), tenant_id=tenant.id, conversation=conversation
+        db_session, _refine_llm(limit=1), tenant_id=tenant.id, conversation=conversation,
+            session_context=context
     )
     assert result.outcome.value == "RESULT_SET_EXPIRED"
     await db_session.refresh(conversation)
-    assert conversation.active_result_set_id == root.id
+    await db_session.refresh(context)
+    assert context.active_result_set_id == root.id
 
 
 async def test_no_active_result_set_returns_clarification_not_a_crash(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
     tenant, user, _password, membership = tenant_and_user
-    conversation, _session = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context, _session = await _new_conversation(db_session, tenant, user, membership)
 
     llm = _refine_llm(limit=3)
     result = await _refine(
-        db_session, llm, tenant_id=tenant.id, conversation=conversation
+        db_session, llm, tenant_id=tenant.id, conversation=conversation, session_context=context
     )
     assert llm.agent_contexts == [(False, [])]
     assert result.outcome.value == "CLARIFICATION_REQUESTED"
@@ -706,8 +756,8 @@ async def test_cross_tenant_result_set_pointer_fails_closed(
     from meyar.services.user_repo import create_user
 
     tenant, user, _password, membership = tenant_and_user
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
-    (_candidate,), root = await _seed_root(db_session, tenant, conversation, session, ("Python",))
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
+    (_candidate,), root = await _seed_root(db_session, tenant, context, session, ("Python",))
 
     other_tenant = await create_tenant(db_session, name=f"Other-{uuid.uuid4().hex[:8]}")
     other_user = await create_user(
@@ -719,12 +769,12 @@ async def test_cross_tenant_result_set_pointer_fails_closed(
         db_session, user_id=other_user.id, tenant_id=other_tenant.id, role=ROLE_HR_USER
     )
     await db_session.commit()
-    other_conversation, _other_session = await _new_conversation(
+    other_conversation, other_context, _other_session = await _new_conversation(
         db_session, other_tenant, other_user, other_membership
     )
     # Tamper: point the OTHER tenant's conversation at this tenant's result set.
-    other_conversation.active_result_set_id = root.id
-    other_conversation.context_epoch = conversation.context_epoch
+    other_context.active_result_set_id = root.id
+    other_context.context_epoch = context.context_epoch
     await db_session.flush()
 
     llm = _refine_llm(limit=1)
@@ -733,30 +783,35 @@ async def test_cross_tenant_result_set_pointer_fails_closed(
         llm,
         tenant_id=other_tenant.id,
         conversation=other_conversation,
+        session_context=other_context,
     )
     assert llm.agent_contexts == [(True, [])]
     assert result.outcome.value == "CLARIFICATION_REQUESTED"
     assert result.message is not None and "Əvvəlcə namizəd axtarışı" in result.message
-    assert other_conversation.active_result_set_id == root.id  # pointer left untouched, unresolved
+    assert other_context.active_result_set_id == root.id  # pointer left untouched, unresolved
 
 
 async def test_cross_session_result_set_pointer_fails_closed(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
     tenant, user, _password, membership = tenant_and_user
-    conversation_a, session_a = await _new_conversation(db_session, tenant, user, membership)
+    conversation_a, context_a, session_a = await _new_conversation(
+        db_session, tenant, user, membership
+    )
     (_candidate,), root = await _seed_root(
-        db_session, tenant, conversation_a, session_a, ("Python",)
+        db_session, tenant, context_a, session_a, ("Python",)
     )
 
-    conversation_b, _session_b = await _new_conversation(db_session, tenant, user, membership)
-    conversation_b.active_result_set_id = root.id
-    conversation_b.context_epoch = conversation_a.context_epoch
+    conversation_b, context_b, _session_b = await _new_conversation(
+        db_session, tenant, user, membership
+    )
+    context_b.active_result_set_id = root.id
+    context_b.context_epoch = context_a.context_epoch
     await db_session.flush()
 
     llm = _refine_llm(limit=1)
     result = await _refine(
-        db_session, llm, tenant_id=tenant.id, conversation=conversation_b
+        db_session, llm, tenant_id=tenant.id, conversation=conversation_b, session_context=context_b
     )
     assert llm.agent_contexts == [(True, [])]
     assert result.outcome.value == "CLARIFICATION_REQUESTED"
@@ -766,18 +821,18 @@ async def test_old_context_epoch_result_set_pointer_fails_closed(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
     tenant, user, _password, membership = tenant_and_user
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
-    (_candidate,), root = await _seed_root(db_session, tenant, conversation, session, ("Python",))
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
+    (_candidate,), root = await _seed_root(db_session, tenant, context, session, ("Python",))
     await db_session.commit()
 
-    await reset_conversation(db_session, conversation)
-    conversation.active_result_set_id = root.id  # tampered repoint under the NEW epoch
+    context.context_epoch += 1
+    context.active_result_set_id = root.id  # tampered repoint under the NEW epoch
     await db_session.flush()
     await db_session.commit()
 
     llm = _refine_llm(limit=1)
     result = await _refine(
-        db_session, llm, tenant_id=tenant.id, conversation=conversation
+        db_session, llm, tenant_id=tenant.id, conversation=conversation, session_context=context
     )
     assert llm.agent_contexts == [(True, [])]
     assert result.outcome.value == "CLARIFICATION_REQUESTED"
@@ -790,9 +845,9 @@ async def test_prohibited_attribute_filter_rejected_without_mutating_context(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
     tenant, user, _password, membership = tenant_and_user
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
     _candidates, root = await _seed_root(
-        db_session, tenant, conversation, session, ("Python",), ("SQL",)
+        db_session, tenant, context, session, ("Python",), ("SQL",)
     )
 
     result = await _refine(
@@ -800,11 +855,13 @@ async def test_prohibited_attribute_filter_rejected_without_mutating_context(
         _refine_llm(filter_query="qadın namizədləri göstər"),
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
     )
     assert result.outcome.value == "CLARIFICATION_REQUESTED"
     assert result.tool_results == []
     await db_session.refresh(conversation)
-    assert conversation.active_result_set_id == root.id
+    await db_session.refresh(context)
+    assert context.active_result_set_id == root.id
 
     # No derived result set was ever persisted for the rejected attempt.
     count = await db_session.scalar(
@@ -833,9 +890,9 @@ async def test_semantic_or_hybrid_filter_plan_is_rejected_not_downgraded(
     from meyar.search.schemas import CandidateSearchRequest, SearchMode
 
     tenant, user, _password, membership = tenant_and_user
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
     _candidates, root = await _seed_root(
-        db_session, tenant, conversation, session, ("Python",), ("SQL",)
+        db_session, tenant, context, session, ("Python",), ("SQL",)
     )
 
     async def _fake_plan(*_args, **_kwargs):
@@ -865,10 +922,12 @@ async def test_semantic_or_hybrid_filter_plan_is_rejected_not_downgraded(
         _refine_llm(filter_query="engineers"),
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
     )
     assert result.outcome.value == "CLARIFICATION_REQUESTED"
     await db_session.refresh(conversation)
-    assert conversation.active_result_set_id == root.id
+    await db_session.refresh(context)
+    assert context.active_result_set_id == root.id
 
 
 # --- Preferred filters must never be silently applied -----------------------
@@ -885,9 +944,9 @@ async def test_preferred_only_filter_plan_is_rejected_not_partially_executed(
     import meyar.agent.service as agent_service
 
     tenant, user, _password, membership = tenant_and_user
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
     _candidates, root = await _seed_root(
-        db_session, tenant, conversation, session, ("Python",), ("SQL",), ("Go",)
+        db_session, tenant, context, session, ("Python",), ("SQL",), ("Go",)
     )
 
     monkeypatch.setattr(
@@ -901,6 +960,7 @@ async def test_preferred_only_filter_plan_is_rejected_not_partially_executed(
         _refine_llm(filter_query="SQL üstünlük təşkil edir"),
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
     )
     assert result.outcome.value == "CLARIFICATION_REQUESTED"
     assert result.message == (
@@ -908,7 +968,8 @@ async def test_preferred_only_filter_plan_is_rejected_not_partially_executed(
     )
     assert result.tool_results == []
     await db_session.refresh(conversation)
-    assert conversation.active_result_set_id == root.id
+    await db_session.refresh(context)
+    assert context.active_result_set_id == root.id
 
     count = await db_session.scalar(
         select(func.count()).select_from(AgentResultSet).where(
@@ -928,9 +989,9 @@ async def test_required_and_preferred_filter_plan_rejects_whole_refinement(
     import meyar.agent.service as agent_service
 
     tenant, user, _password, membership = tenant_and_user
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
     _candidates, root = await _seed_root(
-        db_session, tenant, conversation, session, ("Python",), ("Python",), ("SQL",)
+        db_session, tenant, context, session, ("Python",), ("Python",), ("SQL",)
     )
 
     monkeypatch.setattr(
@@ -944,11 +1005,13 @@ async def test_required_and_preferred_filter_plan_rejects_whole_refinement(
         _refine_llm(filter_query="Python bilən, SQL üstünlük təşkil edir"),
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
     )
     assert result.outcome.value == "CLARIFICATION_REQUESTED"
     assert result.tool_results == []
     await db_session.refresh(conversation)
-    assert conversation.active_result_set_id == root.id
+    await db_session.refresh(context)
+    assert context.active_result_set_id == root.id
 
     count = await db_session.scalar(
         select(func.count()).select_from(AgentResultSet).where(
@@ -968,8 +1031,8 @@ async def test_stale_filter_refinement_prevalidates_before_planner_invocation(
     import meyar.agent.service as agent_service
 
     tenant, user, _password, membership = tenant_and_user
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
-    (candidate,), root = await _seed_root(db_session, tenant, conversation, session, ("Python",))
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
+    (candidate,), root = await _seed_root(db_session, tenant, context, session, ("Python",))
 
     # Reprocessing the candidate's profile drifts the corpus fingerprint,
     # the same trigger test_stale_source_blocks_refinement_and_leaves_
@@ -993,11 +1056,13 @@ async def test_stale_filter_refinement_prevalidates_before_planner_invocation(
         llm,
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
     )
     assert llm.agent_contexts == [(True, [])]
     assert result.outcome.value == "RESULT_SET_STALE"
     await db_session.refresh(conversation)
-    assert conversation.active_result_set_id == root.id
+    await db_session.refresh(context)
+    assert context.active_result_set_id == root.id
 
 
 async def test_expired_filter_refinement_prevalidates_before_planner_invocation(
@@ -1006,8 +1071,8 @@ async def test_expired_filter_refinement_prevalidates_before_planner_invocation(
     import meyar.agent.service as agent_service
 
     tenant, user, _password, membership = tenant_and_user
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
-    (_candidate,), root = await _seed_root(db_session, tenant, conversation, session, ("Python",))
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
+    (_candidate,), root = await _seed_root(db_session, tenant, context, session, ("Python",))
 
     root.expires_at = datetime.now(UTC) - timedelta(hours=1)
     await db_session.flush()
@@ -1024,11 +1089,13 @@ async def test_expired_filter_refinement_prevalidates_before_planner_invocation(
         llm,
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
     )
     assert llm.agent_contexts == [(True, [])]
     assert result.outcome.value == "RESULT_SET_EXPIRED"
     await db_session.refresh(conversation)
-    assert conversation.active_result_set_id == root.id
+    await db_session.refresh(context)
+    assert context.active_result_set_id == root.id
 
 
 async def test_missing_context_filter_refinement_never_invokes_planner(
@@ -1037,7 +1104,7 @@ async def test_missing_context_filter_refinement_never_invokes_planner(
     import meyar.agent.service as agent_service
 
     tenant, user, _password, membership = tenant_and_user
-    conversation, _session = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context, _session = await _new_conversation(db_session, tenant, user, membership)
 
     async def _fail_if_called(*_args, **_kwargs):
         raise AssertionError("planner must not be called with no active result set")
@@ -1049,6 +1116,7 @@ async def test_missing_context_filter_refinement_never_invokes_planner(
         _refine_llm(filter_query="SQL bilən namizədləri göstər"),
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
     )
     assert result.outcome.value == "CLARIFICATION_REQUESTED"
     assert result.tool_results == []
@@ -1063,9 +1131,9 @@ async def test_planner_explicit_limit_recovered_when_agent_decision_omits_it(
     import meyar.agent.service as agent_service
 
     tenant, user, _password, membership = tenant_and_user
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
     (a, b, c, _d), root = await _seed_root(
-        db_session, tenant, conversation, session, ("SQL",), ("SQL",), ("SQL",), ("SQL",)
+        db_session, tenant, context, session, ("SQL",), ("SQL",), ("SQL",), ("SQL",)
     )
 
     monkeypatch.setattr(
@@ -1079,6 +1147,7 @@ async def test_planner_explicit_limit_recovered_when_agent_decision_omits_it(
         _refine_llm(filter_query="ilk 3 SQL bilən namizədləri göstər"),
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
     )
     assert result.outcome.value == "ANSWERED_FROM_TOOL_RESULT"
     refine = result.tool_results[0].refine
@@ -1095,9 +1164,9 @@ async def test_matching_planner_and_agent_explicit_limit_succeeds(
     import meyar.agent.service as agent_service
 
     tenant, user, _password, membership = tenant_and_user
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
     (a, b, c, _d), root = await _seed_root(
-        db_session, tenant, conversation, session, ("SQL",), ("SQL",), ("SQL",), ("SQL",)
+        db_session, tenant, context, session, ("SQL",), ("SQL",), ("SQL",), ("SQL",)
     )
 
     monkeypatch.setattr(
@@ -1111,6 +1180,7 @@ async def test_matching_planner_and_agent_explicit_limit_succeeds(
         _refine_llm(filter_query="ilk 3 SQL bilən namizədləri göstər", limit=3),
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
     )
     assert result.outcome.value == "ANSWERED_FROM_TOOL_RESULT"
     refine = result.tool_results[0].refine
@@ -1126,9 +1196,9 @@ async def test_conflicting_planner_and_agent_explicit_limit_rejects_safely(
     import meyar.agent.service as agent_service
 
     tenant, user, _password, membership = tenant_and_user
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
     _candidates, root = await _seed_root(
-        db_session, tenant, conversation, session, ("SQL",), ("SQL",), ("SQL",), ("SQL",)
+        db_session, tenant, context, session, ("SQL",), ("SQL",), ("SQL",), ("SQL",)
     )
 
     monkeypatch.setattr(
@@ -1142,11 +1212,13 @@ async def test_conflicting_planner_and_agent_explicit_limit_rejects_safely(
         _refine_llm(filter_query="ilk 3 SQL bilən namizədləri göstər", limit=2),
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
     )
     assert result.outcome.value == "CLARIFICATION_REQUESTED"
     assert result.tool_results == []
     await db_session.refresh(conversation)
-    assert conversation.active_result_set_id == root.id
+    await db_session.refresh(context)
+    assert context.active_result_set_id == root.id
 
     count = await db_session.scalar(
         select(func.count()).select_from(AgentResultSet).where(
@@ -1166,9 +1238,9 @@ async def test_agent_decision_limit_used_when_planner_finds_no_explicit_count(
     import meyar.agent.service as agent_service
 
     tenant, user, _password, membership = tenant_and_user
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
     (a, b, _c, _d), root = await _seed_root(
-        db_session, tenant, conversation, session, ("SQL",), ("SQL",), ("SQL",), ("SQL",)
+        db_session, tenant, context, session, ("SQL",), ("SQL",), ("SQL",), ("SQL",)
     )
 
     monkeypatch.setattr(
@@ -1182,6 +1254,7 @@ async def test_agent_decision_limit_used_when_planner_finds_no_explicit_count(
         _refine_llm(filter_query="SQL bilən namizədləri göstər", limit=2),
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
     )
     assert result.outcome.value == "ANSWERED_FROM_TOOL_RESULT"
     refine = result.tool_results[0].refine
@@ -1200,9 +1273,9 @@ async def test_planner_default_limit_never_becomes_implicit_refinement_truncatio
     import meyar.agent.service as agent_service
 
     tenant, user, _password, membership = tenant_and_user
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
     (a, b, c), root = await _seed_root(
-        db_session, tenant, conversation, session, ("SQL",), ("SQL",), ("SQL",)
+        db_session, tenant, context, session, ("SQL",), ("SQL",), ("SQL",)
     )
 
     monkeypatch.setattr(
@@ -1216,6 +1289,7 @@ async def test_planner_default_limit_never_becomes_implicit_refinement_truncatio
         _refine_llm(filter_query="SQL bilən namizədləri göstər"),
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
     )
     assert result.outcome.value == "ANSWERED_FROM_TOOL_RESULT"
     refine = result.tool_results[0].refine
@@ -1241,9 +1315,9 @@ async def test_derived_result_set_copies_root_search_provenance_verbatim(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
     tenant, user, _password, membership = tenant_and_user
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
     (a, b), root = await _seed_root(
-        db_session, tenant, conversation, session, ("SQL",), ("Python",)
+        db_session, tenant, context, session, ("SQL",), ("Python",)
     )
 
     await _refine(
@@ -1251,9 +1325,11 @@ async def test_derived_result_set_copies_root_search_provenance_verbatim(
         _refine_llm(filter_query="SQL bilən namizədləri göstər"),
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
     )
     await db_session.refresh(conversation)
-    derived = await db_session.get(AgentResultSet, conversation.active_result_set_id)
+    await db_session.refresh(context)
+    derived = await db_session.get(AgentResultSet, context.active_result_set_id)
     assert derived is not None
     assert derived.canonical_search_request == root.canonical_search_request
     assert derived.planner_policy_version == root.planner_policy_version
@@ -1277,15 +1353,17 @@ async def test_derived_expiry_never_exceeds_parent(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
     tenant, user, _password, membership = tenant_and_user
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
-    (_a,), root = await _seed_root(db_session, tenant, conversation, session, ("SQL",))
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
+    (_a,), root = await _seed_root(db_session, tenant, context, session, ("SQL",))
 
     original_expiry = root.expires_at
     await _refine(
-        db_session, _refine_llm(limit=1), tenant_id=tenant.id, conversation=conversation
+        db_session, _refine_llm(limit=1), tenant_id=tenant.id, conversation=conversation,
+            session_context=context
     )
     await db_session.refresh(conversation)
-    derived = await db_session.get(AgentResultSet, conversation.active_result_set_id)
+    await db_session.refresh(context)
+    derived = await db_session.get(AgentResultSet, context.active_result_set_id)
     assert derived is not None
     assert derived.expires_at == original_expiry
 
@@ -1297,9 +1375,9 @@ async def test_refinement_audit_event_never_leaks_raw_filter_text(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
     tenant, user, _password, membership = tenant_and_user
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
     (a, b), root = await _seed_root(
-        db_session, tenant, conversation, session, ("SQL",), ("Python",)
+        db_session, tenant, context, session, ("SQL",), ("Python",)
     )
 
     await _refine(
@@ -1307,6 +1385,7 @@ async def test_refinement_audit_event_never_leaks_raw_filter_text(
         _refine_llm(filter_query="SQL bilən namizədləri göstər", limit=1),
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
     )
     await db_session.commit()
 
@@ -1342,9 +1421,9 @@ async def test_refinement_never_creates_job_or_evaluation_rows(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
     tenant, user, _password, membership = tenant_and_user
-    conversation, session = await _new_conversation(db_session, tenant, user, membership)
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
     _candidates, root = await _seed_root(
-        db_session, tenant, conversation, session, ("SQL",), ("Python",)
+        db_session, tenant, context, session, ("SQL",), ("Python",)
     )
 
     await _refine(
@@ -1352,8 +1431,10 @@ async def test_refinement_never_creates_job_or_evaluation_rows(
         _refine_llm(filter_query="SQL bilən namizədləri göstər"),
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
     )
-    await _refine(db_session, _refine_llm(limit=1), tenant_id=tenant.id, conversation=conversation)
+    await _refine(db_session, _refine_llm(limit=1), tenant_id=tenant.id, conversation=conversation,
+        session_context=context)
     await db_session.commit()
 
     assert await db_session.scalar(select(func.count()).select_from(JobModel)) == 0

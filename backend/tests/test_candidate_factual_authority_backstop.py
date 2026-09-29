@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 from fakes import FakeLLMProvider
-from search_helpers import seed_active_result_set
+from search_helpers import open_test_conversation, seed_active_result_set
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.agent.schemas import AgentActionType, AgentDecision, AgentTurnOutcome
@@ -31,7 +31,6 @@ from meyar.search.schemas import (
     SearchMode,
 )
 from meyar.search.service import search_candidates
-from meyar.services.agent_conversation_repo import get_or_create_conversation
 from meyar.services.browser_session_repo import create_browser_session
 from meyar.services.candidate_document_repo import (
     create_candidate_document,
@@ -186,14 +185,18 @@ async def test_legacy_completed_python_claim_with_excel_only_evidence_is_not_aut
     browser_session, _raw = await create_browser_session(
         db_session, user_id=user.id, tenant_membership_id=membership.id, ttl_hours=8
     )
-    conversation = await get_or_create_conversation(
-        db_session, tenant_id=tenant.id, browser_session_id=browser_session.id
+    conversation, context = await open_test_conversation(
+        db_session,
+        tenant_id=tenant.id,
+        user_id=user.id,
+        membership_id=membership.id,
+        browser_session_id=browser_session.id,
     )
     await seed_active_result_set(
         db_session,
         tenant_id=tenant.id,
         browser_session_id=browser_session.id,
-        conversation=conversation,
+        session_context=context,
         candidate_ids=[seeded.candidate.id],
     )
     await db_session.commit()
@@ -224,6 +227,7 @@ async def test_legacy_completed_python_claim_with_excel_only_evidence_is_not_aut
         ),
         tenant_id=tenant.id,
         conversation=conversation,
+        session_context=context,
         user_message="Birinci namizədin profilini göstər",
         as_of_date=AS_OF_DATE,
         embedding_config=_embedding_config(),

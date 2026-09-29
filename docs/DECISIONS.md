@@ -6635,3 +6635,149 @@ search planner or JD extraction, and no ResultSet/Job/JobCriteriaVersion/
 Evaluation is created. Audit metadata stays structural only (source, action,
 version); the raw message and exception text are never recorded. The
 orchestration prompt contract is unchanged.
+
+## D-086 — Durable conversation authority separated from BrowserSession live context (issue #80 PR80-1)
+
+**Context:** before #80, `AgentConversation` was 1:1 with one
+`BrowserSession` (`browser_session_id UNIQUE`) and carried the live
+`context_epoch`/`active_result_set_id`. Logout/login therefore produced a new,
+empty conversation and made the old transcript unreachable. Simply dropping
+the unique constraint, or rebinding an old conversation to a new session,
+would make ResultSet and pending-draft authority ambiguous.
+
+**Decision — two separate representations, one authority each:**
+
+- **BrowserSession = authentication transport, NOT durable conversation
+  owner.**
+- **`AgentConversation` = durable tenant/user/membership-owned history:**
+  `tenant_id`, `owner_user_id`, `owner_membership_id`, closed `title_kind`,
+  bounded `turns`, timestamps. It has no FK to `browser_sessions`, so session
+  expiry/deletion never deletes history.
+- **`AgentConversationSessionContext` = BrowserSession-bound live ResultSet /
+  pending-action authority:** `tenant_id`, `conversation_id`,
+  `browser_session_id`, `context_epoch`, `active_result_set_id`,
+  `active_pending_draft_id`; `UNIQUE(conversation_id, browser_session_id)`;
+  CASCADE with its BrowserSession and conversation. It is the ONLY live
+  authority for the active ResultSet, candidate ordinals, refinement, and
+  pending JD mutation authority. `run_agent_turn` now receives
+  `conversation` (durable transcript) and `session_context` (live authority)
+  explicitly and never infers session state from the transcript.
+- **Historical transcript is NOT ResultSet or mutation authority.** It never
+  recreates ordinals, the active ResultSet, pending-draft authority,
+  tenant/user identity, or scoring criteria.
+- **A new BrowserSession never inherits old ResultSet/pending-draft
+  authority.** Relogin sees the durable, server-validated transcript, but its
+  new context starts with `active_result_set_id = NULL` and
+  `active_pending_draft_id = NULL`; "ilk 3" returns result-context-required,
+  old ordinals do not resolve, and an old draft cannot be confirmed. A new
+  context's `context_epoch` is one past the conversation's highest epoch
+  (monotonic per durable conversation, defense in depth).
+
+**ResultSet conversation binding (security blocker fix):** one BrowserSession
+may now hold several conversations' contexts at the same epoch, so
+session + epoch no longer identify the candidate universe. `AgentResultSet`
+gains non-null `conversation_id` (FK → `agent_conversations`, CASCADE). SEARCH
+rows copy it from the resolving context; REFINEMENT rows preserve the
+(validated) parent's. Active-set validation requires context tenant/session
+match, row tenant, row `browser_session_id`, row `conversation_id ==
+session_context.conversation_id` (new `CONVERSATION_MISMATCH`, collapsed
+outward to `NOT_FOUND`), epoch, expiry, and corpus fingerprint — additive
+defense in depth; no earlier check was removed. A tampered pointer from
+conversation B to conversation A's set fails closed even inside one
+BrowserSession at the same epoch.
+
+**Pending-draft authority:** a pending draft is actionable only when (1) the
+live owner may access the conversation, (2) the current BrowserSession
+resolves that conversation's context, (3) `active_pending_draft_id ==
+draft_id`, (4) the matching payload exists in that conversation's server-held
+transcript, and (5) all existing source-bound confirmation rules pass
+(`resolve_pending_draft_authority`, `get_active_pending_job_draft`). A
+modified draft (new id) moves the pointer, so the old id fails; confirmation
+sets the pointer to NULL. Replay/idempotency remains exclusively the
+dedicated `AgentDraftConfirmation` row (checked after the lock attempt so a
+concurrent duplicate observes the winner) — never transcript scanning.
+
+**Ownership:** every read/write validates `tenant_id`, `owner_user_id`, and
+`owner_membership_id` against the live `UIContext` principal, which
+`get_ui_context()` still re-derives from active User + TenantMembership on
+every request; stored ownership never bypasses live auth, so a disabled user
+or membership loses access immediately. Foreign-tenant, foreign-user,
+foreign-membership, and nonexistent conversation ids are indistinguishable
+(generic 404, no title/timestamp).
+
+**FK/retention:** tenant deletion cascades conversations. Owner
+user/membership FKs are NO ACTION: a user or membership cannot disappear
+silently while it owns durable history (a tenant delete still succeeds
+because the deferred end-of-statement check sees both rows gone). Session
+contexts and ResultSets are deleted with their BrowserSession; the durable
+conversation survives.
+
+**Transcript storage vs. model context:** durable storage is bounded by
+`MAX_PERSISTED_AGENT_TURNS = 100` (oldest entries dropped); the model still
+receives only the last `agent_max_context_turns` (default 8). Raising the
+storage bound never increases model input; there is no unbounded memory and
+no whole-history prompt.
+
+**History listing:** `list_owned_conversations` is paginated (`page >= 1`,
+`page_size` default 20, max 50), ordered `updated_at DESC, id DESC`, owner
+scoped. No unbounded "all conversations" query.
+
+**Title:** closed server-owned `title_kind` (`NEW`, `CANDIDATE_SEARCH`,
+`VACANCY_ANALYSIS`, `RESULT_REFINEMENT`, `GENERAL`), DB check-constrained.
+`NEW` transitions once, from the completed server-validated turn result (first
+executed tool type, or `GENERAL` for a zero-tool closed-response answer);
+clarifications/failures leave it `NEW`. Never derived from message, query, JD,
+candidate, or CV text; no LLM title call. PR80-2 renders localized labels plus
+date/time.
+
+**"Yeni söhbət":** creates a NEW durable conversation (`NEW`, empty turns)
+plus a clean context for the current BrowserSession (`context_epoch=1`, no
+ResultSet/pending draft). The previous conversation is never cleared or
+deleted. `reset_conversation` is retired.
+
+**Legacy `/ui/agent` compatibility (PR80-1 only; no sidebar):** GET renders
+the session's current conversation (the owned conversation this
+BrowserSession most recently used, else the owner's most recent, else a new
+one) and embeds its id as a hidden composer field; POST uses that explicit
+selector (owner-validated, row-locked) or, for a selector-less legacy form,
+resolves/creates the current conversation in a short separate transaction
+under a per-owner membership row lock (race-safe first creation), then locks
+only the conversation for the turn. A minimal unstyled
+`GET /ui/agent?conversation=<id>` selector exists for reopening history.
+
+**Concurrency:** state-changing turns hold the durable conversation row's
+PostgreSQL `SELECT ... FOR UPDATE` lock for the whole turn; the session
+context is created/updated under it. Different conversations remain
+independently concurrent. First context creation is race-safe
+(`uq_agent_conversation_session_context` + SAVEPOINT retry). No
+process-global locks.
+
+**Migration `b7e3c9d41f28` (on `543c60f7efc5`):** owners are backfilled only
+through `browser_session_id → browser_sessions → (user_id,
+tenant_membership_id)` when that membership belongs to the same user and the
+conversation's tenant; any unattributable row aborts the migration (ownership
+is never fabricated). One context per existing conversation is backfilled
+from its old `browser_session_id`/`context_epoch`/`active_result_set_id`, so
+an old active ResultSet remains bound only to its original session.
+`agent_result_sets.conversation_id` is backfilled through the pre-migration
+1:1 session link (abort on any unattributable row). New columns become NOT
+NULL only after backfill, then the old live columns are dropped from
+`agent_conversations`. Transcript-bearing conversations become `GENERAL`,
+empty ones `NEW`. **The migration invalidates pre-existing unconfirmed
+pending draft authority (`active_pending_draft_id = NULL`); HR must
+re-analyse the vacancy before confirmation.** Already confirmed Jobs,
+criteria versions, and `AgentDraftConfirmation` rows are untouched.
+Downgrade is lossy by necessity (each session keeps its most recently used
+conversation).
+
+**Audit:** `agent.conversation.created` (`conversation_id`, `title_kind`),
+`agent.conversation.opened` (explicit selector only — plain GET refreshes are
+not audited), `agent.conversation.access_rejected` (`reason_code` only;
+foreign and missing ids audited identically). `agent.result_set.created`
+additionally records `conversation_id`. No transcript, query, JD, or title
+text.
+
+**Non-scope (PR80-2 and later):** visual sidebar, mobile drawer, history
+styling, conversation search/deletion/rename, model-generated titles,
+semantic/RAG history, shared conversations, #50, scoring changes,
+deployment work.

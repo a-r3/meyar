@@ -1,4 +1,8 @@
-from meyar.models.agent_conversation import AgentConversation
+from meyar.models.agent_conversation import (
+    AgentConversation,
+    AgentConversationSessionContext,
+    AgentConversationTitleKind,
+)
 from meyar.models.agent_draft_confirmation import AgentDraftConfirmation
 from meyar.models.agent_result_set import AgentResultSet, AgentResultSetMember
 from meyar.models.api_key import ApiKey
@@ -22,6 +26,8 @@ from meyar.models.user import User
 
 __all__ = [
     "AgentConversation",
+    "AgentConversationSessionContext",
+    "AgentConversationTitleKind",
     "AgentDraftConfirmation",
     "AgentResultSet",
     "AgentResultSetMember",
