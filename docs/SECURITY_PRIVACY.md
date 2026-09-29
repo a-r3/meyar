@@ -321,6 +321,12 @@ unlabeled number but never guesses that an arbitrary identifier is a phone.
   instruction wrapper is an exact substring by offsets, never rewritten and
   never audited. Current-result/ordinal language keeps precedence over new
   search so #49 ResultSet semantics are unchanged.
+- Routing policy `agent-entry-routing-v4` makes entry routing total over
+  valid composer input: only the known `SourceOccurrence.text` length
+  overflow maps to `CLARIFY_INPUT_STRUCTURE` (fixed clarification, no model,
+  planner or JD tool call, no truncation); unrelated validation errors still
+  propagate. Its audit event carries only the closed source/action/version
+  values — never the raw message or exception text.
 
 ## Local-only Ollama operating contract
 

@@ -30,7 +30,9 @@ without an orchestration-model decision, count-only follow-ups ("ilk 3") are
 server-routed to the existing #49 limit refinement, explicit JD-analysis instructions
 are sliced off the exact user source, a source-less analysis command asks for
 the vacancy text, and mobile header/composer copy/layout defects from visual
-review are fixed.
+review are fixed. Final blocker (routing `agent-entry-routing-v4`): a valid
+long unpunctuated requirement that the source-bound analyzer cannot represent
+now receives fixed structure clarification instead of an unhandled 500.
 
 **Historical snapshot: accepted `main` was
 `7c911cbc850d21999eae2239e6b51bfedc570d4a`.**

@@ -554,10 +554,10 @@ tbody tr:hover { background: var(--surface-subtle); }
 }
 
 /* PR #42 owner correction (issue #33, D-045) — composer productization:
-   one visually merged, chat-style input (textarea + mode + send) instead
-   of three stacked full-width form elements, so the agent reads as an
-   assistant, not a developer form. The JD mode stays an explicit select
-   (no magic prompt detection) — only its presentation changes. */
+   one visually merged, chat-style input (textarea + send) so the agent
+   reads as an assistant, not a developer form. Since issue #79 (D-085)
+   there is no mode select: search-vs-JD routing is decided server-side
+   by meyar.agent.intent_routing. */
 .composer-panel { margin: 18px 0; }
 .composer {
   display: flex;

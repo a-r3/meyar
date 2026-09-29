@@ -2912,7 +2912,7 @@ async def test_model_proposed_jd_for_search_is_rejected_without_internal_code_co
     assert rejected_event.event_metadata == {
         "routing_source": "MODEL",
         "routed_action": "CLARIFY",
-        "routing_policy_version": "agent-entry-routing-v3",
+        "routing_policy_version": "agent-entry-routing-v4",
     }
     assert raw_message not in str(rejected_event.event_metadata)
 
@@ -2959,9 +2959,97 @@ async def test_ambiguous_search_or_jd_clarifies_without_model_tool_or_business_r
     assert route_event.event_metadata == {
         "routing_source": "DETERMINISTIC_CLARIFICATION",
         "routed_action": "CLARIFY",
-        "routing_policy_version": "agent-entry-routing-v3",
+        "routing_policy_version": "agent-entry-routing-v4",
     }
     assert raw_message not in str(route_event.event_metadata)
+
+
+async def test_unrepresentable_long_input_renders_structure_clarification_not_500(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
+) -> None:
+    """Issue #79 PR81 final blocker: a valid (<=4000 char) long unpunctuated
+    requirement used to raise an unhandled SourceOccurrence ValidationError
+    inside entry routing. It must render fixed structure clarification with
+    no model, planner, JD tool, ResultSet or business row."""
+    from sqlalchemy import func, select
+
+    from meyar.models.agent_conversation import AgentConversation
+    from meyar.models.agent_result_set import AgentResultSet
+    from meyar.models.audit_event import AuditEvent
+    from meyar.models.evaluation import Evaluation
+    from meyar.models.job import Job
+    from meyar.models.job_criteria_version import JobCriteriaVersion
+
+    tenant, user, password, _membership = tenant_and_user
+    fake = FakeLLMProvider()
+    app.dependency_overrides[get_llm_provider] = lambda: fake
+    csrf = await _login_and_csrf(client, user.username, password)
+    raw_message = "Python " * 400 + "tələb olunur"
+    assert len(raw_message) <= 4000
+    response = await client.post(
+        "/ui/agent", data={"message": raw_message, "csrf_token": csrf}
+    )
+    assert response.status_code == 200
+    assert (
+        "Bu mətni təhlükəsiz analiz etmək üçün tələbləri daha qısa cümlələrə və ya "
+        "ayrı sətirlərə bölüb yenidən göndərin."
+    ) in response.text
+    for internal in (
+        "ValidationError",
+        "string_too_long",
+        "SourceOccurrence",
+        "CLARIFY_INPUT_STRUCTURE",
+        "DETERMINISTIC_CLARIFICATION",
+        "max_length",
+        "500 characters",
+    ):
+        assert internal not in response.text
+    assert fake.agent_call_count == 0
+    assert fake.jd_draft_call_count == 0
+    assert fake.call_count == 0  # search planner never invoked
+    assert await db_session.scalar(select(func.count()).select_from(AgentResultSet)) == 0
+    assert await db_session.scalar(select(func.count()).select_from(Job)) == 0
+    assert await db_session.scalar(select(func.count()).select_from(JobCriteriaVersion)) == 0
+    assert await db_session.scalar(select(func.count()).select_from(Evaluation)) == 0
+
+    conversation = await db_session.scalar(
+        select(AgentConversation).where(AgentConversation.tenant_id == tenant.id)
+    )
+    assert conversation is not None
+    assert conversation.active_result_set_id is None
+    assert [turn["role"] for turn in conversation.turns][-2:] == ["user", "assistant"]
+
+    route_event = await db_session.scalar(
+        select(AuditEvent).where(
+            AuditEvent.tenant_id == tenant.id,
+            AuditEvent.event_type == "agent.entry.routed",
+        )
+    )
+    assert route_event is not None
+    assert route_event.event_metadata == {
+        "routing_source": "DETERMINISTIC_CLARIFICATION",
+        "routed_action": "CLARIFY",
+        "routing_policy_version": "agent-entry-routing-v4",
+    }
+    all_metadata = str(
+        (
+            await db_session.execute(
+                select(AuditEvent.event_metadata).where(AuditEvent.tenant_id == tenant.id)
+            )
+        ).scalars().all()
+    )
+    assert "Python Python" not in all_metadata
+    assert "tələb olunur" not in all_metadata
+
+    # The session stays usable: a normal ambiguous fragment still clarifies.
+    follow_up = await client.post(
+        "/ui/agent", data={"message": "Python mütləqdir.", "csrf_token": csrf}
+    )
+    assert follow_up.status_code == 200
+    assert "Bu mətni namizəd axtarışı üçün istifadə etmək" in follow_up.text
 
 
 def test_wrong_mode_guidance_headline_has_no_stale_mode_language() -> None:
@@ -3841,7 +3929,7 @@ async def test_explicit_search_bypasses_wrong_orchestrator_then_ilk_3_refines(
     assert route_event.event_metadata == {
         "routing_source": "DETERMINISTIC_SEARCH",
         "routed_action": "SEARCH_CANDIDATES",
-        "routing_policy_version": "agent-entry-routing-v3",
+        "routing_policy_version": "agent-entry-routing-v4",
     }
     assert "Python" not in str(route_event.event_metadata)
     assert await _count_business_rows(db_session) == (0, 0, 0)
@@ -3976,7 +4064,7 @@ async def test_job_analysis_command_without_source_asks_for_vacancy_text(
     assert route_event.event_metadata == {
         "routing_source": "DETERMINISTIC_CLARIFICATION",
         "routed_action": "CLARIFY",
-        "routing_policy_version": "agent-entry-routing-v3",
+        "routing_policy_version": "agent-entry-routing-v4",
     }
     assert await _count_business_rows(db_session) == (0, 0, 0)
 
@@ -4042,6 +4130,6 @@ async def test_count_only_followup_without_result_set_is_truthful_context_requir
     assert route_event.event_metadata == {
         "routing_source": "DETERMINISTIC_RESULT_CONTEXT",
         "routed_action": "REFINE_CANDIDATE_RESULTS",
-        "routing_policy_version": "agent-entry-routing-v3",
+        "routing_policy_version": "agent-entry-routing-v4",
     }
     assert await _count_business_rows(db_session) == (0, 0, 0)

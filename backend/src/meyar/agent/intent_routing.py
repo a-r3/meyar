@@ -21,12 +21,18 @@ import re
 from dataclasses import dataclass
 from enum import StrEnum
 
-from meyar.agent.schemas import MAX_AGENT_SEARCH_QUERY_LENGTH, MAX_CANDIDATE_REF
+from pydantic import ValidationError
+
+from meyar.agent.schemas import (
+    MAX_AGENT_SEARCH_QUERY_LENGTH,
+    MAX_CANDIDATE_REF,
+    SourceOccurrence,
+)
 from meyar.agent.semantic_requirements import analyze_hr_text, count_token_value
 from meyar.core.result_count import ResultCountState
 from meyar.core.text import fold_az_ascii, normalize_azerbaijani_case
 
-ENTRY_ROUTING_POLICY_VERSION = "agent-entry-routing-v3"
+ENTRY_ROUTING_POLICY_VERSION = "agent-entry-routing-v4"
 
 
 class AgentEntryRoute(StrEnum):
@@ -36,6 +42,7 @@ class AgentEntryRoute(StrEnum):
     MODEL_ROUTED = "MODEL_ROUTED"
     CLARIFY_AMBIGUOUS = "CLARIFY_AMBIGUOUS"
     CLARIFY_JOB_SOURCE_REQUIRED = "CLARIFY_JOB_SOURCE_REQUIRED"
+    CLARIFY_INPUT_STRUCTURE = "CLARIFY_INPUT_STRUCTURE"
 
 
 class AgentRoutingSource(StrEnum):
@@ -87,6 +94,10 @@ AMBIGUOUS_SEARCH_OR_JOB_COPY = (
 JOB_SOURCE_REQUIRED_COPY = (
     "Vakansiya elanının mətnini və ya namizədə qoyulan tələbləri göndərin, "
     "sonra onları analiz edim."
+)
+INPUT_STRUCTURE_CLARIFICATION_COPY = (
+    "Bu mətni təhlükəsiz analiz etmək üçün tələbləri daha qısa cümlələrə və ya "
+    "ayrı sətirlərə bölüb yenidən göndərin."
 )
 
 
@@ -291,7 +302,48 @@ def _is_explicit_new_search(
     )
 
 
+def _is_source_occurrence_overflow(exc: ValidationError) -> bool:
+    """True only for the known source-bound span length limit.
+
+    The deterministic semantic analyzer represents every material slot as an
+    exact ``SourceOccurrence``; one very long unpunctuated clause can exceed
+    that model's bounded ``text`` length even inside a valid composer message.
+    Any other validation failure is an internal defect and must propagate.
+    """
+
+    errors = exc.errors(include_url=False, include_context=False, include_input=False)
+    return (
+        exc.title == SourceOccurrence.__name__
+        and bool(errors)
+        and all(
+            error["type"] == "string_too_long" and error["loc"] == ("text",)
+            for error in errors
+        )
+    )
+
+
 def route_agent_entry(message: str) -> AgentEntryRoutingResult:
+    """Return the server-owned route for one raw HR message (total).
+
+    A message whose clause structure cannot be represented as bounded exact
+    source occurrences receives fixed structure clarification: the text is
+    never truncated, guessed at by the model or forwarded to the planner/JD
+    tools.  Unrelated validation errors still propagate.
+    """
+
+    try:
+        return _route_agent_entry(message)
+    except ValidationError as exc:
+        if not _is_source_occurrence_overflow(exc):
+            raise
+        return _result(
+            AgentEntryRoute.CLARIFY_INPUT_STRUCTURE,
+            AgentRoutingSource.DETERMINISTIC_CLARIFICATION,
+            AgentRoutedAction.CLARIFY,
+        )
+
+
+def _route_agent_entry(message: str) -> AgentEntryRoutingResult:
     """Return the narrow server-owned route for one raw HR message.
 
     Precedence (pending-draft follow-ups are handled by the caller first):

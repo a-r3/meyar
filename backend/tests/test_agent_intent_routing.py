@@ -11,8 +11,8 @@ from meyar.agent.intent_routing import (
 )
 
 
-def test_routing_policy_version_is_v3() -> None:
-    assert ENTRY_ROUTING_POLICY_VERSION == "agent-entry-routing-v3"
+def test_routing_policy_version_is_v4() -> None:
+    assert ENTRY_ROUTING_POLICY_VERSION == "agent-entry-routing-v4"
 
 
 # Issue #79 PR81 visual-acceptance correction: an explicit, unambiguous NEW
@@ -260,3 +260,79 @@ def test_candidate_noun_alone_is_not_search_authority(message: str) -> None:
 )
 def test_candidate_noun_with_requirement_modality_alone_clarifies(message: str) -> None:
     assert route_agent_entry(message).route == AgentEntryRoute.CLARIFY_AMBIGUOUS
+
+
+# Issue #79 PR81 final blocker: entry routing runs deterministic semantic
+# analysis on every /ui/agent turn, so it must be total over every valid
+# composer message (1..4000 chars). A clause too long to be represented as a
+# bounded exact SourceOccurrence gets fixed structure clarification — never an
+# unhandled ValidationError, never a truncated/forced search or JD draft.
+UI_AGENT_MAX_MESSAGE_LENGTH = 4000
+LONG_UNPUNCTUATED_REQUIREMENT = "Python " * 400 + "tələb olunur"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        LONG_UNPUNCTUATED_REQUIREMENT,
+        # Near the 4000-character composer cap.
+        "Python " * 569 + "tələb olunur",
+        "Vakansiyanı analiz et: " + "Python " * 560 + "tələb olunur",
+        "Python " * 560 + "bilən namizədləri göstər",
+        "Experience with " + "python " * 550 + "is required",
+        "X" * 3980 + " tələb olunur",
+    ],
+)
+def test_unrepresentable_long_clause_gets_fixed_structure_clarification(message: str) -> None:
+    assert len(message) <= UI_AGENT_MAX_MESSAGE_LENGTH
+    routing = route_agent_entry(message)
+    assert routing.route == AgentEntryRoute.CLARIFY_INPUT_STRUCTURE
+    assert routing.routing_source == AgentRoutingSource.DETERMINISTIC_CLARIFICATION
+    assert routing.routed_action == AgentRoutedAction.CLARIFY
+    assert routing.route not in (
+        AgentEntryRoute.FORCE_CANDIDATE_SEARCH,
+        AgentEntryRoute.FORCE_JOB_DRAFT,
+    )
+    # No fabricated/truncated source span is ever produced.
+    assert routing.draft_source_start is None
+    assert routing.draft_source_end is None
+    assert routing.result_limit is None
+
+
+def test_near_cap_message_is_long_but_still_structurally_supported() -> None:
+    """Long input by itself is not rejected: short clauses route normally."""
+    message = "Python, " * 490 + "tələb olunur"
+    assert 3900 <= len(message) <= UI_AGENT_MAX_MESSAGE_LENGTH
+    assert route_agent_entry(message).route != AgentEntryRoute.CLARIFY_INPUT_STRUCTURE
+
+
+def test_unrelated_validation_errors_are_not_reclassified_as_hr_ambiguity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the SourceOccurrence ``text`` length overflow is handled; any other
+    validation failure is an internal defect and must propagate."""
+    from pydantic import ValidationError
+
+    import meyar.agent.intent_routing as intent_routing
+    from meyar.agent.schemas import SourceOccurrence
+
+    def _offset_defect(_text: str) -> object:
+        SourceOccurrence(start_offset=5, end_offset=5, text="x")
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(intent_routing, "analyze_hr_text", _offset_defect)
+    with pytest.raises(ValidationError):
+        route_agent_entry("Python tələb olunur")
+
+    def _other_model_too_long(_text: str) -> object:
+        from pydantic import BaseModel, Field
+
+        class OtherModel(BaseModel):
+            text: str = Field(max_length=1)
+
+        OtherModel(text="too long")
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(intent_routing, "analyze_hr_text", _other_model_too_long)
+    with pytest.raises(ValidationError):
+        route_agent_entry("Python tələb olunur")

@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meyar.agent.intent_routing import (
     AMBIGUOUS_SEARCH_OR_JOB_COPY,
     ENTRY_ROUTING_POLICY_VERSION,
+    INPUT_STRUCTURE_CLARIFICATION_COPY,
     JOB_SOURCE_REQUIRED_COPY,
     AgentEntryRoute,
     AgentRoutedAction,
@@ -2043,17 +2044,15 @@ async def run_agent_turn(
             "routing_policy_version": ENTRY_ROUTING_POLICY_VERSION,
         },
     )
-    if entry_routing.route in (
-        AgentEntryRoute.CLARIFY_AMBIGUOUS,
-        AgentEntryRoute.CLARIFY_JOB_SOURCE_REQUIRED,
-    ):
+    clarification_copy = {
+        AgentEntryRoute.CLARIFY_AMBIGUOUS: AMBIGUOUS_SEARCH_OR_JOB_COPY,
+        AgentEntryRoute.CLARIFY_JOB_SOURCE_REQUIRED: JOB_SOURCE_REQUIRED_COPY,
+        AgentEntryRoute.CLARIFY_INPUT_STRUCTURE: INPUT_STRUCTURE_CLARIFICATION_COPY,
+    }.get(entry_routing.route)
+    if clarification_copy is not None:
         result = _build_result(
             outcome=AgentTurnOutcome.CLARIFICATION_REQUESTED,
-            message=(
-                AMBIGUOUS_SEARCH_OR_JOB_COPY
-                if entry_routing.route == AgentEntryRoute.CLARIFY_AMBIGUOUS
-                else JOB_SOURCE_REQUIRED_COPY
-            ),
+            message=clarification_copy,
             tool_results=[],
             tool_call_count=0,
             provenance=_configured_provenance(llm),

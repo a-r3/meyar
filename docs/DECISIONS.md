@@ -6616,3 +6616,22 @@ pending draft follow-up (caller, unchanged)
 - The orchestration prompt (`agent-orchestrator-prompt-v8`) now states that
   confirmed JDs and explicit new searches are handled before its call; it
   gains no authority.
+
+**Amendment — routing policy `agent-entry-routing-v4` (PR #81 final
+blocker).** Entry routing now runs deterministic semantic analysis on every
+`/ui/agent` turn, which made a pre-existing parser limit reachable from the
+browser: one long unpunctuated clause (e.g. `"Python " * 400 + "tələb
+olunur"`, well under the 4000-character composer cap) cannot be represented
+as a bounded exact `SourceOccurrence` (`text` max 500) and raised an unhandled
+Pydantic `ValidationError` (HTTP 500). `route_agent_entry` is now total over
+valid composer input: it catches `ValidationError` only when the validated
+model is `SourceOccurrence` and every error is `string_too_long` on `text`,
+and returns the new outcome `CLARIFY_INPUT_STRUCTURE`
+(`routing_source=DETERMINISTIC_CLARIFICATION`, `routed_action=CLARIFY`) with
+fixed copy asking HR to split the requirements into shorter sentences or
+separate lines. Any other validation failure propagates as an internal
+defect. The text is never truncated, never sent to the orchestration model,
+search planner or JD extraction, and no ResultSet/Job/JobCriteriaVersion/
+Evaluation is created. Audit metadata stays structural only (source, action,
+version); the raw message and exception text are never recorded. The
+orchestration prompt contract is unchanged.
