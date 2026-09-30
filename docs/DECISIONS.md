@@ -7253,3 +7253,154 @@ benchmarks). No new process, worker, queue service, Kafka, Celery or Redis.
 The local-only inference boundary (`LLMProvider`, loopback Ollama), tenant
 isolation, BrowserSession/ResultSet/draft authority, deterministic scoring
 and CandidateIdentity exclusion are unchanged.
+
+## D-090 — ResultSet = immutable member snapshot; bounded validation and retention (issue #86)
+
+Status: proposed with the #86 PR; not accepted until owner acceptance.
+
+Context: the final independent audit (H-3, M-1, ResultSet part of L-6)
+and a synthetic pre-fix reproduction on `7e456a4`
+(`tests/test_agent_result_set_scale.py`) found three problems.
+
+**1. Validation cost grew with the tenant.** Every ResultSet validation
+recomputed a tenant-wide corpus fingerprint: it listed every current
+profile, authorized each one (one `canonical_documents` query per profile)
+and, for semantic/hybrid, ran a tenant-wide embedding lookup. The same
+bounded 10-member ResultSet cost:
+
+| Operation | 16 candidates | 2,000 candidates |
+|---|---|---|
+| ordinal reference | 22 SQL statements | 2,006 SQL statements |
+| `active_result_set_size` | 18 | 2,002 |
+| refinement | 42 | 2,026 |
+
+At 2,000 candidates each operation took about 1.7 s (local development
+measurement, not a Target Mac benchmark). Creating a ResultSet also
+rescanned the tenant after search.
+
+**2. Unrelated changes staled everything.** Any unrelated ingestion or
+re-extraction invalidated every live ResultSet in the tenant (M-1).
+
+**3. No retention.** ResultSet and member rows grew without bound.
+
+Decision:
+
+1. **ResultSet = immutable search snapshot.** An `AgentResultSet` is the
+   ordered set of members that one accepted search or refinement returned
+   at that time. It is not a live mirror of the tenant's future corpus.
+   The following do not stale an existing ResultSet:
+   - a new candidate is ingested;
+   - another candidate is reprocessed, fails extraction, or gets a new
+     embedding;
+   - any CandidateIdentity change.
+
+   To include newer or improved candidates, HR runs a NEW search. This is
+   explicit snapshot semantics, not stale data.
+2. **Validation = ownership + member authority.** No tenant-wide
+   fingerprint is computed. `compute_corpus_fingerprint` and its
+   embedding helper are removed; nothing replaces them with a cache or
+   another tenant scan.
+   - `_validate_active_result_set` checks only structure: tenant,
+     BrowserSession, durable conversation, `context_epoch`, the active
+     pointer and expiry.
+   - `validate_member_snapshots` checks each referenced member's own
+     authority. A member is valid only while ALL of these hold:
+     - the candidate still exists in the tenant;
+     - its CURRENT profile version (max `version_number`) is exactly the
+       recorded `candidate_profile_version_id`. A newer COMPLETED, FAILED
+       or manual-review version makes it stale, and the member is never
+       served under its old ordinal;
+     - that version still passes the SAME professional evidence authority
+       as `authorize_profile_version`. The single-version and batch paths
+       share one implementation (`_verify_against_canonical`); there is no
+       weaker "fast" authority.
+     - **SEMANTIC_ONLY / HYBRID only:** the exact recorded embedding row
+       still exists and matches all of: the member's candidate and profile
+       version; the ResultSet's persisted `EmbeddingSearchConfig`
+       (provider, model, revision, serializer, dimensions); and the source
+       hash of the recorded profile's canonical professional text. It is
+       never "the latest embedding".
+   - STRUCTURED_ONLY ResultSets never look at embeddings.
+   - CandidateIdentity is never read.
+   - Hard delete keeps the no-FK member snapshot pattern: a deleted member
+     fails closed as STALE, and its historical row is never rewritten.
+3. **Bounded query shape** (asserted in the scale tests: identical counts
+   at 16 and 2,000 candidates, and no tenant-wide
+   `GROUP BY candidate_profile_versions.candidate_id` scan):
+   - **Ordinal reference: 5 statements.** ResultSet, member, the current
+     profile for that candidate, its canonical document, and the audit
+     insert.
+   - **Refinement: 8 statements.** ResultSet, ordered members, current
+     profiles for all members (one bounded `IN` using `DISTINCT ON`), their
+     canonical documents (one `IN`), the retention select, then the
+     inserts and audit. Semantic/hybrid adds one bounded embedding query.
+     Member counts are bounded by `MAX_SEARCH_LIMIT=100`.
+   - Search itself (`search_candidates`) still scans current profiles;
+     that remains out of scope, as the issue states.
+4. **`active_result_set_size` is advisory.** It checks only structure and
+   returns the stored bounded `result_count` (1 statement). It only limits
+   the candidate refs shown to the model. Actual authority is always
+   re-checked when a ref is resolved, which fails closed for a stale
+   member.
+5. **Refinement = subset of THIS snapshot.** "Refine these results" is
+   never a fresh tenant-wide search.
+   - The pre-validation (before any planner call) and the persistence
+     path both batch-validate every source member.
+   - If any member is stale, the WHOLE refinement fails as STALE.
+   - Otherwise it filters the existing members in their existing order and
+     never admits a candidate from outside the parent.
+   - Unrelated new candidates never make a refinement stale. For latest
+     corpus completeness HR runs a new SEARCH.
+6. **Truthful copy.**
+   - Member stale: "Bu axtarış nəticəsindəki məlumatlardan biri sonradan
+     dəyişib. Dəqiq nəticə üçün axtarışı yenidən aparın."
+   - Expiry keeps its existing copy.
+   - An unrelated corpus change shows no error.
+   - A member that no longer passes evidence authority is now STALE, where
+     it was previously NOT_FOUND. That is still fail-closed, and still
+     never reveals whether a foreign ResultSet exists.
+7. **Creation stops rescanning the tenant.** `create_result_set_from_search`
+   persists the member snapshot directly from the accepted
+   `CandidateSearchResponse`: candidate id, profile version id, embedding
+   version id, rank/scores and search mode/config.
+8. **Schema (migration `f3a9c6d2e815`).**
+   - New column `agent_result_sets.snapshot_policy_version`
+     (`member-snapshot-v1`, NOT NULL).
+   - `corpus_fingerprint_sha256` becomes nullable and LEGACY: new rows store
+     NULL, and old rows keep their historical value, unused.
+   - Backfill: every existing row is set to `member-snapshot-v1`. This is
+     representable because pre-#86 rows already persist, per member, the
+     immutable candidate, profile-version and embedding-version snapshot
+     references plus their own `EmbeddingSearchConfig`.
+   - Downgrade fails closed. It refuses, before any DDL, while any row has
+     a NULL fingerprint, because the pre-#86 code would need a fabricated
+     fingerprint. A database with only legacy rows round-trips.
+9. **Retention (no daemon).** Pruning runs when a ResultSet is created (search
+   or refinement), scoped to one (tenant, conversation, BrowserSession):
+   - it NEVER deletes a set that ANY session context of the tenant points
+     at, nor the set just created;
+   - otherwise expired sets are retired at once, and only the newest
+     `MAX_INACTIVE_RESULT_SETS_PER_CONTEXT = 5` unexpired inactive sets are
+     kept. The steady-state bound is 1 active + 6 inactive per context
+     (pruning runs before the Phase B pointer switch);
+   - members cascade through their own FK. `parent_result_set_id` is a plain
+     UUID, and a derived set carries its own members, so retiring its
+     parent never affects it;
+   - transcript and AuditEvents are never deleted.
+
+   Each retired row emits `agent.result_set.retired` with safe structural
+   provenance only: ids, kind, parent, conversation, epoch, request and
+   refinement hashes, policy versions, mode, result count, and
+   created/expires timestamps. Query text, canonical request JSON, CV
+   content and CandidateIdentity are never recorded.
+
+   ResultSets of BrowserSessions that are never used again stay bounded per
+   context and disappear with their BrowserSession (CASCADE). Purging
+   BrowserSession rows is general retention (#46).
+10. **#85 interaction.** All ResultSet validation and pruning is short
+    DB-phase work: bounded, never tenant-wide, and run inside the existing
+    phases. The no-DB-during-inference invariant and the Phase B
+    revalidation are unchanged.
+
+Non-scope: #87, #88, #50; general search performance; general orphan and
+BrowserSession retention (#46); distributed caches.

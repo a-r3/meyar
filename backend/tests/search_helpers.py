@@ -16,7 +16,9 @@ from meyar.embedding.serializer import (
 from meyar.models.agent_conversation import AgentConversation, AgentConversationSessionContext
 from meyar.models.agent_result_set import AgentResultSet, AgentResultSetKind, AgentResultSetMember
 from meyar.search.schemas import CandidateSearchRequest, SearchMode
-from meyar.services.agent_result_set_repo import compute_corpus_fingerprint
+from meyar.services.agent_result_set_repo import (
+    SNAPSHOT_POLICY_VERSION,  # noqa: F401 - re-export for tests
+)
 from meyar.services.browser_session_repo import get_browser_session_by_id
 from meyar.services.candidate_document_repo import (
     create_candidate_document,
@@ -193,9 +195,9 @@ async def seed_active_result_set(
     """Test-only shortcut (issue #49) replacing the old direct assignment
     ``conversation.last_search_candidate_ids = [...]`` — builds one real,
     self-consistent AgentResultSet (+ ordered members, ordinal 1..N) that
-    resolve_active_candidate_ref will accept immediately: the corpus
-    fingerprint is computed live against whatever candidates already exist
-    in the DB at call time, exactly like production. Always
+    resolve_active_candidate_ref will accept immediately: each member
+    records the candidate's CURRENT profile version at call time, exactly
+    like production's member snapshot (issue #86). Always
     STRUCTURED_ONLY (no embedding_config) — semantic/hybrid-specific
     fixtures build their own AgentResultSet directly where that distinction
     matters. Also points `session_context.active_result_set_id` at the new
@@ -203,9 +205,6 @@ async def seed_active_result_set(
     session = await get_browser_session_by_id(db_session, browser_session_id=browser_session_id)
     assert session is not None
     request = CandidateSearchRequest(mode=SearchMode.STRUCTURED_ONLY)
-    fingerprint = await compute_corpus_fingerprint(
-        db_session, tenant_id=tenant_id, embedding_config=None
-    )
     result_set = AgentResultSet(
         tenant_id=tenant_id,
         browser_session_id=browser_session_id,
@@ -224,7 +223,8 @@ async def seed_active_result_set(
         search_policy_version="test-search-policy-v1",
         search_mode=SearchMode.STRUCTURED_ONLY.value,
         result_count=len(candidate_ids),
-        corpus_fingerprint_sha256=fingerprint,
+        corpus_fingerprint_sha256=None,
+        snapshot_policy_version=SNAPSHOT_POLICY_VERSION,
         expires_at=session.expires_at,
     )
     db_session.add(result_set)

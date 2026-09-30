@@ -288,8 +288,11 @@ AGENT_TURN_OUTCOME_TEXT: dict[str, str] = {
     "CANDIDATE_REF_NOT_FOUND": (
         "Göstərilən namizəd tapılmadı — əvvəlcə axtarış nəticələrindən birini seçin."
     ),
+    # issue #86: STALE is member-scoped — a member of THIS search snapshot
+    # changed after the search. Unrelated new/changed CVs never cause it.
     "RESULT_SET_STALE": (
-        "Bu axtarış nəticələri artıq yenilənib. Namizədi seçmək üçün axtarışı yenidən edin."
+        "Bu axtarış nəticəsindəki məlumatlardan biri sonradan dəyişib. Dəqiq nəticə üçün "
+        "axtarışı yenidən aparın."
     ),
     "RESULT_SET_EXPIRED": (
         "Bu axtarış nəticələrinin müddəti bitib. Namizədi seçmək üçün axtarışı yenidən edin."

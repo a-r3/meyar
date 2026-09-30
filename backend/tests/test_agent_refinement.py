@@ -1034,9 +1034,10 @@ async def test_stale_filter_refinement_prevalidates_before_planner_invocation(
     conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
     (candidate,), root = await _seed_root(db_session, tenant, context, session, ("Python",))
 
-    # Reprocessing the candidate's profile drifts the corpus fingerprint,
-    # the same trigger test_stale_source_blocks_refinement_and_leaves_
-    # context_untouched uses for a limit-only refinement.
+    # Reprocessing THIS member's profile makes its snapshot stale (issue
+    # #86 member-scoped staleness), the same trigger test_stale_source_
+    # blocks_refinement_and_leaves_context_untouched uses for a limit-only
+    # refinement.
     await seed_next_profile_version(
         db_session,
         tenant_id=tenant.id,
@@ -1058,7 +1059,10 @@ async def test_stale_filter_refinement_prevalidates_before_planner_invocation(
         conversation=conversation,
         session_context=context,
     )
-    assert llm.agent_contexts == [(True, [])]
+    # issue #86: the advisory ref bound no longer validates members (it is
+    # never authority); the refinement itself still fails closed as STALE
+    # before any planner call.
+    assert llm.agent_contexts == [(True, [1])]
     assert result.outcome.value == "RESULT_SET_STALE"
     await db_session.refresh(conversation)
     await db_session.refresh(context)
@@ -1339,7 +1343,9 @@ async def test_derived_result_set_copies_root_search_provenance_verbatim(
     assert derived.planner_model_name == root.planner_model_name
     assert derived.search_policy_version == root.search_policy_version
     assert derived.search_mode == root.search_mode
-    assert derived.corpus_fingerprint_sha256 == root.corpus_fingerprint_sha256
+    # issue #86: no tenant-corpus fingerprint; same member-snapshot policy.
+    assert derived.corpus_fingerprint_sha256 is None
+    assert derived.snapshot_policy_version == root.snapshot_policy_version
     assert derived.expires_at == root.expires_at
     assert derived.refinement_request_sha256 is not None
     assert len(derived.refinement_request_sha256) == 64

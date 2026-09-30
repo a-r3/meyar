@@ -537,16 +537,13 @@ async def test_candidate_ref_from_another_tenants_conversation_cannot_resolve(
     # filters the AgentResultSet lookup by BOTH id and tenant_id in one
     # query, so a foreign-tenant row is never even fetched to compare.
     from meyar.search.schemas import CandidateSearchRequest, SearchMode
-    from meyar.services.agent_result_set_repo import compute_corpus_fingerprint
+    from meyar.services.agent_result_set_repo import SNAPSHOT_POLICY_VERSION
     from meyar.services.browser_session_repo import get_browser_session_by_id
 
     session = await get_browser_session_by_id(
         db_session, browser_session_id=context.browser_session_id
     )
     assert session is not None
-    foreign_fingerprint = await compute_corpus_fingerprint(
-        db_session, tenant_id=foreign_tenant.id, embedding_config=None
-    )
     foreign_result_set = AgentResultSet(
         tenant_id=foreign_tenant.id,
         browser_session_id=context.browser_session_id,
@@ -565,7 +562,8 @@ async def test_candidate_ref_from_another_tenants_conversation_cannot_resolve(
         search_policy_version="test",
         search_mode=SearchMode.STRUCTURED_ONLY.value,
         result_count=1,
-        corpus_fingerprint_sha256=foreign_fingerprint,
+        corpus_fingerprint_sha256=None,
+        snapshot_policy_version=SNAPSHOT_POLICY_VERSION,
         expires_at=session.expires_at,
     )
     db_session.add(foreign_result_set)

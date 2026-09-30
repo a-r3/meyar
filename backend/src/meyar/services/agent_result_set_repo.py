@@ -20,25 +20,25 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.agent.schemas import MAX_CANDIDATE_REF
 from meyar.embedding.serializer import build_professional_embedding_text, compute_source_sha256
-from meyar.models.agent_conversation import SessionContextAuthority
+from meyar.models.agent_conversation import (
+    AgentConversationSessionContext,
+    SessionContextAuthority,
+)
 from meyar.models.agent_result_set import AgentResultSet, AgentResultSetKind, AgentResultSetMember
+from meyar.schemas.candidate_profile import CandidateProfileExtraction
 from meyar.search.planner_schemas import PlannedCandidateSearchResponse
-from meyar.search.schemas import CandidateSearchRequest, EmbeddingSearchConfig
+from meyar.search.schemas import CandidateSearchRequest, SearchMode
 from meyar.search.structured import evaluate_required_filters
 from meyar.services.audit_repo import record_event
 from meyar.services.browser_session_repo import get_browser_session_by_id
-from meyar.services.candidate_embedding_repo import list_compatible_embedding_version_ids
-from meyar.services.candidate_profile_repo import list_current_profile_versions_for_tenant
-from meyar.services.profile_authority import (
-    ProfileAuthorityError,
-    authorize_profile_version,
-    get_current_authorized_profile,
-)
+from meyar.services.candidate_embedding_repo import get_embedding_versions_by_ids
+from meyar.services.candidate_profile_repo import get_current_profile_versions_for_candidates
+from meyar.services.profile_authority import ProfileAuthorityError, authorize_profile_versions
 
 # issue #49 PR49-2 — the deterministic policy REFINE_CANDIDATE_RESULTS
 # applies: derived membership is always a subset of the active result
@@ -48,69 +48,198 @@ from meyar.services.profile_authority import (
 REFINEMENT_POLICY_VERSION = "agent-refinement-policy-v1"
 
 
-async def compute_corpus_fingerprint(
-    db: AsyncSession, *, tenant_id: uuid.UUID, embedding_config: EmbeddingSearchConfig | None
-) -> str:
-    """Deterministic sha256 over the tenant's current searchable authority
-    at this instant — the exact same "current profile version, search-
-    authorized" notion meyar.search.service.search_candidates uses (via
-    list_current_profile_versions_for_tenant + authorize_profile_version),
-    so a result set's own provenance is always compared against a
-    corpus definition search itself would agree with.
+# issue #86 (docs/DECISIONS.md D-090): an AgentResultSet is an IMMUTABLE
+# SNAPSHOT of the ordered members one accepted search/refinement returned.
+# Its validity is its own ownership (tenant/session/conversation/epoch/
+# expiry) plus the CURRENT professional authority of its OWN members —
+# never "nothing anywhere in this tenant changed since the search". Stored
+# on every row so the policy that judges it is explicit; bump only when the
+# member-snapshot rules themselves change.
+SNAPSHOT_POLICY_VERSION = "member-snapshot-v1"
 
-    STRUCTURED_ONLY (``embedding_config is None``): hashes sorted
-    ``"{candidate_id}:{profile_version_id}"`` entries.
+# issue #86 retention (L-6, ResultSet part): per (tenant, conversation,
+# BrowserSession), creation-time pruning keeps every ResultSet a live
+# session context still points at, plus at most this many other
+# (inactive) unexpired ones; expired inactive ones are retired at once.
+# Because pruning runs when a set is CREATED (before the Phase B pointer
+# switch), the steady-state bound per context is 1 active + N+1 inactive.
+MAX_INACTIVE_RESULT_SETS_PER_CONTEXT = 5
 
-    SEMANTIC_ONLY/HYBRID: additionally folds in the one compatible
-    embedding version id for that exact ``EmbeddingSearchConfig`` (or the
-    literal ``NONE`` when a candidate currently has none), via
-    ``"{candidate_id}:{profile_version_id}:{embedding_version_id|NONE}"``.
 
-    Never hashes profile content, CandidateIdentity, evidence text, or CV
-    text — only ids. A candidate whose current profile is not currently
-    search-authorized (see ProfileAuthorityError) is simply absent, same
-    as search's own eligible set."""
-    profile_versions = await list_current_profile_versions_for_tenant(db, tenant_id=tenant_id)
-    authorized_pairs: list[tuple[uuid.UUID, uuid.UUID]] = []
-    authorized_content: dict[uuid.UUID, dict] = {}
-    for version in profile_versions:
-        try:
-            await authorize_profile_version(db, version=version)
-        except ProfileAuthorityError:
-            continue
-        authorized_pairs.append((version.candidate_id, version.id))
-        assert version.profile_content is not None
-        authorized_content[version.id] = version.profile_content
+async def validate_member_snapshots(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    result_set: AgentResultSet,
+    members: list[AgentResultSetMember],
+) -> list[CandidateProfileExtraction] | None:
+    """Member-scoped snapshot authority (issue #86). Returns the authorized
+    profiles aligned with ``members`` or ``None`` (STALE, fail closed) if
+    ANY member's own authority changed. Query shape — independent of tenant
+    size and without per-member N+1 (``members`` <= MAX_SEARCH_LIMIT):
 
-    if embedding_config is None:
-        entries = [
-            f"{candidate_id}:{profile_version_id}"
-            for candidate_id, profile_version_id in authorized_pairs
-        ]
-    else:
-        profile_version_source_hashes = {
-            profile_version_id: compute_source_sha256(
-                build_professional_embedding_text(authorized_content[profile_version_id])
-            )
-            for _candidate_id, profile_version_id in authorized_pairs
-        }
-        embedding_ids_by_candidate = await list_compatible_embedding_version_ids(
+    1 query: current profile version for exactly these candidates;
+    1 query: their canonical documents (batch evidence authority);
+    +1 query only for SEMANTIC_ONLY/HYBRID: the recorded embedding rows.
+
+    A member is valid only while ALL hold:
+    - the candidate still exists in this tenant;
+    - its CURRENT profile version is still exactly the recorded
+      ``candidate_profile_version_id`` (a newer COMPLETED, FAILED or
+      manual-review version makes it stale — never silently served);
+    - that profile still passes the SAME professional evidence authority
+      as ``authorize_profile_version`` (shared implementation);
+    - SEMANTIC_ONLY/HYBRID only: the exact recorded embedding row still
+      exists and matches the member's candidate + profile version, the
+      ResultSet's persisted EmbeddingSearchConfig (provider/model/revision/
+      serializer/dimensions) and the source hash of the recorded profile's
+      canonical professional text. STRUCTURED_ONLY never looks at
+      embeddings. CandidateIdentity is never read."""
+    if not members:
+        return []
+    current = await get_current_profile_versions_for_candidates(
+        db, tenant_id=tenant_id, candidate_ids={member.candidate_id for member in members}
+    )
+    versions = []
+    for member in members:
+        version = current.get(member.candidate_id)
+        if version is None or version.id != member.candidate_profile_version_id:
+            return None
+        versions.append(version)
+    authorized = await authorize_profile_versions(db, tenant_id=tenant_id, versions=versions)
+    profiles: list[CandidateProfileExtraction] = []
+    for version in versions:
+        outcome = authorized[version.id]
+        if isinstance(outcome, ProfileAuthorityError):
+            return None
+        profiles.append(outcome)
+
+    if SearchMode(result_set.search_mode) in (SearchMode.SEMANTIC_ONLY, SearchMode.HYBRID):
+        config = CandidateSearchRequest.model_validate(
+            result_set.canonical_search_request
+        ).embedding_config
+        embedding_ids = [member.candidate_embedding_version_id for member in members]
+        if config is None or any(embedding_id is None for embedding_id in embedding_ids):
+            return None
+        rows = await get_embedding_versions_by_ids(
             db,
             tenant_id=tenant_id,
-            profile_version_source_hashes=profile_version_source_hashes,
-            provider=embedding_config.provider,
-            model_name=embedding_config.model_name,
-            model_revision=embedding_config.model_revision,
-            serializer_version=embedding_config.serializer_version,
-            embedding_dimensions=embedding_config.embedding_dimensions,
+            embedding_version_ids={eid for eid in embedding_ids if eid is not None},
         )
-        entries = [
-            f"{candidate_id}:{profile_version_id}:"
-            f"{embedding_ids_by_candidate.get(candidate_id, 'NONE')}"
-            for candidate_id, profile_version_id in authorized_pairs
-        ]
-    joined = "\n".join(sorted(entries))
-    return hashlib.sha256(joined.encode("utf-8")).hexdigest()
+        for member, version in zip(members, versions, strict=True):
+            assert member.candidate_embedding_version_id is not None
+            row = rows.get(member.candidate_embedding_version_id)
+            assert version.profile_content is not None
+            expected_source = compute_source_sha256(
+                build_professional_embedding_text(version.profile_content)
+            )
+            if (
+                row is None
+                or row.candidate_id != member.candidate_id
+                or row.candidate_profile_version_id != member.candidate_profile_version_id
+                or row.provider != config.provider
+                or row.model_name != config.model_name
+                or row.model_revision != config.model_revision
+                or row.serializer_version != config.serializer_version
+                or row.embedding_dimensions != config.embedding_dimensions
+                or row.source_sha256 != expected_source
+            ):
+                return None
+    return profiles
+
+
+def _iso(value: datetime) -> str:
+    return (value if value.tzinfo is not None else value.replace(tzinfo=UTC)).isoformat()
+
+
+async def retire_inactive_result_sets(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    conversation_id: uuid.UUID,
+    browser_session_id: uuid.UUID,
+    keep_ids: set[uuid.UUID],
+) -> int:
+    """Bounded creation-time retention (issue #86, no background service).
+
+    Scope: exactly one (tenant, conversation, BrowserSession). NEVER deletes
+    a ResultSet that ANY session context of the tenant still points at
+    (live authority), nor one in ``keep_ids`` (e.g. the row just created
+    whose pointer is written later in Phase B). Of the rest, expired rows are
+    retired immediately and only the newest
+    ``MAX_INACTIVE_RESULT_SETS_PER_CONTEXT`` unexpired rows are kept.
+    Deleting a ResultSet cascades only its own member rows;
+    ``parent_result_set_id`` is a plain snapshot UUID (a derived set carries
+    its own copied members, so retiring a parent never affects it).
+    Transcript and AuditEvents are untouched; one ``agent.result_set.retired``
+    event per retired row keeps safe structural provenance (ids, hashes,
+    policy versions, mode, counts, epoch, timestamps — never query text,
+    canonical request JSON, CV content or CandidateIdentity)."""
+    referenced = select(AgentConversationSessionContext.active_result_set_id).where(
+        AgentConversationSessionContext.tenant_id == tenant_id,
+        AgentConversationSessionContext.active_result_set_id.is_not(None),
+    )
+    query = (
+        select(AgentResultSet)
+        .where(
+            AgentResultSet.tenant_id == tenant_id,
+            AgentResultSet.conversation_id == conversation_id,
+            AgentResultSet.browser_session_id == browser_session_id,
+            AgentResultSet.id.not_in(referenced),
+        )
+        .order_by(AgentResultSet.created_at.desc(), AgentResultSet.id.desc())
+    )
+    if keep_ids:
+        query = query.where(AgentResultSet.id.not_in(keep_ids))
+    candidates = list((await db.scalars(query)).all())
+    now = datetime.now(UTC)
+    retired: list[AgentResultSet] = []
+    kept = 0
+    for row in candidates:
+        expires_at = row.expires_at if row.expires_at.tzinfo else row.expires_at.replace(tzinfo=UTC)
+        if expires_at > now and kept < MAX_INACTIVE_RESULT_SETS_PER_CONTEXT:
+            kept += 1
+            continue
+        retired.append(row)
+    if not retired:
+        return 0
+    for row in retired:
+        await record_event(
+            db,
+            tenant_id=tenant_id,
+            event_type="agent.result_set.retired",
+            metadata={
+                "result_set_id": str(row.id),
+                "result_set_kind": row.result_set_kind,
+                "parent_result_set_id": (
+                    str(row.parent_result_set_id) if row.parent_result_set_id else None
+                ),
+                "conversation_id": str(row.conversation_id),
+                "context_epoch": row.context_epoch,
+                "request_sha256": row.request_sha256,
+                "refinement_request_sha256": row.refinement_request_sha256,
+                "search_policy_version": row.search_policy_version,
+                "refinement_policy_version": row.refinement_policy_version,
+                "snapshot_policy_version": row.snapshot_policy_version,
+                "search_mode": row.search_mode,
+                "result_count": row.result_count,
+                "created_at": _iso(row.created_at),
+                "expires_at": _iso(row.expires_at),
+            },
+        )
+    retired_ids = [row.id for row in retired]
+    # Members go by their own ON DELETE CASCADE FK. Re-checks the live-pointer
+    # exclusion inside the DELETE itself (defense in depth).
+    await db.execute(
+        delete(AgentResultSet).where(
+            AgentResultSet.tenant_id == tenant_id,
+            AgentResultSet.id.in_(retired_ids),
+            AgentResultSet.id.not_in(referenced),
+        )
+    )
+    for row in retired:
+        db.expunge(row)
+    return len(retired)
 
 
 async def create_result_set_from_search(
@@ -144,9 +273,8 @@ async def create_result_set_from_search(
     session = await get_browser_session_by_id(db, browser_session_id=browser_session_id)
     assert session is not None, "session context must reference a live BrowserSession"
 
-    fingerprint = await compute_corpus_fingerprint(
-        db, tenant_id=tenant_id, embedding_config=request.embedding_config
-    )
+    # issue #86: no tenant-wide corpus rescan — the accepted search response
+    # already carries every member's profile/embedding snapshot ids.
     result_set = AgentResultSet(
         tenant_id=tenant_id,
         browser_session_id=browser_session_id,
@@ -165,7 +293,8 @@ async def create_result_set_from_search(
         search_policy_version=planned.search_response.policy_version,
         search_mode=request.mode.value,
         result_count=planned.search_response.result_count,
-        corpus_fingerprint_sha256=fingerprint,
+        corpus_fingerprint_sha256=None,
+        snapshot_policy_version=SNAPSHOT_POLICY_VERSION,
         expires_at=session.expires_at,
     )
     db.add(result_set)
@@ -203,11 +332,23 @@ async def create_result_set_from_search(
             "context_epoch": result_set.context_epoch,
         },
     )
+    await retire_inactive_result_sets(
+        db,
+        tenant_id=tenant_id,
+        conversation_id=result_set.conversation_id,
+        browser_session_id=browser_session_id,
+        keep_ids={result_set.id}
+        | ({previous_result_set_id} if previous_result_set_id is not None else set()),
+    )
     return result_set
 
 
 class ResultSetResolutionFailure(StrEnum):
     """Typed internal failure reasons for ``resolve_active_candidate_ref``.
+    ``STALE`` (issue #86) means a MEMBER's own snapshot authority changed
+    (its profile version moved, it lost evidence authority, it was deleted,
+    or — semantic/hybrid — its recorded embedding no longer matches);
+    unrelated tenant changes never produce it.
     Every member except ``STALE``/``EXPIRED``/``ORDINAL_OUT_OF_RANGE``
     collapses to a fail-closed "not found" outward outcome (see
     meyar.agent.service's mapping to AgentTurnOutcome) — cross-tenant/
@@ -225,12 +366,6 @@ class ResultSetResolutionFailure(StrEnum):
     EXPIRED = "EXPIRED"
     STALE = "STALE"
     ORDINAL_OUT_OF_RANGE = "ORDINAL_OUT_OF_RANGE"
-    # Defense in depth only — in practice already implied by STALE (a
-    # candidate that lost search authorization changes the corpus
-    # fingerprint too). Kept as its own check so an authorization edge
-    # case the fingerprint does not happen to cover can never resolve a
-    # candidate MEYAR would no longer treat as searchable.
-    CANDIDATE_NO_LONGER_AUTHORIZED = "CANDIDATE_NO_LONGER_AUTHORIZED"
 
 
 # Outward audit-safe reason code for a rejected resolution — collapses the
@@ -242,7 +377,6 @@ _AUDIT_REASON_BY_FAILURE: dict[ResultSetResolutionFailure, str] = {
     ResultSetResolutionFailure.SESSION_MISMATCH: "NOT_FOUND",
     ResultSetResolutionFailure.CONVERSATION_MISMATCH: "NOT_FOUND",
     ResultSetResolutionFailure.CONTEXT_EPOCH_MISMATCH: "NOT_FOUND",
-    ResultSetResolutionFailure.CANDIDATE_NO_LONGER_AUTHORIZED: "NOT_FOUND",
     ResultSetResolutionFailure.EXPIRED: "EXPIRED",
     ResultSetResolutionFailure.STALE: "STALE",
     ResultSetResolutionFailure.ORDINAL_OUT_OF_RANGE: "ORDINAL_OUT_OF_RANGE",
@@ -286,8 +420,10 @@ async def _validate_active_result_set(
        BrowserSession at the same epoch fails closed here).
     5. Its ``context_epoch`` equals ``session_context.context_epoch``.
     6. ``expires_at`` is still in the future.
-    7. Recomputing the corpus fingerprint still matches the one stored at
-       creation.
+
+    STRUCTURAL ownership only (issue #86): no tenant-wide corpus work. Member
+    freshness is judged separately, per member, by
+    ``validate_member_snapshots`` wherever members are actually used.
     """
     if (
         session_context.tenant_id != tenant_id
@@ -318,15 +454,6 @@ async def _validate_active_result_set(
     if now >= expires_at:
         return ResultSetResolutionFailure.EXPIRED
 
-    embedding_config = CandidateSearchRequest.model_validate(
-        result_set.canonical_search_request
-    ).embedding_config
-    current_fingerprint = await compute_corpus_fingerprint(
-        db, tenant_id=tenant_id, embedding_config=embedding_config
-    )
-    if current_fingerprint != result_set.corpus_fingerprint_sha256:
-        return ResultSetResolutionFailure.STALE
-
     return result_set
 
 
@@ -345,9 +472,10 @@ async def resolve_active_candidate_ref(
 
     1-7. See ``_validate_active_result_set``.
     7. ``candidate_ref`` is within the persisted member ordinal range.
-    8. The resolved candidate still has a current authorized profile for
-       this tenant (defense in depth; see ResultSetResolutionFailure
-       docstring).
+    8. That ONE member's snapshot is still authoritative
+       (``validate_member_snapshots``): unchanged current profile version,
+       evidence authority, and — semantic/hybrid — its recorded embedding.
+       Otherwise STALE. Bounded queries, independent of tenant size.
 
     Fires ``agent.result_set.reference_resolved`` on success or
     ``agent.result_set.reference_rejected`` on failure — metadata is
@@ -378,13 +506,17 @@ async def resolve_active_candidate_ref(
             failure=ResultSetResolutionFailure.ORDINAL_OUT_OF_RANGE, candidate_ref=candidate_ref,
         )
 
-    authorized = await get_current_authorized_profile(
-        db, tenant_id=tenant_id, candidate_id=member.candidate_id
-    )
-    if authorized is None:
+    # issue #86: only THIS member's own snapshot authority decides — never
+    # the rest of the tenant. A changed member fails closed as STALE.
+    if (
+        await validate_member_snapshots(
+            db, tenant_id=tenant_id, result_set=result_set, members=[member]
+        )
+        is None
+    ):
         return await _reject(
             db, tenant_id=tenant_id, session_context=session_context,
-            failure=ResultSetResolutionFailure.CANDIDATE_NO_LONGER_AUTHORIZED, candidate_ref=None,
+            failure=ResultSetResolutionFailure.STALE, candidate_ref=None,
         )
 
     await record_event(
@@ -437,9 +569,12 @@ async def active_result_set_size(
     browser_session_id: uuid.UUID,
     session_context: SessionContextAuthority,
 ) -> int:
-    """How many ordinals are currently legally referenceable — used only
-    to bound ``available_candidate_refs`` for the model's own next
-    decision. Returns 0 on any failure condition (no active result set,
+    """ADVISORY (issue #86): how many ordinals the model may reference —
+    used only to bound ``available_candidate_refs`` for its next decision.
+    Structural checks only (tenant/session/conversation/epoch/expiry/
+    existence) and the stored bounded ``result_count``; it never validates
+    members. A member that became stale still fails closed when it is
+    actually resolved. Returns 0 on any failure condition (no active result set,
     stale, expired, wrong session/tenant/epoch) — this is advisory context
     for the model, never itself an authorization decision; the real
     authorization is always resolve_active_candidate_ref, called again
@@ -520,6 +655,21 @@ async def validate_active_result_set_for_refinement(
         await _reject_refinement(
             db, tenant_id=tenant_id, session_context=session_context, failure=validated
         )
+        return validated
+    # issue #86: refinement is a SUBSET of this snapshot, so every source
+    # member must still be authoritative — checked in one bounded batch.
+    members = await _ordered_members(db, result_set_id=validated.id)
+    if (
+        await validate_member_snapshots(
+            db, tenant_id=tenant_id, result_set=validated, members=members
+        )
+        is None
+    ):
+        await _reject_refinement(
+            db, tenant_id=tenant_id, session_context=session_context,
+            failure=ResultSetResolutionFailure.STALE,
+        )
+        return ResultSetResolutionFailure.STALE
     return validated
 
 
@@ -569,10 +719,12 @@ async def create_result_set_from_refinement(
     1. The active result set passes the exact same 6-step validation
        ``resolve_active_candidate_ref`` uses (``_validate_active_result_set``)
        — STALE/EXPIRED/etc. fail the WHOLE refinement, never partially.
-    2. Each member's recorded ``candidate_profile_version_id`` must still
-       equal the candidate's CURRENT authorized profile version (defense
-       in depth beyond the aggregate corpus fingerprint check above) — any
-       mismatch fails the whole refinement as STALE too.
+    2. Every source member's own snapshot is batch-validated
+       (``validate_member_snapshots``, issue #86): current profile version
+       still the recorded one, evidence authority, and — semantic/hybrid —
+       the recorded embedding. Any mismatch fails the whole refinement as
+       STALE. Unrelated tenant changes never do: a refinement means
+       "refine THESE results", never a fresh tenant-wide search.
     3. When ``filter_request`` is given, a member survives only if
        ``evaluate_required_filters`` (the exact Slice 8 structured-search
        gate) is satisfied against its own current profile — the parent's
@@ -583,8 +735,8 @@ async def create_result_set_from_refinement(
        smaller than requested (``RefinementResult.limit_truncated``).
 
     The derived AgentResultSet's search-provenance fields
-    (canonical_search_request/planner_*/search_policy_version/search_mode/
-    corpus_fingerprint_sha256) are copied VERBATIM from the parent — never
+    (canonical_search_request/planner_*/search_policy_version/search_mode)
+    are copied VERBATIM from the parent — never
     overwritten with the refinement's own filter text — and
     ``expires_at`` is inherited exactly (a refinement never extends
     validity beyond its parent). Fires ``agent.result_set.refined`` on
@@ -611,27 +763,26 @@ async def create_result_set_from_refinement(
     )
     as_of_date = filter_request.as_of_date if filter_request is not None else None
 
-    retained: list[tuple[AgentResultSetMember, list]] = []
-    for member in source_members:
-        authorized = await get_current_authorized_profile(
-            db, tenant_id=tenant_id, candidate_id=member.candidate_id
+    # issue #86: ONE batch validation of every source member's own snapshot
+    # (bounded by the source size, never the tenant). Any changed member
+    # fails the WHOLE refinement as STALE — never a partial subset, never a
+    # different profile version than the snapshot recorded, never a
+    # candidate from outside the parent ResultSet.
+    profiles = await validate_member_snapshots(
+        db, tenant_id=tenant_id, result_set=source_result_set, members=source_members
+    )
+    if profiles is None:
+        await _reject_refinement(
+            db, tenant_id=tenant_id, session_context=session_context,
+            failure=ResultSetResolutionFailure.STALE,
         )
-        if authorized is None or authorized[0].id != member.candidate_profile_version_id:
-            # A member's own profile has moved since the source result set
-            # was created despite the aggregate corpus fingerprint still
-            # matching (defense in depth — see docstring point 2). Fail
-            # the whole refinement rather than silently evaluating a
-            # different profile version than the one this result set's
-            # own provenance recorded.
-            await _reject_refinement(
-                db, tenant_id=tenant_id, session_context=session_context,
-                failure=ResultSetResolutionFailure.STALE,
-            )
-            return ResultSetResolutionFailure.STALE
+        return ResultSetResolutionFailure.STALE
+
+    retained: list[tuple[AgentResultSetMember, list]] = []
+    for member, profile in zip(source_members, profiles, strict=True):
         if filter_request is None:
             retained.append((member, []))
             continue
-        _version, profile = authorized
         evaluation = evaluate_required_filters(
             profile, filter_request.required_filters, as_of_year=as_of_year, as_of_date=as_of_date
         )
@@ -670,7 +821,10 @@ async def create_result_set_from_refinement(
         search_policy_version=source_result_set.search_policy_version,
         search_mode=source_result_set.search_mode,
         result_count=len(limited),
-        corpus_fingerprint_sha256=source_result_set.corpus_fingerprint_sha256,
+        # Legacy tenant-corpus fingerprint is never recomputed (issue #86);
+        # a derived set is judged by the same member-snapshot policy.
+        corpus_fingerprint_sha256=None,
+        snapshot_policy_version=SNAPSHOT_POLICY_VERSION,
         # Never extend validity beyond the parent's own expiry.
         expires_at=source_result_set.expires_at,
         refinement_request_sha256=refinement_request_sha256,
@@ -714,6 +868,13 @@ async def create_result_set_from_refinement(
             "requested_limit": requested_limit,
             "has_filter": filter_request is not None,
         },
+    )
+    await retire_inactive_result_sets(
+        db,
+        tenant_id=tenant_id,
+        conversation_id=derived.conversation_id,
+        browser_session_id=browser_session_id,
+        keep_ids={derived.id, source_result_set.id},
     )
     return RefinementResult(
         result_set=derived,

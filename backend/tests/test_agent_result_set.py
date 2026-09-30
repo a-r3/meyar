@@ -53,9 +53,9 @@ from meyar.services.agent_conversation_repo import (
     get_session_context_for_update,
 )
 from meyar.services.agent_result_set_repo import (
+    SNAPSHOT_POLICY_VERSION,
     ResultSetResolutionFailure,
     active_result_set_size,
-    compute_corpus_fingerprint,
     create_result_set_from_search,
     resolve_active_candidate_ref,
 )
@@ -775,9 +775,12 @@ async def test_profile_reprocessing_makes_ordinal_stale(
     assert resolved == ResultSetResolutionFailure.STALE
 
 
-async def test_new_searchable_candidate_makes_ordinal_stale(
+async def test_unrelated_new_searchable_candidate_does_not_stale_existing_ordinal(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
+    """issue #86 (D-090) reverses the pre-#86 tenant-fingerprint rule: a
+    ResultSet is an immutable search snapshot, so ingesting an UNRELATED
+    candidate never invalidates reading an existing member."""
     tenant, user, _password, membership = tenant_and_user
     candidate, _pv = await seed_candidate_with_profile(
         db_session, tenant_id=tenant.id, profile_content=_profile("Python")
@@ -799,7 +802,8 @@ async def test_new_searchable_candidate_makes_ordinal_stale(
         db_session, tenant_id=tenant.id, browser_session_id=session.id,
         session_context=context, candidate_ref=1,
     )
-    assert resolved == ResultSetResolutionFailure.STALE
+    assert not isinstance(resolved, ResultSetResolutionFailure)
+    assert resolved.candidate_id == candidate.id
 
 
 async def test_embedding_reprocessing_makes_semantic_ordinal_stale(
@@ -872,9 +876,6 @@ async def test_expired_result_set_is_expired_not_stale(
     request = CandidateSearchRequest(
         mode=SearchMode.STRUCTURED_ONLY, required_filters=RequiredFilters(skills=["Python"])
     )
-    fingerprint = await compute_corpus_fingerprint(
-        db_session, tenant_id=tenant.id, embedding_config=None
-    )
     result_set = AgentResultSet(
         tenant_id=tenant.id,
         browser_session_id=session.id,
@@ -885,7 +886,8 @@ async def test_expired_result_set_is_expired_not_stale(
         planner_policy_version="test", planner_prompt_version="test", planner_schema_version="test",
         planner_model_provider="test", planner_model_name="test", planner_model_revision="",
         search_policy_version="test", search_mode=SearchMode.STRUCTURED_ONLY.value,
-        result_count=1, corpus_fingerprint_sha256=fingerprint,
+        result_count=1, corpus_fingerprint_sha256=None,
+        snapshot_policy_version=SNAPSHOT_POLICY_VERSION,
         expires_at=datetime.now(UTC) - timedelta(hours=1),
     )
     db_session.add(result_set)
