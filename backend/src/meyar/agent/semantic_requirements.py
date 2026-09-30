@@ -385,6 +385,48 @@ def _fold(text: str) -> str:
     return fold_az_ascii(normalize_azerbaijani_case(text))
 
 
+# Explicit vacancy-title header line ("Vakansiya: Kredit Analitiki 2").  Only
+# this supported header form is title data; there is no first-line heuristic.
+_VACANCY_TITLE_LINE_RE = re.compile(
+    r"(?im)^[ \t]*(?:vakansiya|vacancy)[ \t]*:[ \t]*([^\r\n]*?)[ \t]*$"
+)
+# Same explicit dash separator the header trim above recognizes.
+_TITLE_DASH_SEPARATOR_RE = re.compile(r"\s+[—–-]\s+")
+MAX_VACANCY_TITLE_CHARS = 120
+
+
+def explicit_vacancy_title(text: str, analysis: SemanticAnalysis) -> str | None:
+    """Exact source title from ONE explicit ``Vakansiya:``/``Vacancy:`` line.
+
+    Issue #84: deterministic, source-grounded title data.  The returned value
+    is always an exact slice of ``text``; it is never rewritten, never a
+    criterion subject and never a result count.  ``None`` when there is no
+    header, more than one header, an empty/unbounded title, or when the title
+    range overlaps a material requirement span or a result-count control span
+    of the same ``analysis`` (such content is not title data).
+    """
+    matches = list(_VACANCY_TITLE_LINE_RE.finditer(_fold(text)))
+    if len(matches) != 1:
+        return None
+    start, end = matches[0].span(1)
+    separator = _TITLE_DASH_SEPARATOR_RE.search(text, start, end)
+    if separator is not None:
+        end = separator.start()
+    while start < end and text[start].isspace():
+        start += 1
+    while end > start and (text[end - 1].isspace() or text[end - 1] in ".;,"):
+        end -= 1
+    if not 0 < end - start <= MAX_VACANCY_TITLE_CHARS:
+        return None
+    occupied = [
+        *((span.start_offset, span.end_offset) for span in analysis.spans),
+        *((span.start_offset, span.end_offset) for span in analysis.result_count.control_spans),
+    ]
+    if any(left < end and start < right for left, right in occupied):
+        return None
+    return text[start:end]
+
+
 def classify_supported_language(text: str) -> SupportedInputLanguage:
     if _CYRILLIC_RE.search(text):
         return SupportedInputLanguage.UNSUPPORTED

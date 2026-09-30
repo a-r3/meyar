@@ -87,6 +87,7 @@ from meyar.agent.schemas import (
 from meyar.agent.semantic_requirements import (
     SemanticAnalysis,
     analyze_hr_text,
+    explicit_vacancy_title,
     is_non_professional_requirement,
 )
 from meyar.core.domain_terms import canonicalize_domain
@@ -155,6 +156,16 @@ MAX_JD_DRAFT_ATTEMPTS = 2
 
 def _fold(text: str) -> str:
     return fold_az_ascii(normalize_azerbaijani_case(text))
+
+
+def normalize_message_newlines(text: str) -> str:
+    """One canonical newline form (LF) for an HR message (issue #84).
+
+    Browser textareas submit CRLF; transport must never change semantics.
+    Applied once at the agent-turn boundary BEFORE routing, span offsets,
+    hashing, provenance and the transcript are produced, so every one of
+    them refers to the same canonical source text."""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _normalize_source_text(text: str) -> str:
@@ -1235,9 +1246,12 @@ async def _dispatch_draft_job_criteria(llm: LLMProvider, *, jd_text: str) -> Age
     canonicalization = canonicalize_requirements(
         spans=analysis.spans, semantics=analysis.requirements, proposals=proposals
     )
+    # An explicit ``Vakansiya:`` header is exact source title data and wins
+    # over any model title; the model title is only a grounded fallback.
+    explicit_title = explicit_vacancy_title(jd_text, analysis)
     return _build_authorized_semantic_draft(
         jd_text=jd_text,
-        title=draft.title if draft is not None else None,
+        title=explicit_title or (draft.title if draft is not None else None),
         canonical=canonicalization.requirements,
         source_spans=analysis.spans,
         requested_result_limit=analysis.result_count.requested,
@@ -1955,6 +1969,9 @@ async def run_agent_turn(
         # conversation and tenant — never mix one conversation's transcript
         # with another's ResultSet/pending-draft authority.
         raise ValueError("Session context does not belong to this conversation.")
+    # Issue #84: canonical source text for everything below (transcript,
+    # routing, spans/offsets, hashing, provenance, the local model).
+    user_message = normalize_message_newlines(user_message)
     turns: list[dict] = [*conversation.turns, {"role": "user", "text": user_message}]
     # Live pending authority only (session_context.active_pending_draft_id);
     # historical transcript payloads alone are never actionable.

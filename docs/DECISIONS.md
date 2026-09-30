@@ -7019,3 +7019,27 @@ A-5. **Canonical collision policy.** After canonicalization and before any
   would recreate an existing identity merges into it only with identical
   parameters and is refused otherwise. Confirmation also fails closed if two
   confirmed criteria share one identity.
+
+### D-088 amendment A-6 (real-Ollama acceptance correction on PR #89)
+A-6. **Canonical transport newlines and explicit vacancy title.** Real
+  browser acceptance with the local `qwen3:1.7b` model reproduced (3/3)
+  that `Vakansiya: Kredit Analitiki 2` + `Excel tələb olunur.` lost its
+  title: the textarea submits CRLF, the model's CRLF proposal carried an
+  empty `required_level`, the strict `JDCriteriaDraft` schema correctly
+  rejected it, and the title was model-only. Two narrow rules, no schema
+  relaxation and no model-specific handling:
+  (1) `run_agent_turn` normalizes `\r\n`/`\r` to `\n`
+  (`normalize_message_newlines`) before the transcript, routing, span
+  offsets, hashing, the session-held source and provenance are produced, so
+  transport never changes semantics and every offset/hash refers to one
+  canonical source;
+  (2) `semantic_requirements.explicit_vacancy_title` returns the exact source
+  slice of ONE explicit `Vakansiya:`/`Vacancy:` header line (optionally cut
+  at the existing explicit dash separator), bounded to 120 characters, and
+  only when it overlaps no requirement span and no result-count control
+  span. It is title data only: never a criterion subject, never a count.
+  When present it takes precedence over the model title (exact HR source
+  beats interpretation; a model can neither invent nor rewrite it). Without
+  a header the existing model-title grounding rule and generic fallback are
+  unchanged. No first-line heuristic. Title is not part of provenance or
+  scoring.
