@@ -7,8 +7,9 @@ and pending-draft authority across sessions."""
 import re
 import uuid
 
+from conftest import BrowserTestClient as AsyncClient
 from fakes import FakeLLMProvider
-from httpx import ASGITransport, AsyncClient
+from httpx import ASGITransport
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from test_ui_agent_routes import (
@@ -156,7 +157,17 @@ async def test_relogin_shows_history_without_result_or_pending_draft_authority(
         assert await db_session.scalar(select(func.count()).select_from(Job)) == 0
 
         app.dependency_overrides[get_llm_provider] = lambda: FakeLLMProvider()
-        response = await relogin.post("/ui/agent", data={"message": "ilk 3", "csrf_token": csrf})
+        submission_match = re.search(
+            r'name="submission_id" value="([0-9a-f-]{36})"', workspace.text
+        )
+        assert submission_match is not None
+        response = await relogin.post(
+            "/ui/agent", data={
+                "message": "ilk 3", "csrf_token": csrf,
+                "conversation_id": conversation_id,
+                "submission_id": submission_match.group(1),
+            }
+        )
         assert response.status_code == 200
         assert "Əvvəlcə namizəd axtarışı" in response.text
 

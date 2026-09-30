@@ -20,7 +20,8 @@ from collections.abc import AsyncGenerator, Callable
 import httpx
 import pytest
 from conftest import TEST_DATABASE_URL
-from httpx import ASGITransport, AsyncClient
+from conftest import BrowserTestClient as AsyncClient
+from httpx import ASGITransport
 from search_helpers import seed_candidate_with_profile
 from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -417,7 +418,8 @@ async def test_queue_full_turn_gets_hr_safe_busy_outcome_and_nothing_is_persiste
         assert gate.calls == 1  # the rejected turn never reached the model
 
         gate.release.set()
-        assert (await asyncio.wait_for(first, timeout=10)).status_code == 200
+        first_response = await asyncio.wait_for(first, timeout=10)
+        assert first_response.status_code == 200, first_response.text
 
     rejected = await _stored(factory, second_id)
     assert rejected.turns == []  # no fabricated assistant answer
@@ -764,6 +766,81 @@ async def test_browser_session_revoked_while_inferring_fails_closed(
     )
     assert response.status_code == 303
     assert (await _stored(factory, conversation_id)).turns == []
+
+
+@pytest.mark.parametrize("change", ["password", "membership"])
+async def test_issue87_security_change_during_inference_rejects_phase_b(
+    small_pool, tenant_and_user, change: str
+) -> None:
+    from meyar.services.tenant_membership_repo import set_membership_active
+    from meyar.services.user_repo import set_password
+
+    async def mutate(db, *, user, membership, **_):  # noqa: ANN001, ANN003, ANN202
+        assert small_pool[2].checked_out == 0  # inference holds no DB connection
+        if change == "password":
+            await set_password(
+                db, user_id=user.id, plaintext_password="rotated-synthetic-password"
+            )
+        else:
+            await set_membership_active(db, membership_id=membership.id, is_active=False)
+
+    factory, tenant, conversation_id, response = await _run_with_mutation_during_inference(
+        small_pool, tenant_and_user, mutate
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == "/ui/login"
+    stored = await _stored(factory, conversation_id)
+    assert stored.turns == []
+    assert stored.active_turn_id is None
+    from sqlalchemy import func
+
+    from meyar.models.agent_conversation import AgentConversationSessionContext
+    from meyar.models.agent_result_set import AgentResultSet
+    from meyar.models.candidate import Candidate
+    from meyar.models.job import Job
+
+    async with factory() as db:
+        context = await db.scalar(select(AgentConversationSessionContext).where(
+            AgentConversationSessionContext.conversation_id == conversation_id
+        ))
+        assert context is not None
+        assert context.active_result_set_id is None
+        assert context.active_pending_draft_id is None
+        for model in (AgentResultSet, Candidate, Job):
+            assert await db.scalar(select(func.count()).select_from(model)) == 0
+    assert await _audit(factory, tenant.id, "agent.turn.stale") == [
+        {"reason_code": "PRINCIPAL_REVOKED"}
+    ]
+
+
+async def test_issue87_simultaneous_same_submission_executes_once(
+    small_pool, tenant_and_user
+) -> None:
+    _engine, factory, _probe = small_pool
+    _, user, password, _ = tenant_and_user
+    gate = GatedOllama()
+    _install(Settings(ui_cookie_secure=False, inference_concurrency=1), gate)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        csrf = await _login(client, user.username, password)
+        conversation_id = await _new_conversation(client, csrf)
+        page = await client.get(f"/ui/agent?conversation={conversation_id}")
+        token_match = re.search(r'name="submission_id" value="([0-9a-f-]{36})"', page.text)
+        assert token_match is not None
+        data = {
+            "csrf_token": csrf, "conversation_id": str(conversation_id),
+            "submission_id": token_match.group(1), "message": "salam",
+        }
+        first = _spawn(client.post("/ui/agent", data=data, follow_redirects=False))
+        await asyncio.wait_for(gate.entered.wait(), timeout=10)
+        second = await client.post("/ui/agent", data=data, follow_redirects=False)
+        assert second.status_code == 409
+        assert gate.calls == 1
+        gate.release.set()
+        assert (await asyncio.wait_for(first, timeout=10)).status_code == 200
+        replay = await client.post("/ui/agent", data=data, follow_redirects=False)
+        assert replay.status_code == 303
+        assert gate.calls == 1
+    assert len((await _stored(factory, conversation_id)).turns) == 2
 
 
 async def test_session_context_replaced_while_inferring_fails_closed(

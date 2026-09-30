@@ -516,6 +516,17 @@ scripts).
 
 ## API security
 
+Issue #87 proposal (D-091, not accepted): human BrowserSessions are revoked
+transactionally on password rotation, user disable, or their membership
+disable; re-enable never revives old cookies. Pending tenant-selection claims
+bind live user/membership security stamps. Failed-login events use a separate
+tenant-independent table with closed outcomes and optional known-user UUID,
+never the submitted unknown username or credentials. Agent composer tokens
+are server-issued request identities bound to live session/owner/conversation
+and the #85 reservation; they grant no scopes, ResultSet, or draft authority.
+CSRF remains mandatory and independent. Agent and classic search text count
+canonical LF characters against the same 4000-character HR limit.
+
 - All non-health routes require `Authorization: Bearer meyar_live_...` (or
   `meyar_test_...` in non-prod).
 - Key verification: look up by prefix, compare SHA-256 hash in constant

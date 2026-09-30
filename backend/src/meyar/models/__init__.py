@@ -5,8 +5,10 @@ from meyar.models.agent_conversation import (
 )
 from meyar.models.agent_draft_confirmation import AgentDraftConfirmation
 from meyar.models.agent_result_set import AgentResultSet, AgentResultSetMember
+from meyar.models.agent_turn_submission import AgentTurnSubmission
 from meyar.models.api_key import ApiKey
 from meyar.models.audit_event import AuditEvent
+from meyar.models.auth_security_event import AuthSecurityEvent
 from meyar.models.browser_session import BrowserSession
 from meyar.models.candidate import Candidate
 from meyar.models.candidate_document import CandidateDocument
@@ -31,8 +33,10 @@ __all__ = [
     "AgentDraftConfirmation",
     "AgentResultSet",
     "AgentResultSetMember",
+    "AgentTurnSubmission",
     "ApiKey",
     "AuditEvent",
+    "AuthSecurityEvent",
     "BrowserSession",
     "Candidate",
     "CandidateDocument",

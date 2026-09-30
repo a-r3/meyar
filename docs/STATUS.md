@@ -2,6 +2,19 @@
 
 ## Current phase
 
+**Issue #87 working branch (not accepted):** accepted `main` is
+`ac9a249359c9a5dcf417b4e3f269a2c0b92b3ab0` (#84, #85, #86 closed).
+Branch `feat/87-session-request-integrity` proposes D-091: transactional
+BrowserSession revocation on password/user/membership security changes,
+security-stamped pending tenant selection, tenant-independent privacy-minimal
+failed-login events, canonical LF 4000-character UI text validation, live
+authenticated validation context, and server-owned agent submission identity
+integrated with the #85 turn reservation. Local Ruff and `mypy src` pass;
+the full suite passes **2820 tests**. Synthetic route/concurrency/migration
+and local browser evidence is recorded in `docs/ISSUE_87_VALIDATION.md`.
+Exact-head CI and independent acceptance review remain pending.
+#87 remains OPEN; #88 and #50 are untouched.
+
 **Current issue #86 working baseline:** accepted `main` is
 `7e456a4b3c43c323d6a2a08426abc1a7e90b1c79` (PR #90 merged; #85 closed).
 The #86 PR proposes D-090: an AgentResultSet is an immutable member

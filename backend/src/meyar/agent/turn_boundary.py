@@ -66,6 +66,7 @@ from meyar.models.agent_conversation import (
     AgentConversation,
     AgentConversationSessionContext,
 )
+from meyar.models.agent_turn_submission import AgentTurnSubmission
 from meyar.models.browser_session import BrowserSession
 from meyar.models.tenant_membership import TenantMembership
 from meyar.models.user import User
@@ -331,7 +332,10 @@ def clear_turn_reservation(conversation: AgentConversation) -> None:
     conversation.active_turn_expires_at = None
 
 
-async def abandon_reserved_turn(db: AsyncSession, reservation: TurnReservation) -> None:
+async def abandon_reserved_turn(
+    db: AsyncSession, reservation: TurnReservation,
+    *, submission_id: uuid.UUID | None = None,
+) -> None:
     """Best-effort, cancellation-shielded cleanup for a turn that will not
     commit: roll back its open transaction and clear ONLY its own
     reservation. If this itself fails (DB unreachable), the reservation
@@ -351,6 +355,20 @@ async def abandon_reserved_turn(db: AsyncSession, reservation: TurnReservation) 
                 )
                 if conversation is not None and conversation.active_turn_id == reservation.token:
                     clear_turn_reservation(conversation)
+                if submission_id is not None:
+                    submission = await db.scalar(
+                        select(AgentTurnSubmission)
+                        .where(AgentTurnSubmission.id == submission_id)
+                        .with_for_update()
+                        .execution_options(populate_existing=True)
+                    )
+                    if (
+                        submission is not None and submission.status == "PROCESSING"
+                        and submission.reservation_id == reservation.token
+                    ):
+                        submission.status = "ABANDONED"
+                        submission.reservation_id = None
+                        submission.lease_expires_at = None
                 await db.commit()
             except Exception:  # noqa: BLE001 - best-effort cleanup; TTL is the backstop
                 # A connection broken by the cancellation itself must never

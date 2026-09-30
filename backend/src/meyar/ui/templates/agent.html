@@ -306,11 +306,13 @@
 {% if not history_turns and not latest %}<section class="agent-main__empty"><h2>Söhbətə başlayın</h2><p>Namizəd axtarın, nəticələri dəqiqləşdirin və ya vakansiya elanını daxil edin.</p></section>{% endif %}
 
 <section class="composer-panel">
-  <form method="post" action="/ui/agent" class="composer" id="agent-composer">
+  <form method="post" action="/ui/agent" class="composer" id="agent-composer"{% if completed_turn %} data-completed-url="/ui/agent?conversation={{ conversation_id }}"{% endif %}>
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="submission_id" value="{{ submission_id }}">
     {% if conversation_id %}<input type="hidden" name="conversation_id" value="{{ conversation_id }}">{% endif %}
     <label for="message" class="sr-only">Namizəd axtarışı və ya vakansiya elanı</label>
-    <textarea id="message" name="message" rows="1" maxlength="4000" placeholder="Namizəd axtarın, nəticələri dəqiqləşdirin və ya vakansiya elanını yapışdırın…"></textarea>
+    {% if composer_error %}<p role="alert" class="form-error">{{ composer_error }}</p>{% endif %}
+    <textarea id="message" name="message" rows="1" maxlength="4000" placeholder="Namizəd axtarın, nəticələri dəqiqləşdirin və ya vakansiya elanını yapışdırın…">{{ composer_message or '' }}</textarea>
     <div class="composer-toolbar">
       <button id="composer-send" class="composer-send" type="submit" aria-label="Göndər">Göndər</button>
     </div>
