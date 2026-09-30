@@ -96,6 +96,16 @@ Final local gates on the implementation:
   **62 passed in 15.54s**, before the final full-suite run.
 - JavaScript syntax, tracked-tree privacy scan and Git whitespace checks pass.
 
+Phase B principal-race correction (independent review of `2ed076d`): the
+four new deterministic regressions in `test_agent_inference_boundary.py`
+(`..._phase_b_holding_authority_blocks_security_change_commit` and
+`..._uncommitted_security_change_makes_phase_b_wait_then_fail_closed`, each for
+password rotation and membership disable) observe the blocked backend in
+`pg_stat_activity`, not by sleeping. All 4 fail against `2ed076d` and pass with
+the `FOR SHARE` lock order (D-091 §5). Gates after the correction: ruff clean,
+mypy clean (204 files), **2824 passed in 317.67s**, single `a87d4c6e2b19` head,
+focused #85/#86/#87/auth/no-exfiltration/migration run **260 passed**.
+
 Final command output, the PR's exact-head CI, and independent acceptance review
 are the gates. D-091 documents the proposed lifecycle, retention/crash and
 migration/downgrade policies. This file does not declare #87 accepted.

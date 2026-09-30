@@ -7514,6 +7514,25 @@ merged. Accepted baseline: `ac9a249359c9a5dcf417b4e3f269a2c0b92b3ab0`.
    token with identical text is a new intentional turn. Busy, cancellation,
    and stale non-commit paths terminate the old identity as ABANDONED in
    shielded cleanup; a rendered retry uses its new issued token.
+   "Phase B revalidates principal" means principal authority is
+   transactionally serialized against credential/session revocation for the
+   final consequential commit: every re-entry (including Phase B) locks
+   User -> TenantMembership -> BrowserSession `FOR SHARE`, in that order,
+   before the conversation/context rows, and holds them until that short
+   transaction commits or rolls back. Security mutators write the same rows
+   in the same order (`set_password`, `set_user_active(False)`: User ->
+   BrowserSession; `set_membership_active(False)`: User -> Membership ->
+   BrowserSession; login/tenant selection: User -> Membership; logout:
+   BrowserSession only), so either the security change commits first and
+   Phase B waits, then fails closed with `PRINCIPAL_REVOKED`, or Phase B
+   holds the rows first and the security change waits until the turn has
+   committed, then revokes the session for every later request. A
+   revocation can never commit between the check and the turn's commit.
+   `FOR SHARE` blocks those UPDATEs but not the `FOR KEY SHARE` locks FK
+   inserts take, nor other turns' re-entry, avoiding new lock inversions.
+   No locks are held across inference (the boundary commits first); no
+   `security_version` comparison is added to Phase B and no schema change
+   is needed. Ordinary non-agent in-flight requests get no new guarantee.
 6. **Browser semantics and retention.** Durable replay protection is used
    instead of true PRG for the first rich result, avoiding duplicate
    persistence of rendered CV/model content. Refresh/back resubmission is

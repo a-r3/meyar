@@ -843,6 +843,156 @@ async def test_issue87_simultaneous_same_submission_executes_once(
     assert len((await _stored(factory, conversation_id)).turns) == 2
 
 
+# ---------------------------------------------------------------------------
+# #87 — Phase B principal authority is serialized against security changes
+# ---------------------------------------------------------------------------
+# Deterministic: independent PostgreSQL sessions, and "blocked" is observed
+# as the backend actually waiting on a row lock in pg_stat_activity — never
+# inferred from a sleep.
+
+
+async def _security_change(db, change: str, *, user, membership) -> None:  # noqa: ANN001
+    from meyar.services.tenant_membership_repo import set_membership_active
+    from meyar.services.user_repo import set_password
+
+    if change == "password":
+        await set_password(db, user_id=user.id, plaintext_password="rotated-synthetic-password")
+    else:
+        await set_membership_active(db, membership_id=membership.id, is_active=False)
+
+
+async def _blocked_on_row_lock(observer, pid: int, task: asyncio.Task) -> bool:  # noqa: ANN001
+    """True once backend ``pid`` is waiting on a heavyweight lock; False if
+    ``task`` finished first (i.e. it was never serialized)."""
+    from sqlalchemy import text
+
+    for _ in range(1000):
+        if task.done():
+            return False
+        async with observer() as db:
+            waiting = await db.scalar(
+                text("SELECT wait_event_type = 'Lock' FROM pg_stat_activity WHERE pid = :pid"),
+                {"pid": pid},
+            )
+        if waiting:
+            return True
+        await asyncio.sleep(0.01)
+    return False
+
+
+async def _phase_a_reserved(client, tenant_and_user, race_factory):  # noqa: ANN001, ANN202
+    """Log in, create a conversation, and commit a real Phase A reservation
+    for that browser session."""
+    from meyar.agent.turn_boundary import reserve_agent_turn
+    from meyar.models.browser_session import BrowserSession
+    from meyar.services.agent_conversation_repo import OwnerPrincipal
+
+    tenant, user, password, membership = tenant_and_user
+    _install(Settings(ui_cookie_secure=False), GatedOllama())
+    csrf = await _login(client, user.username, password)
+    conversation_id = await _new_conversation(client, csrf)
+    owner = OwnerPrincipal(tenant_id=tenant.id, user_id=user.id, membership_id=membership.id)
+    async with race_factory() as db:
+        session_id = await db.scalar(
+            select(BrowserSession.id).where(BrowserSession.user_id == user.id)
+        )
+        reserved = await reserve_agent_turn(
+            db, owner=owner, conversation_id=conversation_id,
+            browser_session_id=session_id, ttl_seconds=60,
+        )
+        assert reserved is not None
+        await db.commit()
+    return reserved.reservation
+
+
+@pytest.fixture
+async def race_factory():  # noqa: ANN201
+    engine = create_async_engine(TEST_DATABASE_URL)
+    try:
+        yield async_sessionmaker(engine, expire_on_commit=False)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("change", ["password", "membership"])
+async def test_issue87_phase_b_holding_authority_blocks_security_change_commit(
+    small_pool, tenant_and_user, race_factory, change: str
+) -> None:
+    """Direction B: Phase B validated the principal first, so the security
+    change must WAIT (it cannot commit) until Phase B's transaction ends;
+    afterwards the old session is revoked for every later request."""
+    from sqlalchemy import text
+
+    from meyar.agent.turn_boundary import clear_turn_reservation, revalidate_reserved_turn
+    from meyar.models.browser_session import BrowserSession
+
+    _, user, _, membership = tenant_and_user
+    async with (
+        AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client,
+        race_factory() as phase_b, race_factory() as mutator,
+    ):
+        reservation = await _phase_a_reserved(client, tenant_and_user, race_factory)
+        conversation, _context = await revalidate_reserved_turn(
+            phase_b, reservation, ttl_seconds=60
+        )
+        pid = await mutator.scalar(text("SELECT pg_backend_pid()"))
+
+        async def change_and_commit() -> None:
+            await _security_change(mutator, change, user=user, membership=membership)
+            await mutator.commit()
+
+        security = _spawn(change_and_commit())
+        assert await _blocked_on_row_lock(race_factory, pid, security), (
+            "security change committed while Phase B held principal authority"
+        )
+        assert not security.done()
+        # Phase B finishes its consequential commit; only then may the
+        # security change proceed.
+        clear_turn_reservation(conversation)
+        await phase_b.commit()
+        await asyncio.wait_for(security, timeout=10)
+        async with race_factory() as db:
+            session = await db.get(BrowserSession, reservation.browser_session_id)
+            assert session is not None and session.revoked_at is not None
+        stale = await client.get("/ui/agent", follow_redirects=False)
+        assert stale.status_code == 303
+
+
+@pytest.mark.parametrize("change", ["password", "membership"])
+async def test_issue87_uncommitted_security_change_makes_phase_b_wait_then_fail_closed(
+    small_pool, tenant_and_user, race_factory, change: str
+) -> None:
+    """Direction A, the exact race: the security change has already
+    written (and row-locked) User/BrowserSession but not yet committed when
+    Phase B starts. Phase B must wait for it and then see the revocation —
+    never validate the pre-commit state and commit afterwards."""
+    from sqlalchemy import text
+
+    from meyar.agent.turn_boundary import (
+        TurnAuthorityLostError,
+        TurnStaleReason,
+        revalidate_reserved_turn,
+    )
+
+    _, user, _, membership = tenant_and_user
+    async with (
+        AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client,
+        race_factory() as phase_b, race_factory() as mutator,
+    ):
+        reservation = await _phase_a_reserved(client, tenant_and_user, race_factory)
+        await _security_change(mutator, change, user=user, membership=membership)
+        pid = await phase_b.scalar(text("SELECT pg_backend_pid()"))
+        revalidation = _spawn(revalidate_reserved_turn(phase_b, reservation, ttl_seconds=60))
+        assert await _blocked_on_row_lock(race_factory, pid, revalidation), (
+            "Phase B validated authority a pending security change is revoking"
+        )
+        await mutator.commit()
+        with pytest.raises(TurnAuthorityLostError) as lost:
+            await asyncio.wait_for(revalidation, timeout=10)
+        assert lost.value.reason == TurnStaleReason.PRINCIPAL_REVOKED
+        await phase_b.rollback()
+
+
 async def test_session_context_replaced_while_inferring_fails_closed(
     small_pool, tenant_and_user
 ) -> None:
