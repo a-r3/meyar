@@ -395,6 +395,11 @@ async def search(
     # through the same deterministic API/CLI contract below. See
     # docs/DECISIONS.md D-023.
     as_of_date = resolve_business_date(settings.business_timezone)
+    # Issue #85 (D-089): end the read-only auth transaction so this request
+    # does not keep a pooled connection checked out while the NL planner
+    # waits for / runs local inference (the planner itself touches the DB
+    # only after the model returns, to append its audit event).
+    await db.commit()
     try:
         planned = await plan_and_search_candidates(
             db,
@@ -532,6 +537,63 @@ def _render_conversation_not_found(request: Request, ctx: UIContext) -> HTMLResp
     )
 
 
+# Issue #85 (D-089): truthful HR copy for a turn that did not run or could
+# not be committed. Never exposes queue/pool/lock internals or reason codes.
+_AGENT_BUSY_COPY = "MEYAR hazırda digər sorğuları emal edir. Bir qədər sonra yenidən cəhd edin."
+_AGENT_TURN_IN_PROGRESS_COPY = (
+    "Bu söhbətdə əvvəlki sorğu hələ emal olunur. Cavabı gözləyin, sonra yenidən göndərin."
+)
+_AGENT_TURN_STALE_COPY = (
+    "Sorğu emal edilərkən söhbətin vəziyyəti dəyişdi, ona görə nəticə tətbiq edilmədi. "
+    "Sorğunu yenidən göndərin."
+)
+
+
+async def _audit_agent_turn_not_committed(
+    db: AsyncSession, ctx: UIContext, event_type: str, reason_code: str
+) -> None:
+    """Bounded structural audit only: a closed reason code — never prompt,
+    model output, message text, or queue/pool figures."""
+    try:
+        await record_event(
+            db,
+            tenant_id=ctx.tenant_id,
+            event_type=event_type,
+            metadata={"reason_code": reason_code},
+            actor_type=ACTOR_HUMAN_USER,
+            actor_id=ctx.user_id,
+        )
+        await db.commit()
+    except SQLAlchemyError:
+        await db.rollback()
+
+
+async def _render_agent_turn_not_run(
+    request: Request,
+    ctx: UIContext,
+    db: AsyncSession,
+    settings: Settings,
+    *,
+    owner,  # noqa: ANN001 - OwnerPrincipal (lazy import)
+    conversation_id: uuid.UUID,
+    message: str,
+    outcome: str,
+    copy: str,
+    status_code: int,
+) -> HTMLResponse:
+    from meyar.services.agent_conversation_repo import get_owned_conversation
+
+    reloaded = await get_owned_conversation(db, owner=owner, conversation_id=conversation_id)
+    if reloaded is None:
+        return _render_conversation_not_found(request, ctx)
+    latest = AgentTurnView(outcome=outcome, message=copy, headline=copy)
+    return await _render_agent_workspace(
+        request, ctx, db, settings, conversation=reloaded,
+        history_turns=_agent_turn_log_views(reloaded), latest=latest,
+        latest_user_message=message, status_code=status_code,
+    )
+
+
 async def _render_agent_workspace(
     request: Request,
     ctx: UIContext,
@@ -631,15 +693,27 @@ async def agent_turn(
     settings: Settings = Depends(get_settings),
 ) -> HTMLResponse:
     verify_csrf(ctx.csrf_token, csrf_token)
-    from meyar.agent.service import run_agent_turn
+    from meyar.agent.service import apply_agent_turn_commit, execute_agent_turn
+    from meyar.agent.turn_boundary import (
+        AgentInferenceBusyError,
+        BoundaryEmbedding,
+        BoundaryLLM,
+        ClientDisconnectedError,
+        ConversationSnapshot,
+        ConversationTurnInProgressError,
+        TurnAuthorityLostError,
+        TurnBoundary,
+        TurnSessionState,
+        TurnStaleReason,
+        abandon_reserved_turn,
+        clear_turn_reservation,
+        reserve_agent_turn_waiting,
+        run_until_client_disconnects,
+    )
     from meyar.services.agent_conversation_repo import (
-        get_or_create_session_context,
-        get_owned_conversation,
-        get_owned_conversation_for_update,
         record_conversation_access_rejected,
         resolve_or_create_current_conversation,
         sync_last_turn_display_text,
-        touch_session_context,
     )
     from meyar.ui.service import build_agent_turn_view
 
@@ -657,42 +731,79 @@ async def agent_turn(
             return _render_conversation_not_found(request, ctx)
         conversation_id = current.id
         await db.commit()
-    # issue #80: hold the DURABLE conversation row's own PostgreSQL lock for
-    # the entire state-changing turn (two tabs/sessions on one conversation
-    # never lose a transcript update); held until commit/rollback below.
-    conversation = await get_owned_conversation_for_update(
-        db, owner=owner, conversation_id=conversation_id
-    )
-    if conversation is None:
+    # issue #85 (D-089) PHASE A: lock the durable conversation row briefly,
+    # authorize, wait (bounded, connection-free) behind another in-flight
+    # turn on this same conversation, and write the server-owned
+    # reservation. The row lock is NOT held across local inference any more:
+    # TurnBoundary commits before every model/embedding wait and re-locks +
+    # revalidates afterwards. Same-conversation serialization (#80) is kept
+    # by the reservation + turn_version, never by a lock held across Ollama.
+    try:
+        reserved = await reserve_agent_turn_waiting(
+            db,
+            owner=owner,
+            conversation_id=conversation_id,
+            browser_session_id=ctx.session_id,
+            ttl_seconds=settings.agent_turn_reservation_seconds,
+            wait_seconds=settings.agent_turn_conversation_wait_seconds,
+        )
+    except ConversationTurnInProgressError:
+        await db.rollback()
+        await record_event(
+            db,
+            tenant_id=ctx.tenant_id,
+            event_type="agent.turn.rejected",
+            metadata={"reason_code": "TURN_IN_PROGRESS"},
+            actor_type=ACTOR_HUMAN_USER,
+            actor_id=ctx.user_id,
+        )
+        await db.commit()
+        return await _render_agent_turn_not_run(
+            request, ctx, db, settings, owner=owner, conversation_id=conversation_id,
+            message=message, outcome="AGENT_TURN_IN_PROGRESS",
+            copy=_AGENT_TURN_IN_PROGRESS_COPY, status_code=status.HTTP_409_CONFLICT,
+        )
+    if reserved is None:
         await db.rollback()
         if explicit_selector:
             await record_conversation_access_rejected(db, owner=owner)
             await db.commit()
         return _render_conversation_not_found(request, ctx)
-    resolved_conversation_id = conversation.id
-    # This BrowserSession's own live context for this conversation. A new
-    # session (relogin) gets a clean one: no ResultSet, no pending draft.
-    session_context = await get_or_create_session_context(
-        db, conversation=conversation, browser_session_id=ctx.session_id
+    reservation = reserved.reservation
+    boundary = TurnBoundary(
+        db, reservation, ttl_seconds=settings.agent_turn_reservation_seconds
     )
-    touch_session_context(session_context)
     # Same "current date is a trusted-runtime value, never user/model
     # supplied" boundary as /ui/search (docs/DECISIONS.md D-023).
     as_of_date = resolve_business_date(settings.business_timezone)
+    failure: tuple[str, str, int] | None = None
     try:
-        result = await run_agent_turn(
-            db,
-            llm,
-            tenant_id=ctx.tenant_id,
-            conversation=conversation,
-            session_context=session_context,
-            user_message=message,
-            as_of_date=as_of_date,
-            embedding_config=embedding_config,
-            embedding_provider=embedding_provider,
-            max_tool_calls=settings.agent_max_tool_calls,
-            max_context_turns=settings.agent_max_context_turns,
+        commit = await run_until_client_disconnects(
+            request,
+            execute_agent_turn(
+                db,
+                BoundaryLLM(llm, boundary),
+                tenant_id=ctx.tenant_id,
+                # Plain snapshots cross the inference gap — never live ORM
+                # authority (Phase B re-reads and revalidates everything).
+                conversation=ConversationSnapshot.of(reserved.conversation),
+                session_context=TurnSessionState.of(reserved.session_context),
+                user_message=message,
+                as_of_date=as_of_date,
+                embedding_config=embedding_config,
+                embedding_provider=BoundaryEmbedding(embedding_provider, boundary),
+                max_tool_calls=settings.agent_max_tool_calls,
+                max_context_turns=settings.agent_max_context_turns,
+            ),
         )
+        # PHASE B: re-lock and revalidate principal, reservation,
+        # turn_version and live context; only then persist the outcome and
+        # clear the reservation in the same commit.
+        conversation, session_context = await boundary.reenter()
+        result = await apply_agent_turn_commit(
+            db, conversation, session_context, tenant_id=ctx.tenant_id, commit=commit
+        )
+        clear_turn_reservation(conversation)
         latest = await build_agent_turn_view(db, tenant_id=ctx.tenant_id, result=result)
         # D-045 (PR #42 owner correction, issue #33): make the persisted
         # turn text and the just-rendered live headline the same value, so
@@ -701,28 +812,45 @@ async def agent_turn(
         # message — see sync_last_turn_display_text's own docstring.
         await sync_last_turn_display_text(db, conversation, text=latest.headline)
         await db.commit()
+    except TurnAuthorityLostError as exc:
+        await abandon_reserved_turn(db, reservation)
+        await _audit_agent_turn_not_committed(db, ctx, "agent.turn.stale", exc.reason.value)
+        if exc.reason == TurnStaleReason.PRINCIPAL_REVOKED:
+            # Same outcome as any request made after revocation.
+            raise UIAccessError(status.HTTP_303_SEE_OTHER, clear_cookie=True) from None
+        failure = ("AGENT_TURN_STALE", _AGENT_TURN_STALE_COPY, status.HTTP_409_CONFLICT)
+    except AgentInferenceBusyError as exc:
+        await abandon_reserved_turn(db, reservation)
+        await _audit_agent_turn_not_committed(db, ctx, "agent.turn.busy", exc.reason)
+        failure = ("AGENT_BUSY", _AGENT_BUSY_COPY, status.HTTP_503_SERVICE_UNAVAILABLE)
+    except ClientDisconnectedError:
+        await abandon_reserved_turn(db, reservation)
+        await _audit_agent_turn_not_committed(
+            db, ctx, "agent.turn.abandoned", "CLIENT_DISCONNECTED"
+        )
+        # Nobody is listening; any minimal response is fine.
+        return HTMLResponse("", status_code=499)
     except (EmbeddingProviderError, SearchRequestError, SQLAlchemyError):
-        await db.rollback()
-        from meyar.ui.view_models import AgentTurnView
-
-        latest = AgentTurnView(
-            outcome="AGENT_PROVIDER_FAILURE",
-            message="MEYAR AI xidməti hazırda əlçatan deyil. Bir qədər sonra yenidən cəhd edin.",
-            headline="MEYAR AI xidməti hazırda əlçatan deyil. Bir qədər sonra yenidən cəhd edin.",
+        await abandon_reserved_turn(db, reservation)
+        failure = (
+            "AGENT_PROVIDER_FAILURE",
+            "MEYAR AI xidməti hazırda əlçatan deyil. Bir qədər sonra yenidən cəhd edin.",
+            status.HTTP_503_SERVICE_UNAVAILABLE,
         )
-        reloaded = await get_owned_conversation(
-            db, owner=owner, conversation_id=resolved_conversation_id
-        )
+    except BaseException:
+        # Cancellation or an unexpected error: never leave this turn's
+        # reservation behind (shielded, best-effort; TTL is the backstop).
+        await abandon_reserved_turn(db, reservation)
+        raise
+    if failure is not None:
+        outcome, copy, status_code = failure
         # D-044 (PR #42 owner UX correction): nothing was persisted for
-        # this failed attempt, so show the HR user's own just-submitted
-        # text directly rather than losing it. A conversation created in
-        # this same rolled-back transaction simply has no history yet.
-        if reloaded is None:
-            return _render_conversation_not_found(request, ctx)
-        return await _render_agent_workspace(
-            request, ctx, db, settings, conversation=reloaded,
-            history_turns=_agent_turn_log_views(reloaded), latest=latest,
-            latest_user_message=message, status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        # this attempt, so show the HR user's own just-submitted text
+        # directly rather than losing it. Never a fabricated answer.
+        return await _render_agent_turn_not_run(
+            request, ctx, db, settings, owner=owner,
+            conversation_id=reservation.conversation_id, message=message,
+            outcome=outcome, copy=copy, status_code=status_code,
         )
 
     # D-044: run_agent_turn always persists exactly one new (user,

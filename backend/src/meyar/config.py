@@ -7,6 +7,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 
+from meyar.llm.concurrency import (
+    DEFAULT_INFERENCE_QUEUE_MAX_WAITERS,
+    DEFAULT_INFERENCE_QUEUE_TIMEOUT_SECONDS,
+)
 from meyar.llm.loopback import require_loopback_url
 from meyar.llm.model_identity import is_local_model_identity
 
@@ -22,7 +26,38 @@ class Settings(BaseSettings):
     ollama_model: str = "qwen3:0.6b"
     max_upload_bytes: int = 10 * 1024 * 1024
     rate_limit_per_minute: int = 60
-    inference_concurrency: int = 1
+    # Issue #85 (docs/DECISIONS.md D-089): process-wide bounded local
+    # inference admission. ``inference_concurrency`` model calls run at
+    # once; at most ``inference_queue_max_waiters`` more wait, each for at
+    # most ``inference_queue_timeout_seconds``. Excess AI work receives a
+    # truthful HR "busy" outcome instead of piling up behind Ollama.
+    inference_concurrency: int = Field(default=1, ge=1, le=16)
+    inference_queue_max_waiters: int = Field(
+        default=DEFAULT_INFERENCE_QUEUE_MAX_WAITERS, ge=0, le=64
+    )
+    inference_queue_timeout_seconds: float = Field(
+        default=DEFAULT_INFERENCE_QUEUE_TIMEOUT_SECONDS, gt=0, le=300
+    )
+    # Readiness (NOT liveness) reports INFERENCE_SATURATED only once the
+    # gate has been continuously saturated for this long — a momentary
+    # full queue is normal backpressure, not an unready process.
+    inference_saturation_grace_seconds: float = Field(default=10.0, ge=0, le=600)
+    # Issue #85: a server-owned agent-turn reservation outlives one
+    # inference gap (queue wait + one model call) and is refreshed at every
+    # re-entry; it only matters when a process died mid-turn.
+    agent_turn_reservation_seconds: int = Field(default=600, ge=60, le=3600)
+    # Issue #85: a second turn on the SAME conversation waits (holding no
+    # DB connection) at most this long for the in-flight turn to finish,
+    # then receives the truthful "still processing" outcome. 0 = refuse at
+    # once. Different conversations never wait on each other.
+    agent_turn_conversation_wait_seconds: float = Field(default=30.0, ge=0, le=300)
+    # Explicit single-process SQLAlchemy pool policy (issue #85, D-089).
+    # These equal SQLAlchemy's own QueuePool defaults; they are explicit so
+    # the operability contract is reviewable. Agent inference never holds a
+    # pooled connection, so these are sized for short DB work only.
+    db_pool_size: int = Field(default=5, ge=1, le=50)
+    db_max_overflow: int = Field(default=10, ge=0, le=50)
+    db_pool_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
     storage_root: str = "./var/storage"
     # Request-serving runtime has no fake/deterministic provider mode.
     # Test doubles are dependency overrides and the synthetic demo provider
@@ -74,6 +109,18 @@ class Settings(BaseSettings):
     # services still receive the resolved date explicitly and never consult
     # the wall clock themselves.
     business_timezone: str = "Asia/Baku"
+
+    @model_validator(mode="after")
+    def _turn_reservation_outlives_inference_gap(self) -> "Settings":
+        # A live turn must never lose its reservation merely because one
+        # admitted-and-running inference gap took its full bounded time.
+        gap = self.inference_queue_timeout_seconds + self.llm_timeout_seconds
+        if self.agent_turn_reservation_seconds <= gap:
+            raise ValueError(
+                "MEYAR_AGENT_TURN_RESERVATION_SECONDS must exceed the inference queue "
+                "timeout plus the LLM timeout."
+            )
+        return self
 
     @model_validator(mode="after")
     def _production_safety(self) -> "Settings":

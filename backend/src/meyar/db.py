@@ -11,7 +11,19 @@ class Base(DeclarativeBase):
 
 
 def make_engine(database_url: str | None = None):
-    return create_async_engine(database_url or get_settings().database_url, pool_pre_ping=True)
+    """Single-process engine with an EXPLICIT bounded pool (issue #85,
+    docs/DECISIONS.md D-089). Request handlers hold a pooled connection
+    only for short DB phases: agent turns release theirs before every local
+    inference wait/call (meyar.agent.turn_boundary), so pool size bounds
+    concurrent DB work, never concurrent AI work."""
+    settings = get_settings()
+    return create_async_engine(
+        database_url or settings.database_url,
+        pool_pre_ping=True,
+        pool_size=settings.db_pool_size,
+        max_overflow=settings.db_max_overflow,
+        pool_timeout=settings.db_pool_timeout_seconds,
+    )
 
 
 _engine = None

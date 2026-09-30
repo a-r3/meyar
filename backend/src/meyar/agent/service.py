@@ -90,6 +90,7 @@ from meyar.agent.semantic_requirements import (
     explicit_vacancy_title,
     is_non_professional_requirement,
 )
+from meyar.agent.turn_boundary import ConversationSnapshot, TurnSessionState
 from meyar.core.domain_terms import canonicalize_domain
 from meyar.core.result_count import is_result_count_only
 from meyar.core.text import (
@@ -294,7 +295,7 @@ async def _dispatch_search(
     llm: LLMProvider,
     *,
     tenant_id: uuid.UUID,
-    session_context: AgentConversationSessionContext,
+    session_context: TurnSessionState,
     previous_result_set_id: uuid.UUID | None,
     decision: AgentDecision,
     as_of_date: date,
@@ -341,7 +342,7 @@ async def _dispatch_profile(
     *,
     tenant_id: uuid.UUID,
     decision: AgentDecision,
-    session_context: AgentConversationSessionContext,
+    session_context: TurnSessionState,
 ) -> tuple[AgentToolResult, CandidateProfileExtraction | None, ResultSetResolutionFailure | None]:
     """Returns (tool result, the raw validated profile when found, the
     resolution failure reason when not) — the profile is handed back
@@ -470,7 +471,7 @@ async def _dispatch_refine(
     llm: LLMProvider,
     *,
     tenant_id: uuid.UUID,
-    session_context: AgentConversationSessionContext,
+    session_context: TurnSessionState,
     decision: AgentDecision,
     as_of_date: date,
     embedding_config: EmbeddingSearchConfig,
@@ -640,7 +641,7 @@ async def _dispatch_evidence(
     *,
     tenant_id: uuid.UUID,
     decision: AgentDecision,
-    session_context: AgentConversationSessionContext,
+    session_context: TurnSessionState,
 ) -> tuple[AgentToolResult, CandidateProfileExtraction | None, ResultSetResolutionFailure | None]:
     """Returns (tool result, the raw validated profile when found, the
     resolution failure reason when not) — see _dispatch_profile's
@@ -1868,16 +1869,27 @@ def _build_result(
     )
 
 
-async def _finish_turn(
-    db: AsyncSession,
-    conversation: AgentConversation,
-    session_context: AgentConversationSessionContext,
+@dataclass(frozen=True)
+class AgentTurnCommit:
+    """The complete, not-yet-persisted outcome of one orchestration turn
+    (issue #85). Built from snapshots only; applied to the live ORM rows by
+    ``apply_agent_turn_commit`` — in the router, only after Phase B has
+    re-locked and revalidated every piece of authority."""
+
+    result: AgentTurnResult
+    user_turn: dict
+    assistant_turn: dict
+    active_result_set_id: uuid.UUID | None
+    active_pending_draft_id: uuid.UUID | None
+
+
+def _finish_turn(
+    session_context: TurnSessionState,
     *,
-    tenant_id: uuid.UUID,
-    turns: list[dict],
+    user_turn: dict,
     result: AgentTurnResult,
-) -> AgentTurnResult:
-    """Persists this turn's own (outcome, message) as a first pass — the
+) -> AgentTurnCommit:
+    """Builds this turn's own (outcome, message) transcript entry as a first pass — the
     router's own sync_last_turn_display_text (D-045) overwrites ``text``
     with the actual rendered headline once one is available, right after
     this call returns. This first pass alone still guarantees a past turn
@@ -1912,21 +1924,54 @@ async def _finish_turn(
         latest_draft = pending_drafts[-1]
         assistant_turn["pending_job_draft"] = pending_draft_payload(latest_draft)
         session_context.active_pending_draft_id = latest_draft.draft_id
+    return AgentTurnCommit(
+        result=result,
+        user_turn=user_turn,
+        assistant_turn=assistant_turn,
+        active_result_set_id=session_context.active_result_set_id,
+        active_pending_draft_id=session_context.active_pending_draft_id,
+    )
+
+
+async def apply_agent_turn_commit(
+    db: AsyncSession,
+    conversation: AgentConversation,
+    session_context: AgentConversationSessionContext,
+    *,
+    tenant_id: uuid.UUID,
+    commit: AgentTurnCommit,
+) -> AgentTurnResult:
+    """Persist one turn's outcome onto the LOCKED, (re)validated live rows:
+    append the (user, assistant) pair to the CURRENT transcript, set this
+    BrowserSession's live ResultSet/pending-draft pointers, apply the title
+    transition, and audit completion. The caller commits."""
+    if (
+        session_context.conversation_id != conversation.id
+        or session_context.tenant_id != tenant_id
+        or conversation.tenant_id != tenant_id
+    ):
+        raise ValueError("Session context does not belong to this conversation.")
     # Durable storage bound (MAX_PERSISTED_AGENT_TURNS) — deliberately NOT
     # the model context window; see save_conversation_turns.
-    await save_conversation_turns(db, conversation, turns=[*turns, assistant_turn])
-    apply_title_kind_transition(conversation, result)
+    await save_conversation_turns(
+        db,
+        conversation,
+        turns=[*conversation.turns, commit.user_turn, commit.assistant_turn],
+    )
+    session_context.active_result_set_id = commit.active_result_set_id
+    session_context.active_pending_draft_id = commit.active_pending_draft_id
+    apply_title_kind_transition(conversation, commit.result)
     await db.flush()
     await record_event(
         db,
         tenant_id=tenant_id,
         event_type="agent.turn.completed",
         metadata={
-            "outcome": result.outcome.value,
-            "tool_call_count": result.tool_call_count,
+            "outcome": commit.result.outcome.value,
+            "tool_call_count": commit.result.tool_call_count,
         },
     )
-    return result
+    return commit.result
 
 
 async def run_agent_turn(
@@ -1943,14 +1988,52 @@ async def run_agent_turn(
     max_tool_calls: int,
     max_context_turns: int,
 ) -> AgentTurnResult:
-    """One bounded orchestration turn. Never persists a mutation to any
-    candidate/job/evaluation row — only this durable conversation's own
-    transcript/title kind and its BrowserSession-bound live
-    ``session_context`` (active_result_set_id, active_pending_draft_id).
+    """Single-transaction form: the caller already holds the durable
+    conversation row lock for the whole turn and commits/rolls back. Used by
+    service-level callers/tests. The HTTP route instead uses
+    ``execute_agent_turn`` inside meyar.agent.turn_boundary's phased
+    lifecycle so no DB connection is held during local inference (#85)."""
+    commit = await execute_agent_turn(
+        db,
+        llm,
+        tenant_id=tenant_id,
+        conversation=ConversationSnapshot.of(conversation),
+        session_context=TurnSessionState.of(session_context),
+        user_message=user_message,
+        as_of_date=as_of_date,
+        embedding_config=embedding_config,
+        embedding_provider=embedding_provider,
+        max_tool_calls=max_tool_calls,
+        max_context_turns=max_context_turns,
+    )
+    return await apply_agent_turn_commit(
+        db, conversation, session_context, tenant_id=tenant_id, commit=commit
+    )
+
+
+async def execute_agent_turn(
+    db: AsyncSession,
+    llm: LLMProvider,
+    *,
+    tenant_id: uuid.UUID,
+    conversation: ConversationSnapshot,
+    session_context: TurnSessionState,
+    user_message: str,
+    as_of_date: date,
+    embedding_config: EmbeddingSearchConfig,
+    embedding_provider: EmbeddingProvider | None,
+    max_tool_calls: int,
+    max_context_turns: int,
+) -> AgentTurnCommit:
+    """One bounded orchestration turn over SNAPSHOTS (issue #85). Never
+    persists a mutation to any candidate/job/evaluation row, and never
+    writes the transcript or live pointers itself: it returns an
+    ``AgentTurnCommit`` for ``apply_agent_turn_commit``. Its own DB writes
+    are append-only audit events and new server-owned AgentResultSet rows,
+    which are inert until a committed live pointer references them.
     ``browser_session_id``/``context_epoch``/``active_result_set_id``/
     ``active_pending_draft_id`` come ONLY from ``session_context`` — never
-    inferred from the transcript (issue #80). Caller holds the durable
-    conversation row lock and is responsible for commit/rollback.
+    inferred from the transcript (issue #80).
 
     The high-level JD/search boundary is decided here from the raw message by
     ``route_agent_entry``.  No form field or model proposal can authorize JD
@@ -1972,7 +2055,8 @@ async def run_agent_turn(
     # Issue #84: canonical source text for everything below (transcript,
     # routing, spans/offsets, hashing, provenance, the local model).
     user_message = normalize_message_newlines(user_message)
-    turns: list[dict] = [*conversation.turns, {"role": "user", "text": user_message}]
+    user_turn: dict = {"role": "user", "text": user_message}
+    turns: list[dict] = [*conversation.turns, user_turn]
     # Live pending authority only (session_context.active_pending_draft_id);
     # historical transcript payloads alone are never actionable.
     pending_draft = get_active_pending_job_draft(conversation, session_context)
@@ -2007,14 +2091,7 @@ async def run_agent_turn(
                 tool_call_count=0,
                 provenance=provenance,
             )
-        return await _finish_turn(
-            db,
-            conversation,
-            session_context,
-            tenant_id=tenant_id,
-            turns=turns,
-            result=result,
-        )
+        return _finish_turn(session_context, user_turn=user_turn, result=result)
 
     entry_routing = route_agent_entry(user_message)
     await record_event(
@@ -2040,14 +2117,7 @@ async def run_agent_turn(
             tool_call_count=0,
             provenance=_configured_provenance(llm),
         )
-        return await _finish_turn(
-            db,
-            conversation,
-            session_context,
-            tenant_id=tenant_id,
-            turns=turns,
-            result=result,
-        )
+        return _finish_turn(session_context, user_turn=user_turn, result=result)
 
     server_authorized_draft = entry_routing.route == AgentEntryRoute.FORCE_JOB_DRAFT
     # Exact user-owned source (offsets into user_message), never rewritten.
@@ -2146,14 +2216,7 @@ async def run_agent_turn(
                         tool_call_count=tool_calls_made,
                         provenance=provenance,
                     )
-                    return await _finish_turn(
-                        db,
-                        conversation,
-                        session_context,
-                        tenant_id=tenant_id,
-                        turns=turns,
-                        result=result,
-                    )
+                    return _finish_turn(session_context, user_turn=user_turn, result=result)
                 break
 
         if decision is None:
@@ -2168,14 +2231,7 @@ async def run_agent_turn(
                 tool_call_count=tool_calls_made,
                 provenance=provenance,
             )
-            return await _finish_turn(
-                db,
-                conversation,
-                session_context,
-                tenant_id=tenant_id,
-                turns=turns,
-                result=result,
-            )
+            return _finish_turn(session_context, user_turn=user_turn, result=result)
 
         if (
             decision.action == AgentActionType.DRAFT_JOB_CRITERIA
@@ -2203,14 +2259,7 @@ async def run_agent_turn(
                 tool_call_count=tool_calls_made,
                 provenance=provenance,
             )
-            return await _finish_turn(
-                db,
-                conversation,
-                session_context,
-                tenant_id=tenant_id,
-                turns=turns,
-                result=result,
-            )
+            return _finish_turn(session_context, user_turn=user_turn, result=result)
 
         if decision.action in (AgentActionType.FINAL_ANSWER, AgentActionType.CLARIFY):
             assert decision.response_code is not None
@@ -2229,14 +2278,7 @@ async def run_agent_turn(
                 tool_call_count=tool_calls_made,
                 provenance=provenance,
             )
-            return await _finish_turn(
-                db,
-                conversation,
-                session_context,
-                tenant_id=tenant_id,
-                turns=turns,
-                result=result,
-            )
+            return _finish_turn(session_context, user_turn=user_turn, result=result)
 
         if tool_calls_made >= max_tool_calls:
             result = _build_result(
@@ -2246,14 +2288,7 @@ async def run_agent_turn(
                 tool_call_count=tool_calls_made,
                 provenance=provenance,
             )
-            return await _finish_turn(
-                db,
-                conversation,
-                session_context,
-                tenant_id=tenant_id,
-                turns=turns,
-                result=result,
-            )
+            return _finish_turn(session_context, user_turn=user_turn, result=result)
 
         if decision.action == AgentActionType.SEARCH_CANDIDATES:
             assert decision.search_query is not None
@@ -2271,14 +2306,7 @@ async def run_agent_turn(
                     tool_call_count=tool_calls_made,
                     provenance=provenance,
                 )
-                return await _finish_turn(
-                    db,
-                    conversation,
-                    session_context,
-                    tenant_id=tenant_id,
-                    turns=turns,
-                    result=result,
-                )
+                return _finish_turn(session_context, user_turn=user_turn, result=result)
             searched_queries.add(normalized_query)
 
         if decision.action == AgentActionType.DRAFT_JOB_CRITERIA:
@@ -2302,14 +2330,7 @@ async def run_agent_turn(
                     tool_call_count=tool_calls_made,
                     provenance=provenance,
                 )
-                return await _finish_turn(
-                    db,
-                    conversation,
-                    session_context,
-                    tenant_id=tenant_id,
-                    turns=turns,
-                    result=result,
-                )
+                return _finish_turn(session_context, user_turn=user_turn, result=result)
             tool_calls_made += 1
             tool_results.append(job_draft_result)
             assert job_draft_result.job_draft is not None
@@ -2330,14 +2351,7 @@ async def run_agent_turn(
                 tool_call_count=tool_calls_made,
                 provenance=provenance,
             )
-            return await _finish_turn(
-                db,
-                conversation,
-                session_context,
-                tenant_id=tenant_id,
-                turns=turns,
-                result=result,
-            )
+            return _finish_turn(session_context, user_turn=user_turn, result=result)
 
         if decision.action == AgentActionType.REFINE_CANDIDATE_RESULTS:
             # Always turn-terminal (issue #49 PR49-2, docs/DECISIONS.md
@@ -2363,14 +2377,7 @@ async def run_agent_turn(
                     tool_call_count=tool_calls_made,
                     provenance=provenance,
                 )
-                return await _finish_turn(
-                    db,
-                    conversation,
-                    session_context,
-                    tenant_id=tenant_id,
-                    turns=turns,
-                    result=result,
-                )
+                return _finish_turn(session_context, user_turn=user_turn, result=result)
             if refine_dispatch.resolution_failure is not None:
                 failure_outcome, failure_message = _outcome_and_message_for_refinement_failure(
                     refine_dispatch.resolution_failure
@@ -2382,14 +2389,7 @@ async def run_agent_turn(
                     tool_call_count=tool_calls_made,
                     provenance=provenance,
                 )
-                return await _finish_turn(
-                    db,
-                    conversation,
-                    session_context,
-                    tenant_id=tenant_id,
-                    turns=turns,
-                    result=result,
-                )
+                return _finish_turn(session_context, user_turn=user_turn, result=result)
             assert (
                 refine_dispatch.tool_result is not None
                 and refine_dispatch.new_result_set_id is not None
@@ -2414,14 +2414,7 @@ async def run_agent_turn(
                 tool_call_count=tool_calls_made,
                 provenance=provenance,
             )
-            return await _finish_turn(
-                db,
-                conversation,
-                session_context,
-                tenant_id=tenant_id,
-                turns=turns,
-                result=result,
-            )
+            return _finish_turn(session_context, user_turn=user_turn, result=result)
 
         matched_profile: CandidateProfileExtraction | None = None
         resolution_failure: ResultSetResolutionFailure | None = None
@@ -2482,14 +2475,7 @@ async def run_agent_turn(
                 tool_call_count=tool_calls_made,
                 provenance=provenance,
             )
-            return await _finish_turn(
-                db,
-                conversation,
-                session_context,
-                tenant_id=tenant_id,
-                turns=turns,
-                result=result,
-            )
+            return _finish_turn(session_context, user_turn=user_turn, result=result)
 
         # GET_CANDIDATE_PROFILE / GET_CANDIDATE_EVIDENCE are always
         # turn-terminal, found or not: each is already a complete,
@@ -2534,11 +2520,4 @@ async def run_agent_turn(
                 tool_call_count=tool_calls_made,
                 provenance=provenance,
             )
-            return await _finish_turn(
-                db,
-                conversation,
-                session_context,
-                tenant_id=tenant_id,
-                turns=turns,
-                result=result,
-            )
+            return _finish_turn(session_context, user_turn=user_turn, result=result)

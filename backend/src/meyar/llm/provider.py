@@ -31,6 +31,22 @@ class ModelSchemaInvalidError(LLMProviderError):
     code = "MODEL_SCHEMA_INVALID"
 
 
+class InferenceBusyError(ModelUnavailableError):
+    """Issue #85: the process-wide local-inference admission gate rejected
+    the call (queue full, or not admitted within the bounded queue wait).
+    No model call was made. Deliberately a ``ModelUnavailableError`` so every
+    existing non-agent caller keeps its already-handled "model unavailable"
+    outcome; the agent turn boundary (meyar.agent.turn_boundary) maps it to
+    the dedicated HR-safe BUSY outcome instead. Carries only the closed
+    reason code."""
+
+    code = "MODEL_BUSY"
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(f"Local inference busy: {reason}.")
+
+
 class LLMResultProvenance(BaseModel):
     """Provider-reported metadata for one structured local inference call."""
 

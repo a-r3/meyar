@@ -22,9 +22,15 @@ from meyar.agent.schemas import (
 from meyar.extraction.identity_prompts import IDENTITY_SYSTEM_PROMPT
 from meyar.extraction.prompts import SYSTEM_PROMPT, build_user_prompt
 from meyar.extraction.view import ProfessionalDocumentView
-from meyar.llm.concurrency import get_inference_semaphore
+from meyar.llm.concurrency import (
+    DEFAULT_INFERENCE_QUEUE_MAX_WAITERS,
+    DEFAULT_INFERENCE_QUEUE_TIMEOUT_SECONDS,
+    InferenceAdmissionError,
+    get_inference_admission,
+)
 from meyar.llm.loopback import build_local_only_async_client, require_loopback_url
 from meyar.llm.provider import (
+    InferenceBusyError,
     LLMResultProvenance,
     ModelSchemaInvalidError,
     ModelTimeoutError,
@@ -55,6 +61,8 @@ class OllamaLLMProvider:
         timeout_seconds: float,
         transport: httpx.AsyncBaseTransport | None = None,
         max_concurrency: int = 1,
+        max_queued: int = DEFAULT_INFERENCE_QUEUE_MAX_WAITERS,
+        queue_timeout_seconds: float = DEFAULT_INFERENCE_QUEUE_TIMEOUT_SECONDS,
     ) -> None:
         require_loopback_url(base_url, setting_name="MEYAR_OLLAMA_BASE_URL")
         self._base_url = base_url.rstrip("/")
@@ -63,6 +71,8 @@ class OllamaLLMProvider:
         self._timeout_seconds = timeout_seconds
         self._transport = transport
         self._max_concurrency = max_concurrency
+        self._max_queued = max_queued
+        self._queue_timeout_seconds = queue_timeout_seconds
 
     async def health(self) -> dict:
         try:
@@ -240,13 +250,19 @@ class OllamaLLMProvider:
         # effect of an agent-only fix (D-040).
         if think is not None:
             payload["think"] = think
-        semaphore = get_inference_semaphore(self._max_concurrency)
+        admission = get_inference_admission(
+            max_active=self._max_concurrency,
+            max_queued=self._max_queued,
+            queue_timeout_seconds=self._queue_timeout_seconds,
+        )
         try:
-            async with semaphore:
+            async with admission.slot():
                 async with build_local_only_async_client(
                     timeout=self._timeout_seconds, transport=self._transport
                 ) as client:
                     resp = await client.post(f"{self._base_url}/api/chat", json=payload)
+        except InferenceAdmissionError as exc:
+            raise InferenceBusyError(exc.reason.value) from None
         except httpx.TimeoutException as exc:
             raise ModelTimeoutError(
                 f"Ollama request timed out after {self._timeout_seconds}s."

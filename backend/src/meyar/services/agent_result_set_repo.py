@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.agent.schemas import MAX_CANDIDATE_REF
 from meyar.embedding.serializer import build_professional_embedding_text, compute_source_sha256
-from meyar.models.agent_conversation import AgentConversationSessionContext
+from meyar.models.agent_conversation import SessionContextAuthority
 from meyar.models.agent_result_set import AgentResultSet, AgentResultSetKind, AgentResultSetMember
 from meyar.search.planner_schemas import PlannedCandidateSearchResponse
 from meyar.search.schemas import CandidateSearchRequest, EmbeddingSearchConfig
@@ -118,7 +118,7 @@ async def create_result_set_from_search(
     *,
     tenant_id: uuid.UUID,
     browser_session_id: uuid.UUID,
-    session_context: AgentConversationSessionContext,
+    session_context: SessionContextAuthority,
     planned: PlannedCandidateSearchResponse,
     previous_result_set_id: uuid.UUID | None,
 ) -> AgentResultSet:
@@ -262,7 +262,7 @@ async def _validate_active_result_set(
     *,
     tenant_id: uuid.UUID,
     browser_session_id: uuid.UUID,
-    session_context: AgentConversationSessionContext,
+    session_context: SessionContextAuthority,
 ) -> AgentResultSet | ResultSetResolutionFailure:
     """Steps 1-7 of the ordinal-resolution check order shared by EVERY
     consumer of ``session_context.active_result_set_id`` — a candidate_ref
@@ -335,7 +335,7 @@ async def resolve_active_candidate_ref(
     *,
     tenant_id: uuid.UUID,
     browser_session_id: uuid.UUID,
-    session_context: AgentConversationSessionContext,
+    session_context: SessionContextAuthority,
     candidate_ref: int,
 ) -> ResolvedCandidateRef | ResultSetResolutionFailure:
     """THE ONLY place a candidate_ref becomes a real candidate_id. Exact
@@ -411,7 +411,7 @@ async def _reject(
     db: AsyncSession,
     *,
     tenant_id: uuid.UUID,
-    session_context: AgentConversationSessionContext,
+    session_context: SessionContextAuthority,
     failure: ResultSetResolutionFailure,
     candidate_ref: int | None,
 ) -> ResultSetResolutionFailure:
@@ -435,7 +435,7 @@ async def active_result_set_size(
     *,
     tenant_id: uuid.UUID,
     browser_session_id: uuid.UUID,
-    session_context: AgentConversationSessionContext,
+    session_context: SessionContextAuthority,
 ) -> int:
     """How many ordinals are currently legally referenceable — used only
     to bound ``available_candidate_refs`` for the model's own next
@@ -472,7 +472,7 @@ async def _reject_refinement(
     db: AsyncSession,
     *,
     tenant_id: uuid.UUID,
-    session_context: AgentConversationSessionContext,
+    session_context: SessionContextAuthority,
     failure: ResultSetResolutionFailure,
 ) -> None:
     """Mirrors ``_reject`` for a rejected REFINE_CANDIDATE_RESULTS turn —
@@ -494,7 +494,7 @@ async def validate_active_result_set_for_refinement(
     *,
     tenant_id: uuid.UUID,
     browser_session_id: uuid.UUID,
-    session_context: AgentConversationSessionContext,
+    session_context: SessionContextAuthority,
 ) -> AgentResultSet | ResultSetResolutionFailure:
     """REFINE_CANDIDATE_RESULTS's own PRE-validation authority (issue #49
     PR49-2 independent-audit correction). ``meyar.agent.service.
@@ -551,7 +551,7 @@ async def create_result_set_from_refinement(
     *,
     tenant_id: uuid.UUID,
     browser_session_id: uuid.UUID,
-    session_context: AgentConversationSessionContext,
+    session_context: SessionContextAuthority,
     filter_request: CandidateSearchRequest | None,
     requested_limit: int | None,
 ) -> RefinementResult | ResultSetResolutionFailure:

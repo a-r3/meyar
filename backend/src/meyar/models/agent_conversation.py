@@ -1,6 +1,7 @@
 import uuid
 from datetime import datetime
 from enum import StrEnum
+from typing import Protocol
 
 from sqlalchemy import (
     JSON,
@@ -64,6 +65,11 @@ class AgentConversation(Base):
         CheckConstraint(
             f"title_kind IN ({_TITLE_KIND_VALUES})", name="ck_agent_conversation_title_kind"
         ),
+        CheckConstraint("turn_version >= 0", name="ck_agent_conversation_turn_version"),
+        CheckConstraint(
+            "(active_turn_id IS NULL) = (active_turn_expires_at IS NULL)",
+            name="ck_agent_conversation_active_turn_pair",
+        ),
         Index(
             "ix_agent_conversations_owner_recent",
             "tenant_id",
@@ -91,6 +97,23 @@ class AgentConversation(Base):
         server_default=AgentConversationTitleKind.NEW.value,
     )
     turns: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    # Issue #85 (docs/DECISIONS.md D-089): monotonic transcript version,
+    # bumped by every transcript write (meyar.services.
+    # agent_conversation_repo.save_conversation_turns /
+    # sync_last_turn_display_text). A turn that released its lock for local
+    # inference commits only if this is unchanged since its reservation.
+    turn_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    # Issue #85: server-owned single in-flight turn reservation. Set (under
+    # the row lock) before the turn releases its DB connection for local
+    # inference; cleared when the turn commits or is abandoned. Never
+    # client-supplied. ``active_turn_expires_at`` bounds a reservation left
+    # behind by a crashed process.
+    active_turn_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
+    active_turn_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -100,6 +123,28 @@ class AgentConversation(Base):
         onupdate=func.now(),
         nullable=False,
     )
+
+
+class SessionContextAuthority(Protocol):
+    """Read-only shape of one BrowserSession-bound live context — satisfied
+    by the ORM row AND by the in-turn working copy
+    (meyar.agent.turn_boundary.TurnSessionState) that crosses the inference
+    boundary without being a live ORM instance (issue #85)."""
+
+    @property
+    def tenant_id(self) -> uuid.UUID: ...
+
+    @property
+    def conversation_id(self) -> uuid.UUID: ...
+
+    @property
+    def browser_session_id(self) -> uuid.UUID: ...
+
+    @property
+    def context_epoch(self) -> int: ...
+
+    @property
+    def active_result_set_id(self) -> uuid.UUID | None: ...
 
 
 class AgentConversationSessionContext(Base):

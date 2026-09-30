@@ -8,6 +8,7 @@ from httpx import AsyncClient
 
 _EXPECTED_PATHS = {
     "/api/v1/health",
+    "/api/v1/health/ready",
     "/api/v1/usage",
     "/api/v1/jobs",
     "/api/v1/jobs/{job_id}",
@@ -62,7 +63,8 @@ async def test_protected_operations_declare_security_health_does_not(
         for method, operation in methods.items():
             if method not in {"get", "post", "put", "patch", "delete"}:
                 continue
-            if path == "/api/v1/health":
+            if path in ("/api/v1/health", "/api/v1/health/ready"):
+                # Unauthenticated liveness + non-sensitive readiness (#85).
                 continue
             assert "security" in operation, f"{method.upper()} {path} missing security"
 

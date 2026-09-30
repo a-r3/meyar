@@ -244,7 +244,9 @@ def test_clean_no_provenance_roundtrip(monkeypatch) -> None:
         asyncio.run(_admin(f'DROP DATABASE IF EXISTS "{name}"'))
 
 
-def test_single_head_is_the_provenance_revision() -> None:
+def test_single_head_chains_through_the_provenance_revision() -> None:
     script = ScriptDirectory.from_config(_config())
-    assert script.get_heads() == [NEW_HEAD]
+    # issue #85 (D-089) chains e5d7a3c91b04 directly on this revision.
+    assert script.get_heads() == ["e5d7a3c91b04"]
+    assert script.get_revision("e5d7a3c91b04").down_revision == NEW_HEAD
     assert script.get_revision(NEW_HEAD).down_revision == PRIOR_HEAD
