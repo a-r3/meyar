@@ -371,6 +371,12 @@ unlabeled number but never guesses that an arbitrary identifier is a phone.
   field / selector parameter only).
 - Audit metadata for `agent.conversation.created`/`opened`/`access_rejected`
   is limited to `conversation_id`, `title_kind`, and `reason_code`.
+- PR80-2 sidebar reads only bounded owner-scoped id/title-kind/timestamp
+  projections (20 per page). Display labels come from a closed server map,
+  never raw messages, queries, CV/JD content, or model output. The mobile
+  drawer only changes presentation. Historical JD controls are rendered only
+  when the current BrowserSession's live context points to that exact draft;
+  opening a durable conversation does not rebind a ResultSet or draft.
 
 ## Local-only Ollama operating contract
 

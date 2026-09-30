@@ -610,6 +610,58 @@ tbody tr:hover { background: var(--surface-subtle); }
   .composer textarea { min-height: 4.4em; }
 }
 
+/* Issue #80: bounded conversation navigation beside the existing agent UI. */
+.agent-workspace-page .site-header { padding-inline: max(24px, calc((100vw - 1440px) / 2)); }
+.agent-header-spacer { flex: 1; }
+.agent-workspace-shell { width: min(1440px, calc(100% - 32px)); margin-top: 24px; }
+.agent-workspace { display: grid; grid-template-columns: 264px minmax(0, 1fr); gap: 28px; align-items: start; }
+.agent-sidebar {
+  position: sticky; top: 20px; height: min(760px, calc(100vh - 40px)); overflow: hidden;
+  display: flex; flex-direction: column;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+  padding: 18px 12px; box-shadow: var(--shadow-subtle);
+}
+.agent-sidebar__top { padding: 0 8px 16px; display: flex; align-items: center; justify-content: space-between; }
+.agent-sidebar__brand { font-weight: 850; letter-spacing: .1em; color: var(--primary); }
+.agent-sidebar__new { margin: 0 4px 22px; }
+.agent-sidebar__new .button { width: 100%; text-align: left; }
+.agent-sidebar__nav { display: flex; flex: 1; flex-direction: column; min-height: 0; }
+.agent-sidebar__heading { margin: 0 8px 10px; font-size: .75rem; text-transform: uppercase; letter-spacing: .08em; color: var(--text-muted); }
+.agent-sidebar__history { display: grid; align-content: start; gap: 3px; min-height: 0; overflow-y: auto; }
+.agent-sidebar__item { display: grid; gap: 1px; padding: 9px 10px; border-radius: 8px; color: var(--text); text-decoration: none; line-height: 1.3; }
+.agent-sidebar__item span { font-weight: 650; font-size: .9rem; }
+.agent-sidebar__item small { color: var(--text-muted); font-size: .75rem; }
+.agent-sidebar__item:hover, .agent-sidebar__item:focus-visible { background: var(--surface-subtle); }
+.agent-sidebar__item--active, .agent-sidebar__item--active:hover { background: var(--accent-soft); border-left: 3px solid var(--primary); padding-left: 7px; color: var(--primary); }
+.agent-sidebar__empty { margin: 4px 10px 20px; color: var(--text-muted); font-size: .88rem; }
+.agent-sidebar__pages { display: flex; justify-content: space-between; gap: 8px; margin: 10px 8px 18px; font-size: .82rem; }
+.agent-sidebar__products { border-top: 1px solid var(--border); margin: auto 4px 0; padding-top: 14px; display: grid; }
+.agent-sidebar__products a { padding: 9px 10px; border-radius: 8px; color: var(--text); text-decoration: none; font-weight: 650; }
+.agent-sidebar__products a:hover, .agent-sidebar__products a:focus-visible { background: var(--surface-subtle); color: var(--primary); }
+.agent-main { min-width: 0; width: min(100%, 1000px); }
+.agent-main__intro { margin: 0 0 20px; }
+.agent-main__intro h1 { margin: 0; font-size: 1.55rem; }
+.agent-main__intro .eyebrow { margin: 0; }
+.agent-main__empty { min-height: 270px; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; color: var(--text-muted); }
+.agent-main__empty h2 { margin-bottom: 0; color: var(--text); font-size: 1.15rem; }
+.agent-drawer-toggle, .agent-drawer-close { display: none; }
+.agent-drawer-backdrop[hidden] { display: none; }
+@media (max-width: 800px) {
+  .agent-workspace-page .site-header { flex-wrap: nowrap; gap: 12px; }
+  .agent-workspace-page .site-header .brand { order: 0; font-size: 1rem; white-space: nowrap; }
+  .agent-workspace-page .site-header .logout-form { order: 0; }
+  .agent-workspace-shell { width: min(100% - 20px, 800px); margin-top: 18px; }
+  .agent-workspace { display: block; }
+  .agent-drawer-toggle { display: inline-flex; align-items: center; justify-content: center; min-width: 40px; min-height: 40px; border: 1px solid #ffffff88; border-radius: 7px; background: transparent; color: white; font-size: 1.3rem; cursor: pointer; }
+  .agent-drawer-close { display: inline-flex; align-items: center; justify-content: center; border: 0; background: transparent; color: var(--text); font-size: 1.6rem; cursor: pointer; }
+  .agent-sidebar { display: none; position: fixed; z-index: 101; inset: 0 auto 0 0; width: min(300px, calc(100vw - 48px)); height: 100vh; border-radius: 0; }
+  .agent-sidebar.is-open { display: flex; }
+  .agent-drawer-backdrop:not([hidden]) { display: block; position: fixed; z-index: 100; inset: 0; background: #00190c99; }
+  .agent-main { width: 100%; }
+  .agent-main .agent-turn { max-width: 100%; }
+  .agent-main .panel { min-width: 0; }
+}
+
 /* PR #42 owner correction (issue #33, D-045) — criteria review noise
    reduction: the requirement text column dominates the row, the
    irrelevant-per-kind duration cell reads as inert "—" text rather than

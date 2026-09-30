@@ -1,5 +1,10 @@
 {% extends "base.html" %}
 {% block title %}MEYAR AI{% endblock %}
+{% block body_class %}agent-workspace-page{% endblock %}
+{% block main_class %}agent-workspace-shell{% endblock %}
+{% block brand_text %}MEYAR AI{% endblock %}
+{% block header_nav %}<span class="agent-header-spacer"></span>{% endblock %}
+{% block header_leading %}<button class="agent-drawer-toggle" type="button" aria-label="Söhbət menyusunu aç" aria-controls="agent-sidebar" aria-expanded="false">☰</button>{% endblock %}
 {% import "_criteria_rows.html" as criteria_form %}
 {% import "_evidence_list.html" as evidence_partial %}
 {% macro fact_section(title, items) %}
@@ -34,58 +39,10 @@
     {% endfor %}
   </div>
 {% endmacro %}
-{% macro turn_cards(latest) %}
-{% for tool_result in latest.tool_results %}
-  {% if tool_result.tool_name == "SEARCH_CANDIDATES" and tool_result.search_outcome.executable %}
-  {% if not tool_result.search_results %}
-  <div class="empty-state"><h2>Nəticə tapılmadı</h2><p>Sorğu şərtləri əsasında uyğun namizəd yoxdur.</p></div>
-  {% endif %}
-  {{ result_card_list(tool_result.search_results, tool_result.search_outcome.mode in ("SEMANTIC_ONLY", "HYBRID")) }}
-  {% elif tool_result.tool_name == "REFINE_CANDIDATE_RESULTS" %}
-  {% if not tool_result.search_results %}
-  <div class="empty-state"><h2>Nəticə tapılmadı</h2><p>Cari nəticələr daxilində uyğun namizəd yoxdur.</p></div>
-  {% endif %}
-  {{ result_card_list(tool_result.search_results, false) }}
-  {% elif tool_result.tool_name == "GET_CANDIDATE_PROFILE" %}
-    {% if not tool_result.not_found_ref %}
-    <section class="panel">
-      <div class="page-heading">
-        <div><h2>{{ tool_result.profile.full_name or "Ad məlumatı yoxdur" }}</h2>{% if tool_result.profile.current_role %}<p class="lede">{{ tool_result.profile.current_role }}</p>{% endif %}</div>
-        <a class="button button-secondary" href="/ui/candidates/{{ tool_result.profile.candidate_id }}">Tam profilə bax</a>
-      </div>
-    </section>
-    <div class="two-column">
-      {{ fact_section("Bacarıqlar", tool_result.profile.skills) }}
-      {{ fact_section("İş təcrübəsi", tool_result.profile.experience) }}
-      {{ fact_section("Təhsil", tool_result.profile.education) }}
-      {{ fact_section("Dillər", tool_result.profile.languages) }}
-      {{ fact_section("Sertifikatlar", tool_result.profile.certifications) }}
-      {{ fact_section("Layihələr", tool_result.profile.projects) }}
-    </div>
-    {% endif %}
-  {% elif tool_result.tool_name == "GET_CANDIDATE_EVIDENCE" %}
-    {% if not tool_result.not_found_ref %}
-    <section class="panel">
-      <div class="page-heading">
-        <h2>{{ tool_result.evidence.full_name or "Ad məlumatı yoxdur" }}{% if tool_result.evidence.topic %} — {{ tool_result.evidence.topic }}{% endif %}</h2>
-        <a class="button button-secondary" href="/ui/candidates/{{ tool_result.evidence.candidate_id }}">Tam profilə bax</a>
-      </div>
-      {% if not tool_result.evidence.matches %}
-      <p class="muted">Bu mövzu üzrə profil daxilində sübut tapılmadı — bu, mövcud olmadığı demək deyil, yalnız CV-də açıq şəkildə göstərilmədiyi deməkdir.</p>
-      {% endif %}
-      {% for match in tool_result.evidence.matches %}
-      <article class="fact">
-        <h4>Uyğun gələn tələb: {{ match.title }} <span class="meta">({{ match.category_label }})</span></h4>
-        {{ evidence_partial.evidence_items(match.evidence) }}
-      </article>
-      {% endfor %}
-    </section>
-    {% endif %}
-  {% elif tool_result.tool_name == "DRAFT_JOB_CRITERIA" %}
-    {% set draft = tool_result.job_draft %}
+{% macro draft_panel(draft) %}
     {% if draft.must_have_rows or draft.preferred_rows or draft.unsupported_must_have or draft.unsupported_preferred or draft.needs_review or draft.prohibited_count or draft.ungrounded_count or draft.unsupported_language or draft.wrong_mode_guidance %}
     {% set has_scorable = draft.must_have_rows or draft.preferred_rows %}
-    {% set confirmation_ready = has_scorable and not draft.requires_resolution %}
+    {% set confirmation_ready = draft.can_act and has_scorable and not draft.requires_resolution %}
     <section class="panel">
       {% if confirmation_ready %}
       <form method="post" action="/ui/agent/drafts/{{ draft.draft_id }}/confirm" class="stack-form">
@@ -142,7 +99,7 @@
           <p><strong>İnsan baxışı tələb edir — qiymətləndirməyə daxil edilmir:</strong> bu mənbə tələblərinin mənası mövcud meyarlarla itkisiz təsdiqlənmədi:</p>
           {% endif %}
           {% for review in draft.needs_review %}
-            {% if review.allowed_types and review.span_id %}
+            {% if draft.can_act and review.allowed_types and review.span_id %}
             <form method="post" action="/ui/agent/drafts/{{ draft.draft_id }}/resolve" class="stack-form review-resolution-form">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
               <input type="hidden" name="span_id" value="{{ review.span_id }}">
@@ -169,6 +126,7 @@
 
         {% if not draft.wrong_mode_guidance %}
         <p class="field-help">Bu, AI tərəfindən hazırlanmış qaralamadır — yekun qərar deyil. MEYAR-ın anladığı tələbləri yoxlayın. Tələbi dəyişmək, silmək və ya əlavə etmək üçün elanı yenidən analiz edin və ya ayrıca əl ilə vakansiya yaradın.</p>
+        {% if not draft.can_act %}<p class="field-help">Bu qaralama əvvəlki sessiyaya aiddir. Davam etmək üçün vakansiyanı yenidən analiz edin.</p>{% endif %}
         {% if confirmation_ready %}
         <button class="button" type="submit">Tələbləri təsdiqlə və namizədləri sırala</button>
         {% elif has_scorable and draft.requires_resolution %}
@@ -182,24 +140,99 @@
       {% endif %}
     </section>
     {% endif %}
+{% endmacro %}
+{% macro turn_cards(latest) %}
+{% for tool_result in latest.tool_results %}
+  {% if tool_result.tool_name == "SEARCH_CANDIDATES" and tool_result.search_outcome.executable %}
+  {% if not tool_result.search_results %}
+  <div class="empty-state"><h2>Nəticə tapılmadı</h2><p>Sorğu şərtləri əsasında uyğun namizəd yoxdur.</p></div>
+  {% endif %}
+  {{ result_card_list(tool_result.search_results, tool_result.search_outcome.mode in ("SEMANTIC_ONLY", "HYBRID")) }}
+  {% elif tool_result.tool_name == "REFINE_CANDIDATE_RESULTS" %}
+  {% if not tool_result.search_results %}
+  <div class="empty-state"><h2>Nəticə tapılmadı</h2><p>Cari nəticələr daxilində uyğun namizəd yoxdur.</p></div>
+  {% endif %}
+  {{ result_card_list(tool_result.search_results, false) }}
+  {% elif tool_result.tool_name == "GET_CANDIDATE_PROFILE" %}
+    {% if not tool_result.not_found_ref %}
+    <section class="panel">
+      <div class="page-heading">
+        <div><h2>{{ tool_result.profile.full_name or "Ad məlumatı yoxdur" }}</h2>{% if tool_result.profile.current_role %}<p class="lede">{{ tool_result.profile.current_role }}</p>{% endif %}</div>
+        <a class="button button-secondary" href="/ui/candidates/{{ tool_result.profile.candidate_id }}">Tam profilə bax</a>
+      </div>
+    </section>
+    <div class="two-column">
+      {{ fact_section("Bacarıqlar", tool_result.profile.skills) }}
+      {{ fact_section("İş təcrübəsi", tool_result.profile.experience) }}
+      {{ fact_section("Təhsil", tool_result.profile.education) }}
+      {{ fact_section("Dillər", tool_result.profile.languages) }}
+      {{ fact_section("Sertifikatlar", tool_result.profile.certifications) }}
+      {{ fact_section("Layihələr", tool_result.profile.projects) }}
+    </div>
+    {% endif %}
+  {% elif tool_result.tool_name == "GET_CANDIDATE_EVIDENCE" %}
+    {% if not tool_result.not_found_ref %}
+    <section class="panel">
+      <div class="page-heading">
+        <h2>{{ tool_result.evidence.full_name or "Ad məlumatı yoxdur" }}{% if tool_result.evidence.topic %} — {{ tool_result.evidence.topic }}{% endif %}</h2>
+        <a class="button button-secondary" href="/ui/candidates/{{ tool_result.evidence.candidate_id }}">Tam profilə bax</a>
+      </div>
+      {% if not tool_result.evidence.matches %}
+      <p class="muted">Bu mövzu üzrə profil daxilində sübut tapılmadı — bu, mövcud olmadığı demək deyil, yalnız CV-də açıq şəkildə göstərilmədiyi deməkdir.</p>
+      {% endif %}
+      {% for match in tool_result.evidence.matches %}
+      <article class="fact">
+        <h4>Uyğun gələn tələb: {{ match.title }} <span class="meta">({{ match.category_label }})</span></h4>
+        {{ evidence_partial.evidence_items(match.evidence) }}
+      </article>
+      {% endfor %}
+    </section>
+    {% endif %}
+  {% elif tool_result.tool_name == "DRAFT_JOB_CRITERIA" %}
+    {{ draft_panel(tool_result.job_draft) }}
   {% endif %}
 {% endfor %}
 {% endmacro %}
 {% block content %}
-<section class="hero">
-  <p class="eyebrow">MEYAR AI</p>
-  <h1>Namizədlər haqqında söhbət edin</h1>
-  <p class="lede">Nə axtardığınızı öz sözlərinizlə yazın; nəticələr həmişə sübutla əsaslandırılır. Yekun qərarı insan verir.</p>
-</section>
+<div class="agent-drawer-backdrop" hidden></div>
+<div class="agent-workspace">
+  <aside class="agent-sidebar" id="agent-sidebar" aria-label="MEYAR iş sahəsi">
+    <div class="agent-sidebar__top"><span class="agent-sidebar__brand">MEYAR</span><button class="agent-drawer-close" type="button" aria-label="Menyunu bağla">×</button></div>
+    <form method="post" action="/ui/agent/reset" class="agent-sidebar__new">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button class="button" type="submit">+ Yeni söhbət</button>
+    </form>
+    <nav class="agent-sidebar__nav" aria-label="Söhbətlər və məhsul bölmələri">
+      <h2 class="agent-sidebar__heading">Söhbətlər</h2>
+      {% if workspace_active_outside_page %}
+      <a class="agent-sidebar__item agent-sidebar__item--active" href="/ui/agent?conversation={{ workspace_active_outside_page.id }}" aria-current="page"><span>{{ workspace_active_outside_page.title }}</span><small>{{ workspace_active_outside_page.updated_label }}</small></a>
+      {% endif %}
+      {% if workspace_history %}
+      <div class="agent-sidebar__history">
+      {% for item in workspace_history %}
+        <a class="agent-sidebar__item{% if item.is_active %} agent-sidebar__item--active{% endif %}" href="/ui/agent?conversation={{ item.id }}"{% if item.is_active %} aria-current="page"{% endif %}><span>{{ item.title }}</span><small>{{ item.updated_label }}</small></a>
+      {% endfor %}
+      </div>
+      {% else %}<p class="agent-sidebar__empty">Hələ söhbət yoxdur.</p>{% endif %}
+      {% if workspace_no_past_conversations %}<p class="agent-sidebar__empty">Hələ başqa söhbət yoxdur.</p>{% endif %}
+      {% if workspace_has_previous or workspace_has_next %}
+      <div class="agent-sidebar__pages">
+        {% if workspace_has_previous %}<a href="/ui/agent?conversation={{ conversation_id }}&amp;page={{ workspace_page - 1 }}">Əvvəlki</a>{% endif %}
+        {% if workspace_has_next %}<a href="/ui/agent?conversation={{ conversation_id }}&amp;page={{ workspace_page + 1 }}">Növbəti</a>{% endif %}
+      </div>
+      {% endif %}
+      <div class="agent-sidebar__products">
+        <a href="/ui/library">Namizədlər</a>
+        <a href="/ui/jobs">Vakansiyalar</a>
+      </div>
+    </nav>
+  </aside>
+  <div class="agent-main">
+    <section class="agent-main__intro"><p class="eyebrow">İş sahəsi</p><h1>MEYAR AI</h1></section>
 
 {% if history_turns or latest %}
 <section class="panel agent-conversation" aria-label="Söhbət tarixçəsi">
-  <div class="page-heading"><h2>Söhbət</h2>
-    <form method="post" action="/ui/agent/reset" class="stack-form">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <button class="button button-secondary" type="submit">Yeni söhbət</button>
-    </form>
-  </div>
+  <div class="page-heading"><h2>Söhbət</h2></div>
   <ol class="agent-turn-list">
     {% for turn in history_turns %}
     <li class="agent-turn agent-turn-{{ turn.role }}">
@@ -221,6 +254,10 @@
   </ol>
 </section>
 {% endif %}
+{% if workspace_active_draft %}
+{{ draft_panel(workspace_active_draft) }}
+{% endif %}
+{% if not history_turns and not latest %}<section class="agent-main__empty"><h2>Söhbətə başlayın</h2><p>Namizəd axtarın, nəticələri dəqiqləşdirin və ya vakansiya elanını daxil edin.</p></section>{% endif %}
 
 <section class="composer-panel">
   <form method="post" action="/ui/agent" class="composer" id="agent-composer">
@@ -233,7 +270,10 @@
     </div>
   </form>
 </section>
+  </div>
+</div>
 {% endblock %}
 {% block scripts %}
 <script src="/ui/static/agent-composer.js" defer></script>
+<script src="/ui/static/agent-workspace.js" defer></script>
 {% endblock %}

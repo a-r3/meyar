@@ -61,10 +61,19 @@ class OwnerPrincipal:
 
 @dataclass(frozen=True)
 class ConversationPage:
-    items: list[AgentConversation]
+    items: list["ConversationSummary"]
     page: int
     page_size: int
     has_next: bool
+
+
+@dataclass(frozen=True)
+class ConversationSummary:
+    """Sidebar projection: never loads transcript or live session authority."""
+
+    id: uuid.UUID
+    title_kind: str
+    updated_at: datetime
 
 
 def _owned(owner: OwnerPrincipal):  # noqa: ANN202 - SQLAlchemy boolean clause list
@@ -225,13 +234,13 @@ async def list_owned_conversations(
     if page_size < 1 or page_size > MAX_HISTORY_PAGE_SIZE:
         raise ValueError(f"page_size must be between 1 and {MAX_HISTORY_PAGE_SIZE}")
     rows = await db.execute(
-        select(AgentConversation)
+        select(AgentConversation.id, AgentConversation.title_kind, AgentConversation.updated_at)
         .where(*_owned(owner))
         .order_by(AgentConversation.updated_at.desc(), AgentConversation.id.desc())
         .offset((page - 1) * page_size)
         .limit(page_size + 1)
     )
-    items = list(rows.scalars())
+    items = [ConversationSummary(*row) for row in rows.all()]
     return ConversationPage(
         items=items[:page_size],
         page=page,

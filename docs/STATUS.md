@@ -2,14 +2,13 @@
 
 ## Current phase
 
-**Current authority correction (issue #80 PR80-1 working baseline):**
-accepted `main` is `a7de84e4ee1c893309d15c74800cd758f4843fdb` (PR #81,
-issue #79 CLOSED/completed). Issue #80 is OPEN; PR80-1 ("Durable
-Conversation Authority Foundation") is implemented on
-`feat/80-durable-conversation-authority` and is not accepted until
-independent review and an owner merge. PR80-2 (visual workspace/sidebar,
-mobile drawer) is NOT implemented and not started. Issue #50 remains OPEN and
-untouched. Issues #35, #36, and #46 remain OPEN and untouched.
+**Current issue #80 working baseline:** accepted `main` is
+`747ed5ef82b766ff3459b5d87a7cecbd3974939d` (PR #82, PR80-1 durable
+conversation authority merged). Issue #80 remains OPEN. PR80-2 proposes the
+visual conversation workspace, bounded owner-scoped sidebar, safe closed
+title labels plus local timestamps, and a mobile drawer. It is not accepted
+until independent code and visual review and owner merge. Issue #50 remains
+OPEN and untouched. Issues #35, #36, and #46 remain OPEN and untouched.
 
 PR80-1 adopts D-086: BrowserSession = authentication transport, NOT durable
 conversation owner. `AgentConversation` = durable tenant/user/membership-owned

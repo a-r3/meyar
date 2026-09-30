@@ -78,7 +78,8 @@ async def test_new_conversation_creates_a_new_durable_row_and_keeps_history(
     reset = await client.post(
         "/ui/agent/reset", data={"csrf_token": csrf}, follow_redirects=False
     )
-    assert reset.status_code == 303 and reset.headers["location"] == "/ui/agent"
+    assert reset.status_code == 303
+    assert reset.headers["location"].startswith("/ui/agent?conversation=")
     current = await client.get("/ui/agent")
     assert "Salam köhnə söhbət" not in current.text
     new_id = _conversation_id(current.text)
@@ -99,6 +100,13 @@ async def test_new_conversation_creates_a_new_durable_row_and_keeps_history(
     assert new_context.active_result_set_id is None
     assert new_context.active_pending_draft_id is None
     assert new_context.context_epoch == 1
+    assert current.text.count('action="/ui/agent/reset"') == 1
+    assert 'href="/ui/library"' in current.text
+    assert 'href="/ui/jobs"' in current.text
+    assert 'aria-current="page"' in current.text
+    assert "Ümumi söhbət" in current.text
+    assert "Bu gün," in current.text or "sen," in current.text
+    assert "Salam köhnə söhbət</span>" not in current.text
 
     # The historical conversation stays reachable through the minimal
     # explicit selector (PR80-2 renders the sidebar).
@@ -122,13 +130,23 @@ async def test_relogin_shows_history_without_result_or_pending_draft_authority(
     _csrf, confirm_path, _html = await _render_python_draft(
         client, username=user.username, password=password
     )
+    conversation_id = _conversation_id(_html)
     await client.post("/ui/logout", data={"csrf_token": _csrf})
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as relogin:
         csrf = await _login_and_csrf(relogin, user.username, password)
-        workspace = await relogin.get("/ui/agent")
+        before = await db_session.scalar(
+            select(func.count()).select_from(AgentConversationSessionContext)
+        )
+        workspace = await relogin.get(f"/ui/agent?conversation={conversation_id}")
         assert "Python required" in workspace.text  # durable history visible
+        assert "Vakansiya analizi" in workspace.text
+        assert confirm_path not in workspace.text
+        assert "/resolve\"" not in workspace.text
+        assert await db_session.scalar(
+            select(func.count()).select_from(AgentConversationSessionContext)
+        ) == before
 
         # Old pending draft is NOT live authority in the new BrowserSession.
         stale = await relogin.post(
@@ -153,6 +171,7 @@ async def test_confirm_clears_live_pending_authority_and_replay_uses_durable_row
     csrf, confirm_path, html = await _render_python_draft(
         client, username=user.username, password=password
     )
+    conversation_id = _conversation_id(html)
     draft_id = uuid.UUID(confirm_path.split("/")[-2])
     context = await db_session.scalar(select(AgentConversationSessionContext))
     assert context is not None and context.active_pending_draft_id == draft_id
@@ -161,9 +180,95 @@ async def test_confirm_clears_live_pending_authority_and_replay_uses_durable_row
     assert confirmed.status_code == 200
     await db_session.refresh(context)
     assert context.active_pending_draft_id is None
+    reloaded = await client.get(f"/ui/agent?conversation={conversation_id}")
+    assert reloaded.status_code == 200
+    assert confirm_path not in reloaded.text
+    assert "/resolve\"" not in reloaded.text
     replay = await client.post(confirm_path, data={"csrf_token": csrf})
     assert replay.status_code == 200
     assert await db_session.scalar(select(func.count()).select_from(Job)) == 1
+
+
+async def test_same_session_reload_and_switch_restore_only_current_draft_controls(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,  # noqa: F811
+) -> None:
+    _tenant, user, password, _membership = tenant_and_user
+    csrf, confirm_path, html = await _render_python_draft(
+        client, username=user.username, password=password
+    )
+    first_id = _conversation_id(html)
+    draft_id = uuid.UUID(confirm_path.split("/")[-2])
+    assert html.count(confirm_path) == 1
+    assert html.count("Python required") == 1
+    before = await db_session.scalar(
+        select(func.count()).select_from(AgentConversationSessionContext)
+    )
+
+    reloaded = await client.get(f"/ui/agent?conversation={first_id}")
+    assert reloaded.status_code == 200
+    assert reloaded.text.count(confirm_path) == 1
+    assert reloaded.text.count("Python required") == 1
+    assert reloaded.text.count('class="agent-turn agent-turn-assistant"') == 1
+    assert await db_session.scalar(
+        select(func.count()).select_from(AgentConversationSessionContext)
+    ) == before
+    context = await db_session.scalar(
+        select(AgentConversationSessionContext).where(
+            AgentConversationSessionContext.conversation_id == uuid.UUID(first_id)
+        )
+    )
+    assert context is not None and context.active_pending_draft_id == draft_id
+
+    switched = await client.post("/ui/agent/reset", data={"csrf_token": csrf})
+    second_id = switched.headers["location"].split("=")[-1]
+    second = await client.get(switched.headers["location"])
+    assert second.status_code == 200 and second_id != first_id
+    assert confirm_path not in second.text and "Python required" not in second.text
+    reopened = await client.get(f"/ui/agent?conversation={first_id}")
+    assert reopened.status_code == 200
+    assert reopened.text.count(confirm_path) == 1
+    await db_session.refresh(context)
+    assert context.active_pending_draft_id == draft_id
+
+
+async def test_superseded_draft_reload_shows_only_new_draft_controls(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,  # noqa: F811
+) -> None:
+    _tenant, user, password, _membership = tenant_and_user
+    csrf, old_path, html = await _render_python_draft(
+        client, username=user.username, password=password
+    )
+    conversation_id = _conversation_id(html)
+    app.dependency_overrides[get_llm_provider] = lambda: FakeLLMProvider()
+    updated = await client.post(
+        "/ui/agent",
+        data={
+            "message": "20 yox, 5 nəfər göstər.",
+            "csrf_token": csrf,
+            "conversation_id": conversation_id,
+        },
+    )
+    assert updated.status_code == 200
+    new_path = re.search(r'action="(/ui/agent/drafts/[0-9a-f-]+/confirm)"', updated.text)
+    assert new_path is not None and new_path.group(1) != old_path
+    assert updated.text.count(new_path.group(1)) == 1
+    reloaded = await client.get(f"/ui/agent?conversation={conversation_id}")
+    assert reloaded.status_code == 200
+    assert old_path not in reloaded.text
+    assert reloaded.text.count(new_path.group(1)) == 1
+    context = await db_session.scalar(
+        select(AgentConversationSessionContext).where(
+            AgentConversationSessionContext.conversation_id == uuid.UUID(conversation_id)
+        )
+    )
+    assert context is not None
+    assert context.active_pending_draft_id == uuid.UUID(new_path.group(1).split("/")[-2])
 
 
 async def test_foreign_and_missing_selectors_are_indistinguishable_and_audited(
