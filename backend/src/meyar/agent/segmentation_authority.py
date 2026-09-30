@@ -5,11 +5,10 @@ per-side occurrences only when every side carries its own explicit,
 unambiguous modality. Otherwise the complete source clause is retained as
 one attributable material span for human review.
 
-Both the JD/model-grounding segmenter (``meyar.agent.jd_authority``) and the
-deterministic semantic requirement builder
-(``meyar.agent.semantic_requirements``) enforce this same rule through this
-one shared primitive instead of maintaining two independently drifting
-segmentation policies.
+The single server-owned segmenter (``meyar.agent.semantic_requirements``)
+enforces this rule through this primitive. Issue #84 removed the former
+second JD/model-grounding segmenter so exactly one segmentation policy owns
+JD source spans.
 """
 
 from collections.abc import Callable, Sequence

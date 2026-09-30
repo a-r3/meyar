@@ -626,6 +626,8 @@ async def test_audit_metadata_is_structural_only() -> None:
         "unsupported_count",
         "prohibited_count",
         "blocking_review_count",
+        "rejected_proposal_count",
+        "model_result_accepted",
     }
     assert all(isinstance(value, (int, str)) for value in metadata.values())
     assert "Python" not in str(metadata)

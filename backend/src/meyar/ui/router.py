@@ -1293,6 +1293,7 @@ async def resolve_agent_job_draft_review(
             tenant_id=ctx.tenant_id,
             event_type="agent.draft.review_resolved",
             metadata={
+                "draft_id": str(resolved.draft_id),
                 "span_id": span_id,
                 "criterion_type": resolution_code,
                 "semantic_policy_version": resolved.semantic_policy_version,
@@ -1354,6 +1355,10 @@ async def confirm_agent_job_draft(
     durable result link so replay/retry cannot create another Job or version.
     """
     from meyar.agent.schemas import ConfirmedAgentJobDraft
+    from meyar.agent.semantic_provenance import (
+        SemanticProvenanceError,
+        build_agent_semantic_provenance,
+    )
     from meyar.services.agent_conversation_repo import (
         mark_pending_job_draft_confirmed,
         resolve_pending_draft_authority,
@@ -1459,6 +1464,16 @@ async def confirm_agent_job_draft(
             request=job_request,
             submitted_span_ids=submitted_span_ids,
         )
+        # issue #84: durable semantic provenance, built fail-closed from the
+        # locked server draft (never browser data) BEFORE anything is created.
+        try:
+            semantic_provenance = build_agent_semantic_provenance(
+                pending, job_request.criteria
+            )
+        except SemanticProvenanceError as exc:
+            raise UIServiceInputError(
+                "Qaralama meyarlarının mənbə izi təsdiqlənmədi; elanı yenidən analiz edin."
+            ) from exc
 
         duplicate_signature = compute_job_duplicate_signature(
             job_request.title, job_request.criteria
@@ -1493,6 +1508,7 @@ async def confirm_agent_job_draft(
             needs_review_requirements=[item.requirement for item in pending.needs_review],
             result_limit=pending.result_limit,
             eligible_only=True,
+            agent_semantic_provenance=semantic_provenance.model_dump(mode="json"),
         )
         await record_event(
             db,

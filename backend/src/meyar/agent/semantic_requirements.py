@@ -84,6 +84,12 @@ _PREFERRED_RE = re.compile(
     r"arzuolunan(?:dir)?|arzu\s+edilir|olsa\s+yaxsi(?:dir|di)?|yaxsi\s+olar)\b",
     re.I,
 )
+# "X is plus Y" is arithmetic/compensation wording ("Price is plus VAT"), not
+# a preference cue; only a terminal "is (a) plus" or one followed by a
+# preposition/conjunction ("... is a plus for this role") is a preference.
+_NON_TERMINAL_PLUS_RE = re.compile(
+    r"\bis\s+(?:a\s+)?plus\s+(?!(?:for|in|to|if|when|with|on|and|but)\b)\w", re.I
+)
 _REQUIRED_RE = re.compile(
     r"\b(?:required|must(?:\s+have|\s+be)?|mandatory|is\s+required|"
     r"teleb\s+olunur|telebdir|mutleqdir|mutleq|mecburi(?:dir)?|sertdir|vacibdir|lazimdir|"
@@ -295,6 +301,7 @@ _PREFERRED_CONTRAST_RE = re.compile(
 )
 _BOUNDARY_RE = re.compile(r"(?:\r?\n)+|(?<=[.!?;])\s+")
 _BULLET_RE = re.compile(r"\s*(?:[-*•]|\d+[.)])\s*")
+_LIST_ITEM_PREFIX_RE = re.compile(r"[ \t]*(?:[-*•]|\d+[.)])[ \t]*")
 _COORD_RE = re.compile(r"\s+(?:and|ve(?:\s+ya)?|or|while|whereas)\s+", re.I)
 _LEVEL_COMPARATOR_TAIL_RE = re.compile(
     r"(?i)^(?:daha\s+(?:yuksek|asagi)|higher|lower|above|below)\b"
@@ -434,6 +441,16 @@ def _sentences(text: str) -> list[tuple[int, int]]:
     if start < end:
         result.append((start, end))
     return result
+
+
+def _is_list_item(jd_text: str, start: int) -> bool:
+    """A unit that opens a bullet/numbered list line. A listed professional
+    item is a source requirement even without a modality cue: it must stay
+    visible for review instead of silently disappearing (issue #84)."""
+    line_start = jd_text.rfind("\n", 0, start) + 1
+    return bool(_LIST_ITEM_PREFIX_RE.fullmatch(jd_text[line_start:start])) and bool(
+        jd_text[line_start:start].strip()
+    )
 
 
 def _material(text: str) -> bool:
@@ -1338,7 +1355,7 @@ def analyze_hr_text(jd_text: str) -> SemanticAnalysis:
             continue
         if _ROLE_REQUEST_RE.search(_fold(source)):
             continue
-        if not _material(source) and shared is None:
+        if not _material(source) and shared is None and not _is_list_item(jd_text, start):
             # A role/search preface is workflow intent, not a ranking
             # requirement.  It must never become a nonsense SKILL row.
             continue
@@ -1445,6 +1462,12 @@ def analyze_hr_text(jd_text: str) -> SemanticAnalysis:
             state = SemanticRequirementState.UNSUPPORTED
         elif family == JDDraftCriterionKind.OTHER:
             state = SemanticRequirementState.UNSUPPORTED
+        elif (
+            modality_type == CriterionType.PREFERRED
+            and _NON_TERMINAL_PLUS_RE.search(_fold(source)) is not None
+        ):
+            state = SemanticRequirementState.NEEDS_HUMAN_REVIEW
+            review_reason = SemanticReviewReason.MODALITY_UNKNOWN
         elif modality_type is None:
             state = SemanticRequirementState.NEEDS_HUMAN_REVIEW
             review_reason = SemanticReviewReason.MODALITY_UNKNOWN

@@ -11,8 +11,13 @@ source-grounded canonical subjects and the server validates them;
 coordination symmetry; header/location/non-professional/instruction text
 never scorable; unresolved MUST_HAVE blocks confirmation until explicit HR
 resolution/exclusion; result counts never span line breaks; AZ/EN count
-follow-up parity; explicit unsupported-language copy. No migration (head
-`b7e3c9d41f28`). Not accepted until independent review and owner merge.
+follow-up parity; explicit unsupported-language copy. The review
+correction pass adds durable per-criterion semantic provenance on
+agent-confirmed criteria versions (one nullable JSON column, migration
+`c84a5e2f9d17`, single head) and removes the legacy second semantic
+authority (D-088 amendment). Real-Ollama acceptance of the four mandatory
+cases is pending (`REAL_OLLAMA_ACCEPTANCE_PENDING`). Not accepted until
+independent review and owner merge.
 Issues #85, #86, #87, #88 and #50 remain OPEN and untouched; #35/#36/#46
 remain OPEN.
 

@@ -3,6 +3,10 @@ import uuid
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meyar.agent.semantic_provenance import (
+    AgentSemanticProvenance,
+    parse_agent_semantic_provenance,
+)
 from meyar.models.job_criteria_version import JobCriteriaVersion
 
 
@@ -17,6 +21,7 @@ async def create_criteria_version(
     needs_review_requirements: list[str] | None = None,
     result_limit: int = 20,
     eligible_only: bool = False,
+    agent_semantic_provenance: dict | None = None,
 ) -> JobCriteriaVersion:
     """Insert a new immutable criteria version for job_id. Never updates an
     existing version row. Caller must have already verified job_id belongs
@@ -40,6 +45,7 @@ async def create_criteria_version(
         result_limit=result_limit,
         eligible_only=eligible_only,
         created_by_api_key_id=created_by_api_key_id,
+        agent_semantic_provenance=agent_semantic_provenance,
     )
     db.add(version)
     await db.flush()
@@ -95,3 +101,20 @@ async def list_criteria_versions(
         .order_by(JobCriteriaVersion.version_number.asc())
     )
     return list(result.scalars().all())
+
+
+async def get_agent_semantic_provenance(
+    db: AsyncSession, *, tenant_id: uuid.UUID, criteria_version_id: uuid.UUID
+) -> AgentSemanticProvenance | None:
+    """Tenant-scoped, strictly validated read of a version's durable agent
+    semantic provenance (issue #84). ``None`` for an unknown/other-tenant
+    version or a version without agent provenance (manual/API/legacy).
+    Persisted JSON is never trusted: a malformed record raises
+    ``pydantic.ValidationError``. Provenance is audit evidence only — the
+    scorer never reads it."""
+    version = await get_criteria_version_by_id(
+        db, tenant_id=tenant_id, criteria_version_id=criteria_version_id
+    )
+    if version is None:
+        return None
+    return parse_agent_semantic_provenance(version.agent_semantic_provenance)

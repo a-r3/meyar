@@ -18,6 +18,7 @@ conversation's OWN BrowserSession-bound live context
 the model's own memory of what it was shown is never the authority for
 which candidate a tool call touches."""
 
+import hashlib
 import re
 import uuid
 from dataclasses import dataclass
@@ -42,11 +43,11 @@ from meyar.agent.intent_routing import (
     AgentRoutedAction,
     route_agent_entry,
 )
-from meyar.agent.jd_authority import explicit_modality
-from meyar.agent.prompts import AGENT_PROMPT_VERSION
+from meyar.agent.prompts import AGENT_PROMPT_VERSION, JD_CRITERIA_DRAFT_PROMPT_VERSION
 from meyar.agent.schemas import (
     AGENT_POLICY_VERSION,
     MAX_CANDIDATE_REF,
+    MAX_JD_REQUIREMENT_SPANS,
     AgentActionType,
     AgentDecision,
     AgentEvidenceToolResult,
@@ -58,19 +59,20 @@ from meyar.agent.schemas import (
     AgentToolResult,
     AgentTurnOutcome,
     AgentTurnResult,
-    DroppedJDCriterionReason,
     EvidenceMatchItem,
     GroundedCaveat,
     GroundedFact,
     GroundedSelection,
     JDCriteriaDraft,
-    JDDraftCriterionItem,
     JDDraftCriterionKind,
     NeedsReviewJDCriterionItem,
     RequirementSpan,
     RequirementSpanResult,
     RequirementSpanState,
+    SemanticModelProvenance,
     SemanticRequirementState,
+    SemanticReviewDecision,
+    SemanticReviewDecisionKind,
     SupportedInputLanguage,
     UnsupportedJDCriterionItem,
 )
@@ -79,8 +81,8 @@ from meyar.agent.semantic_requirements import (
     analyze_hr_text,
     is_non_professional_requirement,
 )
-from meyar.core.domain_terms import DOMAIN_SYNONYMS, canonicalize_domain
-from meyar.core.result_count import extract_result_count_intent, is_result_count_only
+from meyar.core.domain_terms import canonicalize_domain
+from meyar.core.result_count import is_result_count_only
 from meyar.core.text import (
     combine_degree_and_field,
     fold_az_ascii,
@@ -103,7 +105,6 @@ from meyar.schemas.criteria import (
     CriterionIn,
     CriterionKind,
     CriterionType,
-    ProhibitedCriterionError,
     find_prohibited_term,
 )
 from meyar.search.planner_service import plan_and_search_candidates, plan_candidate_search
@@ -146,34 +147,6 @@ MAX_JD_DRAFT_ATTEMPTS = 2
 
 def _fold(text: str) -> str:
     return fold_az_ascii(normalize_azerbaijani_case(text))
-
-
-_REQUIRED_CUE_RE = re.compile(
-    r"\b(required|must|mandatory|minimum|teleb\w*|mutleq\w*|vacib\w*|olmalidir|olmalidi|[a-z]+m[ae]lidir)\b",
-    re.IGNORECASE,
-)
-_PREFERRED_CUE_RE = re.compile(
-    r"\b(preferred|nice\s+to\s+have|plus|ustunluk\w*|arzuolunan\w*)\b", re.IGNORECASE
-)
-_DURATION_CUE_RE = re.compile(r"\b(years?|yrs?|il|tecrube|experience)\b", re.IGNORECASE)
-_GENERAL_EXPERIENCE_RE = re.compile(
-    r"\b(total|overall|general|umumi)\b.*\b(experience|tecrube)\b|"
-    r"\b(experience|tecrube)\b.*\b(total|overall|general|umumi)\b",
-    re.IGNORECASE,
-)
-_LANGUAGE_LEVEL_RE = re.compile(
-    r"\b(?:a1|a2|b1|b2|c1|c2|beginner|elementary|intermediate|advanced|fluent|native|serbest)\b",
-    re.IGNORECASE,
-)
-_CERTIFICATION_CUE_RE = re.compile(r"\b(certificat\w*|sertifikat\w*)\b", re.IGNORECASE)
-_EDUCATION_CUE_RE = re.compile(
-    r"\b(education|degree|bachelor|master|university|tehsil\w*|bakalavr\w*|magistr\w*)\b",
-    re.IGNORECASE,
-)
-_LANGUAGE_CUE_RE = re.compile(
-    r"\b(language|proficiency|dil\w*|english|ingilis\w*|russian|rusca|azerbaijani|azerbaycan\w*)\b",
-    re.IGNORECASE,
-)
 
 
 def _normalize_source_text(text: str) -> str:
@@ -911,35 +884,6 @@ async def _synthesize_grounded_answer(
     return None
 
 
-def _canonical_subject(span: RequirementSpan) -> str:
-    """Extract the complete source subject without fuzzy token matching."""
-    subject = span.normalized
-    subject = re.sub(r"\bis\s+(?:a\s+)?plus\b", " ", subject)
-    subject = _REQUIRED_CUE_RE.sub(" ", subject)
-    subject = _PREFERRED_CUE_RE.sub(" ", subject)
-    subject = re.sub(r"\b\d+(?:[.,]\d+)?\s*(?:years?|yrs?|il)\b", " ", subject)
-    subject = _LANGUAGE_LEVEL_RE.sub(" ", subject)
-    subject = re.sub(
-        r"\b(?:experience|tecrube\w*|proficiency|level|knowledge|bilik\w*|bacariq\w*|"
-        r"olunur|olaraq|candidate|namized|total|overall|general|umumi)\b",
-        " ",
-        subject,
-    )
-    return " ".join(re.findall(r"[a-z0-9+#.]+", subject)).strip()
-
-
-def _source_number(span: RequirementSpan) -> float | None:
-    values = re.findall(r"(?<![\w.])\d+(?:[.,]\d+)?(?![\w.])", span.normalized)
-    if len(values) != 1:
-        return None
-    return float(values[0].replace(",", "."))
-
-
-def _source_language_level(span: RequirementSpan) -> str | None:
-    match = _LANGUAGE_LEVEL_RE.search(span.normalized)
-    return match.group(0).casefold() if match else None
-
-
 def _canonical_display_subject(kind: JDDraftCriterionKind, subject: str) -> str:
     if kind == JDDraftCriterionKind.DOMAIN_EXPERIENCE:
         canonical = "banking" if subject == "bank" else canonicalize_domain(subject)
@@ -960,298 +904,6 @@ def _canonical_display_subject(kind: JDDraftCriterionKind, subject: str) -> str:
     return normalized[:1].upper() + normalized[1:]
 
 
-def _canonicalize_supported_draft_shape(
-    item: JDDraftCriterionItem, *, span: RequirementSpan
-) -> JDDraftCriterionItem:
-    """Map legacy model shapes onto fields owned by the canonical span.
-
-    This adapter cannot add source authority: it only runs after span_id
-    resolution, and every resulting field is revalidated against that exact
-    occurrence by _canonical_binding_result.
-    """
-    subject = _canonical_subject(span)
-    folded = span.normalized
-    has_experience = bool(re.search(r"\b(?:experience|tecrube\w*)\b", folded))
-    has_duration = bool(_DURATION_CUE_RE.search(folded) and re.search(r"\d", folded))
-    source_level = _source_language_level(span)
-    is_language = bool(_LANGUAGE_CUE_RE.search(folded) or source_level)
-    is_general_experience = bool(_GENERAL_EXPERIENCE_RE.search(folded))
-
-    if is_language and item.kind == JDDraftCriterionKind.LANGUAGE and subject:
-        if source_level is not None and (
-            item.required_level is None
-            and source_level not in _normalize_source_text(item.requirement)
-        ):
-            return item
-        return item.model_copy(
-            update={
-                "requirement": _canonical_display_subject(item.kind, subject),
-                "required_level": source_level.upper() if source_level else None,
-                "min_years": None,
-            }
-        )
-    if (has_experience or has_duration) and not is_general_experience and subject:
-        expected = _expected_experience_kind(subject)
-        if expected is not None and item.kind in {
-            JDDraftCriterionKind.SKILL,
-            JDDraftCriterionKind.EXPERIENCE,
-            JDDraftCriterionKind.SKILL_EXPERIENCE,
-            JDDraftCriterionKind.DOMAIN_EXPERIENCE,
-        }:
-            source_number = _source_number(span) if has_duration else None
-            if has_duration and item.min_years != source_number:
-                return item
-            if not has_duration and item.min_years is not None:
-                return item
-            if item.kind == JDDraftCriterionKind.SKILL and item.min_years is None:
-                return item
-            if (
-                item.kind == JDDraftCriterionKind.SKILL
-                and expected == JDDraftCriterionKind.DOMAIN_EXPERIENCE
-            ):
-                return item
-            # A legacy generic EXPERIENCE row is adaptable only when its own
-            # label still names the canonical subject. This prevents the old
-            # unsafe "total experience + separate skill" decomposition from
-            # being recombined by coincidence.
-            if item.kind == JDDraftCriterionKind.EXPERIENCE and not re.search(
-                rf"(?<!\w){re.escape(subject)}(?!\w)",
-                _normalize_source_text(item.requirement),
-            ):
-                return item
-            return item.model_copy(
-                update={
-                    "kind": expected,
-                    "requirement": _canonical_display_subject(expected, subject),
-                    "min_years": source_number,
-                    "required_level": None,
-                }
-            )
-    return item
-
-
-def _review_item_for_supported_ambiguity(
-    item: JDDraftCriterionItem, *, span: RequirementSpan
-) -> NeedsReviewJDCriterionItem | None:
-    """Expose only a bounded ambiguity HR is authorized to resolve."""
-    if explicit_modality(span.text) is not None:
-        return None
-    if item.kind != JDDraftCriterionKind.LANGUAGE:
-        return None
-    subject = _canonical_subject(span)
-    level = _source_language_level(span)
-    if not subject or level is None:
-        return None
-    return NeedsReviewJDCriterionItem(
-        requirement=span.text,
-        span_id=span.span_id,
-        kind=JDDraftCriterionKind.LANGUAGE,
-        subject=_canonical_display_subject(JDDraftCriterionKind.LANGUAGE, subject),
-        required_level=level.upper(),
-        allowed_types=[CriterionType.MUST_HAVE, CriterionType.PREFERRED],
-    )
-
-
-def _subjects_match(kind: JDDraftCriterionKind, drafted: str, canonical: str) -> bool:
-    if not canonical:
-        return False
-    if kind in (JDDraftCriterionKind.SKILL, JDDraftCriterionKind.SKILL_EXPERIENCE):
-        return normalize_skill_name(_normalize_source_text(drafted)) == normalize_skill_name(
-            canonical
-        )
-    if kind == JDDraftCriterionKind.DOMAIN_EXPERIENCE:
-        drafted_domain = "banking" if _normalize_source_text(drafted) == "bank" else drafted
-        canonical_domain = "banking" if canonical == "bank" else canonical
-        return canonicalize_domain(drafted_domain) == canonicalize_domain(canonical_domain)
-    return _normalize_source_text(drafted) == _normalize_source_text(canonical)
-
-
-def _expected_experience_kind(subject: str) -> JDDraftCriterionKind | None:
-    if not subject:
-        return None
-    if subject == "bank" or canonicalize_domain(subject) in DOMAIN_SYNONYMS:
-        return JDDraftCriterionKind.DOMAIN_EXPERIENCE
-    return JDDraftCriterionKind.SKILL_EXPERIENCE
-
-
-def _canonical_binding_result(
-    item: JDDraftCriterionItem,
-    *,
-    criterion_type: CriterionType,
-    span: RequirementSpan,
-) -> DroppedJDCriterionReason | None:
-    """Validate an item against the complete server-owned occurrence.
-
-    ``None`` means the item can proceed to CriterionIn construction.
-    Unsupported means the source semantics are valid but the current agent
-    review form cannot round-trip them. Every other mismatch fails closed to
-    human review; source_text is intentionally never consulted.
-    """
-    if span.segmentation_needs_review:
-        return DroppedJDCriterionReason.NEEDS_HUMAN_REVIEW
-    source_type = explicit_modality(span.text)
-    if source_type is None or source_type != criterion_type.value:
-        return DroppedJDCriterionReason.NEEDS_HUMAN_REVIEW
-
-    folded = span.normalized
-    subject = _canonical_subject(span)
-    has_experience = bool(re.search(r"\b(?:experience|tecrube\w*)\b", folded))
-    has_duration = bool(_DURATION_CUE_RE.search(folded) and re.search(r"\d", folded))
-    source_number = _source_number(span)
-    source_level = _source_language_level(span)
-    is_language = bool(_LANGUAGE_CUE_RE.search(folded) or source_level)
-    is_certification = bool(_CERTIFICATION_CUE_RE.search(folded))
-    is_education = bool(_EDUCATION_CUE_RE.search(folded))
-    is_general_experience = bool(_GENERAL_EXPERIENCE_RE.search(folded))
-
-    if item.kind == JDDraftCriterionKind.OTHER:
-        return DroppedJDCriterionReason.UNSUPPORTED
-
-    if (has_experience or has_duration) and not is_general_experience:
-        expected = _expected_experience_kind(subject)
-        if (
-            expected is None
-            or item.kind != expected
-            or not _subjects_match(item.kind, item.requirement, subject)
-        ):
-            return DroppedJDCriterionReason.NEEDS_HUMAN_REVIEW
-        if has_duration:
-            if source_number is None or item.min_years != source_number:
-                return DroppedJDCriterionReason.NEEDS_HUMAN_REVIEW
-        elif item.min_years is not None:
-            return DroppedJDCriterionReason.NEEDS_HUMAN_REVIEW
-        return None
-
-    if is_language:
-        if item.kind != JDDraftCriterionKind.LANGUAGE or not _subjects_match(
-            item.kind, item.requirement, subject
-        ):
-            return DroppedJDCriterionReason.NEEDS_HUMAN_REVIEW
-        if source_level is not None:
-            if (
-                item.required_level is None
-                or _normalize_source_text(item.required_level) != source_level
-            ):
-                return DroppedJDCriterionReason.NEEDS_HUMAN_REVIEW
-            return None
-        if item.required_level is not None:
-            return DroppedJDCriterionReason.NEEDS_HUMAN_REVIEW
-    elif is_certification:
-        if item.kind != JDDraftCriterionKind.CERTIFICATION or not _subjects_match(
-            item.kind, item.requirement, subject
-        ):
-            return DroppedJDCriterionReason.NEEDS_HUMAN_REVIEW
-    elif is_education:
-        if item.kind != JDDraftCriterionKind.EDUCATION or not _subjects_match(
-            item.kind, item.requirement, subject
-        ):
-            return DroppedJDCriterionReason.NEEDS_HUMAN_REVIEW
-    elif is_general_experience:
-        if (
-            item.kind != JDDraftCriterionKind.EXPERIENCE
-            or not has_duration
-            or source_number is None
-            or item.min_years != source_number
-        ):
-            return DroppedJDCriterionReason.NEEDS_HUMAN_REVIEW
-    else:
-        if item.kind != JDDraftCriterionKind.SKILL or not _subjects_match(
-            item.kind, item.requirement, subject
-        ):
-            return DroppedJDCriterionReason.NEEDS_HUMAN_REVIEW
-
-    if item.min_years is not None and item.kind != JDDraftCriterionKind.EXPERIENCE:
-        return DroppedJDCriterionReason.NEEDS_HUMAN_REVIEW
-    if item.required_level is not None and item.kind != JDDraftCriterionKind.LANGUAGE:
-        return DroppedJDCriterionReason.NEEDS_HUMAN_REVIEW
-    return None
-
-
-def _build_criterion_from_draft_item(
-    item: JDDraftCriterionItem,
-    *,
-    criterion_type: CriterionType,
-    used_ids: set[str],
-    source_span: RequirementSpan | None,
-) -> tuple[CriterionIn | None, DroppedJDCriterionReason | None]:
-    """Re-validates one MODEL-PRODUCED draft item into a real CriterionIn —
-    the exact same schema/prohibited-attribute denylist the manual
-    vacancy-creation form and the REST API already enforce (D-031 point 4:
-    an agent tool-dispatch layer is a new PRODUCER of arguments, never a
-    new validator). Returns ``(None, reason)`` on validation failure —
-    never a silent drop (PR #42 owner correction, issue #33): the caller
-    discloses a PROHIBITED reason as a count only (the matched text itself
-    must never be redisplayed), an UNGROUNDED reason as a count only (the
-    text was never confirmed to actually be in HR's JD — D-046), and an
-    UNSUPPORTED reason with the original, already-confirmed-non-sensitive,
-    already-confirmed-grounded requirement text. Mirrors
-    meyar.ui.service._parse_criterion_row's kind-aware value/min_years
-    shape, but reports instead of raising since this is a best-effort
-    DRAFT, not a form submission.
-
-    ``item.kind == JDDraftCriterionKind.OTHER`` is routed straight to
-    UNSUPPORTED here, deterministically — never via an incidental
-    CriterionIn validation failure — because OTHER, by construction, is
-    the model's own explicit signal that this requirement does not fit
-    any evaluator-supported kind (D-045); building a CriterionIn from it
-    would either fail unpredictably or, worse, misclassify a genuinely
-    unsupported requirement into a supported (and therefore scored)
-    criterion, which the deterministic scorer must never do.
-
-    A missing/unknown server span id gates every disclosure/scoring outcome
-    as UNGROUNDED. A resolved item is checked only against that complete
-    canonical occurrence. Prohibition authority comes exclusively from the
-    raw JD/canonical server span in the dispatch boundary below; no
-    model-authored field, including source_text, can manufacture or remove it.
-    """
-    if source_span is None:
-        return None, DroppedJDCriterionReason.UNGROUNDED
-    binding_reason = _canonical_binding_result(
-        item, criterion_type=criterion_type, span=source_span
-    )
-    if binding_reason is not None:
-        return None, binding_reason
-
-    criterion: CriterionIn | None
-    reason: DroppedJDCriterionReason | None
-    if item.kind == JDDraftCriterionKind.OTHER:
-        criterion, reason = None, DroppedJDCriterionReason.UNSUPPORTED
-    else:
-        kind = CriterionKind(item.kind.value)
-        value = None if kind == CriterionKind.EXPERIENCE else item.requirement
-        try:
-            criterion = CriterionIn(
-                id=slugify_criterion_label(item.requirement, used_ids),
-                kind=kind,
-                type=criterion_type,
-                label=item.requirement,
-                value=value,
-                min_years=item.min_years,
-                required_level=item.required_level,
-                # Weight is deterministic product policy, not a JD field the
-                # model is allowed to author.
-                weight=1.0,
-            )
-            reason = None
-        except ValidationError as exc:
-            # A model_validator raising ProhibitedCriterionError (itself a
-            # ValueError subclass) is always re-wrapped by pydantic into a
-            # generic ValidationError before it reaches this except
-            # clause — the original exception survives only inside each
-            # error's own ``ctx["error"]`` (verified against pydantic
-            # 2.11's actual behavior, not merely assumed). Unwrap it there
-            # to tell a sensitive-attribute match apart from every other
-            # validation failure (D-043, PR #42 owner correction, issue
-            # #33).
-            if any(
-                isinstance(error.get("ctx", {}).get("error"), ProhibitedCriterionError)
-                for error in exc.errors()
-            ):
-                return None, DroppedJDCriterionReason.PROHIBITED
-            criterion, reason = None, DroppedJDCriterionReason.UNSUPPORTED
-    return criterion, reason
-
-
 def _build_authorized_semantic_draft(
     *,
     jd_text: str,
@@ -1265,6 +917,10 @@ def _build_authorized_semantic_draft(
     ungrounded_count: int = 0,
     unsupported_language: SupportedInputLanguage | None = None,
     wrong_mode_guidance: bool = False,
+    source_sha256: str | None = None,
+    semantic_prompt_version: str | None = None,
+    semantic_model: SemanticModelProvenance | None = None,
+    rejected_proposal_count: int = 0,
 ) -> AgentToolResult:
     """Construct the public draft only from validated canonical requirements.
 
@@ -1365,6 +1021,11 @@ def _build_authorized_semantic_draft(
                 state=public_state,
                 criterion_type=item.criterion_type,
                 criterion_id=criterion.id if criterion is not None else None,
+                interpretation_source=(
+                    item.interpretation_source.persisted()
+                    if criterion is not None or shape_validated
+                    else None
+                ),
             )
         )
 
@@ -1388,147 +1049,10 @@ def _build_authorized_semantic_draft(
             unsupported_language=unsupported_language,
             wrong_mode_guidance=wrong_mode_guidance,
             semantic_policy_version=JD_SEMANTIC_POLICY_VERSION,
-        ),
-    )
-
-
-def _build_authorized_model_draft(
-    *, jd_text: str, draft: JDCriteriaDraft, source_spans: list[RequirementSpan]
-) -> AgentToolResult:
-    """Reconcile a model proposal against server-owned source occurrences."""
-    safe_title = (
-        draft.title
-        if draft.title and _title_is_attributed(draft.title, jd_text)
-        else "Vakansiya qaralaması"
-    )
-    used_ids: set[str] = set()
-    must_have: list[CriterionIn] = []
-    preferred: list[CriterionIn] = []
-    unsupported: list[UnsupportedJDCriterionItem] = []
-    needs_review: list[NeedsReviewJDCriterionItem] = []
-    spans_by_id = {span.span_id: span for span in source_spans}
-    span_states: dict[str, RequirementSpanState] = {}
-    span_criterion_ids: dict[str, str] = {}
-    raw_prohibited_spans = {
-        span.span_id for span in source_spans if find_prohibited_term(span.text)
-    }
-    raw_jd_has_prohibited_text = find_prohibited_term(jd_text) is not None
-    prohibited_count = max(len(raw_prohibited_spans), int(raw_jd_has_prohibited_text))
-    span_states.update(
-        {span_id: RequirementSpanState.PROHIBITED for span_id in raw_prohibited_spans}
-    )
-    ungrounded_count = 0
-    for items, drafted_type in (
-        (draft.must_have, CriterionType.MUST_HAVE),
-        (draft.preferred, CriterionType.PREFERRED),
-    ):
-        for item in items:
-            source_span = spans_by_id.get(item.span_id)
-            if source_span is None and is_result_count_only(item.requirement):
-                continue
-            if source_span is not None and source_span.span_id in raw_prohibited_spans:
-                continue
-            if source_span is not None and item.span_id in span_states:
-                ungrounded_count += 1
-                continue
-            canonical_item = (
-                _canonicalize_supported_draft_shape(item, span=source_span)
-                if source_span is not None
-                else item
-            )
-            source_modality = explicit_modality(source_span.text) if source_span else None
-            criterion_type = (
-                CriterionType(source_modality)
-                if source_modality is not None
-                and canonical_item.kind
-                in {
-                    JDDraftCriterionKind.SKILL_EXPERIENCE,
-                    JDDraftCriterionKind.DOMAIN_EXPERIENCE,
-                }
-                else drafted_type
-            )
-            criterion, reason = _build_criterion_from_draft_item(
-                canonical_item,
-                criterion_type=criterion_type,
-                used_ids=used_ids,
-                source_span=source_span,
-            )
-            if criterion is not None:
-                bucket = must_have if criterion_type == CriterionType.MUST_HAVE else preferred
-                bucket.append(criterion)
-                assert source_span is not None
-                span_states[source_span.span_id] = RequirementSpanState.SCORABLE
-                span_criterion_ids[source_span.span_id] = criterion.id
-            elif reason == DroppedJDCriterionReason.PROHIBITED:
-                source_not_already_counted = (
-                    source_span is not None and source_span.span_id not in raw_prohibited_spans
-                ) or (source_span is None and not raw_jd_has_prohibited_text)
-                if source_not_already_counted:
-                    prohibited_count += 1
-            elif reason == DroppedJDCriterionReason.UNGROUNDED:
-                ungrounded_count += 1
-            elif reason == DroppedJDCriterionReason.NEEDS_HUMAN_REVIEW:
-                if source_span is not None:
-                    span_states[source_span.span_id] = RequirementSpanState.NEEDS_HUMAN_REVIEW
-                    supported_review = _review_item_for_supported_ambiguity(
-                        canonical_item, span=source_span
-                    )
-                    if supported_review is not None:
-                        needs_review.append(supported_review)
-            else:
-                assert source_span is not None
-                unsupported.append(
-                    UnsupportedJDCriterionItem(
-                        requirement=source_span.text,
-                        criterion_type=criterion_type,
-                    )
-                )
-                span_states[source_span.span_id] = RequirementSpanState.UNSUPPORTED
-
-    requirement_results: list[RequirementSpanResult] = []
-    for source_span in source_spans:
-        inferred_value = explicit_modality(source_span.text)
-        inferred_type = CriterionType(inferred_value) if inferred_value is not None else None
-        state = span_states.get(source_span.span_id, RequirementSpanState.NEEDS_HUMAN_REVIEW)
-        if state == RequirementSpanState.NEEDS_HUMAN_REVIEW and not any(
-            item.span_id == source_span.span_id for item in needs_review
-        ):
-            needs_review.append(
-                NeedsReviewJDCriterionItem(
-                    requirement=source_span.text, criterion_type=inferred_type
-                )
-            )
-        requirement_results.append(
-            RequirementSpanResult(
-                span_id=source_span.span_id,
-                start_offset=source_span.start_offset,
-                end_offset=source_span.end_offset,
-                text=None if state == RequirementSpanState.PROHIBITED else source_span.text,
-                normalized=(
-                    None if state == RequirementSpanState.PROHIBITED else source_span.normalized
-                ),
-                state=state,
-                criterion_type=inferred_type,
-                criterion_id=span_criterion_ids.get(source_span.span_id),
-            )
-        )
-
-    result_count = extract_result_count_intent(jd_text)
-    return AgentToolResult(
-        tool_name=AgentActionType.DRAFT_JOB_CRITERIA,
-        job_draft=AgentJobDraftToolResult(
-            title=safe_title,
-            draft_id=uuid.uuid4(),
-            requested_result_limit=result_count.requested,
-            result_limit=result_count.effective,
-            result_limit_was_bounded=result_count.was_bounded,
-            must_have=must_have,
-            preferred=preferred,
-            unsupported=unsupported,
-            needs_review=needs_review,
-            ungrounded_count=ungrounded_count,
-            prohibited_count=prohibited_count,
-            requirements=requirement_results,
+            source_sha256=source_sha256,
+            semantic_prompt_version=semantic_prompt_version,
+            semantic_model=semantic_model,
+            rejected_proposal_count=rejected_proposal_count,
         ),
     )
 
@@ -1563,12 +1087,14 @@ async def _dispatch_draft_job_criteria(llm: LLMProvider, *, jd_text: str) -> Age
     Unsupported languages fail closed before inference.
     """
     analysis = analyze_hr_text(jd_text)
+    source_sha256 = hashlib.sha256(jd_text.encode("utf-8")).hexdigest()
     if analysis.language == SupportedInputLanguage.UNSUPPORTED:
         return _build_authorized_semantic_draft(
             jd_text=jd_text,
             title=None,
             canonical=[],
             source_spans=[],
+            source_sha256=source_sha256,
             requested_result_limit=analysis.result_count.requested,
             result_limit=analysis.result_count.effective,
             result_limit_was_bounded=analysis.result_count.was_bounded,
@@ -1613,12 +1139,18 @@ async def _dispatch_draft_job_criteria(llm: LLMProvider, *, jd_text: str) -> Age
             wrong_mode_guidance=True,
         )
 
+    if len(analysis.spans) > MAX_JD_REQUIREMENT_SPANS:
+        # Fail closed instead of raising: a JD with more material requirement
+        # spans than one bounded draft can carry is never partially scored.
+        return _overflow_jd_draft(jd_text=jd_text, analysis=analysis, source_sha256=source_sha256)
+
     draft: JDCriteriaDraft | None = None
+    model_provenance: LLMResultProvenance | None = None
     if not raw_has_prohibited_text:
         hints = _span_hints(analysis)
         for attempt in range(1, MAX_JD_DRAFT_ATTEMPTS + 1):
             try:
-                draft, _provenance = await llm.draft_job_criteria(
+                draft, model_provenance = await llm.draft_job_criteria(
                     jd_text,
                     requirement_spans=analysis.spans,
                     span_hints=hints,
@@ -1654,6 +1186,68 @@ async def _dispatch_draft_job_criteria(llm: LLMProvider, *, jd_text: str) -> Age
         # Disclosure only: source-unbound model proposals are counted, never
         # redisplayed and never material.
         ungrounded_count=canonicalization.ungrounded_proposal_count,
+        source_sha256=source_sha256,
+        # Only a successful, schema-valid local-model result is provenance
+        # (prompt + model identity); raw model output is never retained.
+        semantic_prompt_version=(
+            JD_CRITERIA_DRAFT_PROMPT_VERSION
+            if draft is not None and model_provenance is not None
+            else None
+        ),
+        semantic_model=(
+            SemanticModelProvenance(
+                provider=model_provenance.provider,
+                model_name=model_provenance.model_name,
+                model_revision=model_provenance.model_revision,
+            )
+            if draft is not None and model_provenance is not None
+            else None
+        ),
+        rejected_proposal_count=canonicalization.rejected_proposal_count,
+    )
+
+
+def _overflow_jd_draft(
+    *, jd_text: str, analysis: SemanticAnalysis, source_sha256: str
+) -> AgentToolResult:
+    """Too many material spans for one bounded draft: nothing is scored and
+    HR is asked to split the vacancy (never a partial, silently truncated
+    criterion set)."""
+    first, last = analysis.spans[0], analysis.spans[-1]
+    return AgentToolResult(
+        tool_name=AgentActionType.DRAFT_JOB_CRITERIA,
+        job_draft=AgentJobDraftToolResult(
+            title="Vakansiya qaralaması",
+            draft_id=uuid.uuid4(),
+            requested_result_limit=analysis.result_count.requested,
+            result_limit=analysis.result_count.effective,
+            result_limit_was_bounded=analysis.result_count.was_bounded,
+            result_limit_needs_review=analysis.result_count_needs_review,
+            needs_review=[
+                NeedsReviewJDCriterionItem(
+                    requirement=(
+                        f"Elanda {len(analysis.spans)} tələb var; bir qaralama ən çox "
+                        f"{MAX_JD_REQUIREMENT_SPANS} tələbi emal edir. Elanı hissələrə bölün."
+                    ),
+                    criterion_type=CriterionType.MUST_HAVE,
+                    span_id="req-0001",
+                    blocking=True,
+                )
+            ],
+            requirements=[
+                RequirementSpanResult(
+                    span_id="req-0001",
+                    start_offset=first.start_offset,
+                    end_offset=last.end_offset,
+                    text=jd_text[first.start_offset : last.end_offset][:4000],
+                    normalized=None,
+                    state=RequirementSpanState.NEEDS_HUMAN_REVIEW,
+                    criterion_type=CriterionType.MUST_HAVE,
+                )
+            ],
+            semantic_policy_version=JD_SEMANTIC_POLICY_VERSION,
+            source_sha256=source_sha256,
+        ),
     )
 
 
@@ -1666,6 +1260,8 @@ def jd_draft_audit_metadata(draft: AgentJobDraftToolResult) -> dict[str, object]
         "review_count": states.count(RequirementSpanState.NEEDS_HUMAN_REVIEW),
         "unsupported_count": states.count(RequirementSpanState.UNSUPPORTED),
         "prohibited_count": states.count(RequirementSpanState.PROHIBITED),
+        "rejected_proposal_count": draft.rejected_proposal_count,
+        "model_result_accepted": draft.semantic_model is not None,
         "blocking_review_count": sum(
             1 for item in draft.needs_review if item.blocking and not item.acknowledged_excluded
         ),
@@ -1737,6 +1333,9 @@ def resolve_job_draft_review_modality(
     updates: dict[str, object] = {
         "needs_review": [item for item in draft.needs_review if item.span_id != span_id],
         "requirements": requirements,
+        "review_decisions": _with_review_decision(
+            draft, span_id=span_id, decision=SemanticReviewDecisionKind(criterion_type.value)
+        ),
     }
     if criterion_type == CriterionType.MUST_HAVE:
         updates["must_have"] = [*draft.must_have, criterion]
@@ -1766,9 +1365,25 @@ def exclude_blocking_review_requirement(
                 if item.span_id == span_id
                 else item
                 for item in draft.needs_review
-            ]
+            ],
+            "review_decisions": _with_review_decision(
+                draft,
+                span_id=span_id,
+                decision=SemanticReviewDecisionKind.EXCLUDED_BY_REVIEWER,
+            ),
         }
     )
+
+
+def _with_review_decision(
+    draft: AgentJobDraftToolResult, *, span_id: str, decision: SemanticReviewDecisionKind
+) -> list[SemanticReviewDecision]:
+    """The final explicit human decision per span (issue #84): persisted with
+    the confirmed criteria version, so it survives transcript retention."""
+    return [
+        *[item for item in draft.review_decisions if item.span_id != span_id],
+        SemanticReviewDecision(span_id=span_id, decision=decision),
+    ]
 
 
 _FOLLOWUP_RE = re.compile(
@@ -1946,6 +1561,10 @@ def _apply_pending_draft_followup(
             updated_must_have.append(replacement)
         else:
             updated_preferred.append(replacement)
+        target_span = next(
+            (item.span_id for item in draft.requirements if item.criterion_id == target.id),
+            None,
+        )
         return draft.model_copy(
             update={
                 "draft_id": uuid.uuid4(),
@@ -1955,6 +1574,15 @@ def _apply_pending_draft_followup(
                     draft, criterion_id=target.id, criterion_type=requested_type
                 ),
                 "modification_source_text": user_message,
+                "review_decisions": (
+                    _with_review_decision(
+                        draft,
+                        span_id=target_span,
+                        decision=SemanticReviewDecisionKind(requested_type.value),
+                    )
+                    if target_span is not None
+                    else list(draft.review_decisions)
+                ),
             }
         )
     # An explicit no-op or ambiguous direction fails truthfully. It must not

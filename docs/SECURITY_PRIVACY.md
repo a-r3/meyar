@@ -397,8 +397,15 @@ unlabeled number but never guesses that an arbitrary identifier is a phone.
 - An unresolved explicit MUST_HAVE blocks confirmation until HR resolves a
   server-declared interpretation or explicitly excludes it; exclusion never
   creates a criterion and stays disclosed on the criteria version.
-- Audit metadata for drafts/review resolution carries only the policy version
-  and structural counts — never JD/span text or model output.
+- Audit metadata for drafts/review resolution carries only ids, the policy
+  version and structural counts — never JD/span text or model output.
+- Each agent-confirmed criteria version stores immutable semantic provenance
+  (`agent_semantic_provenance`, D-088 A-1): the JD's sha256 (never the JD),
+  each criterion's exact source fragment and offsets, interpretation source,
+  policy/prompt version, accepted local-model identity and explicit human
+  review decisions. No raw model output, chain-of-thought or candidate data.
+  Built fail-closed from the server draft, validated on read, tenant-scoped,
+  never a scoring input.
 
 ## Local-only Ollama operating contract
 

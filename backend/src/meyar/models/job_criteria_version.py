@@ -41,6 +41,10 @@ class JobCriteriaVersion(Base):
     needs_review_requirements: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     result_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=20)
     eligible_only: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Issue #84 (D-088): immutable semantic provenance of an AGENT-confirmed
+    # JD draft (strict schema meyar.agent.semantic_provenance). NULL for
+    # manual/API/pre-#84 versions — never fabricated. Never a scoring input.
+    agent_semantic_provenance: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_by_api_key_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("api_keys.id", ondelete="SET NULL"), nullable=True
     )

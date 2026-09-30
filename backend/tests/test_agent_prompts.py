@@ -6,12 +6,12 @@ prompt test."""
 
 import json
 
-from meyar.agent.jd_authority import segment_requirement_spans
 from meyar.agent.prompts import (
     AGENT_SYSTEM_PROMPT,
     build_agent_user_prompt,
     build_jd_criteria_draft_user_prompt,
 )
+from meyar.agent.semantic_requirements import analyze_hr_text
 
 
 def test_system_prompt_prohibits_reasoning_disclosure_and_sql() -> None:
@@ -93,7 +93,7 @@ def test_system_prompt_keeps_context_presence_separate_from_ordinal_authority() 
 
 def test_jd_prompt_supplies_server_owned_occurrence_ids_before_inference() -> None:
     source = "Python required. Python required."
-    spans = segment_requirement_spans(source)
+    spans = analyze_hr_text(source).spans
     prompt = build_jd_criteria_draft_user_prompt(
         jd_text=source, requirement_spans=spans
     )

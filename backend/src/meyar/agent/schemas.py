@@ -345,10 +345,10 @@ class JDDraftCriterionKind(StrEnum):
     JD text and already confirmed non-sensitive, but does not fit any of
     the five evaluator-supported dimensions (for example: relocation
     willingness, driving license, availability for shift work). ``OTHER``
-    never becomes a ``CriterionIn`` — it always maps to
-    ``DroppedJDCriterionReason.UNSUPPORTED`` in
-    meyar.agent.service._build_criterion_from_draft_item, deterministically,
-    never via an incidental validation failure. Deliberately NOT
+    never becomes a ``CriterionIn``: a model proposal of ``OTHER`` is
+    rejected by the canonical boundary (meyar.agent.canonical_requirements,
+    issue #84), and deterministic non-professional source text is
+    UNSUPPORTED before any model call. Deliberately NOT
     meyar.schemas.criteria.CriterionKind itself: that enum is the
     deterministic evaluator's own persisted scoring vocabulary and must
     never grow a scoring-irrelevant member (PR #42 owner correction,
@@ -591,39 +591,6 @@ class JDCriteriaDraft(BaseModel):
     )
 
 
-class DroppedJDCriterionReason(StrEnum):
-    """Why a model-drafted JD requirement did not become a real
-    CriterionIn — see PR #42 owner correction (issue #33): a drafted
-    requirement must never simply vanish, but a PROHIBITED one's own text
-    is exactly what security policy forbids re-displaying, so the reasons
-    are surfaced very differently (see UnsupportedJDCriterionItem and
-    AgentJobDraftToolResult.prohibited_count/ungrounded_count)."""
-
-    # A non-sensitive requirement that failed some other CriterionIn rule
-    # (for example an EXPERIENCE item the JD text gave no derivable
-    # duration for). Safe to disclose verbatim — HR must see it, per the
-    # ACAMS-style "not silently dropped" requirement.
-    UNSUPPORTED = "UNSUPPORTED"
-    # Matched the sensitive/irrelevant-attribute denylist
-    # (meyar.schemas.criteria.find_prohibited_term). The matched
-    # requirement's own text must never be re-displayed or persisted —
-    # only a count and a safe, generic HR-facing explanation.
-    PROHIBITED = "PROHIBITED"
-    # Failed to resolve a server-owned canonical span id. The requirement's
-    # own text therefore has no authoritative occurrence in the actual JD —
-    # the structural replacement for D-046's lexical grounding check:
-    # a short/underspecified JD reliably gets "filled in" with a
-    # plausible-sounding but entirely unstated item (the reported
-    # "Passing an exam" fabricated onto an unrelated travel-readiness
-    # requirement). Never disclosed verbatim — unlike UNSUPPORTED, this
-    # requirement was never confirmed to actually be in the JD, so
-    # presenting its own text would itself misattribute invented content
-    # to HR's own source document; only a safe count is exposed (see
-    # AgentJobDraftToolResult.ungrounded_count).
-    UNGROUNDED = "UNGROUNDED"
-    NEEDS_HUMAN_REVIEW = "NEEDS_HUMAN_REVIEW"
-
-
 class UnsupportedJDCriterionItem(BaseModel):
     """One non-sensitive JD requirement that did NOT become a real
     CriterionIn — kept visible to HR (never persisted, never scored) so
@@ -685,6 +652,43 @@ class NeedsReviewJDCriterionItem(BaseModel):
         return self
 
 
+class SemanticInterpretationSource(StrEnum):
+    """Issue #84: which authority produced a canonical criterion shape.
+
+    ``DETERMINISTIC`` — the server's own source analysis produced an already
+    canonical subject. ``MODEL_VALIDATED`` — a local-model canonical proposal
+    closed a subject-normalization gap and passed server grounding checks."""
+
+    DETERMINISTIC = "DETERMINISTIC"
+    MODEL_VALIDATED = "MODEL_VALIDATED"
+
+
+class SemanticModelProvenance(BaseModel):
+    """Identity of the local model whose JD semantic result was accepted.
+    Never raw model output."""
+
+    model_config = {"extra": "forbid", "frozen": True}
+
+    provider: str = Field(min_length=1, max_length=64)
+    model_name: str = Field(min_length=1, max_length=255)
+    model_revision: str = Field(default="", max_length=255)
+
+
+class SemanticReviewDecisionKind(StrEnum):
+    MUST_HAVE = "MUST_HAVE"
+    PREFERRED = "PREFERRED"
+    EXCLUDED_BY_REVIEWER = "EXCLUDED_BY_REVIEWER"
+
+
+class SemanticReviewDecision(BaseModel):
+    """One explicit human semantic-review decision that affects ranking."""
+
+    model_config = {"extra": "forbid", "frozen": True}
+
+    span_id: str = Field(pattern=r"^req-\d{4}$")
+    decision: SemanticReviewDecisionKind
+
+
 class RequirementSpanState(StrEnum):
     SCORABLE = "SCORABLE"
     UNSUPPORTED = "UNSUPPORTED"
@@ -707,6 +711,9 @@ class RequirementSpanResult(BaseModel):
     state: RequirementSpanState
     criterion_type: CriterionType | None = None
     criterion_id: str | None = Field(default=None, pattern=r"^[a-z0-9_]{1,64}$")
+    # Issue #84: authority of the (possibly review-gated) canonical shape;
+    # None when no canonical shape exists for this span.
+    interpretation_source: SemanticInterpretationSource | None = None
 
 
 class AgentJobDraftToolResult(BaseModel):
@@ -721,7 +728,7 @@ class AgentJobDraftToolResult(BaseModel):
     ``prohibited_count`` only — its own text is never redisplayed,
     matching the same denylist discipline the manual form and REST API
     already enforce. A requirement with no resolved server-owned span id
-    (see DroppedJDCriterionReason.UNGROUNDED) is counted in
+    (a model proposal with an unknown span id) is counted in
     ``ungrounded_count`` only, for the same
     reason: its own text was never confirmed to actually be in HR's JD,
     so redisplaying it would itself misattribute invented content to the
@@ -754,6 +761,14 @@ class AgentJobDraftToolResult(BaseModel):
     # Issue #84: which JD semantic-interpretation policy produced this draft.
     # None only for drafts persisted before the policy was versioned.
     semantic_policy_version: str | None = Field(default=None, max_length=64)
+    # Issue #84 durable-provenance inputs (all server-owned; never model text).
+    source_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    semantic_prompt_version: str | None = Field(default=None, max_length=64)
+    semantic_model: SemanticModelProvenance | None = None
+    rejected_proposal_count: int = Field(default=0, ge=0)
+    review_decisions: list[SemanticReviewDecision] = Field(
+        default_factory=list, max_length=MAX_JD_REQUIREMENT_SPANS
+    )
     requirements: list[RequirementSpanResult] = Field(
         default_factory=list, max_length=MAX_JD_REQUIREMENT_SPANS
     )

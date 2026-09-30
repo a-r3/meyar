@@ -43,6 +43,7 @@ from meyar.agent.schemas import (
     JDDraftCriterionItem,
     JDDraftCriterionKind,
     RequirementSpan,
+    SemanticInterpretationSource,
     SemanticRequirement,
     SemanticRequirementState,
     SemanticReviewReason,
@@ -218,6 +219,12 @@ class CanonicalInterpretationSource(StrEnum):
     MODEL_VALIDATED = "MODEL_VALIDATED"
     NONE = "NONE"
 
+    def persisted(self) -> SemanticInterpretationSource | None:
+        """Durable form (issue #84): only real authorities persist."""
+        if self == CanonicalInterpretationSource.NONE:
+            return None
+        return SemanticInterpretationSource(self.value)
+
 
 class CanonicalProposalRejection(StrEnum):
     """Why a local-model proposal was not accepted (structural, never text)."""
@@ -232,6 +239,16 @@ class CanonicalProposalRejection(StrEnum):
     SUBJECT_NOT_GROUNDED = "SUBJECT_NOT_GROUNDED"
     PROHIBITED = "PROHIBITED"
     CONFLICTING_PROPOSALS = "CONFLICTING_PROPOSALS"
+    SCOPE_QUALIFIED = "SCOPE_QUALIFIED"
+
+
+# A scope/purpose/composition qualifier inside the deterministic subject
+# ("Python for data analysis", "SQL in reporting", "Python with Django",
+# "... üçün Python") means the source requirement is narrower or wider than a
+# bare canonical subject. A model proposal can never drop it; the span stays
+# visible for human review. Azerbaijani instrumental "ilə" is grammatical
+# ("PostgreSQL ilə işləməyi") and deliberately not listed.
+_SCOPE_QUALIFIER_RE = re.compile(r"(?i)\b(?:for|in|within|using|via|with|on|ucun)\b")
 
 
 class CanonicalRequirement(BaseModel):
@@ -303,6 +320,8 @@ def _validate_proposal(
     subject = " ".join(item.requirement.split())
     if find_prohibited_term(subject) or find_prohibited_term(span.text):
         return "", CanonicalProposalRejection.PROHIBITED
+    if semantic.subject is not None and _SCOPE_QUALIFIER_RE.search(_fold(semantic.subject.text)):
+        return "", CanonicalProposalRejection.SCOPE_QUALIFIED
     if not is_canonical_subject(item.kind, subject):
         return "", CanonicalProposalRejection.SUBJECT_NOT_CANONICAL
     if item.kind != JDDraftCriterionKind.EXPERIENCE and not subject_grounded_in_span(
@@ -357,7 +376,7 @@ def _from_semantic(
         interpretation_state=state,
         interpretation_source=(
             CanonicalInterpretationSource.DETERMINISTIC
-            if state == SemanticRequirementState.SCORABLE
+            if state == SemanticRequirementState.SCORABLE or shape_validated
             else CanonicalInterpretationSource.NONE
         ),
         review_reason=reason if state == SemanticRequirementState.NEEDS_HUMAN_REVIEW else None,

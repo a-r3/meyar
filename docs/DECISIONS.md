@@ -6866,8 +6866,9 @@ Decision (semantic policy `jd-semantic-policy-v2`, prompt
    canonical_subject, criterion_type, min_years, required_level,
    interpretation_state, interpretation_source, review_reason,
    shape_validated). Every JD-draft `CriterionIn` is built only from a
-   SCORABLE `CanonicalRequirement`. It is not persisted; no migration (head
-   remains `b7e3c9d41f28`). Kinds reuse the existing `JDDraftCriterionKind`
+   SCORABLE `CanonicalRequirement`. The in-memory object itself is not
+   persisted; the durable per-criterion provenance record is (amendment
+   A-1 below, migration `c84a5e2f9d17`). Kinds reuse the existing `JDDraftCriterionKind`
    families; no new family was added.
 2. **Deterministic authority stays deterministic.** `analyze_hr_text` still
    owns spans, exact offsets, modality, duration, level, prohibited and
@@ -6932,3 +6933,47 @@ Decision (semantic policy `jd-semantic-policy-v2`, prompt
 Non-scope: Agent Core v2 (#88: task/dialogue state, resumable
 clarification, capability registry), candidate Q&A (#50), Russian NLP,
 target-host model selection (#36). The architecture is sector-neutral.
+
+### D-088 amendment (review correction pass on PR #89)
+
+A-1. **Durable semantic provenance.** The pending draft is bounded session
+  state, so it cannot be the audit record for an immutable criteria
+  version. One nullable JSON column,
+  `job_criteria_versions.agent_semantic_provenance` (migration
+  `c84a5e2f9d17`, parent `b7e3c9d41f28`, single head), stores a strict
+  `jd-semantic-provenance-v1` record (`meyar.agent.semantic_provenance`,
+  Pydantic v2, `extra=forbid`, frozen): draft_id, `source_sha256` of the JD,
+  semantic policy version, prompt version and `{provider, model_name,
+  model_revision}` only when a schema-valid local-model result was accepted
+  (else null), `rejected_proposal_count`, per criterion `{criterion_id,
+  span_id, start_offset, end_offset, source_text (the exact fragment),
+  interpretation_source DETERMINISTIC|MODEL_VALIDATED}`, and explicit human
+  `review_decisions` `{span_id, MUST_HAVE|PREFERRED|EXCLUDED_BY_REVIEWER}`.
+  It never stores the full JD, raw model output, chain-of-thought or
+  candidate data. Existing rows stay NULL (never fabricated). Downgrade
+  refuses before any DDL while any row carries provenance. The record is
+  built fail-closed at the confirm boundary from the locked server draft
+  (never browser data): missing/duplicate/unknown-span provenance, criterion
+  mismatch, offset/text/grounding mismatch, inconsistent exclusions or a
+  missing policy version/digest → 422, nothing created. Reads go through
+  `get_agent_semantic_provenance` (tenant-scoped, strictly validated). The
+  scorer never reads it. `agent.draft.review_resolved` now also carries
+  `draft_id`; draft audit metadata carries `rejected_proposal_count` and
+  `model_result_accepted`.
+A-2. **One semantic authority.** The unused legacy model-reconciliation path
+  (`_build_authorized_model_draft`, `_build_criterion_from_draft_item`,
+  `_canonical_binding_result`, their helpers and `meyar.agent.jd_authority`,
+  a second segmenter) is removed. `tests/test_jd_source_binding.py` now
+  drives `_dispatch_draft_job_criteria` — the real production path — and
+  asserts canonical outcomes. Doing so exposed three pre-existing
+  production gaps (present on `main` too, masked by tests of dead code),
+  fixed narrowly in the single authority: bullet/numbered list items with
+  no modality cue are kept as review instead of silently dropped;
+  non-terminal "X is plus Y" is not a preference cue (review); a
+  scope/purpose/composition qualifier in the deterministic subject
+  (`for|in|within|using|via|with|on|üçün`) cannot be dropped by a model
+  proposal (`SCOPE_QUALIFIED` rejection).
+A-3. **Span overflow.** A JD with more than 64 source requirement spans
+  previously raised a validation error in production; it now yields one
+  blocking review item covering the source, so nothing can be confirmed
+  and nothing is silently dropped.
