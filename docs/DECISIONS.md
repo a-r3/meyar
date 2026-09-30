@@ -7577,6 +7577,20 @@ not merged. Full design: `docs/AGENT_CORE_V2_DESIGN.md`. Audited baseline:
    There is one new live pointer, `active_clarification_id`, on the session
    context. Plans are not persisted; plan provenance goes to audit. Nothing
    survives into a new BrowserSession as live authority.
+
+   **Two independent waiting lanes** exist per session context and may
+   coexist:
+   - the dialogue lane: ≤1 WAITING_CLARIFICATION task, pointer
+     `active_clarification_id`;
+   - the mutation-confirmation lane: ≤1 WAITING_CONFIRMATION vacancy task,
+     pointer `active_pending_draft_id`.
+
+   Clarifications, searches and lookups never cancel lane B. Only a new
+   pending draft replacing the pointer does (T11). Confirmation never
+   cancels lane A. With both lanes live, clarification resolution runs
+   before the pending-draft amendment branch. The model sees only
+   `waiting_clarification` {task_type, phase} | null and
+   `pending_vacancy_confirmation` {present}, never ids.
 3. **Resumable clarification (M-8).**
    - SEARCH_OR_VACANCY and VACANCY_SOURCE_REQUIRED are server-typed.
    - The next message is resolved in a fixed order: button (exact) → strict
@@ -7600,11 +7614,30 @@ not merged. Full design: `docs/AGENT_CORE_V2_DESIGN.md`. Audited baseline:
      read-only.
 5. **Plans.**
    - `agent-plan-v1` with `extra=forbid`: no ids, scopes, confirmation,
-     dates or scores.
+     dates, scores, and no model-authored search/filter/topic text or
+     numbers.
    - At most 3 steps (`min(3, agent_max_tool_calls)`).
    - One planner call plus one repair, and no post-tool re-decision loop.
-   - The pure validator uses closed reason codes and rejects the whole plan
-     before any execution.
+   - **Source grounding.** SEARCH/REFINE inputs are the whole canonical
+     message or exact, unique quotes of it. The server resolves offsets and
+     hashes. Every material requirement must be covered by some grounded
+     span, prohibited content forces WHOLE_MESSAGE, limits and ordinals are
+     parsed by closed server parsers from grounded quotes, and the evidence
+     topic is a grounded quote or absent. The planner still normalizes
+     source-bound text into filters; faithfulness is enforced before it.
+   - **Validation has two layers.**
+     - Layer 1 is static and whole-plan: schema, offered capabilities,
+       length, duplicates, scopes, task type, grounding, prohibited content,
+       dependency shape, pre-existing live context, HUMAN_ACTION_ONLY. Any
+       failure means **zero execution**.
+     - Layer 2 is dynamic and runs before each step: a producer succeeded,
+       the actual count supports the ordinal, ResultSet/member authority is
+       current, and the executor's own checks pass.
+   - **v1 plans are atomic.** A later step failing gives `PLAN_INCOMPLETE`.
+     No plan-produced pointer is activated (inert ResultSets stay inert),
+     no successful task transition is recorded, the turn completes with
+     truthful fixed copy, and bounded attempt audit is kept. Step
+     criticality is deferred.
 6. **Transactions.**
    - The #85 boundary is unchanged: no DB connection or lock is held during
      inference.
@@ -7626,4 +7659,8 @@ not merged. Full design: `docs/AGENT_CORE_V2_DESIGN.md`. Audited baseline:
    merge of the accepted design:
    - A: persistence + resumable clarification;
    - B: registry + validator, behaviour-preserving;
-   - C: model plan contract + retirement of `AgentDecision` and the loop.
+   - C: model plan contract + full grounding contract + retirement of
+     `AgentDecision` and the loop.
+
+   Slice B already passes WHOLE_MESSAGE instead of the model's
+   `search_query` for model-routed searches.

@@ -252,7 +252,8 @@ needs a reviewed decision entry.
 MODEL_ROUTED text (and, from slice C on, anything the deterministic pre-router
 does not own) goes to one local-model call that returns a strict
 `AgentPlanProposal` (§9). The server then validates it (§10). The capability
-layer takes typed arguments and ordinals only, so it is language-neutral.
+layer takes closed codes plus exact grounded quotes of the user's own text
+(§10.2), so it is language-neutral.
 
 Language claims are limited to what is tested:
 - `SupportedInputLanguage` on `fb03477` covers **Azerbaijani, English and
@@ -356,11 +357,53 @@ agent_clarifications SET NULL):
 - It follows exactly the same rules as `active_pending_draft_id`: a new
   BrowserSession gets a fresh context with a NULL pointer.
 
-Partial unique indexes:
+Partial unique indexes (one per waiting lane, §4.4):
 - one `OPEN` clarification per `session_context_id`;
-- one `WAITING_CLARIFICATION` task per `session_context_id`;
-- one `WAITING_CONFIRMATION` task per `session_context_id` (mirrors the
-  single pending-draft pointer).
+- one `WAITING_CLARIFICATION` task per `session_context_id` (dialogue lane);
+- one `WAITING_CONFIRMATION` task per `session_context_id`
+  (mutation-confirmation lane; mirrors the single pending-draft pointer).
+
+### 4.4 Two independent waiting lanes (v1 contract)
+
+A session context has exactly two waiting lanes. They are independent and
+may coexist.
+
+| | A. Dialogue lane | B. Mutation-confirmation lane |
+|---|---|---|
+| Holds | at most one `WAITING_CLARIFICATION` task (+ its one OPEN clarification) | at most one `WAITING_CONFIRMATION` vacancy task |
+| Live authority pointer | `active_clarification_id` | `active_pending_draft_id` (existing) |
+| Created by | a server-typed clarification (§6.1) | ANALYZE_VACANCY producing a pending draft (direct, or via a resolved clarification) |
+| Ended by | resolution, supersession, expiry, attempts (T2–T8) | HR confirmation, draft replacement, pointer loss, expiry (T9–T12) |
+| Enforced by | partial unique index + pointer | partial unique index + pointer |
+
+Lane rules:
+1. **Coexistence.** For example, pending vacancy draft D1 waits for
+   confirmation, then HR sends `Python mütləqdir.`. A SEARCH_OR_VACANCY
+   clarification is created in lane A, and D1 stays untouched in lane B.
+2. **Lane A never cancels lane B implicitly.** A new clarification, a
+   clarification resolution, a normal candidate search, a refinement or a
+   profile/evidence lookup never touch lane B. Resolving a clarification
+   changes only its own task, **unless** the resolved action itself replaces
+   the pending draft. Resolving to VACANCY_ANALYSIS produces D2, which
+   replaces `active_pending_draft_id`, and that is exactly T11 for the old
+   lane-B task.
+3. **Only a new pending draft replaces lane B.** A new vacancy analysis
+   (forced, or resumed) that moves `active_pending_draft_id` cancels the old
+   WAITING_CONFIRMATION task (T11) in the same Phase B and puts the new task
+   in lane B.
+4. **Lane B never cancels lane A.** Confirming D1 (T10) in the separate
+   confirm route leaves an OPEN clarification in lane A untouched. The next
+   agent turn still resolves it by §6.4. That clarification's
+   `created_turn_version` binding is conversation-level, and the confirm
+   route does not write the transcript.
+5. **Turn ordering when both lanes are live.**
+   - If lane A has an OPEN clarification, §6.4 runs **first**.
+   - The existing pending-draft amendment branch (`_FOLLOWUP_RE`, lane B)
+     runs only if §6.4 classifies the message as a new request. The
+     clarification is then superseded (T7) and the message is processed as
+     today.
+   - This stops a clarification answer such as `namizəd axtarışı et` from
+     being misread as a draft edit because of the frozen `et` token.
 
 ---
 
@@ -375,8 +418,9 @@ Phase A (unchanged #85/#87)
       CLARIFY_*  → typed clarification (new state, no execution)
       MODEL      → [3]
 → [3] leave DB → local model: AgentPlanProposal → re-enter
-→ [4] pure plan validator (§10) → reject (closed code, zero execution) | executable plan
-→ [5] execute steps via registry executors, each with #85 boundary
+→ [4] Layer 1 static validator (§11.1) → reject (closed code, zero execution) | executable plan
+→ [5] per step: Layer 2 dynamic preconditions (§11.2) → executor (#85 boundary);
+      a failed later step → PLAN_INCOMPLETE, nothing activated (§11.3)
 → [6] stage task/clarification/pointer changes in AgentTurnCommit
 → Phase B: revalidate everything, including the clarification row (§12),
   then commit once
@@ -551,10 +595,12 @@ the user's turn, but it is **never** used as search or JD input.
 - **TTL.** `agent_clarification_ttl_seconds`, default 1800, bounds 60–3600,
   and never beyond the BrowserSession expiry. Expiry is also forced by
   rule 2 of §6.2 (next write only).
-- **Cardinality.** At most one OPEN clarification per session context, and
-  one WAITING_CLARIFICATION task per session context (partial unique
-  indexes). There is no second, parallel active task per conversation
-  context: a new task supersedes.
+- **Cardinality.** This is per session context, per waiting lane (§4.4):
+  at most one OPEN clarification and one WAITING_CLARIFICATION task in the
+  dialogue lane. A new dialogue-lane task supersedes the old one (T7).
+  Independently, the mutation-confirmation lane may hold one
+  WAITING_CONFIRMATION vacancy task. A new clarification or a new search
+  never cancels it; only a replacing pending draft does (T11).
 - **Logout / new BrowserSession.** The new session gets a fresh context
   with pointer NULL. The old question is visible in history, but its
   buttons render disabled (live `can_act` is computed from the pointer, as
@@ -579,11 +625,14 @@ Persisted statuses: `WAITING_CLARIFICATION`, `WAITING_CONFIRMATION`,
 `ACTIVE` is in-memory only: a turn working on a goal that finishes in the
 same turn.
 
+Lane A = dialogue lane (T1–T8); lane B = mutation-confirmation lane
+(T3's target, T9–T11); T12 applies to both (§4.4).
+
 | # | Event | Old | New | Authority required | DB mutation point | Audit |
 |---|---|---|---|---|---|---|
 | T1 | Deterministic clarification created | (none) / ACTIVE | WAITING_CLARIFICATION | live principal + reservation + `candidates:read` | Phase B insert task + clarification + pointer | `agent.task.created`, `agent.clarification.created` |
 | T2 | Valid answer (button/label/model), resume succeeds, search | WAITING_CLARIFICATION | COMPLETED | + live OPEN clarification (§6.2) | Phase B | `agent.clarification.resolved`, `agent.task.state_changed` |
-| T3 | Valid answer, vacancy draft produced | WAITING_CLARIFICATION | WAITING_CONFIRMATION | + draft pointer set in the same Phase B | Phase B | same |
+| T3 | Valid answer, vacancy draft produced (task moves lane A → lane B; any previous lane-B task gets T11 in the same Phase B) | WAITING_CLARIFICATION | WAITING_CONFIRMATION | + draft pointer set in the same Phase B | Phase B | same |
 | T4 | Valid answer, capability returns a truthful failure (e.g. JOB_DRAFT_FAILED, non-executable plan) | WAITING_CLARIFICATION | FAILED_SAFE | same | Phase B | `agent.clarification.resolved`, `agent.task.state_changed` |
 | T5 | Unclear answer, attempt < 2 | WAITING_CLARIFICATION | WAITING_CLARIFICATION (new clarification row) | same | Phase B | `agent.clarification.superseded(reason=UNCLEAR)`, `agent.clarification.created` |
 | T6 | Unclear answer at attempt 2 | WAITING_CLARIFICATION | FAILED_SAFE | same | Phase B | `agent.clarification.expired(reason=ATTEMPTS)` |
@@ -591,7 +640,7 @@ same turn.
 | T8 | TTL passed, stale source, or version mismatch, observed by a turn | WAITING_CLARIFICATION | EXPIRED | same | Phase B of that turn | `agent.clarification.expired(reason=TTL\|STALE\|VERSION)` |
 | T9 | Draft modified (new draft id) | WAITING_CONFIRMATION | WAITING_CONFIRMATION (`pending_draft_id` updated) | live pending-draft authority | Phase B | `agent.task.state_changed(same)` |
 | T10 | HR confirms draft (`/ui/agent/drafts/{id}/confirm`, CSRF) | WAITING_CONFIRMATION | COMPLETED | existing confirm route scopes + `resolve_pending_draft_authority` | the confirm route's single commit, with `create_job`/`AgentDraftConfirmation` | existing `job.created` + `agent.task.state_changed` |
-| T11 | Pending-draft pointer replaced by a new vacancy analysis | WAITING_CONFIRMATION | CANCELLED | live pointer | Phase B | `agent.task.state_changed` |
+| T11 | Pending-draft pointer replaced by a new vacancy analysis (forced, or a resolved VACANCY_ANALYSIS clarification) | WAITING_CONFIRMATION | CANCELLED | live pointer | Phase B | `agent.task.state_changed(reason=DRAFT_REPLACED)` |
 | T12 | Lazy expiry: task past `expires_at` or context gone | any waiting | EXPIRED | none (maintenance) | retention batch (§13) | `agent.task.state_changed(reason=EXPIRED)` |
 
 Terminal states (COMPLETED, CANCELLED, EXPIRED, FAILED_SAFE) have **no**
@@ -599,10 +648,10 @@ outgoing transitions. Turns that end in a waiting state are the only ones
 that create a task row. Busy, cancelled, stale and revoked turns commit no
 transition at all (§12).
 
-A new search while a vacancy draft waits for confirmation does **not**
-cancel it. This preserves today's behaviour where the pending pointer
-survives search turns. That is why there are two independent waiting
-slots, not one.
+A new search, refinement, lookup or clarification while a vacancy draft
+waits for confirmation does **not** cancel it. This preserves today's
+behaviour where the pending pointer survives search turns. That is why
+there are two independent waiting lanes (§4.4), not one active-task slot.
 
 ---
 
@@ -671,10 +720,10 @@ emit.
 
 | Capability | Current implementation | Input schema | Output schema | Required scopes | Live context | Local model use | Candidate content exposure | Side effect (real) | Confirmation | Deterministic authority | Existing audit / provenance | Change needed |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| SEARCH_CANDIDATES | `_dispatch_search` → `plan_and_search_candidates` → `create_result_set_from_search` | `SearchArgs{query: str 1..2000}` (= `AgentDecision.search_query`) | `AgentSearchToolResult` | `candidates:read` | none; **produces** ACTIVE_RESULT_SET | D-031 planner (LLM), embeddings for hybrid | ranked professional summaries in the UI; no identity to the model | SESSION_WORKING_STATE (new AgentResultSet, inert until pointer) + audit | none | frozen planner validation, prohibited-attribute and no-silent-weakening rules, snapshot | planner audit, `CANDIDATE_SEARCH_EXECUTED`, `agent.result_set.created`, `agent.tool.executed` | wrap as executor unchanged |
-| REFINE_RESULTS | `_dispatch_refine` → `validate_active_result_set_for_refinement` → `create_result_set_from_refinement` | `RefineArgs{filter_query?: str 1..2000, limit?: 1..50}`, ≥1 required | `AgentRefineToolResult` | `candidates:read` | ACTIVE_RESULT_SET | planner for `filter_query` only | subset of snapshot members | SESSION_WORKING_STATE + audit | none | #86 snapshot subset, server order | `agent.result_set.refined` / `refine_rejected` | wrap unchanged (`AgentActionType.REFINE_CANDIDATE_RESULTS` renamed only at the registry layer) |
-| GET_CANDIDATE_PROFILE | `_dispatch_profile` → `resolve_active_candidate_ref` → `get_current_authorized_profile` | `ProfileArgs{candidate_ref: 1..50}` | `AgentProfileToolResult` | `candidates:read` | ACTIVE_RESULT_SET | optional D-038 grounded synthesis (`select_grounded_facts`) over accepted professional facts | accepted `CandidateProfileExtraction` (professional only) | NONE (+ audit) | none | ordinal → snapshot → current profile authority | `agent.result_set.reference_resolved` / `reference_rejected` | wrap unchanged |
-| GET_CANDIDATE_EVIDENCE | `_dispatch_evidence` (same resolution) | `EvidenceArgs{candidate_ref: 1..50, evidence_topic?: ≤200}` | `AgentEvidenceToolResult` | `candidates:read` | ACTIVE_RESULT_SET | same optional grounded synthesis | accepted evidence items (CV spans, professional) | NONE (+ audit) | none | same | same | wrap unchanged |
+| SEARCH_CANDIDATES | `_dispatch_search` → `plan_and_search_candidates` → `create_result_set_from_search` | `SearchArgs{source: SourceSelection}` (§10.2). The planner gets the whole message or verified exact spans, never model text (replaces `AgentDecision.search_query`) | `AgentSearchToolResult` | `candidates:read` | none; **produces** ACTIVE_RESULT_SET | D-031 planner (LLM), embeddings for hybrid | ranked professional summaries in the UI; no identity to the model | SESSION_WORKING_STATE (new AgentResultSet, inert until pointer) + audit | none | frozen planner validation, prohibited-attribute and no-silent-weakening rules, snapshot | planner audit, `CANDIDATE_SEARCH_EXECUTED`, `agent.result_set.created`, `agent.tool.executed` | wrap as executor; the executor receives server-resolved source text instead of `decision.search_query` (domain service unchanged) |
+| REFINE_RESULTS | `_dispatch_refine` → `validate_active_result_set_for_refinement` → `create_result_set_from_refinement` | `RefineArgs{filter_source?: SourceSelection, limit_quote?: SourceQuote}`, ≥1 required; `filter_query` becomes grounded spans, `limit` a server-parsed count (§10.2) | `AgentRefineToolResult` | `candidates:read` | ACTIVE_RESULT_SET | planner for `filter_query` only | subset of snapshot members | SESSION_WORKING_STATE + audit | none | #86 snapshot subset, server order | `agent.result_set.refined` / `refine_rejected` | wrap unchanged (`AgentActionType.REFINE_CANDIDATE_RESULTS` renamed only at the registry layer) |
+| GET_CANDIDATE_PROFILE | `_dispatch_profile` → `resolve_active_candidate_ref` → `get_current_authorized_profile` | `ProfileArgs{ref_quote}`: a server-parsed ordinal 1..50 (§10.2 rule 5) | `AgentProfileToolResult` | `candidates:read` | ACTIVE_RESULT_SET | optional D-038 grounded synthesis (`select_grounded_facts`) over accepted professional facts | accepted `CandidateProfileExtraction` (professional only) | NONE (+ audit) | none | ordinal → snapshot → current profile authority | `agent.result_set.reference_resolved` / `reference_rejected` | wrap unchanged |
+| GET_CANDIDATE_EVIDENCE | `_dispatch_evidence` (same resolution) | `EvidenceArgs{ref_quote, topic_quote?}`: server-parsed ordinal; topic is an exact grounded slice or absent (§10.2 rule 6) | `AgentEvidenceToolResult` | `candidates:read` | ACTIVE_RESULT_SET | same optional grounded synthesis | accepted evidence items (CV spans, professional) | NONE (+ audit) | none | same | same | wrap unchanged |
 | ANALYZE_VACANCY | `_dispatch_draft_job_criteria` + #84 canonicalization | `VacancyArgs{source: SourceBinding}`, **server-built only**: offsets into the current message, or a resumed clarification source | `AgentJobDraftToolResult` (pending draft) | today `candidates:read` (route); **proposed** + `jobs:write` (offer only what HR can complete; no user impact, since both roles hold all scopes) | none; **produces** PENDING_DRAFT | `draft_job_criteria` (LLM) + deterministic canonicalization | JD text only | SESSION_WORKING_STATE (transcript payload + pointer, no Job row) | none (draft is review-only) | source offsets, CanonicalRequirement, the model never supplies source | `agent.tool.executed` + `jd_draft_audit_metadata`, `agent.tool.failed` | wrap unchanged; `model_proposable=False` (a model proposal becomes the SEARCH_OR_VACANCY clarification, §6.1) |
 | CREATE_JOB | `confirm_agent_job_draft` route → `resolve_pending_draft_authority` → `create_job` + `create_criteria_version` + `AgentDraftConfirmation` + `mark_pending_job_draft_confirmed` | none from the model; the draft id comes from the live pointer | redirect/render of ranking | `jobs:write`, `jobs:read`, `candidates:read`, `evaluations:write` | PENDING_DRAFT | none | none | **BUSINESS_MUTATION** (Job, JobCriteriaVersion, confirmation link) | **EXPLICIT_HUMAN_ROUTE** (CSRF form) | pending-draft authority, duplicate-job check, unique confirmation | `job.created`, criteria-version audit, `AgentDraftConfirmation` | registry entry `HUMAN_ACTION_ONLY`; the route additionally marks the task COMPLETED (T10) |
 | RANK_JOB_CANDIDATES | `/ui/jobs/{v}/rank` (CSRF) and post-confirm `_render_job_ranking` → `rank_candidates_for_job` → `evaluate_and_score_candidate` | none from the model; target `job_criteria_version_id` is server-derived (`AgentDraftConfirmation` of this BrowserSession) | ranking view | `jobs:read`, `candidates:read`, `evaluations:write` | CONFIRMED_JOB_IN_SESSION | **none**: fully deterministic | accepted current profiles, deterministic scores | **DERIVED_RECORDS**: writes `Evaluation` rows (reused by exact provenance tuple), `EVALUATION_STARTED`, `CANDIDATE_SCORE_COMPUTED`, `JOB_BATCH_RANKED` audit. It is **not read-only** | **EXPLICIT_HUMAN_ROUTE** | deterministic policy engine and scoring policy; business date from `resolve_business_date(settings.business_timezone)` at the UI boundary, never from the model | as listed | registry entry `HUMAN_ACTION_ONLY`; in chat, a proposal renders the existing rank form for the session-confirmed job only |
@@ -695,13 +744,23 @@ renamed.
 ```python
 class PlanKind(StrEnum): PLAN = "PLAN"; CLARIFY = "CLARIFY"; CONVERSE = "CONVERSE"
 
-class SearchArgs(BaseModel):  extra="forbid"; query: str (1..2000)
-class RefineArgs(BaseModel):  extra="forbid"; filter_query: str|None; limit: int|None (1..50)
-class ProfileArgs(BaseModel): extra="forbid"; candidate_ref: int (1..50)
-class EvidenceArgs(BaseModel):extra="forbid"; candidate_ref: int (1..50); evidence_topic: str|None (≤200)
-class NoArgs(BaseModel):      extra="forbid"            # CREATE_JOB / RANK_JOB_CANDIDATES proposals
+# Grounding primitives (§10.2). The model never writes search
+# text; it only points at user-owned text by exact quotation.
+class SourceQuote(BaseModel):  extra="forbid"; quote: str (1..500)   # must be an exact, unique substring
+class SourceSelection(BaseModel):
+    extra="forbid"
+    mode: Literal["WHOLE_MESSAGE", "QUOTES"]
+    quotes: list[SourceQuote] (0..4)        # QUOTES only, ≥1; WHOLE_MESSAGE ⇒ empty
 
-class PlanStep(BaseModel):    # discriminated union on `capability`
+class SearchArgs(BaseModel):   extra="forbid"; source: SourceSelection
+class RefineArgs(BaseModel):   extra="forbid"; filter_source: SourceSelection | None
+                                               limit_quote: SourceQuote | None      # ≥1 of the two
+class ProfileArgs(BaseModel):  extra="forbid"; ref_quote: SourceQuote               # e.g. "birincinin"
+class EvidenceArgs(BaseModel): extra="forbid"; ref_quote: SourceQuote
+                                               topic_quote: SourceQuote | None      # e.g. "Python"
+class NoArgs(BaseModel):       extra="forbid"   # CREATE_JOB / RANK_JOB_CANDIDATES proposals
+
+class PlanStep(BaseModel):     # discriminated union on `capability`
     capability: CapabilityName            # per-call enum subset (§8.1)
     args: <per-capability args model>
 
@@ -715,31 +774,98 @@ class AgentPlanProposal(BaseModel):
     response_code: AgentResponseCode | None               # CONVERSE only (GREETING/ACKNOWLEDGEMENT)
 ```
 
-The contract has **no field for** a tenant id, BrowserSession id,
-ResultSet id, candidate UUID, draft id, job id, scope or permission,
-confirmation flag, evaluation date, score or weight, or free-text answer.
-Candidate references are ordinals only, resolved at execution time through
-the active ResultSet (§14). Unknown keys fail `extra="forbid"`. Every string
+The contract has **no field for**:
+- a tenant id, BrowserSession id, ResultSet id, candidate UUID, draft id or
+  job id;
+- a scope or permission, or a confirmation flag;
+- an evaluation date, score or weight;
+- a free-text answer;
+- **any model-authored search, filter, topic or numeric value.**
+
+Every value that drives execution is either a closed code, or an exact
+quotation of the current user message that the server resolves to offsets
+and parses itself (§10.2). Unknown keys fail `extra="forbid"`. Every string
 has a hard bound; the ≤2000-character Ollama grammar limit from D-035 still
 applies.
 
-`SearchArgs.query` and `RefineArgs.filter_query` keep today's semantics.
-They are forwarded unmodified into the frozen D-031 planner, which revalidates
-prohibited attributes and never silently weakens a requirement. Binding these
-to exact source spans is an open question (§19). It is not an authority
-boundary, because search is non-mutating and the planner re-derives filters.
+### 10.2 Source grounding of search/refine/lookup inputs (v1 contract)
 
-### 10.2 Bounds
+Principle: **the model chooses *which* capability runs and *which part* of
+the user's own words it applies to. It never writes the words.** The frozen
+D-031 planner keeps its role of turning source-bound text into validated
+structured filters. Faithfulness to the user's request is enforced here,
+before the planner, and not by "the planner will validate the derived
+query". The planner can only validate what it is given.
+
+Server resolution (pure, in the static layer §11.1, against the canonical
+LF current message `M`):
+1. **WHOLE_MESSAGE** resolves to `M` exactly. This is the default and
+   always safe. It is the same input today's FORCE_CANDIDATE_SEARCH gives
+   the planner.
+2. **QUOTES** resolve each quote to `M.find(quote)`.
+   - The quote must occur **exactly once** in `M`: byte-exact after LF
+     canonicalization, no case or diacritic folding.
+   - Zero or multiple occurrences reject the plan with `SOURCE_NOT_GROUNDED`.
+   - The server computes `(start, end)` offsets and a SHA-256 per span. These
+     are server-owned and audited as hashes/offsets only.
+   - Spans must be non-overlapping and non-blank. The planner input is the
+     spans in source order, joined by a server-owned `"\n"`. No model
+     character enters the query.
+3. **Requirement coverage.**
+   - Run `analyze_hr_text(M)` (policy-versioned, deterministic).
+   - Every material requirement (state SCORABLE or NEEDS_HUMAN_REVIEW)
+     must have its `subject` occurrence overlap **some** grounding span of
+     **some** step in the plan: search/refine source spans, a ref quote or a
+     topic quote.
+   - Otherwise the plan is rejected with `SOURCE_COVERAGE_INCOMPLETE`. The
+     model therefore cannot silently drop a requirement (for example keep
+     "Python" and drop "Java").
+   - WHOLE_MESSAGE trivially covers everything.
+4. **Prohibited content.** If `M` contains any PROHIBITED requirement or
+   PROTECTED_CUE role, QUOTES mode is not allowed for SEARCH/REFINE
+   (`SOURCE_SELECTION_FORBIDDEN`). Only WHOLE_MESSAGE is accepted, so the
+   frozen planner's prohibited-attribute refusal applies to the whole
+   request. A span selection can never launder a protected-attribute
+   request into a "clean" query.
+5. **Numeric grounding** (`limit_quote`, `ref_quote`).
+   - The quote is grounded as in rule 2, then parsed **by the server** with
+     the closed count parser (`count_token_value`, as already used by
+     FORCE_RESULT_LIMIT) or a closed ordinal parser.
+   - The ordinal parser covers digits, `#N`, the Azerbaijani ordinal suffix
+     over count words (`birinci`, `ikinci`, ... with case suffixes) and
+     English `first`…`fifth` / `Nth`, over the range 1..`MAX_CANDIDATE_REF`.
+   - The parsed value is the argument. There is no model-supplied integer.
+   - A span the parser cannot read (e.g. "sonuncu") rejects the step with
+     `REFERENCE_NOT_GROUNDED`. HR gets the existing
+     CANDIDATE_REFERENCE_REQUIRED / RESULT_CONTEXT_REQUIRED copy.
+   - This ordinal table is a closed numeric vocabulary. It belongs to the
+     §3.1 safety-relevant category, not the frozen general-intent regex
+     layer.
+6. **Evidence topic** (`topic_quote`).
+   - It is grounded by rule 2 (exact unique slice of `M`) or absent (all
+     evidence of the resolved candidate).
+   - Lower risk, but still strict: the topic only narrows which stored,
+     accepted evidence items of an already-authorized candidate are shown,
+     by the existing case/diacritic-insensitive substring match. An
+     ungrounded topic is rejected and is not ignored silently.
+
+Server-built plans are already grounded by construction:
+- deterministic FORCE_* routes use the whole message or the router's own
+  exact span;
+- resumed clarifications use the bound source span (§6.2);
+- FORCE_RESULT_LIMIT uses the server-parsed count.
+
+### 10.3 Bounds
 
 | Bound | Value | Notes |
 |---|---|---|
-| Max plan steps | `MAX_PLAN_STEPS = 3`, effective `min(3, agent_max_tool_calls)` | `agent_max_tool_calls` keeps its truthful meaning: max capability executions per turn |
+| Max plan steps | `MAX_PLAN_STEPS = 3`, effective `min(3, agent_max_tool_calls)`; max 4 quotes per SourceSelection | `agent_max_tool_calls` keeps its truthful meaning: max capability executions per turn |
 | Max capability executions per turn | same | a server-built resume plan is exactly 1 step |
 | Planner model calls per turn | 1 + 1 repair | replaces `decide_agent_action`; there is **no** post-tool "what next" call |
 | Clarification-answer classifier calls | ≤1 + 1 repair, only when an OPEN clarification is unmatched by button/label | |
 | Capability-internal model calls | unchanged service bounds (D-031 planner, JD draft `MAX_JD_DRAFT_ATTEMPTS=2`, synthesis `MAX_SYNTHESIS_ATTEMPTS=2`) | all through `BoundaryLLM` / `BoundaryEmbedding` |
 | Clarification depth | 2 attempts per source binding (§6.4), then EXPIRED | no nested clarifications |
-| Open clarifications / waiting tasks | 1 OPEN clarification and ≤1 per waiting status, per session context | partial unique indexes |
+| Waiting state | per session context: dialogue lane ≤1 WAITING_CLARIFICATION task + ≤1 OPEN clarification; mutation-confirmation lane ≤1 WAITING_CONFIRMATION task (§4.4) | partial unique indexes + pointers |
 | Task lifetime | WAITING_CLARIFICATION: clarification TTL (≤3600 s); WAITING_CONFIRMATION: until the pointer changes or the BrowserSession expires (≤`ui_session_ttl_hours`) | |
 | Model context turns | `agent_max_context_turns` (default 8), unchanged | |
 | Persisted task history | ≤10 terminal tasks per session context (§13) | |
@@ -750,46 +876,132 @@ validated_plan.steps` bounded iteration.
 
 ---
 
-## 11. Plan validator (pure, server-owned)
+## 11. Plan validation: static whole-plan layer + dynamic per-step layer
 
-`validate_plan(proposal, ctx: ValidationContext) -> ExecutablePlan |
+Validation has two explicit layers with different guarantees. Neither
+layer mutates business state.
+
+### 11.1 Layer 1 — static whole-plan validation (before any execution)
+
+`validate_plan(proposal, message, ctx: ValidationContext) -> ExecutablePlan |
 PlanRejection` is a **pure function**: no DB access, no mutation.
 
-`ValidationContext` is assembled by read-only server calls in a DB phase:
+`ValidationContext` is assembled by read-only server calls in a DB phase
+just before validation:
 - principal scopes;
-- task type if waiting;
-- active ResultSet status from `active_result_set_size` / a read-only
-  validation: none, valid n, STALE or EXPIRED;
-- pending-draft presence;
-- a confirmed job in this session;
-- open clarification state;
-- running policy/schema versions.
+- lane A: the waiting-clarification task type/phase, if any;
+- lane B: whether a WAITING_CONFIRMATION vacancy task / live pending draft
+  exists;
+- the **pre-existing** active ResultSet status from a read-only validation:
+  none, valid with n members, STALE or EXPIRED;
+- whether a confirmed job exists in this session;
+- running policy/schema versions;
+- `analyze_hr_text(message)` for grounding (§10.2).
 
-Rejections are checked in order. The first failure rejects the **whole**
-plan and nothing executes:
+Checks, in order. The first failure rejects the **whole** plan, and **zero
+capabilities execute**:
 
 | Code | Rule |
 |---|---|
 | `UNSUPPORTED_VERSION` | `schema_version` or a capability `policy_version` unknown |
 | `SHAPE_INVALID` | kind/field combination invalid (e.g. PLAN without steps, CONVERSE with steps) |
-| `UNKNOWN_CAPABILITY` | not in the registry (normally already a Pydantic failure) |
+| `UNKNOWN_CAPABILITY` | not in the registry or not in this call's offered subset (normally already a Pydantic failure) |
 | `NOT_MODEL_PROPOSABLE` | e.g. ANALYZE_VACANCY from the model (converted to the SEARCH_OR_VACANCY clarification per §6.1, not executed) |
 | `INVALID_ARGUMENTS` | args fail the capability `input_schema` |
 | `PLAN_TOO_LONG` | steps > effective max |
-| `DUPLICATE_STEP` | identical (capability, args) twice (generalizes today's `searched_queries` guard) |
+| `DUPLICATE_STEP` | identical (capability, resolved grounded args) twice (generalizes today's `searched_queries` guard) |
 | `SCOPE_MISSING` | `required_scopes ⊄ principal scopes` |
-| `TASK_TYPE_CONFLICT` | step capability not allowed for the plan goal / waiting task type |
-| `RESULT_CONTEXT_REQUIRED` | needs ACTIVE_RESULT_SET, and neither the context nor an earlier step (`produces`) provides it |
-| `RESULT_SET_STALE` / `RESULT_SET_EXPIRED` | active ResultSet not valid at validation time (re-checked authoritatively at execution) |
-| `CANDIDATE_REF_OUT_OF_RANGE` | ordinal > validated size (or > the producing step's result, checked at execution) |
+| `TASK_TYPE_CONFLICT` | a step's capability is not allowed for the plan's goal (lane selection below) |
+| `SOURCE_NOT_GROUNDED` / `SOURCE_SELECTION_FORBIDDEN` / `SOURCE_COVERAGE_INCOMPLETE` / `REFERENCE_NOT_GROUNDED` | §10.2 rules 2–6 |
+| `PROHIBITED_ATTRIBUTE` | `find_prohibited_term` / PROTECTED_CUE hit in any resolved grounded text (WHOLE_MESSAGE is then passed to the planner, whose refusal is authoritative) |
+| `DEPENDENCY_INVALID` | dependency graph shape: a step that consumes ACTIVE_RESULT_SET has neither a pre-existing context nor an **earlier** step whose `produces` includes it; no step consumes a later step's output; at most one producer of ACTIVE_RESULT_SET per plan |
+| `RESULT_CONTEXT_REQUIRED` / `RESULT_SET_STALE` / `RESULT_SET_EXPIRED` | a step consuming the **pre-existing** ResultSet (no earlier producer) while it is absent/stale/expired at plan start |
+| `CANDIDATE_REF_OUT_OF_RANGE` | for a step consuming the **pre-existing** ResultSet, the parsed ordinal exceeds its known size n. Ordinals against a ResultSet produced by an earlier step **cannot** be range-checked here (Layer 2) |
 | `CONFIRMATION_REQUIRED` | a `HUMAN_ACTION_ONLY` capability without its live target → rejected; with target → converted to an affordance, **never executed** |
-| `PROHIBITED_ATTRIBUTE` | `find_prohibited_term` / PROTECTED_CUE hit in any string arg |
-| `CANDIDATE_CONTENT_POLICY` | a capability whose content policy is not satisfied (e.g. identity field requested; reserved for #50 capabilities) |
+| `CANDIDATE_CONTENT_POLICY` | a capability whose content policy is not satisfied (reserved for #50 capabilities) |
 
-The HR user sees fixed product copy per code family (e.g. "Bu sorğunu
-təhlükəsiz icra edə bilmədim; zəhmət olmasa dəqiqləşdirin."). They never see
-raw codes, capability names or ids. The codes go to audit
-(`agent.plan.rejected`).
+**Lane selection for `TASK_TYPE_CONFLICT`.**
+- A plan exists only for a turn that is *not* a resolved clarification.
+  Resolved clarifications get server-built plans for the lane-A task's
+  resolved type (§6.6), so no model plan is validated against lane A.
+  Otherwise lane A has just been superseded (§6.4 step 3/4).
+- A model plan is therefore checked against **its own `goal`**:
+  - CANDIDATE_SEARCH allows SEARCH, REFINE, PROFILE, EVIDENCE.
+  - RESULT_FOLLOWUP allows REFINE, PROFILE, EVIDENCE.
+  - VACANCY_ANALYSIS allows CREATE_JOB and RANK affordances only.
+    ANALYZE_VACANCY itself is not model-proposable.
+- Lane B is consulted **only** by capabilities whose `live_context` or
+  `produces` includes PENDING_DRAFT or CONFIRMED_JOB_IN_SESSION:
+  - CREATE_JOB needs the lane-B target to become an affordance;
+  - RANK needs the session-confirmed job;
+  - a producer of PENDING_DRAFT (server-built only) triggers T11.
+- Search, refine, profile and evidence neither read nor modify lane B.
+
+### 11.2 Layer 2 — dynamic per-step precondition validation (immediately before each step)
+
+Run in the DB phase directly before step *k* executes, after the previous
+step finished:
+1. If step *k* consumes a ResultSet produced by an earlier step in this plan,
+   that step must have **succeeded** and its ResultSet must exist, belong to
+   this tenant/session/context/epoch, and be unexpired.
+2. The resolved ordinal must be ≤ the **actual** member count of the
+   consumed ResultSet. With a producer, zero results means step *k* does not
+   execute.
+3. For a pre-existing ResultSet, authoritative re-validation of
+   ResultSet/member snapshot authority (#86) is still current.
+4. Any other runtime-dependent context set by prior steps.
+5. Then the executor's own authoritative checks run as today, e.g.
+   `resolve_active_candidate_ref` and `validate_active_result_set_for_refinement`.
+   Layer 2 does not replace them.
+
+Example: `SEARCH_CANDIDATES → GET_CANDIDATE_PROFILE(ref_quote="birincinin")`.
+- Layer 1 proves that SEARCH produces ACTIVE_RESULT_SET, that step 2
+  depends on it, and that the ordinal is grounded and parses to 1.
+- Layer 1 cannot prove that member 1 exists.
+- After the search, Layer 2 reads the actual count. If it is 0, the profile
+  step does not execute.
+
+### 11.3 Partial-execution semantics (v1: atomic plan)
+
+v1 plans are **atomic with respect to activation**. There is no step
+criticality: every step is required.
+- **Success.** If every step executes successfully, Phase B activates the
+  final produced pointers, commits the transcript and commits task
+  transitions as successful.
+- **A later step fails its Layer 2 precondition, or its executor returns a
+  non-success outcome.** The plan is `PLAN_INCOMPLETE`:
+  - no BUSINESS_MUTATION has happened, because IN_TURN steps are only NONE
+    or SESSION_WORKING_STATE;
+  - no HUMAN_ACTION_ONLY operation executed (it never does in-turn);
+  - ResultSet rows created by earlier steps stay **inert**: Phase B does
+    **not** activate any pointer produced by this plan, and the previous
+    `active_result_set_id` stays exactly as it was. The inert rows fall
+    under #86 bounded retention;
+  - no task or clarification transition is committed as successful.
+    Model plans never resolve lane A. Lane B is unchanged, because
+    model plans cannot produce a pending draft;
+  - the turn still completes normally (submission COMPLETED, reservation
+    cleared). The transcript gets the user turn and an assistant turn with a
+    new closed outcome `PLAN_INCOMPLETE` and fixed truthful copy, e.g.
+    "Sorğunun bütün addımları icra oluna bilmədi, ona görə nəticə
+    aktivləşdirilmədi. Sorğunu hissə-hissə göndərin." No result cards are
+    rendered as active;
+  - audit keeps bounded attempt/execution provenance: `agent.plan.validated`,
+    `agent.tool.executed` for steps that ran, and
+    `agent.plan.incomplete(step_index, reason_code)`.
+- **Single-step plans** (all server-built plans, and most model plans):
+  the step's own truthful outcome (empty search, non-executable planner
+  result, JOB_DRAFT_FAILED, RESULT_SET_STALE) is the plan outcome, exactly as
+  today. A zero-member search as the *final* step is a completed plan with
+  an empty result, just as today.
+- Keeping an earlier successful search visible when a later **optional**
+  step fails would need an explicit per-step `criticality` field and its
+  own decision. It is out of scope for v1.
+
+HR sees fixed product copy per code family (e.g. "Bu sorğunu təhlükəsiz
+icra edə bilmədim; zəhmət olmasa dəqiqləşdirin."). They never see raw
+codes, capability names or ids. The codes go to audit
+(`agent.plan.rejected`, `agent.plan.incomplete`).
 
 ---
 
@@ -802,10 +1014,12 @@ Phase A  lock+reserve, claim submission                      → commit (leave_d
 [if needed] model: clarification classifier                   (no DB)
 reenter  revalidate (principal FOR SHARE, conv/context locks)
 [if MODEL route] leave_db → model: plan proposal → reenter
-validate (pure) on freshly read ValidationContext
+Layer 1: validate (pure) on freshly read ValidationContext   → reject = zero execution
 for step in plan:            # ≤ 3
+    Layer 2: dynamic preconditions for this step               → fail = PLAN_INCOMPLETE, stop
     executor(step)           # may leave_db → local inference → reenter internally
-Phase B  final reenter + clarification/task row locks + submission check → apply → commit
+Phase B  final reenter + clarification/task row locks + submission check
+         → apply (plan-produced pointers only if the plan completed) → commit
 ```
 
 - No DB connection, transaction or row lock is held across an Ollama or
@@ -819,7 +1033,9 @@ Phase B  final reenter + clarification/task row locks + submission check → app
   orchestrator owns ordering, bounds and the `produces` / `live_context`
   hand-off. For example, a SEARCH step's new ResultSet id is placed in the
   in-turn `TurnSessionState`, so a following PROFILE step resolves ordinals
-  against it, exactly as the eager sync works today.
+  against it, exactly as the eager sync works today. That in-turn value is
+  **staged**. It becomes the committed pointer only through Phase B, and only
+  for a completed plan (§11.3).
 
 ### 12.2 Phase B atomicity
 
@@ -842,7 +1058,8 @@ is unchanged, extending the existing CONTEXT_CHANGED check), the server:
    principal → conversation → session context → clarification → task →
    submission);
 2. re-verifies each staged transition's precondition (still OPEN, still
-   unexpired, same `created_turn_version`);
+   unexpired, same `created_turn_version`). For a `PLAN_INCOMPLETE` turn it
+   stages **no** plan-produced pointer and no successful task transition;
 3. writes transcript (with `turn_id`s), ResultSet/draft/clarification
    pointers, task/clarification rows, and task/clarification audit events;
 4. marks the submission COMPLETED and clears the reservation, then
@@ -924,8 +1141,11 @@ Projection for `propose_agent_plan`:
   one-line server descriptions;
 - `active_result_context_present: bool`,
   `available_candidate_refs: [1..n]` (unchanged semantics);
-- `pending_vacancy_draft_present: bool`;
-- `waiting_task`: `{task_type, phase}` codes only, or null.
+- `waiting_clarification`: `{task_type, phase}` closed codes, or null
+  (lane A);
+- `pending_vacancy_confirmation`: `{present: bool}` (lane B).
+No task id, clarification id or draft id is ever sent. Both facts are
+advisory only; the validator re-reads the lanes (§11).
 
 Projection for `resolve_clarification_answer`:
 - the answer text;
@@ -980,7 +1200,7 @@ typed (Pydantic) with an allow-list, not a deny-list.
 
 A future `ANSWER_CANDIDATE_QUESTION` / `COMPARE_CANDIDATES` plugs in by:
 1. adding enum members and `CapabilityDefinition`s with
-   `live_context={ACTIVE_RESULT_SET}`, ordinal-only args,
+   `live_context={ACTIVE_RESULT_SET}`, grounded-quote args only (§10.2),
    `candidate_content=PROFESSIONAL_LOCAL_ONLY` and
    `identity=NEVER_IN_INPUT_OR_MODEL`;
 2. an executor under `meyar.agent.capabilities` that resolves ordinals via
@@ -1079,7 +1299,8 @@ kept.
 | `agent.clarification.expired` | Phase B / retention | `reason_code` (TTL/STALE/VERSION/ATTEMPTS/SOURCE_MISMATCH) |
 | `agent.clarification.rejected` | attempt | `reason_code` (INVALID_CHOICE/NOT_ACTIVE) |
 | `agent.plan.validated` | attempt | `plan_sha256`, `step_count`, `capabilities` (closed codes), `schema_version` |
-| `agent.plan.rejected` | attempt | `reason_code`, `schema_version` |
+| `agent.plan.rejected` | attempt | `reason_code`, `schema_version` (Layer 1) |
+| `agent.plan.incomplete` | attempt | `step_index`, `reason_code` (Layer 2 / executor non-success; nothing activated) |
 | `agent.tool.executed` (existing) | as today | + `capability`, `capability_version` |
 | `agent.entry.routed` / `agent.entry.action_rejected` (existing) | unchanged | unchanged |
 
@@ -1091,7 +1312,8 @@ Never logged or audited:
 - tokens.
 
 `plan_sha256` is computed over the canonical JSON of the *validated* plan,
-which contains no UUIDs or identity.
+with every quote replaced by its server-resolved offsets and span SHA-256.
+It contains no HR text, UUIDs or identity.
 
 ---
 
@@ -1187,18 +1409,31 @@ göstər`).
   foreign row is untouched.
 
 **E. Search → `bunlardan SQL bilənləri` → refine.**
-- MODEL route, and the plan is `[REFINE_RESULTS(filter_query="SQL bilənlər")]`.
-- The validator:
-  - checks `candidates:read`;
-  - requires ACTIVE_RESULT_SET, which is present;
-  - requires the pre-check to pass (VALID n).
-- The executor runs today's `_dispatch_refine`: a subset of the #86
-  snapshot and a new REFINEMENT ResultSet. Phase B switches the pointer.
-- The plan cannot name a ResultSet id or candidate id.
+- MODEL route. The plan is
+  `[REFINE_RESULTS(filter_source=QUOTES["SQL bilənləri"])]`.
+- Layer 1:
+  - the quote is an exact unique slice of the message, and the server
+    computes [10,23);
+  - coverage holds: the only material requirement subject (`bunlardan SQL`,
+    [0,13)) overlaps the span;
+  - `candidates:read` is held;
+  - the pre-existing ACTIVE_RESULT_SET is present and VALID n.
+- Layer 2 re-validates the pre-existing ResultSet authority immediately
+  before the step.
+- The executor runs today's `_dispatch_refine` with the **server-resolved
+  span text** as `filter_query`: a subset of the #86 snapshot and a new
+  REFINEMENT ResultSet. Phase B switches the pointer.
+- The plan cannot name a ResultSet id or candidate id, and cannot author
+  filter text.
 
 **F. `birincinin sübutunu göstər` → evidence.**
-- The plan is `[GET_CANDIDATE_EVIDENCE(candidate_ref=1)]`.
-- The validator checks that ref 1 ≤ n.
+- The plan is `[GET_CANDIDATE_EVIDENCE(ref_quote="birincinin")]`.
+- Layer 1:
+  - the quote is grounded, and the server's ordinal parser gives 1;
+  - 1 ≤ n of the pre-existing ResultSet.
+- A model-supplied integer does not exist in the contract. A quote the
+  parser cannot read gets REFERENCE_NOT_GROUNDED and the existing
+  "which candidate?" copy.
 - The executor calls `resolve_active_candidate_ref` (authoritative:
   tenant/session/epoch/expiry/member snapshot/current profile), then the
   accepted evidence, then optional grounded synthesis.
@@ -1255,6 +1490,47 @@ outside the per-call subset).
 - An answer typed now is a new turn. An ordinal gets
   RESULT_CONTEXT_REQUIRED. Drafts are not confirmable.
 
+**M. Two-step plan whose dependent step cannot run (atomic plan).**
+- `Kotlin bilən namizəd tap və birincinin profilini göstər`.
+- Ordinal language routes it to MODEL_ROUTED today (the result-context
+  check precedes the search imperative).
+- The plan is `[SEARCH_CANDIDATES(QUOTES["Kotlin bilən namizəd"]),
+  GET_CANDIDATE_PROFILE(ref_quote="birincinin")]`. Every material subject
+  overlaps one of the two grounded spans.
+- Layer 1 passes: the dependency is SEARCH → produces → PROFILE, and the
+  ordinal is grounded (1). It **cannot** check that member 1 exists.
+- Step 1 runs and produces an inert ResultSet R with 0 members.
+- Step 2's Layer 2 check: the actual count is 0 < 1, so the step does not
+  execute and the result is `PLAN_INCOMPLETE`.
+- Phase B:
+  - transcript user turn + assistant turn with fixed PLAN_INCOMPLETE copy;
+  - submission COMPLETED, reservation cleared;
+  - `active_result_set_id` **unchanged** (the previous one, if any). R is
+    never activated and is retired by #86 retention;
+  - no successful task transition.
+- Audit: `agent.plan.validated`, `agent.tool.executed` (step 1) and
+  `agent.plan.incomplete(step_index=2, reason=CANDIDATE_REF_OUT_OF_RANGE)`.
+
+**N. Model injects a constraint absent from the source.**
+- The user writes `Python bilən namizədlər`. A wrong or injected proposal
+  is `SEARCH_CANDIDATES(QUOTES["Java bilən namizədlər"])`.
+- Layer 1: the quote does not occur in the message, so the plan is
+  rejected with SOURCE_NOT_GROUNDED and zero executions. No Java search can
+  exist.
+- A proposal that quotes only part of a multi-requirement message (e.g.
+  `Python` from `Python və Java bilən`) gets SOURCE_COVERAGE_INCOMPLETE.
+- Nothing the model writes reaches the planner. Only WHOLE_MESSAGE or exact
+  slices do.
+
+**O. Both waiting lanes live.**
+- D1 is pending confirmation (lane B), and HR sends `Python mütləqdir.`.
+- A SEARCH_OR_VACANCY clarification κ is created in lane A, and D1 is
+  untouched.
+- `namizəd axtarışı` resolves κ and runs the search. Lane B stays D1.
+- If HR had answered `vakansiya kimi`, the resumed ANALYZE_VACANCY produces
+  D2 and moves `active_pending_draft_id` to D2. The D1 task is cancelled
+  (T11) in the same Phase B, and the new task holds lane B.
+
 ---
 
 ## 22. Adversarial test plan (future; not written in this PR)
@@ -1263,8 +1539,8 @@ For slices A to C, each item is a failing-first regression:
 
 1. **Unknown capability** in the model output: rejected, zero executor
    calls (spy), zero state.
-2. **Invalid args**: extra keys, wrong types, over-length strings, ref 0 or
-   51.
+2. **Invalid args**: extra keys, wrong types, over-length strings, and
+   ordinal quotes parsing to 0 or 51.
 3. **Over-long plan**: 4 steps are rejected whole; step 1 does not execute.
 4. **Missing scope**: a membership role without a scope yields
    SCOPE_MISSING (synthetic role via unknown-role → zero scopes).
@@ -1309,6 +1585,33 @@ For slices A to C, each item is a failing-first regression:
     still OPEN afterwards and no pointer changes.
 23. **#85**: no DB checkout during the plan or classifier model calls
     (pool-probe tests extended).
+24. **Source injection** (future required test): the user source says
+    Python, and a malicious or wrong plan proposal quotes `Java ...`. The
+    plan is rejected (SOURCE_NOT_GROUNDED). A spy on the planner asserts it
+    never receives "Java", and a whole-message search remains source-bound
+    to Python.
+25. **Coverage drop**: `Python və Java bilən` with a plan quoting only
+    `Python` gets SOURCE_COVERAGE_INCOMPLETE and zero executions.
+26. **Ambiguous/duplicate quote**: a quote occurring twice, or a
+    near-match differing in case or diacritics, gets SOURCE_NOT_GROUNDED.
+27. **Laundering a protected attribute**: a message with a prohibited cue
+    plus a QUOTES selection that omits it gets SOURCE_SELECTION_FORBIDDEN.
+    The WHOLE_MESSAGE path yields the planner's prohibited refusal.
+28. **Numeric grounding**: `ilk 3` quoted but the model claims 5 is
+    impossible by schema. A `limit_quote`/`ref_quote` the parser cannot read
+    gets REFERENCE_NOT_GROUNDED. AZ/EN ordinal forms parse to the expected
+    value.
+29. **Static vs dynamic**: in SEARCH → PROFILE(ref 1) where the search
+    returns 0, the profile executor is never called (spy), the result is
+    PLAN_INCOMPLETE, and the active pointer is unchanged. The inert
+    ResultSet exists but is not active.
+30. **Layer 1 zero execution**: a plan whose step 3 fails Layer 1 (e.g.
+    SCOPE_MISSING) executes neither step 1 nor step 2.
+31. **Lanes**: a clarification created while D1 is pending leaves D1
+    confirmable. A search while D1 is pending leaves D1. A resolved
+    VACANCY_ANALYSIS replaces D1 → T11. Confirming D1 leaves an open
+    clarification answerable. `namizəd axtarışı et` with both lanes live
+    resolves the clarification and does not hit the draft amendment branch.
 
 ---
 
@@ -1333,7 +1636,14 @@ concern.
 **Slice B: capability registry + validator, behaviour-preserving.**
 - `meyar.agent.capabilities` with the seven definitions, whose executors
   wrap the current `_dispatch_*` unchanged.
-- The pure `validate_plan`.
+- The pure Layer 1 `validate_plan`, the Layer 2 per-step precondition hook,
+  and the atomic activation rule (§11.3).
+- The first grounding step: the adapter passes WHOLE_MESSAGE to the
+  planner for model-routed SEARCH_CANDIDATES instead of the model's
+  `search_query` (the same input FORCE_CANDIDATE_SEARCH already uses).
+  Refine filter, limit and ordinals stay on today's transitional
+  model-supplied `AgentDecision` fields until slice C. This is a residual
+  that exists on `main` today, not a regression.
 - A transitional adapter turns each current `AgentDecision` / forced route
   into a one-step `PlanStep`, so the `if/elif` dispatch becomes registry
   dispatch.
@@ -1344,13 +1654,17 @@ concern.
 **Slice C: model plan contract + retirement of the action loop.**
 - `propose_agent_plan` (`agent-plan-v1`, per-call enum subset, repair).
 - Bounded multi-step plans, with no post-tool re-decision.
+- The full §10.2 grounding contract: `SourceSelection` quotes, coverage,
+  prohibited-content rule, the closed count/ordinal parsers and grounded
+  evidence topic. After this slice no model-authored text or number drives
+  execution.
 - ANALYZE_VACANCY model proposals become the clarification.
 - Retire `decide_agent_action`, `AgentDecision`, `TOOL_ACTIONS` and the
   `while True` loop.
 - A new `AGENT_PROMPT_VERSION` and a real-Ollama smoke test (not a
   Target-Mac benchmark).
-- Tests: the model-path adversarial matrix end-to-end with fake providers,
-  plus a prompt-injection fixture (a plan cannot be steered to a
+- Tests: the model-path adversarial matrix end-to-end with fake providers
+  (§22 items 24–31 included), plus a prompt-injection fixture (a plan cannot be steered to a
   non-offered capability or a UUID field).
 
 Dependency order is A, then B, then C. A delivers the M-8 user value first
@@ -1369,8 +1683,9 @@ slice gets its own PR with `Refs #88`. Only the final slice closes #88.
 | `_dispatch_search`, `_dispatch_refine`, `_dispatch_profile`, `_dispatch_evidence`, `_dispatch_draft_job_criteria` | **wrapped** as capability executors (B); domain logic unchanged |
 | `plan_and_search_candidates`, ResultSet repo, `get_current_authorized_profile`, #84 canonicalization, grounded synthesis, `rank_candidates_for_job`, confirm route | **retained unchanged** (domain services) |
 | `AgentDecision`, `AgentActionType`, `TOOL_ACTIONS`, `decide_agent_action`, `while True` loop, `searched_queries` | **transitional** (adapter in B), **removed** in C |
+| Model-authored `search_query` / `filter_query` / `limit` / `candidate_ref` / `evidence_topic` | `search_query` ignored (WHOLE_MESSAGE) from B; all replaced by grounded quotes + server parsers in C (§10.2) |
 | `AgentTurnCommit`, `apply_agent_turn_commit`, `TurnBoundary`, `revalidate_reserved_turn` | **extended** (A) |
-| `AgentToolResult` / `AgentTurnResult` / outcomes / presentation | **retained**; new outcomes only for clarification staleness |
+| `AgentToolResult` / `AgentTurnResult` / outcomes / presentation | **retained**; new closed outcomes only for clarification staleness and `PLAN_INCOMPLETE` |
 
 Agent Core v2 replaces orchestration plumbing. It does not reimplement
 search, evidence, evaluation or JD canonicalization.
@@ -1399,6 +1714,10 @@ search, evidence, evaluation or JD canonicalization.
 
 ## 26. Open design questions (none on an authority/security boundary)
 
+Resolved in this revision and no longer open: dual waiting lanes (§4.4),
+static vs dynamic validation (§11), and source grounding of search/refine
+inputs (§10.2).
+
 1. **Answer plus a new requirement in one message** (`namizəd axtarışı, SQL
    də olsun`). v1 policy: a material requirement means a new task, so the
    clarification is superseded. Merging the two is deferred.
@@ -1407,10 +1726,14 @@ search, evidence, evaluation or JD canonicalization.
 3. **Ranking in chat for jobs not confirmed in this session.** This would
    need a server-owned job picker affordance, and the model would still
    never name a job id. Deferred.
-4. **Binding `SearchArgs.query` to exact source spans** instead of the
-   model's own text. Not an authority boundary (§10.1). To be decided with
-   slice C prompt evaluation.
-5. **Numeric defaults.** TTL 1800 s, ≤10 terminal tasks per context, and
+4. **Ordinal vocabulary coverage.** Phrases outside the closed parser
+   (e.g. `sonuncu` / "last") fail closed with the existing "which
+   candidate?" copy. Extending the closed list is a quality decision, not an
+   authority one.
+5. **Optional plan steps.** v1 plans are atomic (§11.3). Per-step
+   criticality (keep an earlier search when an optional lookup fails) would
+   need its own decision.
+6. **Numeric defaults.** TTL 1800 s, ≤10 terminal tasks per context, and
    2 clarification attempts are reversible settings/constants, confirmed at
    slice A review.
 
@@ -1428,6 +1751,11 @@ search, evidence, evaluation or JD canonicalization.
    - Every task, every clarification, and all three live pointers
      (`active_result_set_id`, `active_pending_draft_id`,
      `active_clarification_id`), through the session context.
+   - Waiting state lives in two independent lanes (§4.4): the dialogue lane
+     (`active_clarification_id`, ≤1 WAITING_CLARIFICATION) and the
+     mutation-confirmation lane (`active_pending_draft_id`, ≤1
+     WAITING_CONFIRMATION). They coexist. Only a replacing pending draft
+     ends lane B (T11).
    - The transcript is conversation-bound and durable.
 3. **How is a clarification source-bound?**
    - `source_turn_id` + `source_sha256` + exact offsets, plus semantic and
@@ -1440,12 +1768,19 @@ search, evidence, evaluation or JD canonicalization.
      exactly one allowed value or NEW_REQUEST/UNCLEAR.
    - The server validates the value. UNCLEAR never executes.
 5. **What makes a plan executable?**
-   - Schema-valid `agent-plan-v1`, then every §11 check passes on
-     freshly-read context, with only IN_TURN non-business-mutating steps.
-   - Then each executor re-checks its own authority at execution time.
+   - Schema-valid `agent-plan-v1`, all inputs grounded in the current
+     message (§10.2), and every Layer 1 static check passing on freshly-read
+     context (§11.1), with only IN_TURN non-business-mutating steps. A
+     Layer 1 failure means zero execution.
+   - Then, before each step, the Layer 2 dynamic preconditions (§11.2) and
+     the executor's own authority checks.
+   - A failed later step makes the plan PLAN_INCOMPLETE: nothing it produced
+     is activated (§11.3).
 6. **What can the model propose but never authorize?**
-   - Goals, plan steps, ordinals, search/filter text, closed clarification
-     answers, and CREATE_JOB/RANK proposals.
+   - Goals, plan steps, **which** part of the user's own message a step
+     applies to (exact quotes), closed clarification answers, and
+     CREATE_JOB/RANK proposals. It never writes search/filter/topic text or
+     numbers: the server resolves quotes and parses counts/ordinals itself.
    - It never authorizes candidate identity, ResultSet choice, drafts,
      tenant or session, scopes, scores, weights, dates or confirmation.
 7. **How are mutations confirmed?**
@@ -1474,14 +1809,16 @@ search, evidence, evaluation or JD canonicalization.
 12. **What prevents candidate identity from entering ranking or plan
     authority?**
     - Typed allow-list projections have no identity field.
-    - Plan/args schemas are `extra="forbid"` with ordinals only.
+    - Plan/args schemas are `extra="forbid"`; candidate references are
+      grounded ordinal quotes parsed by the server (§10.2).
     - Registry `identity` policy, and deterministic ranking with no model
       arguments.
     - Identity-contamination regression tests.
 13. **What state is projected into model context?**
     - The last N transcript turns, the offered capability names, result
-      context presence/refs, pending-draft presence, and waiting task
-      type/phase codes.
+      context presence/refs, `waiting_clarification` {task_type, phase} or
+      null (lane A), and `pending_vacancy_confirmation` {present} (lane B).
+      No task, clarification or draft ids are sent.
     - For the classifier: only the answer text, type and allowed codes.
 14. **What expires and what remains durable?**
     - Clarifications expire (TTL / next-write / attempts / versions).
@@ -1491,7 +1828,7 @@ search, evidence, evaluation or JD canonicalization.
 15. **How will #50 plug in later without bypassing ResultSet or evidence
     authority?**
     - As registered capabilities with `ACTIVE_RESULT_SET` live context,
-      ordinal args, executors that resolve through
+      grounded ordinal quotes (§10.2), executors that resolve through
       `resolve_active_candidate_ref` and accepted evidence, their own output
       schema and factuality review.
     - The orchestrator does not change.
