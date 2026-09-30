@@ -60,7 +60,7 @@
         <div class="alert alert-warning"><p><strong>Bu dil hazırda dəstəklənmir.</strong> Vakansiya mətnini Azərbaycan və ya ingilis dilində göndərin. Heç bir sıralama meyarı yaradılmadı.</p></div>
         {% elif draft.wrong_mode_guidance %}
         <div class="alert alert-info"><p><strong>Bu mətn namizəd axtarışına bənzəyir.</strong> Namizədləri vakansiya yaratmadan tapmaq üçün axtarış istəyinizi açıq yazın; vakansiya analizi üçün isə elanı və tələblərin məcburi/üstünlük statusunu qeyd edin.</p></div>
-        {% else %}
+        {% elif not draft.requires_resolution %}
         <div class="alert alert-warning">
           <p><strong>Avtomatik sıralama üçün hazır meyar yoxdur.</strong> Mənbə tələbləri aşağıda görünür, lakin onlar insan baxışı tələb edir və ya sistem tərəfindən hələ ölçülmür. Tələbləri dəqiqləşdirib elanı yenidən analiz edin.</p>
         </div>
@@ -71,8 +71,12 @@
         {% endif %}
 
         {% if not draft.wrong_mode_guidance %}
+        {% if draft.must_have_rows or draft.unsupported_must_have %}
         <h3>Mütləq tələblər</h3>
+        {% endif %}
+        {% if draft.must_have_rows %}
         {{ criteria_form.criterion_rows("must", draft.must_have_rows, kind_options, true) }}
+        {% endif %}
         {% if draft.unsupported_must_have %}
         <div class="alert alert-info">
           <p><strong>Məlumat üçün — qiymətləndirməyə daxil edilmir:</strong> bu tələblər real və qeydə alınıb, lakin sistem hələ bu növ tələbi ölçə bilmir, ona görə bal/reytinqə təsir etmir:</p>
@@ -80,8 +84,12 @@
         </div>
         {% endif %}
 
+        {% if draft.preferred_rows or draft.unsupported_preferred %}
         <h3>Üstünlük tələbləri</h3>
+        {% endif %}
+        {% if draft.preferred_rows %}
         {{ criteria_form.criterion_rows("pref", draft.preferred_rows, kind_options, true) }}
+        {% endif %}
         {% if draft.unsupported_preferred %}
         <div class="alert alert-info">
           <p><strong>Məlumat üçün — qiymətləndirməyə daxil edilmir:</strong> bu tələblər real və qeydə alınıb, lakin sistem hələ bu növ tələbi ölçə bilmir, ona görə bal/reytinqə təsir etmir:</p>

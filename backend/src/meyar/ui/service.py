@@ -1090,13 +1090,44 @@ def _agent_turn_headline(
                     f"{draft.ungrounded_count} tələb JD mətnində aydın təsdiqlənmədiyi üçün "
                     "çıxarıldı"
                 )
-            if draft.needs_review:
-                notes.append(f"{len(draft.needs_review)} tələb dəqiqləşdirmə tələb edir")
+            informational_reviews = sum(
+                1
+                for item in draft.needs_review
+                if not item.allowed_types and not (item.blocking and not item.acknowledged_excluded)
+            )
+            if informational_reviews:
+                notes.append(
+                    f"{informational_reviews} tələb insan baxışı tələb edir və "
+                    "qiymətləndirməyə daxil edilmir"
+                )
             note_text = f" ({'; '.join(notes)}.)" if notes else ""
+            # Issue #84: three truthful states derived only from the validated
+            # draft view — the SAME predicate (``requires_resolution``) that
+            # decides whether the confirm action renders. Never model prose.
+            if draft.requires_resolution:
+                blocking = sum(
+                    1
+                    for item in draft.needs_review
+                    if item.allowed_types or (item.blocking and not item.acknowledged_excluded)
+                )
+                if blocking == 0:
+                    return (
+                        "Qaralamada nəticə sayı dəqiqləşdirmə tələb edir. Namizədləri "
+                        "sıralamadan əvvəl sayı dəqiqləşdirib elanı yenidən analiz edin."
+                    )
+                return (
+                    f"Qaralamada {blocking} tələb dəqiqləşdirmə tələb edir. Namizədləri "
+                    f"sıralamadan əvvəl aşağıdakı seçimi tamamlayın.{note_text}"
+                )
+            if total == 0:
+                return (
+                    "Bu mətndən avtomatik qiymətləndirmə üçün meyar çıxmadı. Aşağıdakı "
+                    f"məlumat sıralamaya daxil edilmir.{note_text}"
+                )
             return (
-                f"Vakansiya qaralaması üçün {len(draft.must_have_rows)} mütləq və "
-                f"{len(draft.preferred_rows)} üstünlük tələbi hazırlandı. Nəzərdən keçirin "
-                f"və təsdiqləyin.{note_text}"
+                f"MEYAR bu mətndən {total} meyar hazırladı: {len(draft.must_have_rows)} "
+                f"mütləq, {len(draft.preferred_rows)} üstünlük. Nəzərdən keçirin və "
+                f"təsdiqləyin.{note_text}"
             )
         if latest_view.tool_name == AgentActionType.REFINE_CANDIDATE_RESULTS.value:
             return _refine_headline(latest_view.refine_summary)
