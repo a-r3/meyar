@@ -3,17 +3,25 @@
 ## Current phase
 
 **Issue #88 — design accepted, implementation NOT started:** accepted `main`
-is `fb03477a4b4c3ec4698b7294f2589fbbbeafa4e7` (#84, #85, #86, #87 closed).
+is `3ac42a531f34651ac25fc1eab0e880fb05ca01f0` (#84–#87 closed; D-092 design
+merged via PR #93).
 - The Agent Core v2 design (D-092, `docs/AGENT_CORE_V2_DESIGN.md`) was
   independently reviewed and **accepted**. It covers task/dialogue/
   clarification state, the two waiting lanes, resumable M-8 clarification,
   the capability registry, two-layer plan validation and source-grounded
   inputs.
-- It is docs-only. Docs-only PR #93 is still awaiting owner merge.
+- It is docs-only.
 - **Implementation has NOT started.**
 - #88 remains OPEN. #50 remains OPEN and out of scope.
-- Next engineering action after the merge: #88 **Slice A**, typed
-  clarification/task persistence plus resumable clarification.
+- PR #93 merged as `3ac42a5`.
+- The slice A pre-implementation audit found that lane-B confirm and
+  review routes bump `turn_version`, which conflicts with the original
+  clarification binding.
+- The owner chose **D-092 Amendment A1**: the append-position binding via
+  `question_turn_id`. It is proposed in a separate docs PR and pending
+  independent review.
+- Slice A (typed clarification/task persistence plus resumable
+  clarification) starts only after that amendment is accepted and merged.
 
 **Issue #87 working branch (not accepted):** accepted `main` is
 `ac9a249359c9a5dcf417b4e3f269a2c0b92b3ab0` (#84, #85, #86 closed).
