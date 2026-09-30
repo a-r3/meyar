@@ -18,10 +18,11 @@ merged via PR #93).
   review routes bump `turn_version`, which conflicts with the original
   clarification binding.
 - The owner chose **D-092 Amendment A1**: the append-position binding via
-  `question_turn_id`. It is proposed in a separate docs PR and pending
-  independent review.
-- Slice A (typed clarification/task persistence plus resumable
-  clarification) starts only after that amendment is accepted and merged.
+  `question_turn_id`. A1 was independently reviewed and **accepted** (docs PR
+  #94, awaiting owner merge).
+- **Slice A implementation has NOT started.** It (typed clarification/task
+  persistence plus resumable clarification) may begin only after the OWNER
+  manually merges PR #94 and post-merge verification succeeds.
 
 **Issue #87 working branch (not accepted):** accepted `main` is
 `ac9a249359c9a5dcf417b4e3f269a2c0b92b3ab0` (#84, #85, #86 closed).

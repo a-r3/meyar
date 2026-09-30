@@ -7562,9 +7562,13 @@ the owner merges the design PR. Full design: `docs/AGENT_CORE_V2_DESIGN.md`. Aud
 `main` @ `fb03477a4b4c3ec4698b7294f2589fbbbeafa4e7` (#84–#87 closed).
 #88 stays open; #50 is out of scope.
 
-**Amendment A1 — clarification append-position binding (PROPOSED, pending
-independent review; owner selected "Variant 1", separate docs PR, before
-slice A).**
+**Amendment A1 — clarification append-position binding (ACCEPTED AMENDMENT /
+IMPLEMENTATION NOT STARTED; owner selected "Variant 1", separate docs PR
+#94, before slice A).**
+- *Status.* A1 was independently reviewed and accepted. Slice A
+  implementation has NOT started. #88 remains OPEN, and #50 remains OPEN and
+  out of scope. Slice A may begin only after the OWNER manually merges PR #94
+  and post-merge verification succeeds.
 - *Finding.* The slice A audit of `main` @ `3ac42a5` shows that the lane-B
   human routes rewrite transcript entries in place and bump `turn_version`
   (D-089):

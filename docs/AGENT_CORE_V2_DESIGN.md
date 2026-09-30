@@ -13,8 +13,15 @@ Decision record: D-092 (`docs/DECISIONS.md`). Audited baseline: `main` @
 `fb03477a4b4c3ec4698b7294f2589fbbbeafa4e7` (#84, #85, #86, #87 closed).
 Alembic head at audit time: `a87d4c6e2b19`.
 
-**Amendment A1 (PROPOSED, pending independent review; owner-selected
-"Variant 1"):** the clarification liveness binding changes from
+**Amendment A1 (ACCEPTED AMENDMENT / IMPLEMENTATION NOT STARTED; owner-selected
+"Variant 1"):**
+- A1 was independently reviewed and accepted.
+- Slice A implementation has NOT started. #88 remains OPEN, and #50 remains
+  OPEN and out of scope.
+- Slice A may begin only after the OWNER manually merges PR #94 and
+  post-merge verification succeeds.
+
+The change: the clarification liveness binding changes from
 `turn_version` equality to an **append-position** binding through a new
 `question_turn_id` (§6.2 rule 2, §4.3, §18). Reason: the audit of `main`
 @ `3ac42a5` for slice A found that the lane-B human routes
