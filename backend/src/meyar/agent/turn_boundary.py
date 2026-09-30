@@ -66,6 +66,7 @@ from meyar.models.agent_conversation import (
     AgentConversation,
     AgentConversationSessionContext,
 )
+from meyar.models.agent_turn_submission import AgentTurnSubmission
 from meyar.models.browser_session import BrowserSession
 from meyar.models.tenant_membership import TenantMembership
 from meyar.models.user import User
@@ -257,37 +258,56 @@ async def reserve_agent_turn(
 
 async def _principal_is_live(db: AsyncSession, reservation: TurnReservation) -> bool:
     """Same live checks as meyar.ui.auth.get_ui_context, re-derived from
-    the database (never from the request's earlier UIContext)."""
+    the database (never from the request's earlier UIContext).
+
+    issue #87 (D-091): the authority rows are row-locked ``FOR SHARE`` for
+    the rest of this short re-entry/Phase B transaction, in the same
+    User -> TenantMembership -> BrowserSession order every security mutator
+    (set_password, set_user_active, set_membership_active, logout) writes
+    them. A credential/session revocation therefore either commits first
+    (this check then waits for it and sees the revoked state) or waits
+    until this transaction ends — it can never commit between this check
+    and the consequential commit. ``FOR SHARE`` (not ``FOR UPDATE``) blocks
+    those UPDATEs but stays compatible with the ``FOR KEY SHARE`` locks FK
+    inserts take (new conversations/submissions/result sets referencing
+    the same user/membership/session) and with other turns' Phase B, so it
+    introduces no lock-order inversion with conversation-row locks. Never
+    held across inference: ``TurnBoundary.leave_db`` commits first."""
     owner = reservation.owner
-    session = await db.scalar(
-        select(BrowserSession)
-        .where(BrowserSession.id == reservation.browser_session_id)
-        .execution_options(populate_existing=True)
-    )
-    if (
-        session is None
-        or session.revoked_at is not None
-        or session.expires_at <= datetime.now(UTC)
-        or session.user_id != owner.user_id
-        or session.tenant_membership_id != owner.membership_id
-    ):
-        return False
     user = await db.scalar(
-        select(User).where(User.id == owner.user_id).execution_options(populate_existing=True)
+        select(User)
+        .where(User.id == owner.user_id)
+        .with_for_update(read=True)
+        .execution_options(populate_existing=True)
     )
     if user is None or not user.is_active:
         return False
     membership = await db.scalar(
         select(TenantMembership)
         .where(TenantMembership.id == owner.membership_id)
+        .with_for_update(read=True)
+        .execution_options(populate_existing=True)
+    )
+    if (
+        membership is None
+        or not membership.is_active
+        or membership.user_id != owner.user_id
+        or membership.tenant_id != owner.tenant_id
+        or AGENT_TURN_REQUIRED_SCOPE not in permissions_for_role(membership.role)
+    ):
+        return False
+    session = await db.scalar(
+        select(BrowserSession)
+        .where(BrowserSession.id == reservation.browser_session_id)
+        .with_for_update(read=True)
         .execution_options(populate_existing=True)
     )
     return (
-        membership is not None
-        and membership.is_active
-        and membership.user_id == owner.user_id
-        and membership.tenant_id == owner.tenant_id
-        and AGENT_TURN_REQUIRED_SCOPE in permissions_for_role(membership.role)
+        session is not None
+        and session.revoked_at is None
+        and session.expires_at > datetime.now(UTC)
+        and session.user_id == owner.user_id
+        and session.tenant_membership_id == owner.membership_id
     )
 
 
@@ -331,7 +351,10 @@ def clear_turn_reservation(conversation: AgentConversation) -> None:
     conversation.active_turn_expires_at = None
 
 
-async def abandon_reserved_turn(db: AsyncSession, reservation: TurnReservation) -> None:
+async def abandon_reserved_turn(
+    db: AsyncSession, reservation: TurnReservation,
+    *, submission_id: uuid.UUID | None = None,
+) -> None:
     """Best-effort, cancellation-shielded cleanup for a turn that will not
     commit: roll back its open transaction and clear ONLY its own
     reservation. If this itself fails (DB unreachable), the reservation
@@ -351,6 +374,20 @@ async def abandon_reserved_turn(db: AsyncSession, reservation: TurnReservation) 
                 )
                 if conversation is not None and conversation.active_turn_id == reservation.token:
                     clear_turn_reservation(conversation)
+                if submission_id is not None:
+                    submission = await db.scalar(
+                        select(AgentTurnSubmission)
+                        .where(AgentTurnSubmission.id == submission_id)
+                        .with_for_update()
+                        .execution_options(populate_existing=True)
+                    )
+                    if (
+                        submission is not None and submission.status == "PROCESSING"
+                        and submission.reservation_id == reservation.token
+                    ):
+                        submission.status = "ABANDONED"
+                        submission.reservation_id = None
+                        submission.lease_expires_at = None
                 await db.commit()
             except Exception:  # noqa: BLE001 - best-effort cleanup; TTL is the backstop
                 # A connection broken by the cancellation itself must never

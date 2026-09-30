@@ -4,6 +4,8 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.models.tenant_membership import TenantMembership
+from meyar.models.user import User
+from meyar.services.browser_session_repo import revoke_sessions_for_membership
 
 
 async def create_membership(
@@ -16,13 +18,16 @@ async def create_membership(
 
 
 async def get_membership_by_id(
-    db: AsyncSession, membership_id: uuid.UUID
+    db: AsyncSession, membership_id: uuid.UUID, *, for_update: bool = False
 ) -> TenantMembership | None:
-    result = await db.execute(
+    stmt = (
         select(TenantMembership)
         .where(TenantMembership.id == membership_id)
         .execution_options(populate_existing=True)
     )
+    if for_update:
+        stmt = stmt.with_for_update()
+    result = await db.execute(stmt)
     return result.scalar_one_or_none()
 
 
@@ -57,8 +62,23 @@ async def list_active_memberships_for_user(
 async def set_membership_active(
     db: AsyncSession, *, membership_id: uuid.UUID, is_active: bool
 ) -> None:
+    values: dict[str, bool | uuid.UUID] = {"is_active": is_active}
+    if not is_active:
+        values["security_version"] = uuid.uuid4()
+        user_id = await db.scalar(
+            select(TenantMembership.user_id).where(TenantMembership.id == membership_id)
+        )
+        if user_id is not None:
+            # Match login's User -> Membership row-lock order.
+            await db.execute(
+                update(User).where(User.id == user_id).values(security_version=uuid.uuid4())
+            )
     await db.execute(
         update(TenantMembership)
         .where(TenantMembership.id == membership_id)
-        .values(is_active=is_active)
+        .values(**values)
     )
+    if not is_active:
+        # User stamp invalidates all pending claims; other memberships'
+        # BrowserSessions remain live.
+        await revoke_sessions_for_membership(db, membership_id=membership_id)

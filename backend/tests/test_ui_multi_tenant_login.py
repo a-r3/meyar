@@ -107,6 +107,7 @@ async def test_selecting_a_membership_belonging_to_another_user_is_rejected(
     )
     await db_session.commit()
     other_membership_id = str(other_membership.id)
+    user_id = user.id
 
     first = await client.post(
         "/ui/login",
@@ -124,6 +125,14 @@ async def test_selecting_a_membership_belonging_to_another_user_is_rejected(
     )
     assert response.status_code == 401
     assert response.cookies.get("meyar_ui_session") is None
+    from sqlalchemy import select
+
+    from meyar.models.auth_security_event import AuthSecurityEvent
+
+    failures = (await db_session.scalars(select(AuthSecurityEvent))).all()
+    assert len(failures) == 1
+    assert failures[0].outcome_code == "TENANT_SELECTION_INVALID"
+    assert failures[0].user_id == user_id
 
 
 async def test_tampered_pending_login_token_is_rejected(
@@ -138,14 +147,28 @@ async def test_tampered_pending_login_token_is_rejected(
     )
     assert response.status_code == 401
     assert response.cookies.get("meyar_ui_session") is None
+    from sqlalchemy import select
+
+    from meyar.models.auth_security_event import AuthSecurityEvent
+
+    failures = (await db_session.scalars(select(AuthSecurityEvent))).all()
+    assert len(failures) == 1
+    assert failures[0].outcome_code == "PENDING_TOKEN_INVALID"
+    assert failures[0].user_id is None
 
 
 def test_pending_login_token_signature_is_verified() -> None:
     import uuid
 
     user_id = uuid.uuid4()
-    token = issue_pending_login_token(secret="secret-a", user_id=user_id)
-    assert verify_pending_login_token(secret="secret-a", token=token) == user_id
+    version = uuid.uuid4()
+    membership_id = uuid.uuid4()
+    token = issue_pending_login_token(
+        secret="secret-a", user_id=user_id, user_security_version=version,
+        membership_versions={membership_id: version},
+    )
+    claim = verify_pending_login_token(secret="secret-a", token=token)
+    assert claim is not None and claim.user_id == user_id
     assert verify_pending_login_token(secret="secret-b", token=token) is None
     assert verify_pending_login_token(secret="secret-a", token=token + "x") is None
 

@@ -94,6 +94,36 @@ async def test_freshly_seeded_demo_credential_logs_in_over_real_http(
     assert library.status_code == 200
 
 
+async def test_demo_credential_rotation_revokes_old_browser_session(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tmp_path: Path,
+    local_ui_settings: Settings,
+) -> None:
+    first = await _seed(db_session, tmp_path)
+    await db_session.commit()
+    login = await client.post(
+        "/ui/login",
+        data={"username": first.human_username, "password": first.human_temp_password},
+        follow_redirects=False,
+    )
+    assert login.status_code == 303
+    old_cookie = login.cookies.get("meyar_ui_session")
+    assert old_cookie is not None
+    rotated = await _seed(db_session, tmp_path)
+    await db_session.commit()
+    assert rotated.human_temp_password != first.human_temp_password
+    client.cookies.set("meyar_ui_session", old_cookie, path="/ui")
+    assert (await client.get("/ui/library", follow_redirects=False)).status_code == 303
+    fresh = await client.post(
+        "/ui/login",
+        data={"username": rotated.human_username, "password": rotated.human_temp_password},
+        follow_redirects=False,
+    )
+    assert fresh.status_code == 303
+    assert fresh.cookies.get("meyar_ui_session") != old_cookie
+
+
 async def test_password_is_verified_exactly_not_normalized(
     client: AsyncClient,
     db_session: AsyncSession,

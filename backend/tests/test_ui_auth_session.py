@@ -118,8 +118,8 @@ async def test_inactive_membership_blocks_login(
     )
     await db_session.commit()
     response = await _login(client, user.username, password)
-    assert response.status_code == 403
-    assert "heç bir aktiv təşkilat girişi" in response.text
+    assert response.status_code == 401
+    assert "İstifadəçi adı və ya parol yanlışdır" in response.text
 
 
 async def test_login_cookie_policy_local_and_production(

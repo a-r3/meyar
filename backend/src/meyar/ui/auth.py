@@ -54,6 +54,11 @@ def verify_csrf(expected: str, presented: str | None) -> None:
 async def get_ui_context(
     request: Request, db: AsyncSession = Depends(get_db)
 ) -> UIContext:
+    return await resolve_ui_context(request, db)
+
+
+async def resolve_ui_context(request: Request, db: AsyncSession) -> UIContext:
+    """Shared live authority check for routes and recoverable UI errors."""
     raw_token = request.cookies.get(UI_SESSION_COOKIE)
     if not raw_token:
         raise UIAccessError(status.HTTP_303_SEE_OTHER)

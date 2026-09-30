@@ -7465,3 +7465,90 @@ Decision:
 
 Non-scope: #87, #88, #50; general search performance; general orphan and
 BrowserSession retention (#46); distributed caches.
+
+## D-091 — Issue #87 proposal: session revocation and agent request integrity
+
+**Status:** Proposed on `feat/87-session-request-integrity`; not accepted or
+merged. Accepted baseline: `ac9a249359c9a5dcf417b4e3f269a2c0b92b3ab0`.
+
+1. **Session security changes.** `set_password` updates the Argon2id hash and
+   revokes all BrowserSessions for that user in one transaction. Disabling a
+   user does the same. Disabling a membership revokes only BrowserSessions
+   tied to that membership. Re-enabling never clears `revoked_at`. Demo
+   credential rotation uses the same `set_password` path only after the
+   existing positive synthetic-demo identification. Machine API-key auth is
+   unchanged.
+2. **Pending tenant choice.** Direct session revocation cannot revoke a
+   stateless token issued after password verification but before a
+   BrowserSession exists. User and membership `security_version` UUID stamps
+   rotate on their respective security changes. Membership disable also
+   rotates the user's pending-login stamp without revoking sessions on the
+   user's other memberships. A signed 5-minute pending
+   claim binds both, and tenant selection reloads live User and membership
+   state before minting a session. Existing sessions remain truthful on
+   upgrade; no old pending-token format is accepted after deployment.
+3. **Failed login audit.** `AuthSecurityEvent` is tenant-independent because
+   unknown usernames cannot truthfully be placed in tenant-owned
+   `AuditEvent`. It stores a closed outcome code, nullable known-user UUID,
+   and timestamp only. Unknown username, wrong password and disabled user
+   share browser copy. Submitted unknown usernames, passwords, cookies,
+   tokens, CSRF material and raw forms are absent. Tenant-selection failures
+   have structural codes. Successful tenant-scoped `AuditEvent` remains.
+4. **Canonical text.** Both agent and classic search normalize CRLF/lone CR
+   to LF before counting. The HR limit is 4000 canonical characters,
+   inclusive; no truncation. Form transport has a separate 8192-character
+   ceiling, enough for any browser-valid textarea and a 4001-character
+   all-newline diagnostic. The agent preserves over-limit canonical text in
+   an escaped authenticated workspace and does no inference or mutation.
+5. **Agent submission lifecycle.** GET/render issues an unguessable,
+   server-owned `AgentTurnSubmission` scoped to tenant, owner user,
+   membership, BrowserSession, durable conversation and context epoch. The
+   browser token is only a request identity, never authorization. The
+   existing #85 conversation reservation is still the concurrency
+   authority. Phase A checks owner and canonical SHA-256 request hash and
+   changes ISSUED to PROCESSING in the reservation transaction. Phase B
+   revalidates principal, reservation, context and submission, then commits
+   transcript/live pointers, COMPLETED and reservation clear atomically.
+   A same-token PROCESSING duplicate is 409; COMPLETED replay redirects to
+   canonical GET; different bytes and foreign context fail closed. Fresh
+   token with identical text is a new intentional turn. Busy, cancellation,
+   and stale non-commit paths terminate the old identity as ABANDONED in
+   shielded cleanup; a rendered retry uses its new issued token.
+   "Phase B revalidates principal" means principal authority is
+   transactionally serialized against credential/session revocation for the
+   final consequential commit: every re-entry (including Phase B) locks
+   User -> TenantMembership -> BrowserSession `FOR SHARE`, in that order,
+   before the conversation/context rows, and holds them until that short
+   transaction commits or rolls back. Security mutators write the same rows
+   in the same order (`set_password`, `set_user_active(False)`: User ->
+   BrowserSession; `set_membership_active(False)`: User -> Membership ->
+   BrowserSession; login/tenant selection: User -> Membership; logout:
+   BrowserSession only), so either the security change commits first and
+   Phase B waits, then fails closed with `PRINCIPAL_REVOKED`, or Phase B
+   holds the rows first and the security change waits until the turn has
+   committed, then revokes the session for every later request. A
+   revocation can never commit between the check and the turn's commit.
+   `FOR SHARE` blocks those UPDATEs but not the `FOR KEY SHARE` locks FK
+   inserts take, nor other turns' re-entry, avoiding new lock inversions.
+   No locks are held across inference (the boundary commits first); no
+   `security_version` comparison is added to Phase B and no schema change
+   is needed. Ordinary non-agent in-flight requests get no new guarantee.
+6. **Browser semantics and retention.** Durable replay protection is used
+   instead of true PRG for the first rich result, avoiding duplicate
+   persistence of rendered CV/model content. Refresh/back resubmission is
+   harmless because completed POST replays redirect. After a successful rich
+   render, progressive JavaScript replaces the history entry with the canonical
+   GET URL; this improves reload/forward UX without becoming replay authority.
+   Submission rows expire after 24 hours. Expired non-processing
+   rows are retired in bounded lazy batches of 20; expired PROCESSING rows
+   are collectible only after their own lease and conversation reservation
+   expire. A crash before Phase B leaves a bounded lease, not a completed
+   request; retry after expiry can reclaim the uncommitted intent. Active inference
+   holds no DB connection. CSRF is checked independently before submission
+   claim. Revoked BrowserSessions cannot use their submissions.
+7. **Migration and rollback.** Revision `a87d4c6e2b19` follows
+   `f3a9c6d2e815` as one head. It adds only two stamps and the two
+   security/request tables. No token/request history is fabricated for old
+   conversations or sessions. Downgrade refuses to erase nonempty durable
+   auth/submission tables, and revokes all BrowserSessions before removing
+   security stamps when representable. #88 and #50 remain out of scope.

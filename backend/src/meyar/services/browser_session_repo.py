@@ -67,6 +67,27 @@ async def revoke_browser_session_by_id(
     )
 
 
+async def revoke_sessions_for_user(db: AsyncSession, *, user_id: uuid.UUID) -> None:
+    await db.execute(
+        update(BrowserSession)
+        .where(BrowserSession.user_id == user_id, BrowserSession.revoked_at.is_(None))
+        .values(revoked_at=datetime.now(UTC))
+    )
+
+
+async def revoke_sessions_for_membership(
+    db: AsyncSession, *, membership_id: uuid.UUID
+) -> None:
+    await db.execute(
+        update(BrowserSession)
+        .where(
+            BrowserSession.tenant_membership_id == membership_id,
+            BrowserSession.revoked_at.is_(None),
+        )
+        .values(revoked_at=datetime.now(UTC))
+    )
+
+
 async def get_browser_session_by_id(
     db: AsyncSession, *, browser_session_id: uuid.UUID
 ) -> BrowserSession | None:

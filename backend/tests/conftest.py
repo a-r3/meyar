@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 import uuid
 from collections.abc import AsyncGenerator
 from pathlib import Path
@@ -23,6 +24,37 @@ from meyar.storage.local import LocalFilesystemStorage
 from meyar.storage.photo import LocalPhotoStorage
 
 DEFAULT_TEST_PASSWORD = "correct-horse-battery-staple-1"
+
+
+class BrowserTestClient(AsyncClient):
+    """Legacy route tests submit like a browser with its rendered composer.
+
+    Explicit #87 token tests pass their own submission_id unchanged.
+    """
+
+    async def post(self, url, *, data=None, **kwargs):  # noqa: ANN001, ANN201
+        if url == "/ui/agent" and isinstance(data, dict) and "submission_id" not in data:
+            selector = data.get("conversation_id")
+            page = await self.get("/ui/agent")
+            current = re.search(r'name="conversation_id" value="([0-9a-f-]{36})"', page.text)
+            if selector and (current is None or current.group(1) != str(selector)):
+                page = await self.get(f"/ui/agent?conversation={selector}")
+            if page.status_code == 404 and selector:
+                # A forged selector must be accompanied by a real token
+                # issued for this browser's own conversation, then rejected
+                # by the route's ownership check.
+                page = await self.get("/ui/agent")
+            if page.status_code == 200:
+                match = re.search(r'name="submission_id" value="([0-9a-f-]{36})"', page.text)
+                if match is not None:
+                    data = {**data, "submission_id": match.group(1)}
+                    if "conversation_id" not in data:
+                        selected = re.search(
+                            r'name="conversation_id" value="([0-9a-f-]{36})"', page.text
+                        )
+                        if selected is not None:
+                            data["conversation_id"] = selected.group(1)
+        return await super().post(url, data=data, **kwargs)
 
 ADMIN_DATABASE_URL = "postgresql+asyncpg://meyar:meyar_dev_password@localhost:55719/meyar"
 TEST_DATABASE_URL = "postgresql+asyncpg://meyar:meyar_dev_password@localhost:55719/meyar_test"
@@ -146,7 +178,7 @@ async def client(db_session: AsyncSession, tmp_path: Path) -> AsyncGenerator[Asy
         root=str(tmp_path / "storage")
     )
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+    async with BrowserTestClient(transport=transport, base_url="http://test") as ac:
         yield ac
     app.dependency_overrides.clear()
 

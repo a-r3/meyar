@@ -27,6 +27,7 @@ class TenantMembership(Base):
     )
     role: Mapped[str] = mapped_column(String(32), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    security_version: Mapped[uuid.UUID] = mapped_column(nullable=False, default=uuid.uuid4)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

@@ -1,7 +1,7 @@
 import hashlib
 import logging
 import uuid
-from datetime import date
+from datetime import UTC, date, datetime
 from importlib import resources
 
 from fastapi import APIRouter, Depends, FastAPI, Form, Query, Request, status
@@ -17,6 +17,7 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from starlette.responses import Response
 from starlette.templating import Jinja2Templates
 
+from meyar.agent.service import normalize_message_newlines
 from meyar.config import Settings, get_settings
 from meyar.core.business_date import resolve_business_date
 from meyar.core.password import hash_password, needs_rehash, verify_password
@@ -41,6 +42,13 @@ from meyar.search.planner_service import plan_and_search_candidates
 from meyar.search.schemas import EmbeddingSearchConfig
 from meyar.search.service import SearchRequestError
 from meyar.services.audit_repo import ACTOR_HUMAN_USER, record_event
+from meyar.services.auth_security_event_repo import (
+    LOGIN_REJECTED,
+    NO_ACTIVE_MEMBERSHIP,
+    PENDING_TOKEN_INVALID,
+    TENANT_SELECTION_INVALID,
+    record_auth_failure,
+)
 from meyar.services.browser_session_repo import (
     create_browser_session,
     revoke_browser_session_by_id,
@@ -55,7 +63,7 @@ from meyar.services.tenant_membership_repo import (
     list_active_memberships_for_user,
 )
 from meyar.services.tenant_repo import get_tenant
-from meyar.services.user_repo import get_user_by_username, set_password
+from meyar.services.user_repo import get_user_by_id, get_user_by_username, set_password
 from meyar.storage.base import DocumentStorage
 from meyar.storage.dependency import get_document_storage, get_photo_storage
 from meyar.storage.photo import LocalPhotoStorage
@@ -65,6 +73,7 @@ from meyar.ui.auth import (
     UIAccessError,
     UIContext,
     require_ui_scopes,
+    resolve_ui_context,
     verify_csrf,
 )
 from meyar.ui.pending_login import issue_pending_login_token, verify_pending_login_token
@@ -105,6 +114,15 @@ from meyar.ui.view_models import AgentTurnView, PlannerOutcomeView
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/ui", tags=["internal-ui"], include_in_schema=False)
+_HR_TEXT_LIMIT = 4000
+_FORM_TRANSPORT_LIMIT = 8192  # 4000 LF textarea chars can arrive as 8000 CRLF chars.
+
+
+def _canonical_hr_text(value: str) -> str | None:
+    canonical = normalize_message_newlines(value)
+    if not 1 <= len(canonical) <= _HR_TEXT_LIMIT:
+        return None
+    return canonical
 
 # A fixed, valid-shaped Argon2 hash verified against on an unknown
 # username so that responding to "unknown user" costs roughly the same
@@ -253,7 +271,7 @@ async def login(
     # at its real source instead: every CLI-issued secret (see
     # meyar.cli._seed_demo/_create_tenant) is printed alone on its own
     # line, never sharing a line with label text that could soft-wrap.
-    user = await get_user_by_username(db, username.strip())
+    user = await get_user_by_username(db, username.strip(), for_update=True)
     stored_hash = user.password_hash if user is not None else _DUMMY_PASSWORD_HASH
     password_ok = verify_password(stored_hash, password)
 
@@ -261,7 +279,12 @@ async def login(
     # "disabled user" — never lets a login attempt confirm a username
     # exists or distinguish why it failed. See docs/DECISIONS.md.
     if user is None or not password_ok or not user.is_active:
+        failed_user_id = user.id if user is not None else None
         await db.rollback()
+        await record_auth_failure(
+            db, outcome_code=LOGIN_REJECTED, user_id=failed_user_id
+        )
+        await db.commit()
         return _render(
             request,
             "login.html",
@@ -274,38 +297,58 @@ async def login(
 
     memberships = await list_active_memberships_for_user(db, user_id=user.id)
     if not memberships:
+        failed_user_id = user.id
         await db.rollback()
+        await record_auth_failure(db, outcome_code=NO_ACTIVE_MEMBERSHIP, user_id=failed_user_id)
+        await db.commit()
         return _render(
             request,
             "login.html",
-            _context(
-                error=(
-                    "Hesabınıza heç bir aktiv təşkilat girişi təyin edilməyib. "
-                    "Administratorla əlaqə saxlayın."
-                )
-            ),
-            status_code=status.HTTP_403_FORBIDDEN,
+            _context(error=_GENERIC_LOGIN_ERROR),
+            status_code=status.HTTP_401_UNAUTHORIZED,
         )
 
     if len(memberships) == 1:
+        selected_membership = await get_membership_by_id(
+            db, memberships[0].id, for_update=True
+        )
+        if (
+            selected_membership is None or not selected_membership.is_active
+            or selected_membership.user_id != user.id
+        ):
+            failed_user_id = user.id
+            await db.rollback()
+            await record_auth_failure(
+                db, outcome_code=NO_ACTIVE_MEMBERSHIP, user_id=failed_user_id
+            )
+            await db.commit()
+            return _render(
+                request, "login.html", _context(error=_GENERIC_LOGIN_ERROR),
+                status_code=status.HTTP_401_UNAUTHORIZED,
+            )
         return await _finalize_human_login(
             db,
             settings,
             user_id=user.id,
-            membership_id=memberships[0].id,
-            tenant_id=memberships[0].tenant_id,
+            membership_id=selected_membership.id,
+            tenant_id=selected_membership.tenant_id,
         )
 
     # More than one active tenant membership: never silently pick one —
     # require an explicit, server-validated choice (see
     # meyar.ui.pending_login and the /login/select-tenant route below).
-    # Every value needed below is captured before the rollback expires
-    # these ORM instances — a post-rollback attribute access would
-    # otherwise trigger an unawaited lazy-load (MissingGreenlet).
+    # Capture the verified stamps before ending this transaction. Commit
+    # any password rehash/revocation so the signed claim describes durable
+    # security state; rolling it back would make the freshly issued claim stale.
     user_id = user.id
+    user_security_version = user.security_version
     membership_ids_and_tenant_ids = [(m.id, m.tenant_id) for m in memberships]
-    await db.rollback()
-    token = issue_pending_login_token(secret=settings.pending_login_secret, user_id=user_id)
+    membership_versions = {m.id: m.security_version for m in memberships}
+    await db.commit()
+    token = issue_pending_login_token(
+        secret=settings.pending_login_secret, user_id=user_id,
+        user_security_version=user_security_version, membership_versions=membership_versions,
+    )
     tenant_options = []
     for membership_id, tenant_id in membership_ids_and_tenant_ids:
         tenant = await get_tenant(db, tenant_id)
@@ -321,12 +364,14 @@ async def login(
 async def select_tenant(
     request: Request,
     token: str = Form(...),
-    membership_id: uuid.UUID = Form(...),
+    membership_id: str = Form(...),
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> Response:
-    user_id = verify_pending_login_token(secret=settings.pending_login_secret, token=token)
-    if user_id is None:
+    claim = verify_pending_login_token(secret=settings.pending_login_secret, token=token)
+    if claim is None:
+        await record_auth_failure(db, outcome_code=PENDING_TOKEN_INVALID)
+        await db.commit()
         return _render(
             request,
             "login.html",
@@ -338,8 +383,28 @@ async def select_tenant(
     # and checked to actually belong to the token's authenticated user and
     # be currently active — a tampered/foreign membership_id never
     # resolves, regardless of what the client submitted.
-    membership = await get_membership_by_id(db, membership_id)
-    if membership is None or membership.user_id != user_id or not membership.is_active:
+    try:
+        selected_membership_id = uuid.UUID(membership_id)
+    except ValueError:
+        selected_membership_id = None
+    user = await get_user_by_id(db, claim.user_id, for_update=True)
+    membership = (
+        await get_membership_by_id(db, selected_membership_id, for_update=True)
+        if selected_membership_id is not None else None
+    )
+    if (
+        user is None or not user.is_active
+        or user.security_version != claim.user_security_version
+        or membership is None or membership.user_id != claim.user_id
+        or not membership.is_active
+        or claim.membership_versions.get(membership.id) != membership.security_version
+    ):
+        await db.rollback()
+        await record_auth_failure(
+            db, outcome_code=TENANT_SELECTION_INVALID,
+            user_id=claim.user_id if user is not None else None,
+        )
+        await db.commit()
         return _render(
             request,
             "login.html",
@@ -350,7 +415,7 @@ async def select_tenant(
     return await _finalize_human_login(
         db,
         settings,
-        user_id=user_id,
+        user_id=claim.user_id,
         membership_id=membership.id,
         tenant_id=membership.tenant_id,
     )
@@ -386,7 +451,7 @@ async def home(request: Request, ctx: UIContext = Depends(require_ui_scopes())) 
 @router.post("/search", response_class=HTMLResponse)
 async def search(
     request: Request,
-    query: str = Form(..., min_length=1, max_length=4000),
+    query: str = Form(default="", max_length=_FORM_TRANSPORT_LIMIT),
     csrf_token: str = Form(...),
     ctx: UIContext = Depends(require_ui_scopes("candidates:read")),
     db: AsyncSession = Depends(get_db),
@@ -396,6 +461,14 @@ async def search(
     settings: Settings = Depends(get_settings),
 ) -> HTMLResponse:
     verify_csrf(ctx.csrf_token, csrf_token)
+    canonical_query = _canonical_hr_text(query)
+    if canonical_query is None:
+        return _render(
+            request, "error.html",
+            _context(ctx, title="Yanlış məlumat", message="Mətn 1–4000 simvol olmalıdır."),
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        )
+    query = canonical_query
     # HR users never choose an evaluation date — the current date is
     # injected here, once, at the UI boundary, and passed explicitly
     # through the same deterministic API/CLI contract below. See
@@ -625,6 +698,9 @@ async def _render_agent_workspace(
     history_turns: list,
     latest: AgentTurnView | None = None,
     latest_user_message: str | None = None,
+    composer_message: str = "",
+    composer_error: str | None = None,
+    completed_turn: bool = False,
     page: int = 1,
     status_code: int = status.HTTP_200_OK,
 ) -> HTMLResponse:
@@ -640,6 +716,13 @@ async def _render_agent_workspace(
         db, ctx=ctx, settings=settings, conversation=conversation,
         latest_draft_ids=latest_draft_ids, page=page,
     )
+    from meyar.services.agent_submission_repo import issue_submission
+
+    submission = await issue_submission(
+        db, owner=_conversation_owner(ctx), browser_session_id=ctx.session_id,
+        conversation=conversation,
+    )
+    await db.commit()
     return _render(
         request,
         "agent.html",
@@ -649,6 +732,10 @@ async def _render_agent_workspace(
             history_turns=history_turns,
             latest=latest,
             latest_user_message=latest_user_message,
+            composer_message=composer_message,
+            composer_error=composer_error,
+            completed_turn=completed_turn,
+            submission_id=submission.id,
             kind_options=CRITERION_KIND_OPTIONS,
             **workspace,
         ),
@@ -703,17 +790,44 @@ async def agent_workspace(
 @router.post("/agent", response_class=HTMLResponse)
 async def agent_turn(
     request: Request,
-    message: str = Form(..., min_length=1, max_length=4000),
+    message: str = Form(default="", max_length=_FORM_TRANSPORT_LIMIT),
     csrf_token: str = Form(...),
     conversation_id: uuid.UUID | None = Form(default=None),
+    submission_id: uuid.UUID = Form(...),
     ctx: UIContext = Depends(require_ui_scopes("candidates:read")),
     db: AsyncSession = Depends(get_db),
     llm: LLMProvider = Depends(get_llm_provider),
     embedding_provider: EmbeddingProvider = Depends(get_embedding_provider),
     embedding_config: EmbeddingSearchConfig = Depends(get_embedding_search_config),
     settings: Settings = Depends(get_settings),
-) -> HTMLResponse:
+) -> Response:
     verify_csrf(ctx.csrf_token, csrf_token)
+    canonical_message = _canonical_hr_text(message)
+    if canonical_message is None:
+        owner = _conversation_owner(ctx)
+        from meyar.services.agent_conversation_repo import (
+            get_owned_conversation,
+            resolve_or_create_current_conversation,
+        )
+        selected = (
+            await get_owned_conversation(db, owner=owner, conversation_id=conversation_id)
+            if conversation_id is not None else
+            await resolve_or_create_current_conversation(
+                db, owner=owner, browser_session_id=ctx.session_id
+            )
+        )
+        if selected is None:
+            await db.rollback()
+            return _render_conversation_not_found(request, ctx)
+        await db.commit()
+        return await _render_agent_workspace(
+            request, ctx, db, settings, conversation=selected,
+            history_turns=_agent_turn_log_views(selected),
+            composer_message=normalize_message_newlines(message),
+            composer_error="Mətn 1–4000 simvol olmalıdır.",
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        )
+    message = canonical_message
     from meyar.agent.service import apply_agent_turn_commit, execute_agent_turn
     from meyar.agent.turn_boundary import (
         AgentInferenceBusyError,
@@ -736,6 +850,12 @@ async def agent_turn(
         resolve_or_create_current_conversation,
         sync_last_turn_display_text,
     )
+    from meyar.services.agent_submission_repo import (
+        claim_submission,
+        complete_submission,
+        get_bound_submission,
+        request_hash,
+    )
     from meyar.ui.service import build_agent_turn_view
 
     owner = _conversation_owner(ctx)
@@ -752,6 +872,32 @@ async def agent_turn(
             return _render_conversation_not_found(request, ctx)
         conversation_id = current.id
         await db.commit()
+    message_sha256 = request_hash(message)
+    submission = await get_bound_submission(
+        db, submission_id=submission_id, owner=owner,
+        browser_session_id=ctx.session_id, conversation_id=conversation_id,
+    )
+    if submission is None or submission.expires_at <= datetime.now(UTC):
+        await db.rollback()
+        return _render_conversation_not_found(request, ctx)
+    if submission.request_sha256 is not None and submission.request_sha256 != message_sha256:
+        await db.rollback()
+        return _render_conversation_not_found(request, ctx)
+    if submission.status == "COMPLETED":
+        await db.rollback()
+        return RedirectResponse(
+            f"/ui/agent?conversation={conversation_id}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+    if submission.status == "PROCESSING" and submission.lease_expires_at and (
+        submission.lease_expires_at > datetime.now(UTC)
+    ):
+        await db.rollback()
+        return await _render_agent_turn_not_run(
+            request, ctx, db, settings, owner=owner, conversation_id=conversation_id,
+            message=message, outcome="AGENT_TURN_IN_PROGRESS",
+            copy=_AGENT_TURN_IN_PROGRESS_COPY, status_code=status.HTTP_409_CONFLICT,
+        )
     # issue #85 (D-089) PHASE A: lock the durable conversation row briefly,
     # authorize, refuse (immediately, 409) when another turn on this same
     # conversation is still in flight, and write the server-owned
@@ -769,6 +915,13 @@ async def agent_turn(
         )
     except ConversationTurnInProgressError:
         await db.rollback()
+        unused_submission = await get_bound_submission(
+            db, submission_id=submission_id, owner=owner,
+            browser_session_id=ctx.session_id, conversation_id=conversation_id,
+            for_update=True,
+        )
+        if unused_submission is not None and unused_submission.status == "ISSUED":
+            unused_submission.status = "ABANDONED"
         await record_event(
             db,
             tenant_id=ctx.tenant_id,
@@ -790,6 +943,26 @@ async def agent_turn(
             await db.commit()
         return _render_conversation_not_found(request, ctx)
     reservation = reserved.reservation
+    submission = await get_bound_submission(
+        db, submission_id=submission_id, owner=owner,
+        browser_session_id=ctx.session_id, conversation_id=conversation_id,
+        for_update=True,
+    )
+    claim_outcome = (
+        claim_submission(
+            submission, reservation=reservation, message_sha256=message_sha256,
+            ttl_seconds=settings.agent_turn_reservation_seconds,
+        ) if submission is not None else "INVALID"
+    )
+    if claim_outcome != "CLAIMED":
+        await db.rollback()
+        if claim_outcome == "COMPLETED":
+            return RedirectResponse(
+                f"/ui/agent?conversation={conversation_id}",
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+        return _render_conversation_not_found(request, ctx)
+    await db.flush()
     boundary = TurnBoundary(
         db, reservation, ttl_seconds=settings.agent_turn_reservation_seconds
     )
@@ -820,6 +993,19 @@ async def agent_turn(
         # turn_version and live context; only then persist the outcome and
         # clear the reservation in the same commit.
         conversation, session_context = await boundary.reenter()
+        phase_b_submission = await get_bound_submission(
+            db, submission_id=submission_id, owner=owner,
+            browser_session_id=ctx.session_id, conversation_id=conversation_id,
+            for_update=True,
+        )
+        if phase_b_submission is None:
+            raise TurnAuthorityLostError(TurnStaleReason.CONTEXT_CHANGED)
+        if (
+            phase_b_submission.status != "PROCESSING"
+            or phase_b_submission.reservation_id != reservation.token
+            or phase_b_submission.request_sha256 != message_sha256
+        ):
+            raise TurnAuthorityLostError(TurnStaleReason.CONTEXT_CHANGED)
         result = await apply_agent_turn_commit(
             db, conversation, session_context, tenant_id=ctx.tenant_id, commit=commit
         )
@@ -831,27 +1017,31 @@ async def agent_turn(
         # saw live instead of falling back to a generic per-outcome
         # message — see sync_last_turn_display_text's own docstring.
         await sync_last_turn_display_text(db, conversation, text=latest.headline)
+        complete_submission(
+            phase_b_submission, reservation=reservation, message_sha256=message_sha256,
+            completed_turn_version=conversation.turn_version,
+        )
         await db.commit()
     except TurnAuthorityLostError as exc:
-        await abandon_reserved_turn(db, reservation)
+        await abandon_reserved_turn(db, reservation, submission_id=submission_id)
         await _audit_agent_turn_not_committed(db, ctx, "agent.turn.stale", exc.reason.value)
         if exc.reason == TurnStaleReason.PRINCIPAL_REVOKED:
             # Same outcome as any request made after revocation.
             raise UIAccessError(status.HTTP_303_SEE_OTHER, clear_cookie=True) from None
         failure = ("AGENT_TURN_STALE", _AGENT_TURN_STALE_COPY, status.HTTP_409_CONFLICT)
     except AgentInferenceBusyError as exc:
-        await abandon_reserved_turn(db, reservation)
+        await abandon_reserved_turn(db, reservation, submission_id=submission_id)
         await _audit_agent_turn_not_committed(db, ctx, "agent.turn.busy", exc.reason)
         failure = ("AGENT_BUSY", _AGENT_BUSY_COPY, status.HTTP_503_SERVICE_UNAVAILABLE)
     except ClientDisconnectedError:
-        await abandon_reserved_turn(db, reservation)
+        await abandon_reserved_turn(db, reservation, submission_id=submission_id)
         await _audit_agent_turn_not_committed(
             db, ctx, "agent.turn.abandoned", "CLIENT_DISCONNECTED"
         )
         # Nobody is listening; any minimal response is fine.
         return HTMLResponse("", status_code=499)
     except (EmbeddingProviderError, SearchRequestError, SQLAlchemyError):
-        await abandon_reserved_turn(db, reservation)
+        await abandon_reserved_turn(db, reservation, submission_id=submission_id)
         failure = (
             "AGENT_PROVIDER_FAILURE",
             "MEYAR AI xidməti hazırda əlçatan deyil. Bir qədər sonra yenidən cəhd edin.",
@@ -860,7 +1050,7 @@ async def agent_turn(
     except BaseException:
         # Cancellation or an unexpected error: never leave this turn's
         # reservation behind (shielded, best-effort; TTL is the backstop).
-        await abandon_reserved_turn(db, reservation)
+        await abandon_reserved_turn(db, reservation, submission_id=submission_id)
         raise
     if failure is not None:
         outcome, copy, status_code = failure
@@ -888,6 +1078,7 @@ async def agent_turn(
     return await _render_agent_workspace(
         request, ctx, db, settings, conversation=conversation,
         history_turns=history_turns, latest=latest, latest_user_message=message,
+        completed_turn=True,
     )
 
 
@@ -1921,10 +2112,23 @@ def install_ui(app: FastAPI) -> None:
     @app.exception_handler(RequestValidationError)
     async def _validation_error(request: Request, exc: RequestValidationError) -> Response:
         if request.url.path == "/ui" or request.url.path.startswith("/ui/"):
+            resolved_ctx: UIContext | None = None
+            provider = app.dependency_overrides.get(get_db, get_db)
+            session_source = provider()
+            try:
+                validation_db = await anext(session_source)
+                try:
+                    resolved_ctx = await resolve_ui_context(request, validation_db)
+                except UIAccessError:
+                    pass
+            finally:
+                await session_source.aclose()
             return _render(
                 request,
                 "error.html",
-                _context(title="Yanlış məlumat", message="Forma məlumatlarını yoxlayın."),
+                _context(
+                    resolved_ctx, title="Yanlış məlumat", message="Forma məlumatlarını yoxlayın."
+                ),
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             )
         from fastapi.exception_handlers import request_validation_exception_handler

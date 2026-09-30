@@ -7,8 +7,8 @@ import re
 import uuid
 
 import pytest
+from conftest import BrowserTestClient as AsyncClient
 from fakes import FakeLLMProvider
-from httpx import AsyncClient
 from pydantic import ValidationError
 from search_helpers import seed_candidate_with_profile
 from sqlalchemy.ext.asyncio import AsyncSession
