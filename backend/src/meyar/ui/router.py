@@ -83,6 +83,7 @@ from meyar.ui.service import (
     JOB_DUPLICATE_MESSAGE,
     CriterionRowInput,
     UIServiceInputError,
+    agent_draft_requires_resolution,
     authorize_agent_draft_confirmation,
     build_job_create_request,
     build_ranked_candidate_views,
@@ -1235,13 +1236,25 @@ async def resolve_agent_job_draft_review(
     draft_id: uuid.UUID,
     csrf_token: str = Form(...),
     span_id: str = Form(..., pattern=r"^req-\d{4}$"),
-    criterion_type: str = Form(..., max_length=16),
+    criterion_type: str | None = Form(default=None, max_length=16),
+    decision: str | None = Form(default=None, max_length=16),
+    option: int | None = Form(default=None, ge=0, le=15),
     ctx: UIContext = Depends(require_ui_scopes("jobs:write", "candidates:read")),
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> HTMLResponse:
-    """Persist one canonical, server-declared human-review resolution."""
-    from meyar.agent.service import resolve_job_draft_review_modality
+    """Persist one canonical, server-declared human-review resolution.
+
+    Exactly one of: a modality resolution (``criterion_type``) for a
+    server-validated canonical shape, or (issue #84) ``decision=exclude`` —
+    HR's explicit acknowledgement that an unresolved MUST_HAVE source
+    requirement is not part of automatic ranking. Neither path accepts
+    free text and neither can turn arbitrary source text into a criterion."""
+    from meyar.agent.service import (
+        exclude_blocking_review_requirement,
+        resolve_job_draft_review_modality,
+        resolve_job_draft_semantic_conflict,
+    )
     from meyar.schemas.criteria import CriterionType
     from meyar.services.agent_conversation_repo import (
         replace_pending_job_draft,
@@ -1252,7 +1265,11 @@ async def resolve_agent_job_draft_review(
 
     verify_csrf(ctx.csrf_token, csrf_token)
     try:
-        resolved_type = CriterionType(criterion_type)
+        exclude = decision == "exclude"
+        chosen_paths = [exclude, criterion_type is not None, option is not None]
+        if (decision is not None and not exclude) or chosen_paths.count(True) != 1:
+            raise UIServiceInputError("Dəqiqləşdirmə seçimi etibarsızdır.")
+        resolved_type = CriterionType(criterion_type) if criterion_type is not None else None
         # issue #80: live pending authority only — owner + this
         # BrowserSession's context pointer + transcript payload, all
         # required (see resolve_pending_draft_authority).
@@ -1265,15 +1282,30 @@ async def resolve_agent_job_draft_review(
         if authority is None:
             raise UIServiceInputError("Qaralama bu sessiyada tapılmadı.")
         conversation = authority.conversation
-        resolved = resolve_job_draft_review_modality(
-            authority.draft, span_id=span_id, criterion_type=resolved_type
-        )
+        if option is not None:
+            resolved = resolve_job_draft_semantic_conflict(
+                authority.draft, span_id=span_id, option_index=option
+            )
+            resolution_code = "CONFLICT_RESOLVED"
+        elif resolved_type is None:
+            resolved = exclude_blocking_review_requirement(authority.draft, span_id=span_id)
+            resolution_code = "EXCLUDED_BY_REVIEWER"
+        else:
+            resolved = resolve_job_draft_review_modality(
+                authority.draft, span_id=span_id, criterion_type=resolved_type
+            )
+            resolution_code = resolved_type.value
         await replace_pending_job_draft(db, authority, draft=resolved)
         await record_event(
             db,
             tenant_id=ctx.tenant_id,
             event_type="agent.draft.review_resolved",
-            metadata={"span_id": span_id, "criterion_type": resolved_type.value},
+            metadata={
+                "draft_id": str(resolved.draft_id),
+                "span_id": span_id,
+                "criterion_type": resolution_code,
+                "semantic_policy_version": resolved.semantic_policy_version,
+            },
             actor_type=ACTOR_HUMAN_USER,
             actor_id=ctx.user_id,
         )
@@ -1292,6 +1324,8 @@ async def resolve_agent_job_draft_review(
         headline=(
             "Dəqiqləşdirmə yadda saxlanıldı. "
             "Tələbləri təsdiqləyib namizədləri sıralaya bilərsiniz."
+            if not agent_draft_requires_resolution(resolved)
+            else "Dəqiqləşdirmə yadda saxlanıldı. Qalan tələbləri də nəzərdən keçirin."
         ),
         tool_results=[
             AgentToolResultView(
@@ -1329,6 +1363,10 @@ async def confirm_agent_job_draft(
     durable result link so replay/retry cannot create another Job or version.
     """
     from meyar.agent.schemas import ConfirmedAgentJobDraft
+    from meyar.agent.semantic_provenance import (
+        SemanticProvenanceError,
+        build_agent_semantic_provenance,
+    )
     from meyar.services.agent_conversation_repo import (
         mark_pending_job_draft_confirmed,
         resolve_pending_draft_authority,
@@ -1381,6 +1419,13 @@ async def confirm_agent_job_draft(
                 "elanı yenidən analiz edin."
             )
         pending = authority.draft
+        if agent_draft_requires_resolution(pending):
+            # Same single confirmability rule as authorize_agent_draft_
+            # confirmation, checked before any request shape is built (a
+            # fully conflicted draft may have no criteria at all yet).
+            raise UIServiceInputError(
+                "İnsan baxışı tələb edən sahələri dəqiqləşdirmədən sıralamanı təsdiqləmək olmaz."
+            )
 
         canonical_title = pending.title or "Vakansiya qaralaması"
         submitted_authority = "title" in form or any(
@@ -1416,11 +1461,11 @@ async def confirm_agent_job_draft(
                 title=canonical_title,
                 criteria=[*pending.must_have, *pending.preferred],
             )
-            span_by_criterion = {
-                item.criterion_id: item.span_id
-                for item in pending.requirements
-                if item.criterion_id is not None and item.state.value == "SCORABLE"
-            }
+            # Primary (first) supporting span per criterion (issue #84).
+            span_by_criterion: dict[str, str] = {}
+            for item in pending.requirements:
+                if item.criterion_id is not None and item.state.value == "SCORABLE":
+                    span_by_criterion.setdefault(item.criterion_id, item.span_id)
             submitted_span_ids = []
             for criterion in job_request.criteria:
                 span_id = span_by_criterion.get(criterion.id)
@@ -1434,6 +1479,16 @@ async def confirm_agent_job_draft(
             request=job_request,
             submitted_span_ids=submitted_span_ids,
         )
+        # issue #84: durable semantic provenance, built fail-closed from the
+        # locked server draft (never browser data) BEFORE anything is created.
+        try:
+            semantic_provenance = build_agent_semantic_provenance(
+                pending, job_request.criteria
+            )
+        except SemanticProvenanceError as exc:
+            raise UIServiceInputError(
+                "Qaralama meyarlarının mənbə izi təsdiqlənmədi; elanı yenidən analiz edin."
+            ) from exc
 
         duplicate_signature = compute_job_duplicate_signature(
             job_request.title, job_request.criteria
@@ -1468,6 +1523,7 @@ async def confirm_agent_job_draft(
             needs_review_requirements=[item.requirement for item in pending.needs_review],
             result_limit=pending.result_limit,
             eligible_only=True,
+            agent_semantic_provenance=semantic_provenance.model_dump(mode="json"),
         )
         await record_event(
             db,

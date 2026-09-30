@@ -163,6 +163,7 @@ class _DemoLLMProvider:
         jd_text: str,
         *,
         requirement_spans: list[RequirementSpan],
+        span_hints: dict[str, dict[str, str]] | None = None,
         repair: bool = False,
     ) -> tuple[JDCriteriaDraft, LLMResultProvenance]:
         raise NotImplementedError("The demo seed provider never drafts job criteria.")

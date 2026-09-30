@@ -28,6 +28,8 @@ BASE_URL = ADMIN_DATABASE_URL.rsplit("/", 1)[0]
 ADMIN_URL = f"{BASE_URL}/postgres"
 PRIOR_HEAD = "543c60f7efc5"
 NEW_HEAD = "b7e3c9d41f28"
+# Current single Alembic head (issue #84 chains c84a5e2f9d17 on NEW_HEAD).
+CURRENT_HEAD = "c84a5e2f9d17"
 
 TENANT = "00000000-0000-0000-0000-0000000080a1"
 OTHER_TENANT = "00000000-0000-0000-0000-0000000080a2"
@@ -623,7 +625,7 @@ def test_fresh_install_reaches_single_head(monkeypatch) -> None:
     try:
         command.upgrade(config, "head")
         revision = asyncio.run(_query(url, "SELECT version_num FROM alembic_version"))
-        assert revision[0][0] == NEW_HEAD
+        assert revision[0][0] == CURRENT_HEAD
         tables = asyncio.run(
             _query(url, "SELECT to_regclass('agent_conversation_session_contexts')")
         )
@@ -631,4 +633,4 @@ def test_fresh_install_reaches_single_head(monkeypatch) -> None:
     finally:
         get_settings.cache_clear()
         asyncio.run(_admin(f'DROP DATABASE IF EXISTS "{name}"'))
-    assert ScriptDirectory.from_config(config).get_heads() == [NEW_HEAD]
+    assert ScriptDirectory.from_config(config).get_heads() == [CURRENT_HEAD]

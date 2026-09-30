@@ -6842,3 +6842,204 @@ draft authority. JD confirmation/review controls use a server-prepared
 historical drafts are never made actionable by transcript rendering. There
 is no raw-content or model-generated title, no conversation RAG, and no
 schema migration. This PR does not implement #50.
+
+## D-088 — Canonical professional-requirement boundary for JD drafts (issue #84)
+
+Context: the final independent adversarial audit of `main` @
+`096afb8caec18750f27499f20dc9ceeb00981102` (H-1, M-7, M-11 deterministic
+part, L-11) reproduced deterministic, model-independent defects: the JD path
+turned raw grammatical remainders into scoring authority
+(`"PostgreSQL ilə işləməyi"` → SCORABLE SKILL that evaluates UNKNOWN for a
+PostgreSQL candidate), let a one-line vacancy header leak into a criterion
+(`"Vakansiya: Analitik — Python"`), offered location text as a SKILL review
+item (`"Bakıda"`), let a coordinated list give siblings different authority,
+and let a trailing vacancy-title number on one line plus "Namizəd ..." on the
+next be parsed as a result count (JD misrouted away from drafting). A local
+model draft was requested but only its title was used; the deterministic
+subject was the material authority.
+
+Decision (semantic policy `jd-semantic-policy-v2`, prompt
+`jd-criteria-draft-prompt-v4`):
+
+1. **Canonical boundary.** `meyar.agent.canonical_requirements` introduces an
+   in-memory, Pydantic v2 `CanonicalRequirement` (span_id, kind,
+   canonical_subject, criterion_type, min_years, required_level,
+   interpretation_state, interpretation_source, review_reason,
+   shape_validated). Every JD-draft `CriterionIn` is built only from a
+   SCORABLE `CanonicalRequirement`. The in-memory object itself is not
+   persisted; the durable per-criterion provenance record is (amendment
+   A-1 below, migration `c84a5e2f9d17`). Kinds reuse the existing `JDDraftCriterionKind`
+   families; no new family was added.
+2. **Deterministic authority stays deterministic.** `analyze_hr_text` still
+   owns spans, exact offsets, modality, duration, level, prohibited and
+   unsupported classification. A deterministic subject is scorable only when
+   `is_canonical_subject` accepts it (curated alias, canonical language, or a
+   short clean term with no header/person tokens, function words or
+   Azerbaijani verbal-noun residue). This is a fail-closed rejection check,
+   not a language-understanding vocabulary: anything suspicious goes to
+   review. Unknown clean professional subjects (e.g. "Camunda") stay
+   scorable.
+3. **Model = proposal, server = authority.** The local model (only through
+   `LLMProvider`) receives the same authoritative spans plus structural
+   hints (modality/family/min_years/required_level) and returns canonical
+   subject proposals per span id. A proposal may close ONLY a
+   subject-normalization gap (`SUBJECT_NOT_CANONICAL`,
+   `RECRUITMENT_SUBJECT_WITHOUT_CUE`). It must reference a known span id
+   (else counted as ungrounded, never displayed), keep the deterministic
+   family, duration and level exactly, be itself canonical, not prohibited,
+   and be grounded in the span's exact text (token occurrence, bounded
+   Azerbaijani case suffix, or a reviewed alias of a span n-gram). One
+   distinct valid proposal per span; conflicting proposals → review. The
+   model never supplies modality, weight, score, offsets, permissions or new
+   requirements, and cannot override PROHIBITED/UNSUPPORTED.
+4. **Fallback.** Provider timeout/unavailable/schema-invalid never erases a
+   requirement and never degrades to a raw remainder: canonical
+   deterministic subjects stay scorable, everything else becomes review.
+5. **Coordination symmetry.** Spans split from one coordinated clause carry a
+   server-owned `coordination_group`; if any interpretable member is not
+   scorable, no member is (`COORDINATION_SYMMETRY`).
+6. **Header, non-professional, instruction-like text.** A one-line
+   `Vakansiya:/Vacancy: <title> — ...` header is trimmed at segmentation.
+   Location/residence, salary, work authorization/visa, remote/on-site/
+   hybrid, relocation/shift/travel and system-directed instructions are
+   deterministically UNSUPPORTED (visible, never scored, never a SKILL review
+   shape). No location scoring was introduced.
+7. **Unresolved MUST_HAVE blocks confirmation.** A NEEDS_HUMAN_REVIEW item
+   whose source modality is explicitly MUST_HAVE is `blocking`;
+   `agent_draft_requires_resolution` (the single UI + mutation rule) keeps
+   the draft unconfirmable until HR either resolves a server-declared
+   interpretation or explicitly acknowledges exclusion
+   (`decision=exclude`). Exclusion never mints a criterion; the requirement
+   stays disclosed on the draft and in the criteria version's
+   `needs_review_requirements`.
+8. **Review cannot turn text into a criterion.** A review item exposes
+   kind/subject (and modality `allowed_types`) only for a server-validated
+   canonical shape. `resolve_job_draft_review_modality` re-validates the
+   subject (canonical, grounded, not prohibited, source not non-professional)
+   before minting a CriterionIn.
+9. **Result count never spans a line break** (M-7), and "show (me) the first
+   three" is the same deterministic count-only follow-up as "ilk üç" /
+   "first 3" (M-11). ResultSet authority (#49) is unchanged.
+10. **Russian.** No Russian semantic support is claimed. JD drafts keep the
+    explicit unsupported-language panel; search now shows an explicit
+    "Bu dil hazırda dəstəklənmir" copy instead of the generic
+    "mənasını zəiflətmədən" message.
+11. **Provenance/audit.** Drafts carry `semantic_policy_version`;
+    `agent.tool.executed` for a draft and `agent.draft.review_resolved` add
+    only the policy version and structural counts (scorable / review /
+    unsupported / prohibited / blocking). No span text, JD text or model
+    output is audited.
+
+Non-scope: Agent Core v2 (#88: task/dialogue state, resumable
+clarification, capability registry), candidate Q&A (#50), Russian NLP,
+target-host model selection (#36). The architecture is sector-neutral.
+
+### D-088 amendment (review correction pass on PR #89)
+
+A-1. **Durable semantic provenance.** The pending draft is bounded session
+  state, so it cannot be the audit record for an immutable criteria
+  version. One nullable JSON column,
+  `job_criteria_versions.agent_semantic_provenance` (migration
+  `c84a5e2f9d17`, parent `b7e3c9d41f28`, single head), stores a strict
+  `jd-semantic-provenance-v1` record (superseded by v2, A-4) (`meyar.agent.semantic_provenance`,
+  Pydantic v2, `extra=forbid`, frozen): draft_id, `source_sha256` of the JD,
+  semantic policy version, prompt version and `{provider, model_name,
+  model_revision}` only when a schema-valid local-model result was accepted
+  (else null), `rejected_proposal_count`, per criterion `{criterion_id,
+  span_id, start_offset, end_offset, source_text (the exact fragment),
+  interpretation_source DETERMINISTIC|MODEL_VALIDATED}`, and explicit human
+  `review_decisions` `{span_id, MUST_HAVE|PREFERRED|EXCLUDED_BY_REVIEWER}`.
+  It never stores the full JD, raw model output, chain-of-thought or
+  candidate data. Existing rows stay NULL (never fabricated). Downgrade
+  refuses before any DDL while any row carries provenance. The record is
+  built fail-closed at the confirm boundary from the locked server draft
+  (never browser data): missing/duplicate/unknown-span provenance, criterion
+  mismatch, offset/text/grounding mismatch, inconsistent exclusions or a
+  missing policy version/digest → 422, nothing created. Reads go through
+  `get_agent_semantic_provenance` (tenant-scoped, strictly validated). The
+  scorer never reads it. `agent.draft.review_resolved` now also carries
+  `draft_id`; draft audit metadata carries `rejected_proposal_count` and
+  `model_result_accepted`.
+A-2. **One semantic authority.** The unused legacy model-reconciliation path
+  (`_build_authorized_model_draft`, `_build_criterion_from_draft_item`,
+  `_canonical_binding_result`, their helpers and `meyar.agent.jd_authority`,
+  a second segmenter) is removed. `tests/test_jd_source_binding.py` now
+  drives `_dispatch_draft_job_criteria` — the real production path — and
+  asserts canonical outcomes. Doing so exposed three pre-existing
+  production gaps (present on `main` too, masked by tests of dead code),
+  fixed narrowly in the single authority: bullet/numbered list items with
+  no modality cue are kept as review instead of silently dropped;
+  non-terminal "X is plus Y" is not a preference cue (review); a
+  scope/purpose/composition qualifier in the deterministic subject
+  (`for|in|within|using|via|with|on|üçün`) cannot be dropped by a model
+  proposal (`SCOPE_QUALIFIED` rejection).
+A-3. **Span overflow.** A JD with more than 64 source requirement spans
+  previously raised a validation error in production; it now yields one
+  blocking review item covering the source, so nothing can be confirmed
+  and nothing is silently dropped.
+A-4. **Human amendments are durable provenance (schema
+  `jd-semantic-provenance-v2`).** A bounded HR follow-up that changes one
+  criterion's `criterion_type`, `min_years` or `required_level` (only these
+  three, closed enum) appends an immutable, ordered, server-created
+  `SemanticCriterionAmendment {sequence, criterion_id, span_id, field,
+  previous_value, new_value, source_text, source_sha256}`; `source_text` is
+  the bounded HR follow-up that authorized it (an HR instruction, never
+  candidate data or model output). Chains are kept whole (3→5→7, B2→C1→C2).
+  New values are validated through `CriterionIn` before they apply. A
+  follow-up may name the old value instead of the subject ("3 ili 5 et")
+  only when exactly one criterion carries that value. At confirmation the
+  builder re-hashes and deterministically re-analyses the session-held JD
+  (the pending draft keeps it, excluded from every render/dump and from
+  durable provenance), re-derives each span's offsets/text/family/modality/
+  duration/level, and proves each final value = source value (+ explicit
+  review decision or conflict choice) replayed through an unbroken
+  amendment chain. Missing/forged source text, a value change with no
+  amendment, a broken `previous_value`, a cross-criterion/span, unknown,
+  duplicate or out-of-order amendment → 422, nothing created. The persisted
+  record stores per criterion `origin` and `final` parameters plus the full
+  chain; strict read validation replays it. v2 supersedes v1, which was
+  never part of an accepted release, so v1 JSON is not accepted on read; no
+  new column or migration (head stays `c84a5e2f9d17`).
+A-5. **Canonical collision policy.** After canonicalization and before any
+  `CriterionIn` exists, SCORABLE spans are grouped by the one central key
+  `semantic_identity = (kind, normalized canonical subject)` (skill aliases
+  via `normalize_skill_name`, domain via `canonicalize_domain` with
+  bank→banking, language via the language alias map; `EXPERIENCE` has no
+  subject). Kinds stay distinct because evaluator semantics differ (`SKILL`
+  presence ≠ `SKILL_EXPERIENCE` duration). Equal `(criterion_type,
+  min_years, required_level)` → exact duplicate: ONE criterion supported
+  by every span (provenance lists all `source_spans`). Different parameters
+  → every span of the group is a blocking `SEMANTIC_CONFLICT` review
+  (non-liftable by the model), shown as one item that says the requirement
+  appears with conflicting importance/parameters; no value is chosen
+  automatically (no max/min, no MUST_HAVE default). HR either picks one
+  server-declared option (`option` on the resolve route; recorded as a
+  `SemanticConflictResolution` whose options are re-derived from the source
+  at confirmation) or explicitly excludes it. A review resolution that
+  would recreate an existing identity merges into it only with identical
+  parameters and is refused otherwise. Confirmation also fails closed if two
+  confirmed criteria share one identity.
+
+### D-088 amendment A-6 (real-Ollama acceptance correction on PR #89)
+A-6. **Canonical transport newlines and explicit vacancy title.** Real
+  browser acceptance with the local `qwen3:1.7b` model reproduced (3/3)
+  that `Vakansiya: Kredit Analitiki 2` + `Excel tələb olunur.` lost its
+  title: the textarea submits CRLF, the model's CRLF proposal carried an
+  empty `required_level`, the strict `JDCriteriaDraft` schema correctly
+  rejected it, and the title was model-only. Two narrow rules, no schema
+  relaxation and no model-specific handling:
+  (1) `run_agent_turn` normalizes `\r\n`/`\r` to `\n`
+  (`normalize_message_newlines`) before the transcript, routing, span
+  offsets, hashing, the session-held source and provenance are produced, so
+  transport never changes semantics and every offset/hash refers to one
+  canonical source;
+  (2) `semantic_requirements.explicit_vacancy_title` returns the exact source
+  slice of ONE explicit `Vakansiya:`/`Vacancy:` header line (optionally cut
+  at the existing explicit dash separator), bounded to 120 characters, and
+  only when it overlaps no requirement span and no result-count control
+  span. It is title data only: never a criterion subject, never a count.
+  When present it takes precedence over the model title (exact HR source
+  beats interpretation; a model can neither invent nor rewrite it). Without
+  a header the existing model-title grounding rule and generic fallback are
+  unchanged. No first-line heuristic. Title is not part of provenance or
+  scoring.

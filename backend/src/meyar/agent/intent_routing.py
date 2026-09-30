@@ -166,7 +166,10 @@ _COUNT_NOUN = r"(?:\s+(?:namized\w*|nefer\w*|candidates?|results?|netice\w*))?"
 _COUNT_VERB = r"(?:\s+(?:goster(?:in|iniz)?|saxla|qalsin|show|keep))?"
 _RESULT_LIMIT_ONLY_RES = (
     re.compile(
-        r"^\W*(?:ilk|first|top)\s+"
+        # Issue #84 (M-11 parity): "show (me) the first three" is the same
+        # unambiguous count-only follow-up as "ilk üç" / "first 3".
+        r"^\W*(?:(?:please\s+)?(?:show|display|list|keep)\s+(?:me\s+)?(?:only\s+)?)?"
+        r"(?:the\s+)?(?:ilk|first|top)\s+"
         + _COUNT_TOKEN
         + r"(?:-[a-z]+)?"
         + _COUNT_NOUN

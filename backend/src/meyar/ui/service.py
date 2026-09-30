@@ -9,7 +9,12 @@ from pydantic import ValidationError
 from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meyar.agent.schemas import AgentActionType, AgentJobDraftToolResult, AgentTurnResult
+from meyar.agent.schemas import (
+    AgentActionType,
+    AgentJobDraftToolResult,
+    AgentTurnResult,
+    SemanticParameters,
+)
 from meyar.core.text import (
     combine_degree_and_field,
     fold_az_ascii,
@@ -893,6 +898,18 @@ async def build_agent_turn_view(
     )
 
 
+def _conflict_option_label(option: SemanticParameters) -> str:
+    """Closed server copy for one conflicting parameter set (issue #84)."""
+    parts = [
+        "Əsas tələb" if option.criterion_type == CriterionType.MUST_HAVE else "Üstünlük"
+    ]
+    if option.min_years is not None:
+        parts.append(f"minimum {option.min_years:g} il")
+    if option.required_level:
+        parts.append(f"səviyyə {option.required_level}")
+    return " — ".join(parts)
+
+
 def agent_draft_requires_resolution(draft: AgentJobDraftToolResult) -> bool:
     """Single server-owned confirmability predicate for a pending job draft.
 
@@ -902,10 +919,13 @@ def agent_draft_requires_resolution(draft: AgentJobDraftToolResult) -> bool:
     ``authorize_agent_draft_confirmation``. A draft is unresolved, and
     therefore never confirmable, while an ambiguous result-count request
     has left ``result_limit_needs_review`` set (the placeholder
-    ``result_limit`` must never become confirmation authority) or any
-    ``needs_review`` item still carries unresolved allowed types."""
+    ``result_limit`` must never become confirmation authority), any
+    ``needs_review`` item still carries unresolved allowed types, or (issue
+    #84) an explicit MUST_HAVE source requirement is still unresolved and
+    HR has not explicitly acknowledged its exclusion from ranking."""
     return draft.result_limit_needs_review or any(
-        item.allowed_types for item in draft.needs_review
+        item.allowed_types or (item.blocking and not item.acknowledged_excluded)
+        for item in draft.needs_review
     )
 
 
@@ -957,6 +977,11 @@ def build_agent_job_draft_view(draft: AgentJobDraftToolResult) -> AgentJobDraftV
                 min_years=(str(item.min_years) if item.min_years is not None else ""),
                 required_level=item.required_level or "",
                 allowed_types=[value.value for value in item.allowed_types],
+                blocking=item.blocking,
+                acknowledged_excluded=item.acknowledged_excluded,
+                conflict_options=[
+                    _conflict_option_label(option) for option in item.conflict_options
+                ],
             )
             for item in draft.needs_review
         ],
@@ -1065,13 +1090,48 @@ def _agent_turn_headline(
                     f"{draft.ungrounded_count} tələb JD mətnində aydın təsdiqlənmədiyi üçün "
                     "çıxarıldı"
                 )
-            if draft.needs_review:
-                notes.append(f"{len(draft.needs_review)} tələb dəqiqləşdirmə tələb edir")
+            informational_reviews = sum(
+                1
+                for item in draft.needs_review
+                if not item.allowed_types and not (item.blocking and not item.acknowledged_excluded)
+            )
+            if informational_reviews:
+                notes.append(
+                    f"{informational_reviews} tələb insan baxışı tələb edir və "
+                    "qiymətləndirməyə daxil edilmir"
+                )
             note_text = f" ({'; '.join(notes)}.)" if notes else ""
+            # Issue #84: three truthful states derived only from the validated
+            # draft view — the SAME predicate (``requires_resolution``) that
+            # decides whether the confirm action renders. Never model prose.
+            if draft.requires_resolution:
+                blocking = sum(
+                    1
+                    for item in draft.needs_review
+                    if item.allowed_types or (item.blocking and not item.acknowledged_excluded)
+                )
+                if blocking == 0:
+                    return (
+                        "Qaralamada nəticə sayı dəqiqləşdirmə tələb edir. Namizədləri "
+                        "sıralamadan əvvəl sayı dəqiqləşdirib elanı yenidən analiz edin."
+                    )
+                return (
+                    f"Qaralamada {blocking} tələb dəqiqləşdirmə tələb edir. Namizədləri "
+                    f"sıralamadan əvvəl aşağıdakı seçimi tamamlayın.{note_text}"
+                )
+            if total == 0:
+                # The sentence itself already says the informational rows are
+                # not scored; only the remaining safety notes are appended.
+                safety_notes = notes[1:] if unsupported_total else notes
+                safety_text = f" ({'; '.join(safety_notes)}.)" if safety_notes else ""
+                return (
+                    "Bu mətndən avtomatik qiymətləndirmə üçün meyar çıxmadı. Aşağıdakı "
+                    f"məlumat sıralamaya daxil edilmir.{safety_text}"
+                )
             return (
-                f"Vakansiya qaralaması üçün {len(draft.must_have_rows)} mütləq və "
-                f"{len(draft.preferred_rows)} üstünlük tələbi hazırlandı. Nəzərdən keçirin "
-                f"və təsdiqləyin.{note_text}"
+                f"MEYAR bu mətndən {total} meyar hazırladı: {len(draft.must_have_rows)} "
+                f"mütləq, {len(draft.preferred_rows)} üstünlük. Nəzərdən keçirin və "
+                f"təsdiqləyin.{note_text}"
             )
         if latest_view.tool_name == AgentActionType.REFINE_CANDIDATE_RESULTS.value:
             return _refine_headline(latest_view.refine_summary)
@@ -1534,8 +1594,19 @@ def authorize_agent_draft_confirmation(
         )
     if len(request.criteria) != len(submitted_span_ids):
         raise UIServiceInputError("Qaralama meyarlarının mənbə təsdiqi etibarsızdır.")
-    expected_by_span = {
-        result.span_id: next(
+    # Issue #84: one criterion may be supported by several duplicate source
+    # spans; its PRIMARY (first) span is the one confirmation identifier.
+    expected_by_span: dict[str, CriterionIn | None] = {}
+    seen_criteria: set[str] = set()
+    for result in draft.requirements:
+        if (
+            result.state.value != "SCORABLE"
+            or result.criterion_id is None
+            or result.criterion_id in seen_criteria
+        ):
+            continue
+        seen_criteria.add(result.criterion_id)
+        expected_by_span[result.span_id] = next(
             (
                 criterion
                 for criterion in [*draft.must_have, *draft.preferred]
@@ -1543,9 +1614,6 @@ def authorize_agent_draft_confirmation(
             ),
             None,
         )
-        for result in draft.requirements
-        if result.state.value == "SCORABLE" and result.criterion_id is not None
-    }
     if len(request.criteria) != len(expected_by_span):
         raise UIServiceInputError(
             "Qaralamanın təsdiqli meyarları silinə və ya yeni meyarla əvəz edilə bilməz."

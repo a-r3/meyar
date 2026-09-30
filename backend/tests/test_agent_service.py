@@ -1858,8 +1858,12 @@ async def test_draft_job_criteria_supports_named_experience_without_inventing_du
     assert draft.ungrounded_count == 0
     assert draft.unsupported == []
     assert len(draft.needs_review) == 1
-    assert draft.needs_review[0].kind == CriterionKind.SKILL_EXPERIENCE
-    assert draft.needs_review[0].subject == "Backend"
+    # Issue #84: an experience claim without a duration has no
+    # server-validated criterion shape, so no canonical kind/subject is
+    # exposed; as an explicit MUST_HAVE it blocks confirmation instead.
+    assert draft.needs_review[0].kind is None
+    assert draft.needs_review[0].subject is None
+    assert draft.needs_review[0].blocking is True
     # Disclosed, never persisted.
     from sqlalchemy import select
 
@@ -1943,10 +1947,10 @@ async def test_draft_job_criteria_other_kind_is_unsupported_never_scored(
 
 
 def test_requirement_authority_is_an_exact_server_owned_occurrence() -> None:
-    from meyar.agent.jd_authority import segment_requirement_spans
+    from meyar.agent.semantic_requirements import analyze_hr_text
 
     jd_text = "Vakansiya: Regional Satış Nümayəndəsi. Namizəd ezamiyyətə getməyə hazır olmalıdır."
-    spans = segment_requirement_spans(jd_text)
+    spans = analyze_hr_text(jd_text).spans
     assert len(spans) == 1
     span = spans[0]
     assert jd_text[span.start_offset : span.end_offset] == span.text

@@ -201,11 +201,13 @@ class FakeLLMProvider:
         jd_text: str,
         *,
         requirement_spans: list[RequirementSpan],
+        span_hints: dict[str, dict[str, str]] | None = None,
         repair: bool = False,
     ) -> tuple[JDCriteriaDraft, LLMResultProvenance]:
         self.jd_draft_call_count += 1
         self.last_jd_text = jd_text
         self.last_requirement_spans = requirement_spans
+        self.last_span_hints = span_hints
         if self.jd_draft_call_count <= self._jd_draft_fail_first_n_calls:
             from meyar.llm.provider import ModelSchemaInvalidError
 

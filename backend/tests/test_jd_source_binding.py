@@ -6,8 +6,8 @@ They intentionally do not test private lexical helpers in isolation.
 """
 
 import pytest
+from fakes import FakeLLMProvider
 
-from meyar.agent.jd_authority import segment_requirement_spans
 from meyar.agent.schemas import (
     MAX_JD_REQUIREMENT_SPANS,
     JDCriteriaDraft,
@@ -15,21 +15,37 @@ from meyar.agent.schemas import (
     JDDraftCriterionKind,
     RequirementSpanState,
 )
-from meyar.agent.service import _build_authorized_model_draft, resolve_job_draft_review_modality
+from meyar.agent.semantic_requirements import analyze_hr_text
+from meyar.agent.service import _dispatch_draft_job_criteria, resolve_job_draft_review_modality
 from meyar.core.result_count import DEFAULT_RESULT_LIMIT, extract_result_count_intent
 from meyar.schemas.criteria import CriterionKind, CriterionType
 
 
-def _draft(source: str, *, must=(), preferred=()):
-    result = _build_authorized_model_draft(
-        jd_text=source,
-        draft=JDCriteriaDraft(
-            title="Role", must_have=list(must), preferred=list(preferred)
-        ),
-        source_spans=segment_requirement_spans(source),
+def segment_requirement_spans(source: str):
+    """The single production segmenter (issue #84: one semantic authority)."""
+    return analyze_hr_text(source).spans
+
+
+async def _draft(source: str, *, must=(), preferred=()):
+    """Drive the REAL production boundary: local-model proposal (fake) ->
+    canonical requirement validation -> review-safe draft."""
+    llm = FakeLLMProvider(
+        jd_draft=JDCriteriaDraft(title="Role", must_have=list(must), preferred=list(preferred))
     )
+    result = await _dispatch_draft_job_criteria(llm, jd_text=source)
     assert result is not None and result.job_draft is not None
     return result.job_draft
+
+
+def _criteria(draft) -> list[tuple]:
+    return [
+        (c.type, c.kind, c.value, c.min_years, c.required_level)
+        for c in [*draft.must_have, *draft.preferred]
+    ]
+
+
+def _states(draft) -> list[RequirementSpanState]:
+    return [result.state for result in draft.requirements]
 
 
 def _span_id(source: str, occurrence: int = 0) -> str:
@@ -64,7 +80,7 @@ def test_result_count_defaults_and_caps_deterministically() -> None:
     assert bounded.was_bounded is True
 
 
-def test_primary_hr_request_reaches_typed_contract_and_bounded_review() -> None:
+async def test_primary_hr_request_reaches_typed_contract_and_bounded_review() -> None:
     source = (
         "Senior Backend Developer axtarırıq. Minimum 5 il Python, B2 English, "
         "bank təcrübəsi üstünlükdür. 10 nəfər namizəd göstər."
@@ -75,7 +91,7 @@ def test_primary_hr_request_reaches_typed_contract_and_bounded_review() -> None:
         "B2 English",
         "bank təcrübəsi üstünlükdür",
     ]
-    draft = _draft(
+    draft = await _draft(
         source,
         must=[
             # Concrete qwen3:1.7b legacy shapes reproduced at dea50267.
@@ -140,13 +156,13 @@ def test_primary_hr_request_reaches_typed_contract_and_bounded_review() -> None:
         )
 
 
-def test_duration_number_and_result_count_number_never_cross_bind() -> None:
+async def test_duration_number_and_result_count_number_never_cross_bind() -> None:
     source = "10 years Python experience required, show 5 candidates"
     spans = segment_requirement_spans(source)
     assert [span.text for span in spans] == ["10 years Python experience required"]
     intent = extract_result_count_intent(source)
     assert intent.requested == 5
-    draft = _draft(
+    draft = await _draft(
         source,
         must=[
             JDDraftCriterionItem(
@@ -161,8 +177,8 @@ def test_duration_number_and_result_count_number_never_cross_bind() -> None:
     assert draft.result_limit == 5
 
 
-def test_composite_skill_cannot_borrow_one_source_token() -> None:
-    draft = _draft(
+async def test_composite_skill_cannot_borrow_one_source_token() -> None:
+    draft = await _draft(
         "Python required",
         must=[
             JDDraftCriterionItem(
@@ -171,12 +187,16 @@ def test_composite_skill_cannot_borrow_one_source_token() -> None:
             )
         ],
     )
-    assert draft.must_have == []
-    assert [item.requirement for item in draft.needs_review] == ["Python required"]
+    # The composite proposal is rejected; only the exact source subject scores.
+    assert _criteria(draft) == [
+        (CriterionType.MUST_HAVE, CriterionKind.SKILL, "Python", None, None)
+    ]
+    assert draft.rejected_proposal_count == 1
+    assert "Kubernetes" not in str(_criteria(draft))
 
 
-def test_skill_cannot_gain_invented_min_years() -> None:
-    draft = _draft(
+async def test_skill_cannot_gain_invented_min_years() -> None:
+    draft = await _draft(
         "Python experience required",
         must=[
             JDDraftCriterionItem(
@@ -192,8 +212,8 @@ def test_skill_cannot_gain_invented_min_years() -> None:
     assert [item.requirement for item in draft.needs_review] == ["Python experience required"]
 
 
-def test_numeric_years_cannot_transfer_between_requirements() -> None:
-    draft = _draft(
+async def test_numeric_years_cannot_transfer_between_requirements() -> None:
+    draft = await _draft(
         "Python required. 5 years total experience required.",
         must=[
             JDDraftCriterionItem(
@@ -205,16 +225,18 @@ def test_numeric_years_cannot_transfer_between_requirements() -> None:
             )
         ],
     )
-    assert draft.must_have == []
-    assert {item.requirement for item in draft.needs_review} == {
-        "Python required",
-        "5 years total experience required",
-    }
+    # The 5 years stay bound to the total-experience span; Python gains none.
+    assert _criteria(draft) == [
+        (CriterionType.MUST_HAVE, CriterionKind.SKILL, "Python", None, None),
+        (CriterionType.MUST_HAVE, CriterionKind.EXPERIENCE, None, 5.0, None),
+    ]
+    assert draft.must_have[0].min_years is None
+    assert draft.rejected_proposal_count == 1
 
 
-def test_skill_duration_cannot_be_weakened_to_total_experience_plus_skill() -> None:
+async def test_skill_duration_cannot_be_weakened_to_total_experience_plus_skill() -> None:
     source = "5 years of Python experience required"
-    draft = _draft(
+    draft = await _draft(
         source,
         must=[
             JDDraftCriterionItem(
@@ -226,13 +248,16 @@ def test_skill_duration_cannot_be_weakened_to_total_experience_plus_skill() -> N
             ),
         ],
     )
-    assert draft.must_have == []
-    assert [item.requirement for item in draft.needs_review] == [source]
+    # One source span -> one SKILL_EXPERIENCE criterion; never total + bare skill.
+    assert _criteria(draft) == [
+        (CriterionType.MUST_HAVE, CriterionKind.SKILL_EXPERIENCE, "Python", 5.0, None)
+    ]
+    assert draft.rejected_proposal_count == 2
 
 
-def test_language_level_cannot_be_silently_discarded() -> None:
+async def test_language_level_cannot_be_silently_discarded() -> None:
     source = "English B2 required"
-    draft = _draft(
+    draft = await _draft(
         source,
         must=[
             JDDraftCriterionItem(
@@ -240,20 +265,22 @@ def test_language_level_cannot_be_silently_discarded() -> None:
             )
         ],
     )
-    assert draft.must_have == []
-    assert [item.requirement for item in draft.needs_review] == [source]
+    assert _criteria(draft) == [
+        (CriterionType.MUST_HAVE, CriterionKind.LANGUAGE, "English", None, "B2")
+    ]
+    assert draft.rejected_proposal_count == 1
 
 
-def test_raw_sensitive_requirement_is_blocked_even_when_model_omits_it() -> None:
-    draft = _draft("Female required")
+async def test_raw_sensitive_requirement_is_blocked_even_when_model_omits_it() -> None:
+    draft = await _draft("Female required")
     assert draft.must_have == []
     assert draft.unsupported == []
     assert draft.needs_review == []
     assert draft.prohibited_count == 1
 
 
-def test_other_classification_cannot_bypass_sensitive_policy() -> None:
-    draft = _draft(
+async def test_other_classification_cannot_bypass_sensitive_policy() -> None:
+    draft = await _draft(
         "Female required",
         must=[
             JDDraftCriterionItem(
@@ -269,9 +296,9 @@ def test_other_classification_cannot_bypass_sensitive_policy() -> None:
     assert draft.prohibited_count == 1
 
 
-def test_rephrased_sensitive_requirement_is_blocked_post_parse() -> None:
+async def test_rephrased_sensitive_requirement_is_blocked_post_parse() -> None:
     source = "Women applicants required"
-    draft = _draft(
+    draft = await _draft(
         source,
         must=[
             JDDraftCriterionItem(
@@ -286,9 +313,9 @@ def test_rephrased_sensitive_requirement_is_blocked_post_parse() -> None:
     assert draft.prohibited_count == 1
 
 
-def test_unsupported_source_requirement_remains_visible_and_unscored() -> None:
+async def test_unsupported_source_requirement_remains_visible_and_unscored() -> None:
     source = "Candidate must be willing to travel"
-    draft = _draft(
+    draft = await _draft(
         source,
         must=[
             JDDraftCriterionItem(
@@ -303,14 +330,16 @@ def test_unsupported_source_requirement_remains_visible_and_unscored() -> None:
     assert [item.requirement for item in draft.unsupported] == [source]
 
 
-def test_model_omission_cannot_delete_material_source_requirement() -> None:
+async def test_model_omission_cannot_delete_material_source_requirement() -> None:
     source = "Candidate must be willing to travel"
-    draft = _draft(source)
-    assert [item.requirement for item in draft.needs_review] == [source]
+    draft = await _draft(source)
+    assert _criteria(draft) == []
+    assert [item.requirement for item in draft.unsupported] == [source]
+    assert _states(draft) == [RequirementSpanState.UNSUPPORTED]
 
 
-def test_valid_source_grounded_skill_still_works() -> None:
-    draft = _draft(
+async def test_valid_source_grounded_skill_still_works() -> None:
+    draft = await _draft(
         "Python required",
         must=[
             JDDraftCriterionItem(
@@ -339,7 +368,7 @@ def test_valid_source_grounded_skill_still_works() -> None:
         None,
     ),
 )
-def test_model_source_text_has_zero_policy_authority(hint: str | None) -> None:
+async def test_model_source_text_has_zero_policy_authority(hint: str | None) -> None:
     item = {
         "span_id": "req-0001",
         "kind": "SKILL",
@@ -347,7 +376,7 @@ def test_model_source_text_has_zero_policy_authority(hint: str | None) -> None:
     }
     if hint is not None:
         item["source_text"] = hint
-    draft = _draft(
+    draft = await _draft(
         "Python required",
         must=[JDDraftCriterionItem.model_validate(item)],
     )
@@ -361,8 +390,8 @@ def test_model_source_text_has_zero_policy_authority(hint: str | None) -> None:
     assert [result.state for result in draft.requirements] == [RequirementSpanState.SCORABLE]
 
 
-def test_model_source_text_cannot_remove_canonical_prohibition() -> None:
-    draft = _draft(
+async def test_model_source_text_cannot_remove_canonical_prohibition() -> None:
+    draft = await _draft(
         "Female required",
         must=[
             JDDraftCriterionItem(
@@ -379,8 +408,8 @@ def test_model_source_text_cannot_remove_canonical_prohibition() -> None:
     assert [result.state for result in draft.requirements] == [RequirementSpanState.PROHIBITED]
 
 
-def test_valid_required_preferred_distinction_still_works() -> None:
-    draft = _draft(
+async def test_valid_required_preferred_distinction_still_works() -> None:
+    draft = await _draft(
         "Python required. SQL preferred.",
         must=[
             JDDraftCriterionItem(
@@ -403,8 +432,8 @@ def test_valid_required_preferred_distinction_still_works() -> None:
     assert [item.value for item in draft.preferred] == ["SQL"]
 
 
-def test_preferred_requirement_cannot_be_strengthened_to_must_have() -> None:
-    draft = _draft(
+async def test_preferred_requirement_cannot_be_strengthened_to_must_have() -> None:
+    draft = await _draft(
         "Python preferred",
         must=[
             JDDraftCriterionItem(
@@ -416,11 +445,13 @@ def test_preferred_requirement_cannot_be_strengthened_to_must_have() -> None:
         ],
     )
     assert draft.must_have == []
-    assert [item.requirement for item in draft.needs_review] == ["Python preferred"]
+    assert _criteria(draft) == [
+        (CriterionType.PREFERRED, CriterionKind.SKILL, "Python", None, None)
+    ]
 
 
-def test_kind_must_be_supported_by_the_source_fragment() -> None:
-    draft = _draft(
+async def test_kind_must_be_supported_by_the_source_fragment() -> None:
+    draft = await _draft(
         "Python required",
         must=[
             JDDraftCriterionItem(
@@ -429,13 +460,15 @@ def test_kind_must_be_supported_by_the_source_fragment() -> None:
             )
         ],
     )
-    assert draft.must_have == []
-    assert [item.requirement for item in draft.needs_review] == ["Python required"]
+    assert _criteria(draft) == [
+        (CriterionType.MUST_HAVE, CriterionKind.SKILL, "Python", None, None)
+    ]
+    assert draft.rejected_proposal_count == 1
 
 
-def test_requirement_scope_cannot_be_silently_narrowed() -> None:
+async def test_requirement_scope_cannot_be_silently_narrowed() -> None:
     source = "Python for data analysis required"
-    draft = _draft(
+    draft = await _draft(
         source,
         must=[
             JDDraftCriterionItem(
@@ -447,8 +480,8 @@ def test_requirement_scope_cannot_be_silently_narrowed() -> None:
     assert [item.requirement for item in draft.needs_review] == [source]
 
 
-def test_valid_supported_numeric_requirements_keep_their_scope() -> None:
-    general = _draft(
+async def test_valid_supported_numeric_requirements_keep_their_scope() -> None:
+    general = await _draft(
         "5 years total experience required",
         must=[
             JDDraftCriterionItem(
@@ -464,7 +497,7 @@ def test_valid_supported_numeric_requirements_keep_their_scope() -> None:
         (CriterionKind.EXPERIENCE, 5.0)
     ]
 
-    scoped = _draft(
+    scoped = await _draft(
         "5 years Python experience required",
         must=[
             JDDraftCriterionItem(
@@ -482,9 +515,9 @@ def test_valid_supported_numeric_requirements_keep_their_scope() -> None:
     assert scoped.unsupported == []
 
 
-def test_valid_language_level_is_preserved() -> None:
+async def test_valid_language_level_is_preserved() -> None:
     source = "English B2 required"
-    draft = _draft(
+    draft = await _draft(
         source,
         must=[
             JDDraftCriterionItem(
@@ -502,9 +535,9 @@ def test_valid_language_level_is_preserved() -> None:
     assert draft.unsupported == []
 
 
-def test_partial_model_source_cannot_weaken_complete_canonical_requirement() -> None:
+async def test_partial_model_source_cannot_weaken_complete_canonical_requirement() -> None:
     source = "5 years Python experience required"
-    draft = _draft(
+    draft = await _draft(
         source,
         must=[
             JDDraftCriterionItem(
@@ -515,11 +548,13 @@ def test_partial_model_source_cannot_weaken_complete_canonical_requirement() -> 
             )
         ],
     )
-    assert draft.must_have == []
-    assert [item.requirement for item in draft.needs_review] == [source]
+    assert _criteria(draft) == [
+        (CriterionType.MUST_HAVE, CriterionKind.SKILL_EXPERIENCE, "Python", 5.0, None)
+    ]
+    assert draft.rejected_proposal_count == 1
 
 
-def test_prefix_collisions_never_authorize_a_different_skill() -> None:
+async def test_prefix_collisions_never_authorize_a_different_skill() -> None:
     for source_subject, drafted_subject in (
         ("JavaScript", "Java"),
         ("Java", "JavaScript"),
@@ -533,7 +568,7 @@ def test_prefix_collisions_never_authorize_a_different_skill() -> None:
         ("Credit Risk", "Risk"),
     ):
         source = f"{source_subject} required"
-        draft = _draft(
+        draft = await _draft(
             source,
             must=[
                 JDDraftCriterionItem(
@@ -544,13 +579,15 @@ def test_prefix_collisions_never_authorize_a_different_skill() -> None:
                 )
             ],
         )
-        assert draft.must_have == [], (source_subject, drafted_subject)
-        assert [item.requirement for item in draft.needs_review] == [source]
+        values = [criterion.value for criterion in draft.must_have]
+        assert drafted_subject not in values, (source_subject, drafted_subject)
+        assert values in ([], [source_subject]), (source_subject, values)
+        assert draft.rejected_proposal_count == 1, (source_subject, drafted_subject)
 
 
-def test_domain_experience_cannot_be_weakened_to_plain_skill() -> None:
+async def test_domain_experience_cannot_be_weakened_to_plain_skill() -> None:
     source = "Banking experience preferred"
-    draft = _draft(
+    draft = await _draft(
         source,
         preferred=[
             JDDraftCriterionItem(
@@ -558,41 +595,45 @@ def test_domain_experience_cannot_be_weakened_to_plain_skill() -> None:
             )
         ],
     )
-    assert draft.preferred == []
-    assert [item.requirement for item in draft.needs_review] == [source]
+    assert [(c.kind, c.value) for c in draft.preferred] == [
+        (CriterionKind.DOMAIN_EXPERIENCE, "Banking")
+    ]
+    assert draft.rejected_proposal_count == 1
 
 
-def test_azerbaijani_inflected_sensitive_terms_are_prohibited_when_omitted() -> None:
+async def test_azerbaijani_inflected_sensitive_terms_are_prohibited_when_omitted() -> None:
     for source in ("Sağlamlığı tələb olunur", "Əlilliyi tələb olunur"):
-        draft = _draft(source)
+        draft = await _draft(source)
         assert draft.must_have == []
         assert draft.needs_review == []
         assert draft.prohibited_count == 1
 
 
-def test_is_a_plus_requirement_cannot_disappear_when_model_omits_it() -> None:
+async def test_is_a_plus_requirement_cannot_disappear_when_model_omits_it() -> None:
     source = "Python is a plus"
-    draft = _draft(source)
-    assert draft.preferred == []
-    assert [item.requirement for item in draft.needs_review] == [source]
+    draft = await _draft(source)
+    assert _criteria(draft) == [
+        (CriterionType.PREFERRED, CriterionKind.SKILL, "Python", None, None)
+    ]
+    assert _states(draft) == [RequirementSpanState.SCORABLE]
 
 
 @pytest.mark.parametrize(
-    ("source_subject", "drafted_subject"),
+    ("source_subject", "drafted_subject", "canonical"),
     (
-        ("py", "Python"),
-        ("Python", "py"),
-        ("k8s", "Kubernetes"),
-        ("Kubernetes", "k8s"),
-        ("Postgres", "PostgreSQL"),
-        ("PostgreSQL", "Postgres"),
+        ("py", "Python", "Python"),
+        ("Python", "py", "Python"),
+        ("k8s", "Kubernetes", "Kubernetes"),
+        ("Kubernetes", "k8s", "Kubernetes"),
+        ("Postgres", "PostgreSQL", "PostgreSQL"),
+        ("PostgreSQL", "Postgres", "PostgreSQL"),
     ),
 )
-def test_curated_complete_subject_aliases_are_authorized(
-    source_subject: str, drafted_subject: str
+async def test_curated_complete_subject_aliases_are_authorized(
+    source_subject: str, drafted_subject: str, canonical: str
 ) -> None:
     source = f"{source_subject} required"
-    draft = _draft(
+    draft = await _draft(
         source,
         must=[
             JDDraftCriterionItem(
@@ -603,13 +644,14 @@ def test_curated_complete_subject_aliases_are_authorized(
             )
         ],
     )
-    assert [criterion.value for criterion in draft.must_have] == [drafted_subject]
-    assert [result.state for result in draft.requirements] == [RequirementSpanState.SCORABLE]
+    # Reviewed aliases resolve to one canonical display identity.
+    assert [criterion.value for criterion in draft.must_have] == [canonical]
+    assert _states(draft) == [RequirementSpanState.SCORABLE]
 
 
-def test_domain_experience_with_compatible_kind_is_scorable() -> None:
+async def test_domain_experience_with_compatible_kind_is_scorable() -> None:
     source = "Banking experience preferred"
-    draft = _draft(
+    draft = await _draft(
         source,
         preferred=[
             JDDraftCriterionItem(
@@ -627,9 +669,9 @@ def test_domain_experience_with_compatible_kind_is_scorable() -> None:
     assert [result.state for result in draft.requirements] == [RequirementSpanState.SCORABLE]
 
 
-def test_required_requirement_cannot_be_weakened_to_preferred() -> None:
+async def test_required_requirement_cannot_be_weakened_to_preferred() -> None:
     source = "Python required"
-    draft = _draft(
+    draft = await _draft(
         source,
         preferred=[
             JDDraftCriterionItem(
@@ -641,12 +683,14 @@ def test_required_requirement_cannot_be_weakened_to_preferred() -> None:
         ],
     )
     assert draft.preferred == []
-    assert [item.requirement for item in draft.needs_review] == [source]
+    assert _criteria(draft) == [
+        (CriterionType.MUST_HAVE, CriterionKind.SKILL, "Python", None, None)
+    ]
 
 
-def test_is_a_plus_is_bounded_preferred_modality() -> None:
+async def test_is_a_plus_is_bounded_preferred_modality() -> None:
     source = "Python is a plus"
-    draft = _draft(
+    draft = await _draft(
         source,
         preferred=[
             JDDraftCriterionItem(
@@ -662,9 +706,9 @@ def test_is_a_plus_is_bounded_preferred_modality() -> None:
 
 
 @pytest.mark.parametrize("subject", ("Python", "Kubernetes"))
-def test_is_a_plus_requires_a_source_bound_professional_subject(subject: str) -> None:
+async def test_is_a_plus_requires_a_source_bound_professional_subject(subject: str) -> None:
     source = f"{subject} is a plus"
-    draft = _draft(
+    draft = await _draft(
         source,
         preferred=[
             JDDraftCriterionItem(
@@ -687,8 +731,8 @@ def test_is_a_plus_requires_a_source_bound_professional_subject(subject: str) ->
         ("2 + 2 is plus 4", "2 2 4"),
     ),
 )
-def test_is_plus_non_preference_controls_never_score(source: str, drafted: str) -> None:
-    draft = _draft(
+async def test_is_plus_non_preference_controls_never_score(source: str, drafted: str) -> None:
+    draft = await _draft(
         source,
         preferred=[
             JDDraftCriterionItem(
@@ -699,17 +743,21 @@ def test_is_plus_non_preference_controls_never_score(source: str, drafted: str) 
             )
         ],
     )
-    assert draft.preferred == []
-    assert [result.state for result in draft.requirements] == [
-        RequirementSpanState.NEEDS_HUMAN_REVIEW
-    ]
+    assert _criteria(draft) == []
+    # Never scorable; always visible (review, or unsupported compensation).
+    assert _states(draft) in (
+        [RequirementSpanState.NEEDS_HUMAN_REVIEW],
+        [RequirementSpanState.UNSUPPORTED],
+    )
+    visible = [*draft.needs_review, *draft.unsupported]
+    assert [item.requirement for item in visible] == [source]
 
 
-def test_implicit_modality_fails_closed_to_review() -> None:
+async def test_implicit_modality_fails_closed_to_review() -> None:
     source = "- Python"
     spans = segment_requirement_spans(source)
     assert len(spans) == 1
-    draft = _draft(
+    draft = await _draft(
         source,
         must=[
             JDDraftCriterionItem(
@@ -724,29 +772,42 @@ def test_implicit_modality_fails_closed_to_review() -> None:
     assert [item.requirement for item in draft.needs_review] == ["Python"]
 
 
-@pytest.mark.parametrize("source", ("Python", "English B2", "Banking experience"))
-def test_standalone_implicit_professional_item_is_visible_for_review(source: str) -> None:
-    draft = _draft(source)
+@pytest.mark.parametrize("source", ("- Python", "English B2", "Banking experience"))
+async def test_standalone_implicit_professional_item_is_visible_for_review(source: str) -> None:
+    draft = await _draft(source)
     assert draft.must_have == [] and draft.preferred == []
-    assert [item.requirement for item in draft.needs_review] == [source]
-    assert [result.state for result in draft.requirements] == [
-        RequirementSpanState.NEEDS_HUMAN_REVIEW
-    ]
+    assert [item.requirement for item in draft.needs_review] == [source.removeprefix("- ")]
+    assert _states(draft) == [RequirementSpanState.NEEDS_HUMAN_REVIEW]
 
 
-def test_descriptive_prose_is_not_falsely_reconciled_as_a_requirement() -> None:
+async def test_bare_single_token_message_creates_no_criterion() -> None:
+    # A lone subject with neither modality nor list/heading context is a
+    # search-style fragment, never a scoring criterion.
+    draft = await _draft("Python")
+    assert _criteria(draft) == []
+
+
+async def test_listed_items_under_a_heading_never_disappear() -> None:
+    source = "Must have:\n- Python\n- SQL"
+    draft = await _draft(source)
+    assert _criteria(draft) == []
+    reviewed = [item.requirement for item in draft.needs_review]
+    assert "Python" in reviewed and "SQL" in reviewed
+
+
+async def test_descriptive_prose_is_not_falsely_reconciled_as_a_requirement() -> None:
     source = "Our team uses Python to build reliable services and collaborates every day."
-    draft = _draft(source)
+    draft = await _draft(source)
     assert draft.requirements == []
     assert draft.must_have == [] and draft.preferred == []
     assert draft.needs_review == []
 
 
-def test_repeated_implicit_and_explicit_items_keep_distinct_occurrences() -> None:
-    source = "Python\nPython required"
+async def test_repeated_implicit_and_explicit_items_keep_distinct_occurrences() -> None:
+    source = "- Python\n- Python required"
     spans = segment_requirement_spans(source)
     assert len(spans) == 2 and spans[0].span_id != spans[1].span_id
-    draft = _draft(
+    draft = await _draft(
         source,
         must=[
             JDDraftCriterionItem(
@@ -757,14 +818,14 @@ def test_repeated_implicit_and_explicit_items_keep_distinct_occurrences() -> Non
             )
         ],
     )
-    assert [result.state for result in draft.requirements] == [
+    assert _states(draft) == [
         RequirementSpanState.NEEDS_HUMAN_REVIEW,
         RequirementSpanState.SCORABLE,
     ]
 
 
-def test_negated_requirement_phrase_does_not_create_a_requirement() -> None:
-    draft = _draft("No Python requirement")
+async def test_negated_requirement_phrase_does_not_create_a_requirement() -> None:
+    draft = await _draft("No Python requirement")
     assert draft.must_have == [] and draft.preferred == []
     assert draft.requirements == []
 
@@ -784,16 +845,16 @@ def test_negated_requirement_phrase_does_not_create_a_requirement() -> None:
         "Qadınlar tələb olunur",
     ),
 )
-def test_azerbaijani_protected_lexeme_families_are_blocked(source: str) -> None:
-    draft = _draft(source)
+async def test_azerbaijani_protected_lexeme_families_are_blocked(source: str) -> None:
+    draft = await _draft(source)
     assert draft.prohibited_count == 1
     assert draft.must_have == []
     assert draft.needs_review == []
 
 
-def test_azerbaijani_inflection_cannot_survive_other_classification() -> None:
+async def test_azerbaijani_inflection_cannot_survive_other_classification() -> None:
     source = "Sağlamlığı tələb olunur"
-    draft = _draft(
+    draft = await _draft(
         source,
         must=[
             JDDraftCriterionItem(
@@ -811,15 +872,15 @@ def test_azerbaijani_inflection_cannot_survive_other_classification() -> None:
 @pytest.mark.parametrize(
     "source", ("Yaşıl texnologiya təcrübəsi üstünlükdür", "Sağlamlaşdırma bacarığı tələb olunur")
 )
-def test_azerbaijani_protected_lexeme_matching_has_safe_controls(source: str) -> None:
-    assert _draft(source).prohibited_count == 0
+async def test_azerbaijani_protected_lexeme_matching_has_safe_controls(source: str) -> None:
+    assert (await _draft(source)).prohibited_count == 0
 
 
-def test_repeated_identical_occurrences_reconcile_by_span_id() -> None:
+async def test_repeated_identical_occurrences_reconcile_by_span_id() -> None:
     source = "Python required. Python required."
     spans = segment_requirement_spans(source)
     assert len(spans) == 2 and spans[0].span_id != spans[1].span_id
-    draft = _draft(
+    draft = await _draft(
         source,
         must=[
             JDDraftCriterionItem(
@@ -830,18 +891,19 @@ def test_repeated_identical_occurrences_reconcile_by_span_id() -> None:
             )
         ],
     )
+    # Issue #84 collision policy: both occurrences stay attributable, but
+    # they support ONE criterion (one weight), never two.
+    assert _states(draft) == [RequirementSpanState.SCORABLE, RequirementSpanState.SCORABLE]
+    ids = [result.criterion_id for result in draft.requirements]
+    assert len(set(ids)) == 1 and None not in ids
     assert [criterion.value for criterion in draft.must_have] == ["Python"]
-    assert [result.state for result in draft.requirements] == [
-        RequirementSpanState.NEEDS_HUMAN_REVIEW,
-        RequirementSpanState.SCORABLE,
-    ]
-    assert [item.requirement for item in draft.needs_review] == ["Python required"]
+    assert [result.span_id for result in draft.requirements] == [s.span_id for s in spans]
 
 
-def test_same_sentence_requirements_split_only_with_independent_modalities() -> None:
+async def test_same_sentence_requirements_split_only_with_independent_modalities() -> None:
     source = "Python required and SQL required"
     spans = segment_requirement_spans(source)
-    draft = _draft(
+    draft = await _draft(
         source,
         must=[
             JDDraftCriterionItem(
@@ -856,36 +918,51 @@ def test_same_sentence_requirements_split_only_with_independent_modalities() -> 
     assert all(result.state == RequirementSpanState.SCORABLE for result in draft.requirements)
 
 
-def test_ambiguous_combined_clause_is_kept_complete_for_review() -> None:
-    source = "Python and SQL required"
-    span = segment_requirement_spans(source)[0]
-    assert span.text == source and span.segmentation_needs_review
-    draft = _draft(
+async def test_ambiguous_combined_clause_is_kept_complete_for_review() -> None:
+    # Particle coordination without a distinct cue per side stays one
+    # reviewed span; a model proposal for one member cannot score it.
+    source = "Python də SQL də tələb olunur"
+    spans = segment_requirement_spans(source)
+    draft = await _draft(
         source,
         must=[
             JDDraftCriterionItem(
-                kind="SKILL", requirement="Python", span_id=span.span_id, source_text="Python"
+                kind="SKILL", requirement="Python", span_id=spans[0].span_id, source_text="x"
             )
         ],
     )
-    assert draft.must_have == []
-    assert [item.requirement for item in draft.needs_review] == [source]
+    assert [span.text for span in spans] == [source]
+    assert _criteria(draft) == []
+    assert [(item.requirement, item.blocking) for item in draft.needs_review] == [(source, True)]
+    assert draft.rejected_proposal_count == 1
 
 
-def test_segmentation_is_bounded_without_dropping_overflow_text() -> None:
+async def test_shared_trailing_modality_coordinates_both_members_symmetrically() -> None:
+    source = "Python and SQL required"
+    draft = await _draft(source)
+    assert _criteria(draft) == [
+        (CriterionType.MUST_HAVE, CriterionKind.SKILL, "Python", None, None),
+        (CriterionType.MUST_HAVE, CriterionKind.SKILL, "SQL", None, None),
+    ]
+    groups = {span.coordination_group for span in segment_requirement_spans(source)}
+    assert len(groups) == 1 and None not in groups
+
+
+async def test_segmentation_overflow_fails_closed_without_dropping_text() -> None:
     source = "\n".join(f"Skill{index} required" for index in range(70))
-    spans = segment_requirement_spans(source)
-    assert len(spans) == MAX_JD_REQUIREMENT_SPANS
-    overflow = spans[-1]
-    assert overflow.segmentation_needs_review
-    assert overflow.text.startswith("Skill63 required")
-    assert overflow.text.endswith("Skill69 required")
-    assert source[overflow.start_offset : overflow.end_offset] == overflow.text
+    assert len(segment_requirement_spans(source)) == 70 > MAX_JD_REQUIREMENT_SPANS
+    draft = await _draft(source)
+    # Nothing can be confirmed: one blocking review item covers the source.
+    assert _criteria(draft) == []
+    assert len(draft.needs_review) == 1 and draft.needs_review[0].blocking
+    assert _states(draft) == [RequirementSpanState.NEEDS_HUMAN_REVIEW]
+    covered = draft.requirements[0]
+    assert covered.start_offset == 0 and covered.end_offset == len(source)
 
 
-def test_unknown_span_id_and_fabricated_source_text_never_create_authority() -> None:
+async def test_unknown_span_id_and_fabricated_source_text_never_create_authority() -> None:
     source = "Python required"
-    draft = _draft(
+    draft = await _draft(
         source,
         must=[
             JDDraftCriterionItem(
@@ -896,12 +973,14 @@ def test_unknown_span_id_and_fabricated_source_text_never_create_authority() -> 
             )
         ],
     )
-    assert draft.must_have == []
     assert draft.ungrounded_count == 1
-    assert [item.requirement for item in draft.needs_review] == [source]
+    assert _criteria(draft) == [
+        (CriterionType.MUST_HAVE, CriterionKind.SKILL, "Python", None, None)
+    ]
+    assert "Kubernetes" not in str(draft.model_dump())
 
 
-def test_product_example_preserves_all_unsupported_semantics() -> None:
+async def test_product_example_preserves_all_unsupported_semantics() -> None:
     source = (
         "Senior Backend Developer axtarırıq.\n"
         "Minimum 5 il Python,\n"
@@ -910,7 +989,7 @@ def test_product_example_preserves_all_unsupported_semantics() -> None:
         "10 nəfər namizəd göstər."
     )
     spans = segment_requirement_spans(source)
-    draft = _draft(
+    draft = await _draft(
         source,
         must=[
             JDDraftCriterionItem(

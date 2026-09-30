@@ -2,6 +2,29 @@
 
 ## Current phase
 
+**Current issue #84 working baseline:** accepted `main` is
+`096afb8caec18750f27499f20dc9ceeb00981102` (PR #83 merged; #80 closed).
+Branch `feat/84-jd-semantic-canonicalization` proposes the post-audit JD
+semantic correctness fix (D-088): a canonical professional-requirement
+boundary (`jd-semantic-policy-v2`) where the local model only proposes
+source-grounded canonical subjects and the server validates them;
+coordination symmetry; header/location/non-professional/instruction text
+never scorable; unresolved MUST_HAVE blocks confirmation until explicit HR
+resolution/exclusion; result counts never span line breaks; AZ/EN count
+follow-up parity; explicit unsupported-language copy. The review
+correction pass adds durable per-criterion semantic provenance on
+agent-confirmed criteria versions (one nullable JSON column, migration
+`c84a5e2f9d17`, single head) and removes the legacy second semantic
+authority (D-088 amendment). A second correction pass makes HR follow-up
+amendments durable, ordered provenance (schema `jd-semantic-provenance-v2`,
+no new migration) and adds the canonical collision policy (duplicates score
+once; conflicting importance/duration/level require explicit HR choice).
+Real-Ollama acceptance of the four mandatory
+cases is pending (`REAL_OLLAMA_ACCEPTANCE_PENDING`). Not accepted until
+independent review and owner merge.
+Issues #85, #86, #87, #88 and #50 remain OPEN and untouched; #35/#36/#46
+remain OPEN.
+
 **Current issue #80 working baseline:** accepted `main` is
 `747ed5ef82b766ff3459b5d87a7cecbd3974939d` (PR #82, PR80-1 durable
 conversation authority merged). Issue #80 remains OPEN. PR80-2 proposes the

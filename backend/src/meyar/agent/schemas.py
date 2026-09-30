@@ -33,8 +33,11 @@ free-text span in the final answer that did not come from a
 GroundedFact.
 """
 
+import hashlib
+import re
 import uuid
 from enum import StrEnum
+from typing import Any
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -345,10 +348,10 @@ class JDDraftCriterionKind(StrEnum):
     JD text and already confirmed non-sensitive, but does not fit any of
     the five evaluator-supported dimensions (for example: relocation
     willingness, driving license, availability for shift work). ``OTHER``
-    never becomes a ``CriterionIn`` — it always maps to
-    ``DroppedJDCriterionReason.UNSUPPORTED`` in
-    meyar.agent.service._build_criterion_from_draft_item, deterministically,
-    never via an incidental validation failure. Deliberately NOT
+    never becomes a ``CriterionIn``: a model proposal of ``OTHER`` is
+    rejected by the canonical boundary (meyar.agent.canonical_requirements,
+    issue #84), and deterministic non-professional source text is
+    UNSUPPORTED before any model call. Deliberately NOT
     meyar.schemas.criteria.CriterionKind itself: that enum is the
     deterministic evaluator's own persisted scoring vocabulary and must
     never grow a scoring-irrelevant member (PR #42 owner correction,
@@ -381,6 +384,10 @@ class RequirementSpan(BaseModel):
     text: str = Field(min_length=1, max_length=4000)
     normalized: str = Field(min_length=1, max_length=4000)
     segmentation_needs_review: bool = False
+    # Issue #84: spans produced by splitting ONE coordinated clause ("X və Y
+    # ...", "X and Y ...") share a group id so their semantic authority is
+    # decided symmetrically. Server-owned; never model-supplied.
+    coordination_group: int | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def _validate_offsets(self) -> "RequirementSpan":
@@ -475,6 +482,33 @@ class SemanticRequirementState(StrEnum):
     PROHIBITED = "PROHIBITED"
 
 
+class SemanticReviewReason(StrEnum):
+    """Why a material requirement stayed NEEDS_HUMAN_REVIEW (issue #84).
+
+    Only ``SUBJECT_NOT_CANONICAL`` and ``RECRUITMENT_SUBJECT_WITHOUT_CUE``
+    describe a subject-normalization gap that a server-validated local-model
+    canonical proposal may close; every other reason is policy the model can
+    never override."""
+
+    SEGMENTATION = "SEGMENTATION"
+    NEGATION_OR_COMPARATOR = "NEGATION_OR_COMPARATOR"
+    RESULT_COUNT_ENTITY = "RESULT_COUNT_ENTITY"
+    PARTICLE_COORDINATION = "PARTICLE_COORDINATION"
+    MODALITY_UNKNOWN = "MODALITY_UNKNOWN"
+    SUBJECT_MISSING = "SUBJECT_MISSING"
+    PERSONAL_ELIGIBILITY = "PERSONAL_ELIGIBILITY"
+    RECRUITMENT_SUBJECT_WITHOUT_CUE = "RECRUITMENT_SUBJECT_WITHOUT_CUE"
+    FAMILY_UNAUTHORIZED = "FAMILY_UNAUTHORIZED"
+    EXPERIENCE_WITHOUT_DURATION = "EXPERIENCE_WITHOUT_DURATION"
+    CERTIFICATION_QUANTITY = "CERTIFICATION_QUANTITY"
+    SUBJECT_NOT_CANONICAL = "SUBJECT_NOT_CANONICAL"
+    COORDINATION_SYMMETRY = "COORDINATION_SYMMETRY"
+    # Issue #84: the same canonical requirement appears in more than one
+    # source span with different importance/duration/level. Never scored
+    # twice and never auto-resolved; only an explicit HR choice decides.
+    SEMANTIC_CONFLICT = "SEMANTIC_CONFLICT"
+
+
 class SemanticRequirement(BaseModel):
     """Server-authorized semantic slots for one material source requirement.
 
@@ -499,6 +533,7 @@ class SemanticRequirement(BaseModel):
     required_level: str | None = Field(default=None, max_length=50)
     state: SemanticRequirementState
     comparison: str | None = Field(default=None, max_length=16)
+    review_reason: SemanticReviewReason | None = None
 
 
 class JDDraftCriterionItem(BaseModel):
@@ -563,39 +598,6 @@ class JDCriteriaDraft(BaseModel):
     )
 
 
-class DroppedJDCriterionReason(StrEnum):
-    """Why a model-drafted JD requirement did not become a real
-    CriterionIn — see PR #42 owner correction (issue #33): a drafted
-    requirement must never simply vanish, but a PROHIBITED one's own text
-    is exactly what security policy forbids re-displaying, so the reasons
-    are surfaced very differently (see UnsupportedJDCriterionItem and
-    AgentJobDraftToolResult.prohibited_count/ungrounded_count)."""
-
-    # A non-sensitive requirement that failed some other CriterionIn rule
-    # (for example an EXPERIENCE item the JD text gave no derivable
-    # duration for). Safe to disclose verbatim — HR must see it, per the
-    # ACAMS-style "not silently dropped" requirement.
-    UNSUPPORTED = "UNSUPPORTED"
-    # Matched the sensitive/irrelevant-attribute denylist
-    # (meyar.schemas.criteria.find_prohibited_term). The matched
-    # requirement's own text must never be re-displayed or persisted —
-    # only a count and a safe, generic HR-facing explanation.
-    PROHIBITED = "PROHIBITED"
-    # Failed to resolve a server-owned canonical span id. The requirement's
-    # own text therefore has no authoritative occurrence in the actual JD —
-    # the structural replacement for D-046's lexical grounding check:
-    # a short/underspecified JD reliably gets "filled in" with a
-    # plausible-sounding but entirely unstated item (the reported
-    # "Passing an exam" fabricated onto an unrelated travel-readiness
-    # requirement). Never disclosed verbatim — unlike UNSUPPORTED, this
-    # requirement was never confirmed to actually be in the JD, so
-    # presenting its own text would itself misattribute invented content
-    # to HR's own source document; only a safe count is exposed (see
-    # AgentJobDraftToolResult.ungrounded_count).
-    UNGROUNDED = "UNGROUNDED"
-    NEEDS_HUMAN_REVIEW = "NEEDS_HUMAN_REVIEW"
-
-
 class UnsupportedJDCriterionItem(BaseModel):
     """One non-sensitive JD requirement that did NOT become a real
     CriterionIn — kept visible to HR (never persisted, never scored) so
@@ -610,10 +612,36 @@ class UnsupportedJDCriterionItem(BaseModel):
     criterion_type: CriterionType
 
 
+class SemanticParameters(BaseModel):
+    """The semantic scoring parameters of one canonical requirement.
+
+    Issue #84: two source spans with the same canonical identity (kind +
+    canonical subject) are an exact duplicate only when these parameters
+    are identical; otherwise they are a semantic conflict."""
+
+    model_config = {"extra": "forbid", "frozen": True}
+
+    criterion_type: CriterionType
+    min_years: float | None = Field(default=None, ge=0, le=60)
+    required_level: str | None = Field(default=None, min_length=1, max_length=50)
+
+
 class NeedsReviewJDCriterionItem(BaseModel):
     """A source requirement whose material semantics could not be safely
     represented or whose model draft omitted/changed a source-bound field.
-    It remains visible to HR but is never submitted as a scoring row."""
+    It remains visible to HR but is never submitted as a scoring row.
+
+    Issue #84:
+
+    - ``kind``/``subject`` are present ONLY when the canonical criterion
+      shape (family + canonical subject + duration/level) is already
+      server-validated; only then may ``allowed_types`` offer a modality
+      resolution. Arbitrary source text can never become a criterion shape.
+    - ``blocking`` marks an explicit MUST_HAVE source requirement that is
+      unresolved: it blocks confirmation until HR either resolves an allowed
+      interpretation or explicitly acknowledges that it is excluded from
+      automatic ranking (``acknowledged_excluded``). Exclusion never mints a
+      criterion."""
 
     model_config = {"extra": "forbid"}
 
@@ -625,18 +653,163 @@ class NeedsReviewJDCriterionItem(BaseModel):
     min_years: float | None = Field(default=None, ge=0, le=60)
     required_level: str | None = Field(default=None, min_length=1, max_length=50)
     allowed_types: list[CriterionType] = Field(default_factory=list, max_length=2)
+    blocking: bool = False
+    acknowledged_excluded: bool = False
+    # Issue #84: a semantic conflict — the same canonical requirement in
+    # several source spans with different parameters. ``span_id`` is the
+    # first conflicting span; HR must choose one server-declared option.
+    conflict_span_ids: list[str] = Field(default_factory=list, max_length=MAX_JD_REQUIREMENT_SPANS)
+    conflict_options: list[SemanticParameters] = Field(default_factory=list, max_length=16)
 
     @model_validator(mode="after")
     def _validate_resolution_shape(self) -> "NeedsReviewJDCriterionItem":
-        fields = (self.span_id, self.kind, self.subject)
-        if any(value is not None for value in fields) and not all(
-            value is not None for value in fields
-        ):
+        if self.conflict_options or self.conflict_span_ids:
+            if (
+                len(self.conflict_options) < 2
+                or len(self.conflict_span_ids) < 2
+                or self.span_id != self.conflict_span_ids[0]
+                or len(set(self.conflict_span_ids)) != len(self.conflict_span_ids)
+                or len(set(self.conflict_options)) != len(self.conflict_options)
+                or self.kind is None
+                or self.allowed_types
+                or not self.blocking
+            ):
+                raise ValueError("Semantic conflict review metadata is inconsistent.")
+        if (self.kind is None) != (self.subject is None):
             raise ValueError("Review resolution metadata must be complete.")
-        if self.allowed_types and not all(value is not None for value in fields):
+        if self.kind is not None and self.span_id is None:
+            raise ValueError("A canonical review shape must be bound to a source span.")
+        if self.allowed_types and self.kind is None:
             raise ValueError("Allowed review types require a complete canonical shape.")
         if len(set(self.allowed_types)) != len(self.allowed_types):
             raise ValueError("Allowed review types must be unique.")
+        if (self.blocking or self.acknowledged_excluded) and self.span_id is None:
+            raise ValueError("A blocking review item must be bound to a source span.")
+        if self.acknowledged_excluded and not self.blocking:
+            raise ValueError("Only a blocking review item can be acknowledged as excluded.")
+        return self
+
+
+class SemanticInterpretationSource(StrEnum):
+    """Issue #84: which authority produced a canonical criterion shape.
+
+    ``DETERMINISTIC`` — the server's own source analysis produced an already
+    canonical subject. ``MODEL_VALIDATED`` — a local-model canonical proposal
+    closed a subject-normalization gap and passed server grounding checks."""
+
+    DETERMINISTIC = "DETERMINISTIC"
+    MODEL_VALIDATED = "MODEL_VALIDATED"
+
+
+class SemanticModelProvenance(BaseModel):
+    """Identity of the local model whose JD semantic result was accepted.
+    Never raw model output."""
+
+    model_config = {"extra": "forbid", "frozen": True}
+
+    provider: str = Field(min_length=1, max_length=64)
+    model_name: str = Field(min_length=1, max_length=255)
+    model_revision: str = Field(default="", max_length=255)
+
+
+class SemanticReviewDecisionKind(StrEnum):
+    MUST_HAVE = "MUST_HAVE"
+    PREFERRED = "PREFERRED"
+    EXCLUDED_BY_REVIEWER = "EXCLUDED_BY_REVIEWER"
+
+
+class SemanticReviewDecision(BaseModel):
+    """One explicit human semantic-review decision that affects ranking."""
+
+    model_config = {"extra": "forbid", "frozen": True}
+
+    span_id: str = Field(pattern=r"^req-\d{4}$")
+    decision: SemanticReviewDecisionKind
+
+
+class SemanticConflictResolution(BaseModel):
+    """One explicit HR choice among the server-declared conflicting
+    parameter sets of one canonical requirement (issue #84)."""
+
+    model_config = {"extra": "forbid", "frozen": True}
+
+    span_ids: list[str] = Field(min_length=2, max_length=MAX_JD_REQUIREMENT_SPANS)
+    options: list[SemanticParameters] = Field(min_length=2, max_length=16)
+    chosen_index: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _validate_choice(self) -> "SemanticConflictResolution":
+        if any(not re.fullmatch(r"req-\d{4}", span_id) for span_id in self.span_ids):
+            raise ValueError("Conflict span ids must be server span ids.")
+        if len(set(self.span_ids)) != len(self.span_ids):
+            raise ValueError("Conflict span ids must be unique.")
+        if len(set(self.options)) != len(self.options):
+            raise ValueError("Conflict options must be distinct.")
+        if self.chosen_index >= len(self.options):
+            raise ValueError("Conflict choice is out of range.")
+        return self
+
+    @property
+    def chosen(self) -> SemanticParameters:
+        return self.options[self.chosen_index]
+
+
+class SemanticCriterionAmendmentField(StrEnum):
+    """The only semantic fields a bounded HR follow-up may amend."""
+
+    CRITERION_TYPE = "CRITERION_TYPE"
+    MIN_YEARS = "MIN_YEARS"
+    REQUIRED_LEVEL = "REQUIRED_LEVEL"
+
+
+_CEFR_OR_NAMED_LEVEL_RE = re.compile(r"^[A-Z][A-Z0-9 -]{0,49}$")
+
+
+def encode_amendment_value(field: SemanticCriterionAmendmentField, value: object) -> str:
+    """Canonical string form of one amended semantic value."""
+    if field == SemanticCriterionAmendmentField.CRITERION_TYPE:
+        return CriterionType(value).value  # type: ignore[arg-type]
+    if field == SemanticCriterionAmendmentField.MIN_YEARS:
+        return f"{float(value):g}"  # type: ignore[arg-type]
+    return str(value).strip().upper()
+
+
+class SemanticCriterionAmendment(BaseModel):
+    """One immutable, server-created human amendment of one criterion field.
+
+    Created only by the bounded pending-draft follow-up after it resolved
+    exactly one target criterion. ``source_text`` is the bounded HR follow-up
+    message that authorized the change (HR-authored instruction, never
+    candidate data or model output); ``source_sha256`` is its digest."""
+
+    model_config = {"extra": "forbid", "frozen": True}
+
+    sequence: int = Field(ge=1)
+    criterion_id: str = Field(pattern=r"^[a-z0-9_]{1,64}$")
+    span_id: str = Field(pattern=r"^req-\d{4}$")
+    field: SemanticCriterionAmendmentField
+    previous_value: str = Field(min_length=1, max_length=50)
+    new_value: str = Field(min_length=1, max_length=50)
+    source_text: str = Field(min_length=1, max_length=4000)
+    source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def _validate_values(self) -> "SemanticCriterionAmendment":
+        for value in (self.previous_value, self.new_value):
+            if self.field == SemanticCriterionAmendmentField.CRITERION_TYPE:
+                if value not in (CriterionType.MUST_HAVE.value, CriterionType.PREFERRED.value):
+                    raise ValueError("Malformed criterion type amendment.")
+            elif self.field == SemanticCriterionAmendmentField.MIN_YEARS:
+                if not re.fullmatch(r"\d{1,2}(?:\.\d+)?", value) or float(value) > 60:
+                    raise ValueError("Malformed min_years amendment.")
+                if value != f"{float(value):g}":
+                    raise ValueError("Non-canonical min_years amendment.")
+            elif not _CEFR_OR_NAMED_LEVEL_RE.fullmatch(value):
+                raise ValueError("Malformed language level amendment.")
+        if self.previous_value == self.new_value:
+            raise ValueError("An amendment must change the value.")
+        if hashlib.sha256(self.source_text.encode("utf-8")).hexdigest() != self.source_sha256:
+            raise ValueError("Amendment source digest does not match its source text.")
         return self
 
 
@@ -662,6 +835,9 @@ class RequirementSpanResult(BaseModel):
     state: RequirementSpanState
     criterion_type: CriterionType | None = None
     criterion_id: str | None = Field(default=None, pattern=r"^[a-z0-9_]{1,64}$")
+    # Issue #84: authority of the (possibly review-gated) canonical shape;
+    # None when no canonical shape exists for this span.
+    interpretation_source: SemanticInterpretationSource | None = None
 
 
 class AgentJobDraftToolResult(BaseModel):
@@ -676,7 +852,7 @@ class AgentJobDraftToolResult(BaseModel):
     ``prohibited_count`` only — its own text is never redisplayed,
     matching the same denylist discipline the manual form and REST API
     already enforce. A requirement with no resolved server-owned span id
-    (see DroppedJDCriterionReason.UNGROUNDED) is counted in
+    (a model proposal with an unknown span id) is counted in
     ``ungrounded_count`` only, for the same
     reason: its own text was never confirmed to actually be in HR's JD,
     so redisplaying it would itself misattribute invented content to the
@@ -706,9 +882,43 @@ class AgentJobDraftToolResult(BaseModel):
     result_limit_needs_review: bool = False
     wrong_mode_guidance: bool = False
     modification_source_text: str | None = Field(default=None, max_length=500)
+    # Issue #84: which JD semantic-interpretation policy produced this draft.
+    # None only for drafts persisted before the policy was versioned.
+    semantic_policy_version: str | None = Field(default=None, max_length=64)
+    # Issue #84 durable-provenance inputs (all server-owned; never model text).
+    source_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    semantic_prompt_version: str | None = Field(default=None, max_length=64)
+    semantic_model: SemanticModelProvenance | None = None
+    rejected_proposal_count: int = Field(default=0, ge=0)
+    review_decisions: list[SemanticReviewDecision] = Field(
+        default_factory=list, max_length=MAX_JD_REQUIREMENT_SPANS
+    )
+    conflict_resolutions: list[SemanticConflictResolution] = Field(
+        default_factory=list, max_length=MAX_JD_REQUIREMENT_SPANS
+    )
+    amendments: list[SemanticCriterionAmendment] = Field(default_factory=list, max_length=256)
+    # Session-held only (issue #84): the exact analysed JD, so confirmation
+    # can re-derive every source value deterministically instead of trusting
+    # draft fields. It lives in the same bounded transcript as the HR turn
+    # that supplied it; it is never audited, logged or persisted in the
+    # durable provenance (only its sha256 is).
+    # Excluded from every dump/render: only ``pending_draft_payload`` writes
+    # it into the session-held transcript payload.
+    source_jd_text: str | None = Field(default=None, max_length=20000, exclude=True)
     requirements: list[RequirementSpanResult] = Field(
         default_factory=list, max_length=MAX_JD_REQUIREMENT_SPANS
     )
+
+
+def pending_draft_payload(draft: "AgentJobDraftToolResult") -> dict[str, Any]:
+    """The server-held transcript payload of a pending draft (issue #84):
+    the public draft plus the exact analysed JD, so confirmation can
+    re-derive source values. The JD is already in the same transcript as
+    the HR turn that supplied it; it is never rendered, audited or put in
+    durable provenance."""
+    payload = draft.model_dump(mode="json")
+    payload["source_jd_text"] = draft.source_jd_text
+    return payload
 
 
 class ConfirmedAgentJobDraft(BaseModel):

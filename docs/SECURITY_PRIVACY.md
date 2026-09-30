@@ -378,6 +378,45 @@ unlabeled number but never guesses that an arbitrary identifier is a phone.
   when the current BrowserSession's live context points to that exact draft;
   opening a durable conversation does not rebind a ResultSet or draft.
 
+## JD semantic authority (issue #84, D-088)
+
+- A JD-draft criterion is built only from a server-validated
+  `CanonicalRequirement` (semantic policy `jd-semantic-policy-v2`). Raw
+  grammatical remainders, vacancy headers/titles, person tokens and location
+  text can never become scoring authority.
+- The local model (LLMProvider only; JD text never leaves the host) may only
+  propose canonical subjects for server-created span ids. Proposals must be
+  grounded in the exact span text and cannot change modality, duration,
+  level, weights, scores or prohibited/unsupported classification. Prohibited
+  attributes remain deterministic (`find_prohibited_term`) regardless of any
+  model output.
+- Prompt-injection text in a JD is data: system-directed instructions are
+  deterministically UNSUPPORTED and never become criteria.
+- Location/residence, salary, work authorization, remote/on-site and similar
+  employment terms are UNSUPPORTED (disclosed, never scored).
+- An unresolved explicit MUST_HAVE blocks confirmation until HR resolves a
+  server-declared interpretation or explicitly excludes it; exclusion never
+  creates a criterion and stays disclosed on the criteria version.
+- Audit metadata for drafts/review resolution carries only ids, the policy
+  version and structural counts — never JD/span text or model output.
+- Each agent-confirmed criteria version stores immutable semantic provenance
+  (`agent_semantic_provenance`, D-088 A-1): the JD's sha256 (never the JD),
+  each criterion's exact source fragment and offsets, interpretation source,
+  policy/prompt version, accepted local-model identity and explicit human
+  review decisions. No raw model output, chain-of-thought or candidate data.
+  Built fail-closed from the server draft, validated on read, tenant-scoped,
+  never a scoring input.
+- Human follow-up amendments (type/min_years/level only) are stored with the
+  version as an ordered chain including the HR follow-up text that
+  authorized each change and its sha256 (HR instruction, not candidate
+  data). The pending draft holds the analysed JD only in the session
+  transcript, excluded from every rendered/dumped result, so confirmation
+  can re-derive source values; the JD itself never enters provenance or
+  audit metadata.
+- One canonical requirement never carries two scoring weights: duplicates
+  collapse to one criterion, conflicts require an explicit HR choice
+  (D-088 A-5).
+
 ## Local-only Ollama operating contract
 
 Two distinct guarantees are in play, and they must not be conflated —

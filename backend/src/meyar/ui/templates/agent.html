@@ -60,7 +60,7 @@
         <div class="alert alert-warning"><p><strong>Bu dil hazırda dəstəklənmir.</strong> Vakansiya mətnini Azərbaycan və ya ingilis dilində göndərin. Heç bir sıralama meyarı yaradılmadı.</p></div>
         {% elif draft.wrong_mode_guidance %}
         <div class="alert alert-info"><p><strong>Bu mətn namizəd axtarışına bənzəyir.</strong> Namizədləri vakansiya yaratmadan tapmaq üçün axtarış istəyinizi açıq yazın; vakansiya analizi üçün isə elanı və tələblərin məcburi/üstünlük statusunu qeyd edin.</p></div>
-        {% else %}
+        {% elif not draft.requires_resolution %}
         <div class="alert alert-warning">
           <p><strong>Avtomatik sıralama üçün hazır meyar yoxdur.</strong> Mənbə tələbləri aşağıda görünür, lakin onlar insan baxışı tələb edir və ya sistem tərəfindən hələ ölçülmür. Tələbləri dəqiqləşdirib elanı yenidən analiz edin.</p>
         </div>
@@ -71,8 +71,12 @@
         {% endif %}
 
         {% if not draft.wrong_mode_guidance %}
+        {% if draft.must_have_rows or draft.unsupported_must_have %}
         <h3>Mütləq tələblər</h3>
+        {% endif %}
+        {% if draft.must_have_rows %}
         {{ criteria_form.criterion_rows("must", draft.must_have_rows, kind_options, true) }}
+        {% endif %}
         {% if draft.unsupported_must_have %}
         <div class="alert alert-info">
           <p><strong>Məlumat üçün — qiymətləndirməyə daxil edilmir:</strong> bu tələblər real və qeydə alınıb, lakin sistem hələ bu növ tələbi ölçə bilmir, ona görə bal/reytinqə təsir etmir:</p>
@@ -80,8 +84,12 @@
         </div>
         {% endif %}
 
+        {% if draft.preferred_rows or draft.unsupported_preferred %}
         <h3>Üstünlük tələbləri</h3>
+        {% endif %}
+        {% if draft.preferred_rows %}
         {{ criteria_form.criterion_rows("pref", draft.preferred_rows, kind_options, true) }}
+        {% endif %}
         {% if draft.unsupported_preferred %}
         <div class="alert alert-info">
           <p><strong>Məlumat üçün — qiymətləndirməyə daxil edilmir:</strong> bu tələblər real və qeydə alınıb, lakin sistem hələ bu növ tələbi ölçə bilmir, ona görə bal/reytinqə təsir etmir:</p>
@@ -112,6 +120,44 @@
               </select>
               <button class="button button-secondary" type="submit">Dəqiqləşdirməni yadda saxla</button>
             </form>
+            {% elif review.conflict_options and not review.acknowledged_excluded %}
+            <div class="review-blocking review-conflict">
+              <p><strong>{{ review.subject }}</strong></p>
+              <p>Eyni tələb elanda bir neçə dəfə, fərqli əhəmiyyət və ya parametrlərlə göstərilib: {{ review.requirement }}. Sistem bunlardan birini özü seçmir və tələbi iki dəfə hesablamır. Hansının keçərli olduğunu seçin və ya tələbi sıralamaya daxil etmədən davam edin.</p>
+              {% if draft.can_act %}
+              <form method="post" action="/ui/agent/drafts/{{ draft.draft_id }}/resolve" class="stack-form review-resolution-form">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="span_id" value="{{ review.span_id }}">
+                <label for="review-conflict-{{ loop.index0 }}">Keçərli variantı seçin</label>
+                <select id="review-conflict-{{ loop.index0 }}" name="option" required>
+                  <option value="">Seçin</option>
+                  {% for label in review.conflict_options %}<option value="{{ loop.index0 }}">{{ label }}</option>{% endfor %}
+                </select>
+                <button class="button button-secondary" type="submit">Seçimi yadda saxla</button>
+              </form>
+              <form method="post" action="/ui/agent/drafts/{{ draft.draft_id }}/resolve" class="stack-form review-resolution-form">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="span_id" value="{{ review.span_id }}">
+                <input type="hidden" name="decision" value="exclude">
+                <button class="button button-secondary" type="submit">Bu tələbi sıralamaya daxil etmədən davam et</button>
+              </form>
+              {% endif %}
+            </div>
+            {% elif review.blocking and review.acknowledged_excluded %}
+            <p><strong>{{ review.requirement }}</strong> — əsas tələb kimi qeyd olunub, lakin sizin qərarınızla avtomatik sıralamaya daxil edilmir.</p>
+            {% elif review.blocking %}
+            <div class="review-blocking">
+              <p><strong>{{ review.requirement }}</strong></p>
+              <p>Bu əsas tələb hələ dəqiqləşdirilməyib. Davam etmək üçün tələbi nəzərdən keçirin: elanda tələbi daha aydın yazıb yenidən analiz edin və ya onu sıralamaya daxil etmədən davam etdiyinizi təsdiqləyin.</p>
+              {% if draft.can_act %}
+              <form method="post" action="/ui/agent/drafts/{{ draft.draft_id }}/resolve" class="stack-form review-resolution-form">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="span_id" value="{{ review.span_id }}">
+                <input type="hidden" name="decision" value="exclude">
+                <button class="button button-secondary" type="submit">Bu tələbi sıralamaya daxil etmədən davam et</button>
+              </form>
+              {% endif %}
+            </div>
             {% else %}
             <p>{{ review.requirement }} — bu tələb hazırkı formada avtomatik sıralamaya daxil edilmir.</p>
             {% endif %}
@@ -130,7 +176,7 @@
         {% if confirmation_ready %}
         <button class="button" type="submit">Tələbləri təsdiqlə və namizədləri sırala</button>
         {% elif has_scorable and draft.requires_resolution %}
-        <p class="field-help">Əvvəlcə yuxarıdakı dəqiqləşdirməni yadda saxlayın. Bundan sonra sıralama təsdiqi görünəcək.</p>
+        <p class="field-help">Əvvəlcə yuxarıdakı dəqiqləşdirilməmiş tələbləri nəzərdən keçirin. Bundan sonra sıralama təsdiqi görünəcək.</p>
         {% endif %}
         {% endif %}
       {% if confirmation_ready %}

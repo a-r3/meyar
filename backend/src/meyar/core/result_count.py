@@ -40,32 +40,38 @@ _DURATION_AFTER_RE = re.compile(
     r"il(?:den|de|lik|ler)?|ay(?:dan|da|liq|lar)?)\b"
 )
 
+# Issue #84 (audit M-7): a count relation never spans a line break. A vacancy
+# title ending in a number ("Kredit Analitiki 2") followed on the NEXT line by
+# a requirement that starts with "Namizəd ..." is title data, not "2 namizəd".
+_HS = r"[^\S\r\n]+"
+_HS_OPT = r"[^\S\r\n]*"
+
 # Each match is the complete source-attributable workflow-control occurrence,
 # not merely the number token. Folding preserves supported AZ/EN offsets.
 _RESULT_COUNT_PATTERNS = (
     re.compile(
-        rf"(?i)\b(?:en\s+(?:cox|uygun|yaxsi)\s+|maksimum\s+)?{_COUNT}\s+"
-        rf"{_AZ_RESULT_ENTITY}(?:\s+{_AZ_ACTION})?\b"
+        rf"(?i)\b(?:en{_HS}(?:cox|uygun|yaxsi){_HS}|maksimum{_HS})?{_COUNT}{_HS}"
+        rf"{_AZ_RESULT_ENTITY}(?:{_HS}{_AZ_ACTION})?\b"
     ),
     re.compile(
-        rf"(?i)\b{_AZ_ACTION}\s+(?:en\s+(?:cox|uygun|yaxsi)\s+|maksimum\s+)?"
-        rf"{_COUNT}\s+{_AZ_RESULT_ENTITY}\b"
+        rf"(?i)\b{_AZ_ACTION}{_HS}(?:en{_HS}(?:cox|uygun|yaxsi){_HS}|maksimum{_HS})?"
+        rf"{_COUNT}{_HS}{_AZ_RESULT_ENTITY}\b"
     ),
     re.compile(
-        rf"(?i)\b(?:netice\w*\s+(?:sayi\s+)?)?(?:en\s+cox\s+|maksimum\s+)"
-        rf"{_COUNT}(?:\s+{_AZ_RESULT_ENTITY})?(?:\s+{_AZ_ACTION}|\s+olsun)?\b"
+        rf"(?i)\b(?:netice\w*{_HS}(?:sayi{_HS})?)?(?:en{_HS}cox{_HS}|maksimum{_HS})"
+        rf"{_COUNT}(?:{_HS}{_AZ_RESULT_ENTITY})?(?:{_HS}{_AZ_ACTION}|{_HS}olsun)?\b"
     ),
-    re.compile(rf"(?i)\btop[ -]?{_COUNT}(?:\s+{_EN_RESULT_ENTITY})?\b"),
+    re.compile(rf"(?i)\btop[ -]?{_COUNT}(?:{_HS}{_EN_RESULT_ENTITY})?\b"),
     re.compile(
-        rf"(?i)\b{_EN_ACTION}\s+(?:up\s+to\s+|at\s+most\s+|maximum\s+)?"
-        rf"(?:the\s+)?(?:best\s+|top\s+)?{_COUNT}(?:\s+(?:best\s+)?{_EN_RESULT_ENTITY})?\b"
-    ),
-    re.compile(
-        rf"(?i)\b(?:up\s+to\s+|at\s+most\s+|maximum\s+)?{_COUNT}\s+"
-        rf"(?:best\s+)?{_EN_RESULT_ENTITY}(?:\s+{_EN_ACTION})?\b"
+        rf"(?i)\b{_EN_ACTION}{_HS}(?:up{_HS}to{_HS}|at{_HS}most{_HS}|maximum{_HS})?"
+        rf"(?:the{_HS})?(?:best{_HS}|top{_HS})?{_COUNT}(?:{_HS}(?:best{_HS})?{_EN_RESULT_ENTITY})?\b"
     ),
     re.compile(
-        rf"(?i)\b(?:namized\w*|netice\w*)\s+sayi\s+{_COUNT}(?:\s+olsun)?\b"
+        rf"(?i)\b(?:up{_HS}to{_HS}|at{_HS}most{_HS}|maximum{_HS})?{_COUNT}{_HS}"
+        rf"(?:best{_HS})?{_EN_RESULT_ENTITY}(?:{_HS}{_EN_ACTION})?\b"
+    ),
+    re.compile(
+        rf"(?i)\b(?:namized\w*|netice\w*){_HS}sayi{_HS}{_COUNT}(?:{_HS}olsun)?\b"
     ),
 )
 _AMBIGUOUS_RESULT_CUE_RE = re.compile(
