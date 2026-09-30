@@ -218,7 +218,13 @@ unlabeled number but never guesses that an arbitrary identifier is a phone.
   changes) never affect it. Retired ResultSets (bounded creation-time
   retention, D-090) leave an `agent.result_set.retired` audit record with
   ids/hashes/policy versions/mode/counts/timestamps only — never query text,
-  canonical request JSON, CV content, or CandidateIdentity.
+  canonical request JSON, CV content, or CandidateIdentity. A record is
+  written only for a row the DELETE actually removed in the same
+  transaction. The ops backlog drain (`meyar retire-result-sets`) takes
+  one explicit tenant id (no global mode) and prints counts only. A
+  ResultSet under an unknown `snapshot_policy_version` fails closed
+  (outward RESULT_SET_STALE, audit reason `STALE`), and the raw policy
+  string is never exposed.
 - Audit events `agent.result_set.created`, `agent.result_set.
   reference_resolved`, and `agent.result_set.reference_rejected` carry only
   ids/enums/counts/version strings (result_set_id, candidate_id,

@@ -20,8 +20,9 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
 
 from meyar.agent.schemas import MAX_CANDIDATE_REF
 from meyar.embedding.serializer import build_professional_embedding_text, compute_source_sha256
@@ -34,7 +35,7 @@ from meyar.schemas.candidate_profile import CandidateProfileExtraction
 from meyar.search.planner_schemas import PlannedCandidateSearchResponse
 from meyar.search.schemas import CandidateSearchRequest, SearchMode
 from meyar.search.structured import evaluate_required_filters
-from meyar.services.audit_repo import record_event
+from meyar.services.audit_repo import record_event, record_events
 from meyar.services.browser_session_repo import get_browser_session_by_id
 from meyar.services.candidate_embedding_repo import get_embedding_versions_by_ids
 from meyar.services.candidate_profile_repo import get_current_profile_versions_for_candidates
@@ -57,13 +58,22 @@ REFINEMENT_POLICY_VERSION = "agent-refinement-policy-v1"
 # member-snapshot rules themselves change.
 SNAPSHOT_POLICY_VERSION = "member-snapshot-v1"
 
-# issue #86 retention (L-6, ResultSet part): per (tenant, conversation,
-# BrowserSession), creation-time pruning keeps every ResultSet a live
-# session context still points at, plus at most this many other
-# (inactive) unexpired ones; expired inactive ones are retired at once.
-# Because pruning runs when a set is CREATED (before the Phase B pointer
-# switch), the steady-state bound per context is 1 active + N+1 inactive.
+# issue #86 retention (L-6, ResultSet part) — exact owner contract (D-090):
+# per (tenant, conversation, BrowserSession) at most 1 ACTIVE ResultSet
+# (the one this scope's own session context points at) + at most this many
+# INACTIVE ones. A set some OTHER live session context points at is
+# independently protected and never counted or deleted. Holds after a
+# create + successful Phase B pointer switch AND when the switch fails or
+# goes stale (see ``retire_inactive_result_sets``: creation reserves one
+# inactive slot for whichever of {new, superseded} set ends up inactive).
 MAX_INACTIVE_RESULT_SETS_PER_CONTEXT = 5
+
+# issue #86: hard cap on how many ResultSets ONE retention pass may select
+# and delete (enforced by SQL LIMIT, never by slicing in Python). A normal
+# search/refinement runs at most one pass, so a historical backlog never
+# makes a turn O(backlog); ``retire_next_result_set_batch`` drains the rest
+# (ops CLI ``retire-result-sets``). Steady state needs 1 row per creation.
+RESULT_SET_RETIRE_BATCH_SIZE = 20
 
 
 async def validate_member_snapshots(
@@ -152,6 +162,63 @@ def _iso(value: datetime) -> str:
     return (value if value.tzinfo is not None else value.replace(tzinfo=UTC)).isoformat()
 
 
+def _live_pointer_ids(tenant_id: uuid.UUID):  # noqa: ANN202 — SQLAlchemy Select
+    """Every ResultSet id ANY session context of this tenant points at."""
+    return select(AgentConversationSessionContext.active_result_set_id).where(
+        AgentConversationSessionContext.tenant_id == tenant_id,
+        AgentConversationSessionContext.active_result_set_id.is_not(None),
+    )
+
+
+async def _select_retirement_batch(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    conversation_id: uuid.UUID,
+    browser_session_id: uuid.UUID,
+    keep_ids: set[uuid.UUID],
+    inactive_slots: int,
+) -> list[uuid.UUID]:
+    """At most ``RESULT_SET_RETIRE_BATCH_SIZE`` ids, bounded in SQL (ids
+    only — no ORM rows, no members). Expired rows first (oldest expiry
+    first); the rest of the batch is unexpired rows ranked below the newest
+    ``inactive_slots`` (OFFSET), i.e. excess over the policy."""
+    scope = [
+        AgentResultSet.tenant_id == tenant_id,
+        AgentResultSet.conversation_id == conversation_id,
+        AgentResultSet.browser_session_id == browser_session_id,
+        AgentResultSet.id.not_in(_live_pointer_ids(tenant_id)),
+    ]
+    if keep_ids:
+        scope.append(AgentResultSet.id.not_in(keep_ids))
+    now = datetime.now(UTC)
+    expired = list(
+        (
+            await db.scalars(
+                select(AgentResultSet.id)
+                .where(*scope, AgentResultSet.expires_at <= now)
+                .order_by(AgentResultSet.expires_at.asc(), AgentResultSet.id.asc())
+                .limit(RESULT_SET_RETIRE_BATCH_SIZE)
+            )
+        ).all()
+    )
+    room = RESULT_SET_RETIRE_BATCH_SIZE - len(expired)
+    if room <= 0:
+        return expired
+    excess = list(
+        (
+            await db.scalars(
+                select(AgentResultSet.id)
+                .where(*scope, AgentResultSet.expires_at > now)
+                .order_by(AgentResultSet.created_at.desc(), AgentResultSet.id.desc())
+                .offset(inactive_slots)
+                .limit(room)
+            )
+        ).all()
+    )
+    return expired + excess
+
+
 async def retire_inactive_result_sets(
     db: AsyncSession,
     *,
@@ -159,56 +226,85 @@ async def retire_inactive_result_sets(
     conversation_id: uuid.UUID,
     browser_session_id: uuid.UUID,
     keep_ids: set[uuid.UUID],
+    inactive_slots: int,
 ) -> int:
-    """Bounded creation-time retention (issue #86, no background service).
+    """ONE bounded retention pass (issue #86, no background service).
 
     Scope: exactly one (tenant, conversation, BrowserSession). NEVER deletes
     a ResultSet that ANY session context of the tenant still points at
-    (live authority), nor one in ``keep_ids`` (e.g. the row just created
-    whose pointer is written later in Phase B). Of the rest, expired rows are
-    retired immediately and only the newest
-    ``MAX_INACTIVE_RESULT_SETS_PER_CONTEXT`` unexpired rows are kept.
-    Deleting a ResultSet cascades only its own member rows;
+    (live authority — re-checked inside the DELETE itself), nor one in
+    ``keep_ids``. Of the rest ("other inactive"), expired rows are retired
+    first and unexpired rows beyond the newest ``inactive_slots`` next —
+    at most ``RESULT_SET_RETIRE_BATCH_SIZE`` rows per call, selected and
+    deleted in SQL (two LIMITed id SELECTs + one DELETE ... RETURNING +
+    one batched audit INSERT), so the cost never grows with a backlog.
+
+    Creation passes ``keep_ids`` = {new set, superseded/source set} and
+    ``inactive_slots = MAX_INACTIVE_RESULT_SETS_PER_CONTEXT - 1``: after the
+    Phase B pointer switch the superseded set becomes the 5th inactive one;
+    if the switch fails or goes stale the NEW set is the 5th instead.
+    Either way: 1 active + at most 5 inactive (once any historical backlog
+    is drained). The ops sweep passes no keep_ids and the full 5 slots.
+
+    Audit truthfulness: one ``agent.result_set.retired`` event per row the
+    DELETE actually removed in this transaction (from RETURNING) — a row
+    that became protected between selection and delete is neither deleted
+    nor reported. Deleting a ResultSet cascades only its own member rows;
     ``parent_result_set_id`` is a plain snapshot UUID (a derived set carries
-    its own copied members, so retiring a parent never affects it).
-    Transcript and AuditEvents are untouched; one ``agent.result_set.retired``
-    event per retired row keeps safe structural provenance (ids, hashes,
-    policy versions, mode, counts, epoch, timestamps — never query text,
-    canonical request JSON, CV content or CandidateIdentity)."""
-    referenced = select(AgentConversationSessionContext.active_result_set_id).where(
-        AgentConversationSessionContext.tenant_id == tenant_id,
-        AgentConversationSessionContext.active_result_set_id.is_not(None),
+    its own copied members). Transcript and AuditEvents are untouched; event
+    metadata is structural only (ids, hashes, policy versions, mode, counts,
+    epoch, timestamps — never query text, canonical request JSON, CV
+    content or CandidateIdentity)."""
+    if not 0 <= inactive_slots <= MAX_INACTIVE_RESULT_SETS_PER_CONTEXT:
+        raise ValueError("inactive_slots outside the retention policy.")
+    retire_ids = await _select_retirement_batch(
+        db,
+        tenant_id=tenant_id,
+        conversation_id=conversation_id,
+        browser_session_id=browser_session_id,
+        keep_ids=keep_ids,
+        inactive_slots=inactive_slots,
     )
-    query = (
-        select(AgentResultSet)
-        .where(
-            AgentResultSet.tenant_id == tenant_id,
-            AgentResultSet.conversation_id == conversation_id,
-            AgentResultSet.browser_session_id == browser_session_id,
-            AgentResultSet.id.not_in(referenced),
-        )
-        .order_by(AgentResultSet.created_at.desc(), AgentResultSet.id.desc())
-    )
-    if keep_ids:
-        query = query.where(AgentResultSet.id.not_in(keep_ids))
-    candidates = list((await db.scalars(query)).all())
-    now = datetime.now(UTC)
-    retired: list[AgentResultSet] = []
-    kept = 0
-    for row in candidates:
-        expires_at = row.expires_at if row.expires_at.tzinfo else row.expires_at.replace(tzinfo=UTC)
-        if expires_at > now and kept < MAX_INACTIVE_RESULT_SETS_PER_CONTEXT:
-            kept += 1
-            continue
-        retired.append(row)
-    if not retired:
+    if not retire_ids:
         return 0
-    for row in retired:
-        await record_event(
-            db,
-            tenant_id=tenant_id,
-            event_type="agent.result_set.retired",
-            metadata={
+    # Members go by their own ON DELETE CASCADE FK.
+    deleted = (
+        await db.execute(
+            delete(AgentResultSet)
+            .where(
+                AgentResultSet.tenant_id == tenant_id,
+                AgentResultSet.conversation_id == conversation_id,
+                AgentResultSet.browser_session_id == browser_session_id,
+                AgentResultSet.id.in_(retire_ids),
+                AgentResultSet.id.not_in(_live_pointer_ids(tenant_id)),
+            )
+            .returning(
+                AgentResultSet.id,
+                AgentResultSet.result_set_kind,
+                AgentResultSet.parent_result_set_id,
+                AgentResultSet.conversation_id,
+                AgentResultSet.context_epoch,
+                AgentResultSet.request_sha256,
+                AgentResultSet.refinement_request_sha256,
+                AgentResultSet.search_policy_version,
+                AgentResultSet.refinement_policy_version,
+                AgentResultSet.snapshot_policy_version,
+                AgentResultSet.search_mode,
+                AgentResultSet.result_count,
+                AgentResultSet.created_at,
+                AgentResultSet.expires_at,
+            )
+            .execution_options(synchronize_session=False)
+        )
+    ).all()
+    if not deleted:
+        return 0
+    await record_events(
+        db,
+        tenant_id=tenant_id,
+        event_type="agent.result_set.retired",
+        metadata_rows=[
+            {
                 "result_set_id": str(row.id),
                 "result_set_kind": row.result_set_kind,
                 "parent_result_set_id": (
@@ -225,21 +321,65 @@ async def retire_inactive_result_sets(
                 "result_count": row.result_count,
                 "created_at": _iso(row.created_at),
                 "expires_at": _iso(row.expires_at),
-            },
-        )
-    retired_ids = [row.id for row in retired]
-    # Members go by their own ON DELETE CASCADE FK. Re-checks the live-pointer
-    # exclusion inside the DELETE itself (defense in depth).
-    await db.execute(
-        delete(AgentResultSet).where(
-            AgentResultSet.tenant_id == tenant_id,
-            AgentResultSet.id.in_(retired_ids),
-            AgentResultSet.id.not_in(referenced),
-        )
+            }
+            for row in deleted
+        ],
     )
-    for row in retired:
-        db.expunge(row)
-    return len(retired)
+    # Never leave a deleted row in the identity map (it would look live).
+    for row in deleted:
+        stale = db.identity_map.get(Session.identity_key(AgentResultSet, row.id))
+        if stale is not None:
+            db.expunge(stale)
+    return len(deleted)
+
+
+async def _next_retirement_scope(db: AsyncSession, *, tenant_id: uuid.UUID):  # noqa: ANN202
+    now = datetime.now(UTC)
+    return (
+        await db.execute(
+            select(AgentResultSet.conversation_id, AgentResultSet.browser_session_id)
+            .where(
+                AgentResultSet.tenant_id == tenant_id,
+                AgentResultSet.id.not_in(_live_pointer_ids(tenant_id)),
+            )
+            .group_by(AgentResultSet.conversation_id, AgentResultSet.browser_session_id)
+            .having(
+                or_(
+                    func.count() > MAX_INACTIVE_RESULT_SETS_PER_CONTEXT,
+                    func.bool_or(AgentResultSet.expires_at <= now),
+                )
+            )
+            .limit(1)
+        )
+    ).first()
+
+
+async def result_set_retirement_pending(db: AsyncSession, *, tenant_id: uuid.UUID) -> bool:
+    """True when some scope of THIS tenant is still over the policy."""
+    return await _next_retirement_scope(db, tenant_id=tenant_id) is not None
+
+
+async def retire_next_result_set_batch(db: AsyncSession, *, tenant_id: uuid.UUID) -> int:
+    """Agentless ops sweep step (issue #86 backlog drain; CLI
+    ``retire-result-sets``): finds ONE (conversation, BrowserSession) scope
+    of THIS tenant whose unprotected sets exceed the policy (more than
+    ``MAX_INACTIVE_RESULT_SETS_PER_CONTEXT``, or any expired) and runs one
+    bounded ``retire_inactive_result_sets`` pass on it with the full 5
+    inactive slots (the scope's own active set is pointer-protected).
+    Returns rows retired; 0 means nothing is pending for this tenant.
+    Tenant-scoped by construction — there is no global mode. The caller
+    commits after each call."""
+    scope = await _next_retirement_scope(db, tenant_id=tenant_id)
+    if scope is None:
+        return 0
+    return await retire_inactive_result_sets(
+        db,
+        tenant_id=tenant_id,
+        conversation_id=scope.conversation_id,
+        browser_session_id=scope.browser_session_id,
+        keep_ids=set(),
+        inactive_slots=MAX_INACTIVE_RESULT_SETS_PER_CONTEXT,
+    )
 
 
 async def create_result_set_from_search(
@@ -339,6 +479,7 @@ async def create_result_set_from_search(
         browser_session_id=browser_session_id,
         keep_ids={result_set.id}
         | ({previous_result_set_id} if previous_result_set_id is not None else set()),
+        inactive_slots=MAX_INACTIVE_RESULT_SETS_PER_CONTEXT - 1,
     )
     return result_set
 
@@ -365,6 +506,12 @@ class ResultSetResolutionFailure(StrEnum):
     CONTEXT_EPOCH_MISMATCH = "CONTEXT_EPOCH_MISMATCH"
     EXPIRED = "EXPIRED"
     STALE = "STALE"
+    # issue #86 (D-090): the row is owned by this context but was written
+    # under a snapshot policy this code does not implement (anything other
+    # than SNAPSHOT_POLICY_VERSION). Fails closed before any member is read;
+    # outward it is the same "re-run the search" STALE UX and the closed
+    # audit reason "STALE" — the raw policy string is never exposed.
+    UNSUPPORTED_SNAPSHOT_POLICY = "UNSUPPORTED_SNAPSHOT_POLICY"
     ORDINAL_OUT_OF_RANGE = "ORDINAL_OUT_OF_RANGE"
 
 
@@ -379,6 +526,7 @@ _AUDIT_REASON_BY_FAILURE: dict[ResultSetResolutionFailure, str] = {
     ResultSetResolutionFailure.CONTEXT_EPOCH_MISMATCH: "NOT_FOUND",
     ResultSetResolutionFailure.EXPIRED: "EXPIRED",
     ResultSetResolutionFailure.STALE: "STALE",
+    ResultSetResolutionFailure.UNSUPPORTED_SNAPSHOT_POLICY: "STALE",
     ResultSetResolutionFailure.ORDINAL_OUT_OF_RANGE: "ORDINAL_OUT_OF_RANGE",
 }
 
@@ -420,6 +568,8 @@ async def _validate_active_result_set(
        BrowserSession at the same epoch fails closed here).
     5. Its ``context_epoch`` equals ``session_context.context_epoch``.
     6. ``expires_at`` is still in the future.
+    7. ``snapshot_policy_version`` is exactly ``SNAPSHOT_POLICY_VERSION``
+       (issue #86 fail-closed: an unknown policy is never interpreted).
 
     STRUCTURAL ownership only (issue #86): no tenant-wide corpus work. Member
     freshness is judged separately, per member, by
@@ -453,6 +603,10 @@ async def _validate_active_result_set(
         expires_at = expires_at.replace(tzinfo=UTC)
     if now >= expires_at:
         return ResultSetResolutionFailure.EXPIRED
+    # Checked only AFTER ownership, so a foreign row's policy is never
+    # observable (it already failed as NOT_FOUND/mismatch above).
+    if result_set.snapshot_policy_version != SNAPSHOT_POLICY_VERSION:
+        return ResultSetResolutionFailure.UNSUPPORTED_SNAPSHOT_POLICY
 
     return result_set
 
@@ -875,6 +1029,7 @@ async def create_result_set_from_refinement(
         conversation_id=derived.conversation_id,
         browser_session_id=browser_session_id,
         keep_ids={derived.id, source_result_set.id},
+        inactive_slots=MAX_INACTIVE_RESULT_SETS_PER_CONTEXT - 1,
     )
     return RefinementResult(
         result_set=derived,

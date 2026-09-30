@@ -1446,3 +1446,49 @@ async def test_refinement_never_creates_job_or_evaluation_rows(
     assert await db_session.scalar(select(func.count()).select_from(JobModel)) == 0
     assert await db_session.scalar(select(func.count()).select_from(JobCriteriaVersion)) == 0
     assert await db_session.scalar(select(func.count()).select_from(Evaluation)) == 0
+
+
+async def test_unknown_snapshot_policy_fails_closed_before_planner_and_profile(
+    db_session: AsyncSession, tenant_and_user, monkeypatch
+) -> None:
+    """issue #86 (D-090) fail-closed policy: a ResultSet written under an
+    unknown snapshot_policy_version is never interpreted — the advisory size
+    is 0, a refinement fails as RESULT_SET_STALE before the planner runs,
+    and an ordinal reference exposes no candidate id or profile."""
+    import meyar.agent.service as agent_service
+
+    tenant, user, _password, membership = tenant_and_user
+    conversation, context, session = await _new_conversation(db_session, tenant, user, membership)
+    (candidate,), root = await _seed_root(db_session, tenant, context, session, ("Python",))
+    root.snapshot_policy_version = "member-snapshot-v999"
+    await db_session.commit()
+
+    async def _fail_if_called(*_args, **_kwargs):
+        raise AssertionError("planner must not run for an unknown snapshot policy")
+
+    monkeypatch.setattr(agent_service, "plan_candidate_search", _fail_if_called)
+    llm = _refine_llm(filter_query="SQL bilən namizədləri göstər")
+    result = await _refine(
+        db_session, llm, tenant_id=tenant.id, conversation=conversation, session_context=context
+    )
+    assert llm.agent_contexts == [(True, [])]
+    assert result.outcome.value == "RESULT_SET_STALE"
+    await db_session.commit()
+    await db_session.refresh(context)
+    assert context.active_result_set_id == root.id
+
+    profile_llm = FakeLLMProvider(
+        agent_decision=AgentDecision(
+            action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1
+        )
+    )
+    profile_result = await _refine(
+        db_session, profile_llm, tenant_id=tenant.id, conversation=conversation,
+        session_context=context,
+    )
+    assert profile_result.outcome.value == "RESULT_SET_STALE"
+    dumped = profile_result.model_dump_json()
+    assert str(candidate.id) not in dumped
+    assert "member-snapshot-v999" not in dumped
+    for tool_result in profile_result.tool_results:
+        assert tool_result.profile is None or tool_result.profile.found is False

@@ -14,6 +14,14 @@ Refinement is a subset of the snapshot. The legacy fingerprint column is
 now nullable, with a new `snapshot_policy_version` column (migration
 `f3a9c6d2e815`, single head, fail-closed downgrade), and bounded
 creation-time ResultSet retention emits `agent.result_set.retired` audit.
+PR #91 correction pass:
+- exact retention contract: 1 active + at most 5 inactive per
+  (conversation, BrowserSession), also when the Phase B switch fails;
+- SQL-bounded retirement batches of at most 20, expired first, with audit
+  only for rows actually deleted (`DELETE ... RETURNING`);
+- the agentless tenant-scoped `meyar retire-result-sets` backlog drain;
+- an unknown `snapshot_policy_version` fails closed as STALE.
+
 Not accepted until independent review and owner merge. Issues #87, #88
 and #50 remain OPEN and untouched.
 

@@ -7330,10 +7330,14 @@ Decision:
    - **Ordinal reference: 5 statements.** ResultSet, member, the current
      profile for that candidate, its canonical document, and the audit
      insert.
-   - **Refinement: 8 statements.** ResultSet, ordered members, current
-     profiles for all members (one bounded `IN` using `DISTINCT ON`), their
-     canonical documents (one `IN`), the retention select, then the
-     inserts and audit. Semantic/hybrid adds one bounded embedding query.
+   - **Refinement: 9 statements** (8 before the PR #91 correction pass).
+     ResultSet, ordered members, current profiles for all members (one
+     bounded `IN` using `DISTINCT ON`), their canonical documents (one
+     `IN`), the inserts and audit, then the two LIMITed retention id
+     selects (item 9). A pass that actually retires rows adds one
+     `DELETE ... RETURNING` and one batched audit `INSERT`. Over a
+     2,000-row historical backlog the whole turn is 10 statements.
+     Semantic/hybrid adds one bounded embedding query.
      Member counts are bounded by `MAX_SEARCH_LIMIT=100`.
    - Search itself (`search_candidates`) still scans current profiles;
      that remains out of scope, as the issue states.
@@ -7375,32 +7379,89 @@ Decision:
    - Downgrade fails closed. It refuses, before any DDL, while any row has
      a NULL fingerprint, because the pre-#86 code would need a fabricated
      fingerprint. A database with only legacy rows round-trips.
-9. **Retention (no daemon).** Pruning runs when a ResultSet is created (search
-   or refinement), scoped to one (tenant, conversation, BrowserSession):
-   - it NEVER deletes a set that ANY session context of the tenant points
-     at, nor the set just created;
-   - otherwise expired sets are retired at once, and only the newest
-     `MAX_INACTIVE_RESULT_SETS_PER_CONTEXT = 5` unexpired inactive sets are
-     kept. The steady-state bound is 1 active + 6 inactive per context
-     (pruning runs before the Phase B pointer switch);
-   - members cascade through their own FK. `parent_result_set_id` is a plain
-     UUID, and a derived set carries its own members, so retiring its
-     parent never affects it;
-   - transcript and AuditEvents are never deleted.
+9. **Retention (no daemon), exact contract.** Per (tenant, conversation,
+   BrowserSession): **1 active + at most 5 inactive** ResultSets
+   (`MAX_INACTIVE_RESULT_SETS_PER_CONTEXT = 5`). "Active" is the set this
+   scope's own session context points at. A set some OTHER live session
+   context points at is independently protected: it is never deleted and
+   never counted. (Owner decision in the PR #91 acceptance pass; the first
+   revision allowed 1 + 6.)
+   - **Creation-time pass.** Every search or refinement runs ONE bounded
+     pass after creating its set. `keep_ids` holds the new set and the
+     superseded/source set, and only `MAX - 1 = 4` other unexpired inactive
+     sets are kept. One slot is reserved for whichever of {new, superseded}
+     ends up inactive:
+     - Phase B pointer switch succeeds: new set active; superseded + 4
+       inactive.
+     - Switch fails or goes stale: old set still active; new set + 4
+       inactive.
+     - Either way the result is 1 active + ≤ 5 inactive.
+   - **Bounded execution (SQL, never Python slicing).** A pass selects at
+     most `RESULT_SET_RETIRE_BATCH_SIZE = 20` ids:
+     1. expired unprotected rows first (`ORDER BY expires_at LIMIT 20`);
+     2. then fills the rest of the batch with unexpired rows ranked below
+        the newest kept slots (`ORDER BY created_at DESC OFFSET slots
+        LIMIT rest`).
 
-   Each retired row emits `agent.result_set.retired` with safe structural
-   provenance only: ids, kind, parent, conversation, epoch, request and
-   refinement hashes, policy versions, mode, result count, and
-   created/expires timestamps. Query text, canonical request JSON, CV
-   content and CandidateIdentity are never recorded.
+     It loads ids only, never ORM rows or members. It then runs one
+     `DELETE ... WHERE id IN (...) AND id NOT IN (live pointers) RETURNING
+     <structural columns>` and one batched audit `INSERT`. A normal turn
+     therefore retires at most one batch, whatever the backlog. Measured
+     over 2,000 historical rows: 0 backlog ORM rows loaded, 20 retired,
+     20 audit rows, 10 statements for the whole turn. The 2eb6042 code
+     loaded 2,000 rows, retired 1,995, wrote 1,995 audit rows and issued
+     2,004 statements.
+   - **Backlog drain.** The exact bound holds per turn once no backlog
+     remains. Normal turns converge one batch at a time. The agentless ops
+     command `meyar retire-result-sets --tenant-id <uuid> [--max-batches
+     N]` drains a tenant's backlog in committed batches
+     (`retire_next_result_set_batch`):
+     - one explicit tenant only; there is no global/wildcard mode;
+     - output is counts only (batches / retired / pending);
+     - each batch keeps the full 5 inactive slots, and the scope's active
+       set is pointer-protected.
+   - **Audit truthfulness.** Each row the DELETE actually removed in the
+     same transaction (from `RETURNING`) emits exactly one
+     `agent.result_set.retired` event. A row that became pointer-protected
+     between selection and delete is neither deleted nor reported.
+   - Members cascade through their own FK. `parent_result_set_id` is a
+     plain UUID, and a derived set carries its own members, so retiring
+     its parent never affects it.
+   - Transcript and AuditEvents are never deleted.
+   - No new migration: the existing `conversation_id` index scopes the
+     LIMITed selects.
+
+   Retirement event metadata is safe structural provenance only: ids,
+   kind, parent, conversation, epoch, request and refinement hashes,
+   policy versions, mode, result count, and created/expires timestamps.
+   Query text, canonical request JSON, CV content and CandidateIdentity are
+   never recorded.
 
    ResultSets of BrowserSessions that are never used again stay bounded per
-   context and disappear with their BrowserSession (CASCADE). Purging
+   scope and disappear with their BrowserSession (CASCADE). Purging
    BrowserSession rows is general retention (#46).
 10. **#85 interaction.** All ResultSet validation and pruning is short
     DB-phase work: bounded, never tenant-wide, and run inside the existing
     phases. The no-DB-during-inference invariant and the Phase B
     revalidation are unchanged.
+
+11. **Snapshot policy fails closed.** Structural validation
+    (`_validate_active_result_set`) requires
+    `snapshot_policy_version == SNAPSHOT_POLICY_VERSION`
+    (`member-snapshot-v1`). It checks this only after the ownership checks
+    (tenant, BrowserSession, conversation, epoch, expiry), so a foreign
+    row's policy is never observable. Any other value gives the typed
+    internal failure `UNSUPPORTED_SNAPSHOT_POLICY`:
+    - `active_result_set_size` returns 0;
+    - ordinal resolution fails before any member is read;
+    - refinement fails in pre-validation, before the planner runs, and
+      creates no derived set;
+    - outward it is the existing RESULT_SET_STALE "re-run the search"
+      outcome;
+    - the audit event carries only the closed reason `STALE` plus the
+      context epoch.
+
+    The raw policy string is never exposed or logged.
 
 Non-scope: #87, #88, #50; general search performance; general orphan and
 BrowserSession retention (#46); distributed caches.

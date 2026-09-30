@@ -15,6 +15,8 @@ J CandidateIdentity changes                   -> still valid
 K refinement after unrelated ingestion        -> original snapshot subset only
 L refinement after a source member went stale -> whole refinement STALE
 M zero-result ResultSet semantics             -> unchanged
+N unknown snapshot_policy_version             -> fail closed (size 0, ordinal
+  and refinement STALE-class failure, closed audit reason, no raw policy)
 
 Synthetic data only."""
 
@@ -34,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.embedding.serializer import SERIALIZER_VERSION
 from meyar.models.agent_result_set import AgentResultSet, AgentResultSetMember
+from meyar.models.audit_event import AuditEvent
 from meyar.models.candidate import Candidate
 from meyar.models.canonical_document import CanonicalDocument
 from meyar.search.schemas import (
@@ -651,3 +654,138 @@ async def test_cross_session_conversation_epoch_pointer_tampering_still_fails_cl
         candidate_ref=1,
     ) in (ResultSetResolutionFailure.NOT_FOUND, ResultSetResolutionFailure.SESSION_MISMATCH)
     assert rs.id is not None
+
+
+# ---------------------------------------------------------------- N
+
+UNKNOWN_POLICY = "member-snapshot-v999"
+
+
+async def _audit(db: AsyncSession, tenant_id: uuid.UUID) -> list[AuditEvent]:
+    return list(
+        (await db.scalars(select(AuditEvent).where(AuditEvent.tenant_id == tenant_id))).all()
+    )
+
+
+async def test_n_current_policy_v1_is_accepted(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    tenant, session, context, result_set, _members = await _structured_snapshot(
+        db_session, tenant_and_user
+    )
+    assert result_set.snapshot_policy_version == SNAPSHOT_POLICY_VERSION
+    resolved = await _resolve(db_session, tenant, session, context)
+    assert not isinstance(resolved, ResultSetResolutionFailure)
+    assert await active_result_set_size(
+        db_session, tenant_id=tenant.id, browser_session_id=session.id, session_context=context
+    ) == 2
+
+
+async def test_n_unknown_policy_fails_closed_everywhere(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    tenant, session, context, result_set, members = await _structured_snapshot(
+        db_session, tenant_and_user
+    )
+    result_set.snapshot_policy_version = UNKNOWN_POLICY
+    await db_session.commit()
+    before = {row.id for row in await _audit(db_session, tenant.id)}
+
+    assert await active_result_set_size(
+        db_session, tenant_id=tenant.id, browser_session_id=session.id, session_context=context
+    ) == 0
+    for ref in (1, 2, 99):
+        assert (
+            await _resolve(db_session, tenant, session, context, ref=ref)
+            == ResultSetResolutionFailure.UNSUPPORTED_SNAPSHOT_POLICY
+        )
+    assert (
+        await validate_active_result_set_for_refinement(
+            db_session, tenant_id=tenant.id, browser_session_id=session.id,
+            session_context=context,
+        )
+        == ResultSetResolutionFailure.UNSUPPORTED_SNAPSHOT_POLICY
+    )
+    sets_before = await db_session.scalar(select(func.count()).select_from(AgentResultSet))
+    assert (
+        await create_result_set_from_refinement(
+            db_session, tenant_id=tenant.id, browser_session_id=session.id,
+            session_context=context, filter_request=None, requested_limit=1,
+        )
+        == ResultSetResolutionFailure.UNSUPPORTED_SNAPSHOT_POLICY
+    )
+    await db_session.commit()
+    assert await db_session.scalar(select(func.count()).select_from(AgentResultSet)) == (
+        sets_before
+    )
+    assert context.active_result_set_id == result_set.id
+
+    new_events = [row for row in await _audit(db_session, tenant.id) if row.id not in before]
+    assert {row.event_type for row in new_events} == {
+        "agent.result_set.reference_rejected",
+        "agent.result_set.refine_rejected",
+    }
+    for row in new_events:
+        # Closed safe reason only: no candidate id, no ordinal, no raw policy.
+        assert row.event_metadata == {"reason": "STALE", "context_epoch": context.context_epoch}
+        text = str(row.event_metadata)
+        assert UNKNOWN_POLICY not in text
+        for candidate, version in members:
+            assert str(candidate.id) not in text and str(version.id) not in text
+
+
+async def test_n_unknown_policy_is_indistinguishable_across_session_and_tenant(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    """A foreign context pointing at an unknown-policy row fails exactly like
+    one pointing at the same row under the valid policy (ownership is checked
+    first; both are the NOT_FOUND class) — the policy of a row that is not
+    yours is never observable."""
+    from meyar.services.tenant_repo import create_tenant
+
+    tenant, _owner_session, _owner_context, result_set, _members = await _structured_snapshot(
+        db_session, tenant_and_user
+    )
+    result_set.snapshot_policy_version = UNKNOWN_POLICY
+    _tenant, user, _password, membership = tenant_and_user
+    other_session, other_context = await _context(db_session, tenant, user, membership)
+    await db_session.commit()
+
+    async def _probe(target: uuid.UUID) -> tuple[object, list[dict]]:
+        other_context.active_result_set_id = target
+        await db_session.commit()
+        seen = {row.id for row in await _audit(db_session, tenant.id)}
+        outcome = await _resolve(db_session, tenant, other_session, other_context)
+        size = await active_result_set_size(
+            db_session, tenant_id=tenant.id, browser_session_id=other_session.id,
+            session_context=other_context,
+        )
+        await db_session.commit()
+        events = [
+            dict(row.event_metadata)
+            for row in await _audit(db_session, tenant.id)
+            if row.id not in seen
+        ]
+        assert size == 0
+        return outcome, events
+
+    unknown_outcome, unknown_events = await _probe(result_set.id)
+    result_set.snapshot_policy_version = SNAPSHOT_POLICY_VERSION
+    await db_session.commit()
+    valid_outcome, valid_events = await _probe(result_set.id)
+    assert unknown_outcome == valid_outcome == ResultSetResolutionFailure.SESSION_MISMATCH
+    assert unknown_events == valid_events == [
+        {"reason": "NOT_FOUND", "context_epoch": other_context.context_epoch}
+    ]
+    # Cross-tenant: another tenant's call fails at the ownership step (the
+    # row query itself also filters on tenant_id) before any policy is read.
+    result_set.snapshot_policy_version = UNKNOWN_POLICY
+    stranger = await create_tenant(db_session, name="N-foreign-tenant")
+    await db_session.commit()
+    assert (
+        await resolve_active_candidate_ref(
+            db_session, tenant_id=stranger.id, browser_session_id=other_session.id,
+            session_context=other_context, candidate_ref=1,
+        )
+        == ResultSetResolutionFailure.SESSION_MISMATCH
+    )
