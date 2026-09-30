@@ -82,7 +82,7 @@ async def test_unsupported_only_draft_never_offers_confirmation(
     )
     assert (
         "Bu mətndən avtomatik qiymətləndirmə üçün meyar çıxmadı. Aşağıdakı məlumat "
-        "sıralamaya daxil edilmir." in html
+        "sıralamaya daxil edilmir.</p>" in html
     )
     assert "təsdiqləyin" not in html
     assert "hazırdır" not in html

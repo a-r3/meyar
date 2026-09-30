@@ -1120,9 +1120,13 @@ def _agent_turn_headline(
                     f"sıralamadan əvvəl aşağıdakı seçimi tamamlayın.{note_text}"
                 )
             if total == 0:
+                # The sentence itself already says the informational rows are
+                # not scored; only the remaining safety notes are appended.
+                safety_notes = notes[1:] if unsupported_total else notes
+                safety_text = f" ({'; '.join(safety_notes)}.)" if safety_notes else ""
                 return (
                     "Bu mətndən avtomatik qiymətləndirmə üçün meyar çıxmadı. Aşağıdakı "
-                    f"məlumat sıralamaya daxil edilmir.{note_text}"
+                    f"məlumat sıralamaya daxil edilmir.{safety_text}"
                 )
             return (
                 f"MEYAR bu mətndən {total} meyar hazırladı: {len(draft.must_have_rows)} "
