@@ -1858,8 +1858,12 @@ async def test_draft_job_criteria_supports_named_experience_without_inventing_du
     assert draft.ungrounded_count == 0
     assert draft.unsupported == []
     assert len(draft.needs_review) == 1
-    assert draft.needs_review[0].kind == CriterionKind.SKILL_EXPERIENCE
-    assert draft.needs_review[0].subject == "Backend"
+    # Issue #84: an experience claim without a duration has no
+    # server-validated criterion shape, so no canonical kind/subject is
+    # exposed; as an explicit MUST_HAVE it blocks confirmation instead.
+    assert draft.needs_review[0].kind is None
+    assert draft.needs_review[0].subject is None
+    assert draft.needs_review[0].blocking is True
     # Disclosed, never persisted.
     from sqlalchemy import select
 

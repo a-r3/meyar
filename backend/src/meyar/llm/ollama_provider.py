@@ -187,12 +187,16 @@ class OllamaLLMProvider:
         jd_text: str,
         *,
         requirement_spans: list[RequirementSpan],
+        span_hints: dict[str, dict[str, str]] | None = None,
         repair: bool = False,
     ) -> tuple[JDCriteriaDraft, LLMResultProvenance]:
         content, provenance = await self._chat(
             system_prompt=JD_CRITERIA_DRAFT_SYSTEM_PROMPT,
             user_prompt=build_jd_criteria_draft_user_prompt(
-                jd_text=jd_text, requirement_spans=requirement_spans, repair=repair
+                jd_text=jd_text,
+                requirement_spans=requirement_spans,
+                span_hints=span_hints,
+                repair=repair,
             ),
             # Some supported Ollama/model combinations cannot compile this
             # schema and return HTTP 500 before inference. JSON mode still

@@ -381,6 +381,10 @@ class RequirementSpan(BaseModel):
     text: str = Field(min_length=1, max_length=4000)
     normalized: str = Field(min_length=1, max_length=4000)
     segmentation_needs_review: bool = False
+    # Issue #84: spans produced by splitting ONE coordinated clause ("X və Y
+    # ...", "X and Y ...") share a group id so their semantic authority is
+    # decided symmetrically. Server-owned; never model-supplied.
+    coordination_group: int | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def _validate_offsets(self) -> "RequirementSpan":
@@ -475,6 +479,29 @@ class SemanticRequirementState(StrEnum):
     PROHIBITED = "PROHIBITED"
 
 
+class SemanticReviewReason(StrEnum):
+    """Why a material requirement stayed NEEDS_HUMAN_REVIEW (issue #84).
+
+    Only ``SUBJECT_NOT_CANONICAL`` and ``RECRUITMENT_SUBJECT_WITHOUT_CUE``
+    describe a subject-normalization gap that a server-validated local-model
+    canonical proposal may close; every other reason is policy the model can
+    never override."""
+
+    SEGMENTATION = "SEGMENTATION"
+    NEGATION_OR_COMPARATOR = "NEGATION_OR_COMPARATOR"
+    RESULT_COUNT_ENTITY = "RESULT_COUNT_ENTITY"
+    PARTICLE_COORDINATION = "PARTICLE_COORDINATION"
+    MODALITY_UNKNOWN = "MODALITY_UNKNOWN"
+    SUBJECT_MISSING = "SUBJECT_MISSING"
+    PERSONAL_ELIGIBILITY = "PERSONAL_ELIGIBILITY"
+    RECRUITMENT_SUBJECT_WITHOUT_CUE = "RECRUITMENT_SUBJECT_WITHOUT_CUE"
+    FAMILY_UNAUTHORIZED = "FAMILY_UNAUTHORIZED"
+    EXPERIENCE_WITHOUT_DURATION = "EXPERIENCE_WITHOUT_DURATION"
+    CERTIFICATION_QUANTITY = "CERTIFICATION_QUANTITY"
+    SUBJECT_NOT_CANONICAL = "SUBJECT_NOT_CANONICAL"
+    COORDINATION_SYMMETRY = "COORDINATION_SYMMETRY"
+
+
 class SemanticRequirement(BaseModel):
     """Server-authorized semantic slots for one material source requirement.
 
@@ -499,6 +526,7 @@ class SemanticRequirement(BaseModel):
     required_level: str | None = Field(default=None, max_length=50)
     state: SemanticRequirementState
     comparison: str | None = Field(default=None, max_length=16)
+    review_reason: SemanticReviewReason | None = None
 
 
 class JDDraftCriterionItem(BaseModel):
@@ -613,7 +641,19 @@ class UnsupportedJDCriterionItem(BaseModel):
 class NeedsReviewJDCriterionItem(BaseModel):
     """A source requirement whose material semantics could not be safely
     represented or whose model draft omitted/changed a source-bound field.
-    It remains visible to HR but is never submitted as a scoring row."""
+    It remains visible to HR but is never submitted as a scoring row.
+
+    Issue #84:
+
+    - ``kind``/``subject`` are present ONLY when the canonical criterion
+      shape (family + canonical subject + duration/level) is already
+      server-validated; only then may ``allowed_types`` offer a modality
+      resolution. Arbitrary source text can never become a criterion shape.
+    - ``blocking`` marks an explicit MUST_HAVE source requirement that is
+      unresolved: it blocks confirmation until HR either resolves an allowed
+      interpretation or explicitly acknowledges that it is excluded from
+      automatic ranking (``acknowledged_excluded``). Exclusion never mints a
+      criterion."""
 
     model_config = {"extra": "forbid"}
 
@@ -625,18 +665,23 @@ class NeedsReviewJDCriterionItem(BaseModel):
     min_years: float | None = Field(default=None, ge=0, le=60)
     required_level: str | None = Field(default=None, min_length=1, max_length=50)
     allowed_types: list[CriterionType] = Field(default_factory=list, max_length=2)
+    blocking: bool = False
+    acknowledged_excluded: bool = False
 
     @model_validator(mode="after")
     def _validate_resolution_shape(self) -> "NeedsReviewJDCriterionItem":
-        fields = (self.span_id, self.kind, self.subject)
-        if any(value is not None for value in fields) and not all(
-            value is not None for value in fields
-        ):
+        if (self.kind is None) != (self.subject is None):
             raise ValueError("Review resolution metadata must be complete.")
-        if self.allowed_types and not all(value is not None for value in fields):
+        if self.kind is not None and self.span_id is None:
+            raise ValueError("A canonical review shape must be bound to a source span.")
+        if self.allowed_types and self.kind is None:
             raise ValueError("Allowed review types require a complete canonical shape.")
         if len(set(self.allowed_types)) != len(self.allowed_types):
             raise ValueError("Allowed review types must be unique.")
+        if (self.blocking or self.acknowledged_excluded) and self.span_id is None:
+            raise ValueError("A blocking review item must be bound to a source span.")
+        if self.acknowledged_excluded and not self.blocking:
+            raise ValueError("Only a blocking review item can be acknowledged as excluded.")
         return self
 
 
@@ -706,6 +751,9 @@ class AgentJobDraftToolResult(BaseModel):
     result_limit_needs_review: bool = False
     wrong_mode_guidance: bool = False
     modification_source_text: str | None = Field(default=None, max_length=500)
+    # Issue #84: which JD semantic-interpretation policy produced this draft.
+    # None only for drafts persisted before the policy was versioned.
+    semantic_policy_version: str | None = Field(default=None, max_length=64)
     requirements: list[RequirementSpanResult] = Field(
         default_factory=list, max_length=MAX_JD_REQUIREMENT_SPANS
     )

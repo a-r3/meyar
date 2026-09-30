@@ -83,6 +83,7 @@ from meyar.ui.service import (
     JOB_DUPLICATE_MESSAGE,
     CriterionRowInput,
     UIServiceInputError,
+    agent_draft_requires_resolution,
     authorize_agent_draft_confirmation,
     build_job_create_request,
     build_ranked_candidate_views,
@@ -1235,13 +1236,23 @@ async def resolve_agent_job_draft_review(
     draft_id: uuid.UUID,
     csrf_token: str = Form(...),
     span_id: str = Form(..., pattern=r"^req-\d{4}$"),
-    criterion_type: str = Form(..., max_length=16),
+    criterion_type: str | None = Form(default=None, max_length=16),
+    decision: str | None = Form(default=None, max_length=16),
     ctx: UIContext = Depends(require_ui_scopes("jobs:write", "candidates:read")),
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> HTMLResponse:
-    """Persist one canonical, server-declared human-review resolution."""
-    from meyar.agent.service import resolve_job_draft_review_modality
+    """Persist one canonical, server-declared human-review resolution.
+
+    Exactly one of: a modality resolution (``criterion_type``) for a
+    server-validated canonical shape, or (issue #84) ``decision=exclude`` —
+    HR's explicit acknowledgement that an unresolved MUST_HAVE source
+    requirement is not part of automatic ranking. Neither path accepts
+    free text and neither can turn arbitrary source text into a criterion."""
+    from meyar.agent.service import (
+        exclude_blocking_review_requirement,
+        resolve_job_draft_review_modality,
+    )
     from meyar.schemas.criteria import CriterionType
     from meyar.services.agent_conversation_repo import (
         replace_pending_job_draft,
@@ -1252,7 +1263,10 @@ async def resolve_agent_job_draft_review(
 
     verify_csrf(ctx.csrf_token, csrf_token)
     try:
-        resolved_type = CriterionType(criterion_type)
+        exclude = decision == "exclude"
+        if (decision is not None and not exclude) or (exclude == (criterion_type is not None)):
+            raise UIServiceInputError("Dəqiqləşdirmə seçimi etibarsızdır.")
+        resolved_type = CriterionType(criterion_type) if criterion_type is not None else None
         # issue #80: live pending authority only — owner + this
         # BrowserSession's context pointer + transcript payload, all
         # required (see resolve_pending_draft_authority).
@@ -1265,15 +1279,24 @@ async def resolve_agent_job_draft_review(
         if authority is None:
             raise UIServiceInputError("Qaralama bu sessiyada tapılmadı.")
         conversation = authority.conversation
-        resolved = resolve_job_draft_review_modality(
-            authority.draft, span_id=span_id, criterion_type=resolved_type
-        )
+        if resolved_type is None:
+            resolved = exclude_blocking_review_requirement(authority.draft, span_id=span_id)
+            resolution_code = "EXCLUDED_BY_REVIEWER"
+        else:
+            resolved = resolve_job_draft_review_modality(
+                authority.draft, span_id=span_id, criterion_type=resolved_type
+            )
+            resolution_code = resolved_type.value
         await replace_pending_job_draft(db, authority, draft=resolved)
         await record_event(
             db,
             tenant_id=ctx.tenant_id,
             event_type="agent.draft.review_resolved",
-            metadata={"span_id": span_id, "criterion_type": resolved_type.value},
+            metadata={
+                "span_id": span_id,
+                "criterion_type": resolution_code,
+                "semantic_policy_version": resolved.semantic_policy_version,
+            },
             actor_type=ACTOR_HUMAN_USER,
             actor_id=ctx.user_id,
         )
@@ -1292,6 +1315,8 @@ async def resolve_agent_job_draft_review(
         headline=(
             "Dəqiqləşdirmə yadda saxlanıldı. "
             "Tələbləri təsdiqləyib namizədləri sıralaya bilərsiniz."
+            if not agent_draft_requires_resolution(resolved)
+            else "Dəqiqləşdirmə yadda saxlanıldı. Qalan tələbləri də nəzərdən keçirin."
         ),
         tool_results=[
             AgentToolResultView(

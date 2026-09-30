@@ -6842,3 +6842,93 @@ draft authority. JD confirmation/review controls use a server-prepared
 historical drafts are never made actionable by transcript rendering. There
 is no raw-content or model-generated title, no conversation RAG, and no
 schema migration. This PR does not implement #50.
+
+## D-088 — Canonical professional-requirement boundary for JD drafts (issue #84)
+
+Context: the final independent adversarial audit of `main` @
+`096afb8caec18750f27499f20dc9ceeb00981102` (H-1, M-7, M-11 deterministic
+part, L-11) reproduced deterministic, model-independent defects: the JD path
+turned raw grammatical remainders into scoring authority
+(`"PostgreSQL ilə işləməyi"` → SCORABLE SKILL that evaluates UNKNOWN for a
+PostgreSQL candidate), let a one-line vacancy header leak into a criterion
+(`"Vakansiya: Analitik — Python"`), offered location text as a SKILL review
+item (`"Bakıda"`), let a coordinated list give siblings different authority,
+and let a trailing vacancy-title number on one line plus "Namizəd ..." on the
+next be parsed as a result count (JD misrouted away from drafting). A local
+model draft was requested but only its title was used; the deterministic
+subject was the material authority.
+
+Decision (semantic policy `jd-semantic-policy-v2`, prompt
+`jd-criteria-draft-prompt-v4`):
+
+1. **Canonical boundary.** `meyar.agent.canonical_requirements` introduces an
+   in-memory, Pydantic v2 `CanonicalRequirement` (span_id, kind,
+   canonical_subject, criterion_type, min_years, required_level,
+   interpretation_state, interpretation_source, review_reason,
+   shape_validated). Every JD-draft `CriterionIn` is built only from a
+   SCORABLE `CanonicalRequirement`. It is not persisted; no migration (head
+   remains `b7e3c9d41f28`). Kinds reuse the existing `JDDraftCriterionKind`
+   families; no new family was added.
+2. **Deterministic authority stays deterministic.** `analyze_hr_text` still
+   owns spans, exact offsets, modality, duration, level, prohibited and
+   unsupported classification. A deterministic subject is scorable only when
+   `is_canonical_subject` accepts it (curated alias, canonical language, or a
+   short clean term with no header/person tokens, function words or
+   Azerbaijani verbal-noun residue). This is a fail-closed rejection check,
+   not a language-understanding vocabulary: anything suspicious goes to
+   review. Unknown clean professional subjects (e.g. "Camunda") stay
+   scorable.
+3. **Model = proposal, server = authority.** The local model (only through
+   `LLMProvider`) receives the same authoritative spans plus structural
+   hints (modality/family/min_years/required_level) and returns canonical
+   subject proposals per span id. A proposal may close ONLY a
+   subject-normalization gap (`SUBJECT_NOT_CANONICAL`,
+   `RECRUITMENT_SUBJECT_WITHOUT_CUE`). It must reference a known span id
+   (else counted as ungrounded, never displayed), keep the deterministic
+   family, duration and level exactly, be itself canonical, not prohibited,
+   and be grounded in the span's exact text (token occurrence, bounded
+   Azerbaijani case suffix, or a reviewed alias of a span n-gram). One
+   distinct valid proposal per span; conflicting proposals → review. The
+   model never supplies modality, weight, score, offsets, permissions or new
+   requirements, and cannot override PROHIBITED/UNSUPPORTED.
+4. **Fallback.** Provider timeout/unavailable/schema-invalid never erases a
+   requirement and never degrades to a raw remainder: canonical
+   deterministic subjects stay scorable, everything else becomes review.
+5. **Coordination symmetry.** Spans split from one coordinated clause carry a
+   server-owned `coordination_group`; if any interpretable member is not
+   scorable, no member is (`COORDINATION_SYMMETRY`).
+6. **Header, non-professional, instruction-like text.** A one-line
+   `Vakansiya:/Vacancy: <title> — ...` header is trimmed at segmentation.
+   Location/residence, salary, work authorization/visa, remote/on-site/
+   hybrid, relocation/shift/travel and system-directed instructions are
+   deterministically UNSUPPORTED (visible, never scored, never a SKILL review
+   shape). No location scoring was introduced.
+7. **Unresolved MUST_HAVE blocks confirmation.** A NEEDS_HUMAN_REVIEW item
+   whose source modality is explicitly MUST_HAVE is `blocking`;
+   `agent_draft_requires_resolution` (the single UI + mutation rule) keeps
+   the draft unconfirmable until HR either resolves a server-declared
+   interpretation or explicitly acknowledges exclusion
+   (`decision=exclude`). Exclusion never mints a criterion; the requirement
+   stays disclosed on the draft and in the criteria version's
+   `needs_review_requirements`.
+8. **Review cannot turn text into a criterion.** A review item exposes
+   kind/subject (and modality `allowed_types`) only for a server-validated
+   canonical shape. `resolve_job_draft_review_modality` re-validates the
+   subject (canonical, grounded, not prohibited, source not non-professional)
+   before minting a CriterionIn.
+9. **Result count never spans a line break** (M-7), and "show (me) the first
+   three" is the same deterministic count-only follow-up as "ilk üç" /
+   "first 3" (M-11). ResultSet authority (#49) is unchanged.
+10. **Russian.** No Russian semantic support is claimed. JD drafts keep the
+    explicit unsupported-language panel; search now shows an explicit
+    "Bu dil hazırda dəstəklənmir" copy instead of the generic
+    "mənasını zəiflətmədən" message.
+11. **Provenance/audit.** Drafts carry `semantic_policy_version`;
+    `agent.tool.executed` for a draft and `agent.draft.review_resolved` add
+    only the policy version and structural counts (scorable / review /
+    unsupported / prohibited / blocking). No span text, JD text or model
+    output is audited.
+
+Non-scope: Agent Core v2 (#88: task/dialogue state, resumable
+clarification, capability registry), candidate Q&A (#50), Russian NLP,
+target-host model selection (#36). The architecture is sector-neutral.

@@ -112,6 +112,21 @@
               </select>
               <button class="button button-secondary" type="submit">Dəqiqləşdirməni yadda saxla</button>
             </form>
+            {% elif review.blocking and review.acknowledged_excluded %}
+            <p><strong>{{ review.requirement }}</strong> — əsas tələb kimi qeyd olunub, lakin sizin qərarınızla avtomatik sıralamaya daxil edilmir.</p>
+            {% elif review.blocking %}
+            <div class="review-blocking">
+              <p><strong>{{ review.requirement }}</strong></p>
+              <p>Bu əsas tələb hələ dəqiqləşdirilməyib. Davam etmək üçün tələbi nəzərdən keçirin: elanda tələbi daha aydın yazıb yenidən analiz edin və ya onu sıralamaya daxil etmədən davam etdiyinizi təsdiqləyin.</p>
+              {% if draft.can_act %}
+              <form method="post" action="/ui/agent/drafts/{{ draft.draft_id }}/resolve" class="stack-form review-resolution-form">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="span_id" value="{{ review.span_id }}">
+                <input type="hidden" name="decision" value="exclude">
+                <button class="button button-secondary" type="submit">Bu tələbi sıralamaya daxil etmədən davam et</button>
+              </form>
+              {% endif %}
+            </div>
             {% else %}
             <p>{{ review.requirement }} — bu tələb hazırkı formada avtomatik sıralamaya daxil edilmir.</p>
             {% endif %}
@@ -130,7 +145,7 @@
         {% if confirmation_ready %}
         <button class="button" type="submit">Tələbləri təsdiqlə və namizədləri sırala</button>
         {% elif has_scorable and draft.requires_resolution %}
-        <p class="field-help">Əvvəlcə yuxarıdakı dəqiqləşdirməni yadda saxlayın. Bundan sonra sıralama təsdiqi görünəcək.</p>
+        <p class="field-help">Əvvəlcə yuxarıdakı dəqiqləşdirilməmiş tələbləri nəzərdən keçirin. Bundan sonra sıralama təsdiqi görünəcək.</p>
         {% endif %}
         {% endif %}
       {% if confirmation_ready %}

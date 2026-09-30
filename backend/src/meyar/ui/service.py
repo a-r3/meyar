@@ -902,10 +902,13 @@ def agent_draft_requires_resolution(draft: AgentJobDraftToolResult) -> bool:
     ``authorize_agent_draft_confirmation``. A draft is unresolved, and
     therefore never confirmable, while an ambiguous result-count request
     has left ``result_limit_needs_review`` set (the placeholder
-    ``result_limit`` must never become confirmation authority) or any
-    ``needs_review`` item still carries unresolved allowed types."""
+    ``result_limit`` must never become confirmation authority), any
+    ``needs_review`` item still carries unresolved allowed types, or (issue
+    #84) an explicit MUST_HAVE source requirement is still unresolved and
+    HR has not explicitly acknowledged its exclusion from ranking."""
     return draft.result_limit_needs_review or any(
-        item.allowed_types for item in draft.needs_review
+        item.allowed_types or (item.blocking and not item.acknowledged_excluded)
+        for item in draft.needs_review
     )
 
 
@@ -957,6 +960,8 @@ def build_agent_job_draft_view(draft: AgentJobDraftToolResult) -> AgentJobDraftV
                 min_years=(str(item.min_years) if item.min_years is not None else ""),
                 required_level=item.required_level or "",
                 allowed_types=[value.value for value in item.allowed_types],
+                blocking=item.blocking,
+                acknowledged_excluded=item.acknowledged_excluded,
             )
             for item in draft.needs_review
         ],

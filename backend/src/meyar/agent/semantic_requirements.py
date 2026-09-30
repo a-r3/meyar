@@ -18,6 +18,7 @@ from meyar.agent.schemas import (
     RequirementSpan,
     SemanticRequirement,
     SemanticRequirementState,
+    SemanticReviewReason,
     SourceOccurrence,
     SourceRoleAssignment,
     SourceSpanOwner,
@@ -150,6 +151,34 @@ _SOFT_UNSUPPORTED_RE = re.compile(
     re.I,
 )
 _UNSCORABLE_SCOPE_RE = re.compile(r"\b(?:project|layihe)\w*\b", re.I)
+# Issue #84: requirements about where/under which employment terms someone
+# works are real but non-professional under current MEYAR policy. They are
+# UNSUPPORTED (visible, never scored, never a SKILL review item). This is a
+# deterministic safety classification, not semantic understanding.
+_NON_PROFESSIONAL_RE = re.compile(
+    r"\b(?:yasa(?:ma|may|yan|yir|malidir|sin)\w*|yasayis\w*|qeydiyyat\w*|unvan\w*|"
+    r"maas\w*|emek\s+haqq\w*|is\s+icazes\w*|uzaqdan|hibrid\w*|ofisde|yerinde\s+is\w*|"
+    r"lives?|living|reside\w*|residen(?:ce|t|cy)|based\s+in|located\s+in|location|"
+    r"relocat\w*|commut\w*|salary|salaries|compensation|wage\w*|remuneration|"
+    r"work\s+(?:permit|authori[sz]ation|visa)|visa|remote(?:ly)?|on-?site|hybrid)\b",
+    re.I,
+)
+# Imperative/instruction-like text aimed at the system (prompt injection,
+# scoring manipulation) is never a professional candidate requirement.
+_INSTRUCTION_LIKE_RE = re.compile(
+    r"(?i)^\s*(?:please\s+)?(?:ignore|disregard|forget|override|bypass|add|set|assign|"
+    r"create|delete|remove|reveal|return|give|rank|score|make|change|pretend)\b|"
+    r"\b(?:previous\s+instructions?|system\s+prompt|instructions?\s+above|"
+    r"score\s+(?:to|of|=)\s*\d+|scores?\s+100|rank\s+me|all\s+candidates)\b"
+)
+# A workflow/vacancy header that shares one line with requirements
+# ("Vakansiya: Analitik — Python və SQL mütləqdir") is title data, never a
+# criterion subject. Only a header followed by an explicit dash separator is
+# trimmed; any other header-contaminated subject fails canonical validation.
+_VACANCY_HEADER_PREFIX_RE = re.compile(
+    r"(?i)^\s*(?:vakansiya|vacancy|position|vezife|job\s+title|role)\s*:\s*"
+    r"[^:\n]{1,120}?\s+[\u2014\u2013-]\s+"
+)
 _SEARCH_PREAMBLE_RE = re.compile(
     r"^(?:(?:(?:for|to)\b[^,.;]{0,80},?\s+)?"
     r"(?:(?:we|i)\s+(?:need|want|seek|are\s+looking\s+for)\s+)?"
@@ -448,9 +477,14 @@ def has_unsupported_cefr_comparator(text: str) -> bool:
     return _DOWNWARD_LEVEL_COMPARATOR_RE.search(_fold(text)) is not None
 
 
-def _split_units(text: str) -> list[tuple[int, int, tuple[int, int] | None]]:
-    """Return clause offsets plus a sentence-level shared modality occurrence."""
-    units: list[tuple[int, int, tuple[int, int] | None]] = []
+def _split_units(
+    text: str,
+) -> list[tuple[int, int, tuple[int, int] | None, int | None]]:
+    """Return clause offsets, a sentence-level shared modality occurrence and
+    (issue #84) a coordination-group id shared by every side split from one
+    coordinated clause."""
+    units: list[tuple[int, int, tuple[int, int] | None, int | None]] = []
+    group_counter = 0
     for sentence_start, sentence_end in _sentences(text):
         sentence = text[sentence_start:sentence_end]
         folded_sentence = _fold(sentence)
@@ -508,7 +542,7 @@ def _split_units(text: str) -> list[tuple[int, int, tuple[int, int] | None]]:
         clause_ranges: list[tuple[int, int]] = []
         if _PREFERRED_CONTRAST_RE.search(folded_sentence):
             clause_ranges.append((sentence_start, sentence_end))
-            units.extend((start, end, None) for start, end in clause_ranges)
+            units.extend((start, end, None, None) for start, end in clause_ranges)
             continue
         cursor = 0
         for comma in re.finditer(r",", sentence):
@@ -522,6 +556,10 @@ def _split_units(text: str) -> list[tuple[int, int, tuple[int, int] | None]]:
 
         for clause_start, clause_end in clause_ranges:
             clause = text[clause_start:clause_end]
+            header = _VACANCY_HEADER_PREFIX_RE.match(_fold(clause))
+            if header:
+                clause_start, clause_end = _trim(text, clause_start + header.end(), clause_end)
+                clause = text[clause_start:clause_end]
             preamble = _SEARCH_PREAMBLE_RE.match(_fold(clause))
             if preamble:
                 clause_start += preamble.end()
@@ -596,8 +634,10 @@ def _split_units(text: str) -> list[tuple[int, int, tuple[int, int] | None]]:
                 )
             )
             if not should_split:
-                units.append((clause_start, clause_end, local_shared))
+                units.append((clause_start, clause_end, local_shared, None))
                 continue
+            group_counter += 1
+            group_id = group_counter
             if local_shared is None and preamble:
                 with_match = re.search(r"(?i)\b(?:with|who\s+have)\b", sentence)
                 if with_match:
@@ -611,11 +651,11 @@ def _split_units(text: str) -> list[tuple[int, int, tuple[int, int] | None]]:
                     text, clause_start + part_cursor, clause_start + separator.start()
                 )
                 if part_start < part_end:
-                    units.append((part_start, part_end, local_shared))
+                    units.append((part_start, part_end, local_shared, group_id))
                 part_cursor = separator.end()
             part_start, part_end = _trim(text, clause_start + part_cursor, clause_end)
             if part_start < part_end:
-                units.append((part_start, part_end, local_shared))
+                units.append((part_start, part_end, local_shared, group_id))
     return units
 
 
@@ -867,7 +907,11 @@ def _family(
     subject: str, source: str, *, certification_context: bool = False
 ) -> JDDraftCriterionKind:
     folded = _fold(source)
-    if _SOFT_UNSUPPORTED_RE.search(folded):
+    if (
+        _SOFT_UNSUPPORTED_RE.search(folded)
+        or _NON_PROFESSIONAL_RE.search(folded)
+        or _INSTRUCTION_LIKE_RE.search(folded)
+    ):
         return JDDraftCriterionKind.OTHER
     if _UNSCORABLE_SCOPE_RE.search(folded) and "project management" not in folded:
         return JDDraftCriterionKind.OTHER
@@ -924,16 +968,7 @@ def _normalized_subject(family: JDDraftCriterionKind, source_subject: str, sourc
     if family in (JDDraftCriterionKind.SKILL, JDDraftCriterionKind.SKILL_EXPERIENCE):
         folded = _fold(normalized)
         if folded in SKILL_ALIASES:
-            canonical = normalize_skill_name(folded)
-            display_aliases = {
-                "javascript": "JavaScript",
-                "typescript": "TypeScript",
-                "postgresql": "PostgreSQL",
-                "python": "Python",
-                "kubernetes": "Kubernetes",
-                "go": "Go",
-            }
-            return display_aliases.get(canonical, canonical)
+            return display_skill_name(folded)
         return normalized
     if family == JDDraftCriterionKind.DOMAIN_EXPERIENCE:
         normalized = re.sub(r"(?i)(?:\s+|[-/])(?:domain|sector)$", "", normalized).strip()
@@ -946,6 +981,39 @@ def _normalized_subject(family: JDDraftCriterionKind, source_subject: str, sourc
             return canonical.title()
         return normalized
     return normalized
+
+
+_SKILL_DISPLAY_NAMES = {
+    "javascript": "JavaScript",
+    "typescript": "TypeScript",
+    "postgresql": "PostgreSQL",
+    "python": "Python",
+    "kubernetes": "Kubernetes",
+    "go": "Go",
+}
+
+
+def is_non_professional_requirement(text: str) -> bool:
+    """Deterministic: location/residence, employment terms, soft/unsupported
+    workflow conditions, or system-directed instructions (issue #84). Such
+    text is never a professional criterion subject."""
+    folded = _fold(text)
+    return bool(
+        _SOFT_UNSUPPORTED_RE.search(folded)
+        or _NON_PROFESSIONAL_RE.search(folded)
+        or _INSTRUCTION_LIKE_RE.search(folded)
+    )
+
+
+def display_skill_name(folded_subject: str) -> str:
+    """Reviewed HR-facing display form of a curated skill alias/canonical."""
+    canonical = normalize_skill_name(folded_subject)
+    return _SKILL_DISPLAY_NAMES.get(canonical, canonical)
+
+
+def language_alias_for(text: str) -> str | None:
+    """Canonical language name for an exact reviewed alias, else None."""
+    return _LANGUAGE_ALIASES.get(" ".join(_fold(text).casefold().split()))
 
 
 def _professional_identity_tokens(subject: str) -> list[str]:
@@ -971,9 +1039,32 @@ def _family_authorized(
     certification_context: bool,
 ) -> bool:
     """Typed server authority; a proposed family never authorizes itself."""
+    return (
+        _family_authorization_failure(
+            family,
+            source=source,
+            subject=subject,
+            min_years=min_years,
+            required_level=required_level,
+            certification_context=certification_context,
+        )
+        is None
+    )
+
+
+def _family_authorization_failure(
+    family: JDDraftCriterionKind,
+    *,
+    source: str,
+    subject: str,
+    min_years: float | None,
+    required_level: str | None,
+    certification_context: bool,
+) -> SemanticReviewReason | None:
+    """``None`` when authorized, otherwise the explicit review reason."""
     folded = _fold(source)
     if _PERSONAL_ELIGIBILITY_RE.search(folded):
-        return False
+        return SemanticReviewReason.PERSONAL_ELIGIBILITY
     if _GENERIC_PERSON_RE.search(folded) and not (
         _PROFESSIONAL_CUE_RE.search(folded)
         or _EXPERIENCE_RE.search(folded)
@@ -982,33 +1073,41 @@ def _family_authorized(
         or _LANGUAGE_RE.search(folded)
         or re.search(r"(?i)\b(?:with|olan|bilen)\b", folded)
     ):
-        return False
+        # "Namizəd Python ..." — the recruitment noun is the grammatical
+        # subject, not an eligibility attribute. Only a server-validated
+        # canonical proposal grounded in this exact span may close it.
+        if re.search(r"(?i)\b(?:namized\w*|candidates?|applicants?)\b", folded):
+            return SemanticReviewReason.RECRUITMENT_SUBJECT_WITHOUT_CUE
+        return SemanticReviewReason.FAMILY_UNAUTHORIZED
+    authorized: bool
     if family == JDDraftCriterionKind.EXPERIENCE:
-        return min_years is not None and bool(_EXPERIENCE_RE.search(folded))
-    if not subject or not _professional_identity_tokens(subject):
-        return False
-    if family == JDDraftCriterionKind.SKILL_EXPERIENCE:
-        return min_years is not None and bool(
+        authorized = min_years is not None and bool(_EXPERIENCE_RE.search(folded))
+    elif not subject or not _professional_identity_tokens(subject):
+        authorized = False
+    elif family == JDDraftCriterionKind.SKILL_EXPERIENCE:
+        authorized = min_years is not None and bool(
             _EXPERIENCE_RE.search(folded) or _DURATION_RE.search(folded)
         )
-    if family == JDDraftCriterionKind.DOMAIN_EXPERIENCE:
-        return bool(
+    elif family == JDDraftCriterionKind.DOMAIN_EXPERIENCE:
+        authorized = bool(
             _EXPERIENCE_RE.search(folded)
             or re.search(r"(?i)\b(?:sector|industry|domain|sahe\w*|sektor\w*)\b", folded)
         )
-    if family == JDDraftCriterionKind.LANGUAGE:
-        return bool(
+    elif family == JDDraftCriterionKind.LANGUAGE:
+        authorized = bool(
             _LANGUAGE_RE.search(folded)
             or _LANGUAGE_WRAPPER_RE.search(folded)
             or required_level is not None
         )
-    if family == JDDraftCriterionKind.CERTIFICATION:
-        return bool(_CERT_RE.search(folded) or certification_context)
-    if family == JDDraftCriterionKind.EDUCATION:
-        return bool(_EDUCATION_RE.search(folded))
-    if family == JDDraftCriterionKind.SKILL:
-        return not bool(_COUNT_ENTITY_RE.search(folded))
-    return False
+    elif family == JDDraftCriterionKind.CERTIFICATION:
+        authorized = bool(_CERT_RE.search(folded) or certification_context)
+    elif family == JDDraftCriterionKind.EDUCATION:
+        authorized = bool(_EDUCATION_RE.search(folded))
+    elif family == JDDraftCriterionKind.SKILL:
+        authorized = not bool(_COUNT_ENTITY_RE.search(folded))
+    else:
+        authorized = False
+    return None if authorized else SemanticReviewReason.FAMILY_UNAUTHORIZED
 
 
 def _owner_for_state(state: SemanticRequirementState) -> SourceSpanOwner:
@@ -1217,8 +1316,8 @@ def analyze_hr_text(jd_text: str) -> SemanticAnalysis:
             # construction attributes the preceding bounded acronym to the
             # certification family without maintaining a credential-name list.
             certification_context_ranges.append(sentence_ranges[sentence_index - 1])
-    material_units: list[tuple[int, int, tuple[int, int] | None]] = []
-    for unit_start, unit_end, shared in _split_units(jd_text):
+    material_units: list[tuple[int, int, tuple[int, int] | None, int | None]] = []
+    for unit_start, unit_end, shared, group in _split_units(jd_text):
         control_overlap = bool(
             shared
             and any(
@@ -1227,9 +1326,9 @@ def analyze_hr_text(jd_text: str) -> SemanticAnalysis:
             )
         )
         for start, end in _without_control_spans(jd_text, unit_start, unit_end, result_count):
-            material_units.append((start, end, None if control_overlap else shared))
+            material_units.append((start, end, None if control_overlap else shared, group))
 
-    for start, end, shared in material_units:
+    for start, end, shared, coordination_group in material_units:
         source = jd_text[start:end]
         if not source.strip() or is_result_count_only(source):
             continue
@@ -1302,12 +1401,22 @@ def analyze_hr_text(jd_text: str) -> SemanticAnalysis:
             parts, _review_side_authorized
         )
 
+        review_reason: SemanticReviewReason | None = None
+        authorization_failure = _family_authorization_failure(
+            family,
+            source=source,
+            subject=normalized_subject,
+            min_years=min_years,
+            required_level=required_level,
+            certification_context=certification_context,
+        )
         if prohibited:
             state = SemanticRequirementState.PROHIBITED
         elif segmentation_needs_review:
             # More than one independently material side survived as a single
             # source span. It cannot authorize one executable merged subject.
             state = SemanticRequirementState.NEEDS_HUMAN_REVIEW
+            review_reason = SemanticReviewReason.SEGMENTATION
         elif negated:
             state = SemanticRequirementState.UNSUPPORTED
         elif _COUNT_ENTITY_RE.search(_fold(source)) and not (
@@ -1318,6 +1427,7 @@ def analyze_hr_text(jd_text: str) -> SemanticAnalysis:
             # for review; an unambiguous count-only unit was already consumed
             # above by is_result_count_only().
             state = SemanticRequirementState.NEEDS_HUMAN_REVIEW
+            review_reason = SemanticReviewReason.RESULT_COUNT_ENTITY
         elif (
             (particle := re.search(r"(?i)\s+d[ea]\s+", _fold(source))) is not None
             and not (
@@ -1330,26 +1440,23 @@ def analyze_hr_text(jd_text: str) -> SemanticAnalysis:
             # subject occurrence for each side, the clause must not become one
             # synthetic combined skill identity.
             state = SemanticRequirementState.NEEDS_HUMAN_REVIEW
+            review_reason = SemanticReviewReason.PARTICLE_COORDINATION
         elif comparison == ">":
             state = SemanticRequirementState.UNSUPPORTED
         elif family == JDDraftCriterionKind.OTHER:
             state = SemanticRequirementState.UNSUPPORTED
         elif modality_type is None:
             state = SemanticRequirementState.NEEDS_HUMAN_REVIEW
+            review_reason = SemanticReviewReason.MODALITY_UNKNOWN
         elif not normalized_subject and family != JDDraftCriterionKind.EXPERIENCE:
             state = SemanticRequirementState.NEEDS_HUMAN_REVIEW
-        elif not _family_authorized(
-            family,
-            source=source,
-            subject=normalized_subject,
-            min_years=min_years,
-            required_level=required_level,
-            certification_context=certification_context,
-        ):
+            review_reason = SemanticReviewReason.SUBJECT_MISSING
+        elif authorization_failure is not None:
             # Family authorization is independent from classification. Pure
             # quantities, workflow/result nouns, personal eligibility, or a
             # missing required relationship cannot become scoring authority.
             state = SemanticRequirementState.NEEDS_HUMAN_REVIEW
+            review_reason = authorization_failure
         elif (
             family in (JDDraftCriterionKind.EXPERIENCE, JDDraftCriterionKind.SKILL_EXPERIENCE)
             and min_years is None
@@ -1358,6 +1465,7 @@ def analyze_hr_text(jd_text: str) -> SemanticAnalysis:
             # duration cannot be weakened to bare skill presence merely to fit
             # an evaluator shape.
             state = SemanticRequirementState.NEEDS_HUMAN_REVIEW
+            review_reason = SemanticReviewReason.EXPERIENCE_WITHOUT_DURATION
         elif family == JDDraftCriterionKind.CERTIFICATION and (
             not normalized_subject
             or _CERT_QUANTITY_RE.search(_fold(source))
@@ -1371,6 +1479,7 @@ def analyze_hr_text(jd_text: str) -> SemanticAnalysis:
             # Quantity/generic certification wording is not a certification
             # identity. Keep it visible without inventing a named credential.
             state = SemanticRequirementState.NEEDS_HUMAN_REVIEW
+            review_reason = SemanticReviewReason.CERTIFICATION_QUANTITY
         else:
             state = SemanticRequirementState.SCORABLE
 
@@ -1381,6 +1490,7 @@ def analyze_hr_text(jd_text: str) -> SemanticAnalysis:
             text=source,
             normalized=_fold(source),
             segmentation_needs_review=segmentation_needs_review,
+            coordination_group=coordination_group,
         )
         spans.append(span)
         requirements.append(
@@ -1401,6 +1511,7 @@ def analyze_hr_text(jd_text: str) -> SemanticAnalysis:
                 required_level=required_level,
                 state=state,
                 comparison=comparison,
+                review_reason=review_reason,
             )
         )
     # Construction invariant: every server-owned material span terminates in

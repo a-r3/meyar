@@ -4167,3 +4167,77 @@ async def test_count_only_followup_without_result_set_is_truthful_context_requir
         "routing_policy_version": "agent-entry-routing-v4",
     }
     assert await _count_business_rows(db_session) == (0, 0, 0)
+
+
+async def test_unresolved_must_have_blocks_confirm_until_explicit_exclusion(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,
+) -> None:
+    """Issue #84: an unresolved explicit MUST_HAVE source requirement blocks
+    the primary confirmation (UI and server). HR may explicitly exclude it;
+    exclusion never mints a criterion and stays disclosed on the version."""
+    from sqlalchemy import select
+
+    from meyar.llm.provider import ModelUnavailableError
+    from meyar.models.job_criteria_version import JobCriteriaVersion
+
+    tenant, user, password, _membership = tenant_and_user
+    tenant_id = tenant.id
+    await db_session.commit()
+    fake = FakeLLMProvider(jd_draft_error=ModelUnavailableError("synthetic outage"))
+    app.dependency_overrides[get_llm_provider] = lambda: fake
+    csrf = await _login_and_csrf(client, user.username, password)
+    page = await client.post(
+        "/ui/agent",
+        data={
+            "message": "Vakansiya: Backend\nPython tələb olunur.\nKubernetes təcrübəsi mütləqdir.",
+            "csrf_token": csrf,
+        },
+    )
+    assert page.status_code == 200
+    assert "Bu əsas tələb hələ dəqiqləşdirilməyib" in page.text
+    assert "Tələbləri təsdiqlə və namizədləri sırala" not in page.text
+    resolve_path = re.search(r'action="(/ui/agent/drafts/[0-9a-f-]+/resolve)"', page.text)
+    assert resolve_path is not None
+    span = re.search(r'name="span_id" value="(req-\d{4})"', page.text)
+    assert span is not None
+    confirm_path = resolve_path.group(1).replace("/resolve", "/confirm")
+
+    blocked = await client.post(confirm_path, data={"csrf_token": csrf})
+    assert blocked.status_code == 422
+    ambiguous = await client.post(
+        resolve_path.group(1),
+        data={
+            "csrf_token": csrf,
+            "span_id": span.group(1),
+            "decision": "exclude",
+            "criterion_type": "MUST_HAVE",
+        },
+    )
+    assert ambiguous.status_code == 422
+    minted = await client.post(
+        resolve_path.group(1),
+        data={"csrf_token": csrf, "span_id": span.group(1), "criterion_type": "MUST_HAVE"},
+    )
+    assert minted.status_code == 422
+
+    excluded = await client.post(
+        resolve_path.group(1),
+        data={"csrf_token": csrf, "span_id": span.group(1), "decision": "exclude"},
+    )
+    assert excluded.status_code == 200
+    assert "sizin qərarınızla avtomatik sıralamaya daxil edilmir" in excluded.text
+    assert "Tələbləri təsdiqlə və namizədləri sırala" in excluded.text
+
+    confirmed = await client.post(confirm_path, data={"csrf_token": csrf})
+    assert confirmed.status_code == 200
+    assert "Reytinq nəticələri" in confirmed.text
+    version = (
+        await db_session.execute(
+            select(JobCriteriaVersion).where(JobCriteriaVersion.tenant_id == tenant_id)
+        )
+    ).scalar_one()
+    assert [criterion["value"] for criterion in version.criteria] == ["Python"]
+    assert version.needs_review_requirements == ["Kubernetes təcrübəsi mütləqdir"]

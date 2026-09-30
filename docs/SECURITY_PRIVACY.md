@@ -378,6 +378,28 @@ unlabeled number but never guesses that an arbitrary identifier is a phone.
   when the current BrowserSession's live context points to that exact draft;
   opening a durable conversation does not rebind a ResultSet or draft.
 
+## JD semantic authority (issue #84, D-088)
+
+- A JD-draft criterion is built only from a server-validated
+  `CanonicalRequirement` (semantic policy `jd-semantic-policy-v2`). Raw
+  grammatical remainders, vacancy headers/titles, person tokens and location
+  text can never become scoring authority.
+- The local model (LLMProvider only; JD text never leaves the host) may only
+  propose canonical subjects for server-created span ids. Proposals must be
+  grounded in the exact span text and cannot change modality, duration,
+  level, weights, scores or prohibited/unsupported classification. Prohibited
+  attributes remain deterministic (`find_prohibited_term`) regardless of any
+  model output.
+- Prompt-injection text in a JD is data: system-directed instructions are
+  deterministically UNSUPPORTED and never become criteria.
+- Location/residence, salary, work authorization, remote/on-site and similar
+  employment terms are UNSUPPORTED (disclosed, never scored).
+- An unresolved explicit MUST_HAVE blocks confirmation until HR resolves a
+  server-declared interpretation or explicitly excludes it; exclusion never
+  creates a criterion and stays disclosed on the criteria version.
+- Audit metadata for drafts/review resolution carries only the policy version
+  and structural counts — never JD/span text or model output.
+
 ## Local-only Ollama operating contract
 
 Two distinct guarantees are in play, and they must not be conflated —

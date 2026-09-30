@@ -54,6 +54,15 @@ _MODEL_DECLINED_INTERPRETATION_TEXT = (
     "məhdudiyyəti ola bilər. Tələbi sadələşdirib yenidən cəhd edin.",
 )
 
+# Issue #84 (audit M-11): an unsupported input language is stated honestly —
+# never the generic "could not execute without weakening meaning" copy.
+UNSUPPORTED_INPUT_LANGUAGE_TEXT = (
+    "Bu dil hazırda dəstəklənmir",
+    "MEYAR hazırda sorğuları Azərbaycan və ingilis dillərində başa düşür. Rus dili "
+    "və digər dillər üçün dəstək yoxdur. Sorğunu Azərbaycan və ya ingilis dilində "
+    "yazın.",
+)
+
 READINESS_LABELS: dict[str | None, str] = {
     "COMPLETED": "Hazır",
     "MANUAL_REVIEW_REQUIRED": "Diqqət tələb edir",
@@ -344,6 +353,11 @@ def planner_outcome_view(
         and PlannerReasonCode.MODEL_DECLINED_INTERPRETATION in plan.reason_codes
     ):
         title, message = _MODEL_DECLINED_INTERPRETATION_TEXT
+    elif (
+        plan.outcome == PlannerOutcome.UNSUPPORTED_SEMANTICS
+        and PlannerReasonCode.UNSUPPORTED_INPUT_LANGUAGE in plan.reason_codes
+    ):
+        title, message = UNSUPPORTED_INPUT_LANGUAGE_TEXT
     else:
         title, message = PLANNER_OUTCOME_TEXT[plan.outcome]
     return PlannerOutcomeView(

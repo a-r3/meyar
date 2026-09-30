@@ -116,6 +116,7 @@ class LLMProvider(Protocol):
         jd_text: str,
         *,
         requirement_spans: list[RequirementSpan],
+        span_hints: dict[str, dict[str, str]] | None = None,
         repair: bool = False,
     ) -> tuple[JDCriteriaDraft, "LLMResultProvenance"]:
         """Slice 4 (issue #33, D-030/D-032): one bounded drafting call that
@@ -125,7 +126,14 @@ class LLMProvider(Protocol):
         the server before inference; every item must reference one of those
         occurrence ids. The model drafts; it is never scoring/persistence
         authority — see meyar.agent.service._dispatch_draft_job_criteria,
-        which re-validates every drafted item before it is ever shown."""
+        which re-validates every drafted item before it is ever shown.
+
+        Issue #84: each item is a canonical-requirement PROPOSAL for one
+        server span (``requirement`` = canonical professional subject). The
+        optional ``span_hints`` carry only safe deterministic structure
+        (modality/family/duration/level) — never permissions, weights or
+        policy. meyar.agent.canonical_requirements validates every proposal
+        against the exact span text."""
         ...
 
     async def health(self) -> dict:

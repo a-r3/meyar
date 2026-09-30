@@ -26,6 +26,13 @@ from datetime import date
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meyar.agent.canonical_requirements import (
+    JD_SEMANTIC_POLICY_VERSION,
+    CanonicalRequirement,
+    canonicalize_requirements,
+    is_canonical_subject,
+    subject_grounded_in_span,
+)
 from meyar.agent.intent_routing import (
     AMBIGUOUS_SEARCH_OR_JOB_COPY,
     ENTRY_ROUTING_POLICY_VERSION,
@@ -35,7 +42,7 @@ from meyar.agent.intent_routing import (
     AgentRoutedAction,
     route_agent_entry,
 )
-from meyar.agent.jd_authority import explicit_modality, segment_requirement_spans
+from meyar.agent.jd_authority import explicit_modality
 from meyar.agent.prompts import AGENT_PROMPT_VERSION
 from meyar.agent.schemas import (
     AGENT_POLICY_VERSION,
@@ -63,12 +70,15 @@ from meyar.agent.schemas import (
     RequirementSpan,
     RequirementSpanResult,
     RequirementSpanState,
-    SemanticRequirement,
     SemanticRequirementState,
     SupportedInputLanguage,
     UnsupportedJDCriterionItem,
 )
-from meyar.agent.semantic_requirements import analyze_hr_text
+from meyar.agent.semantic_requirements import (
+    SemanticAnalysis,
+    analyze_hr_text,
+    is_non_professional_requirement,
+)
 from meyar.core.domain_terms import DOMAIN_SYNONYMS, canonicalize_domain
 from meyar.core.result_count import extract_result_count_intent, is_result_count_only
 from meyar.core.text import (
@@ -1246,7 +1256,7 @@ def _build_authorized_semantic_draft(
     *,
     jd_text: str,
     title: str | None,
-    requirements: list[SemanticRequirement],
+    canonical: list[CanonicalRequirement],
     source_spans: list[RequirementSpan],
     requested_result_limit: int | None,
     result_limit: int,
@@ -1256,12 +1266,13 @@ def _build_authorized_semantic_draft(
     unsupported_language: SupportedInputLanguage | None = None,
     wrong_mode_guidance: bool = False,
 ) -> AgentToolResult:
-    """Construct the public draft only from server-owned source slots.
+    """Construct the public draft only from validated canonical requirements.
 
-    Model output is intentionally absent from every material field here.  The
-    model may have proposed a classification upstream, but a criterion reaches
-    this function only through an exact source occurrence and the deterministic
-    semantic state assigned to it.
+    Issue #84: every CriterionIn here comes from a ``CanonicalRequirement``
+    whose subject is canonical and source-grounded (meyar.agent.
+    canonical_requirements). A raw grammatical remainder can never reach a
+    CriterionIn; unresolved spans stay visible as review items, and an
+    unresolved explicit MUST_HAVE blocks confirmation (``blocking``).
     """
     spans_by_id = {span.span_id: span for span in source_spans}
     used_ids: set[str] = set()
@@ -1272,82 +1283,72 @@ def _build_authorized_semantic_draft(
     results: list[RequirementSpanResult] = []
     prohibited_count = 0
 
-    for semantic in requirements:
-        span = spans_by_id[semantic.requirement_span_id]
-        state = semantic.state
-        # Post-parse safety scan: neither a model family nor a normalized
-        # subject can override protected text in the canonical source span.
-        if find_prohibited_term(span.text, semantic.normalized_subject or ""):
-            state = SemanticRequirementState.PROHIBITED
-
+    for item in canonical:
+        span = spans_by_id[item.span_id]
+        state = item.interpretation_state
         criterion: CriterionIn | None = None
+        shape_validated = item.shape_validated
         if state == SemanticRequirementState.SCORABLE:
-            assert semantic.criterion_family is not None
-            assert semantic.criterion_type is not None
-            kind = CriterionKind(semantic.criterion_family.value)
-            subject = semantic.normalized_subject or span.text
-            if semantic.criterion_family == JDDraftCriterionKind.DOMAIN_EXPERIENCE:
-                subject = _canonical_display_subject(semantic.criterion_family, subject)
+            assert item.kind is not None
+            assert item.criterion_type is not None
+            kind = CriterionKind(item.kind.value)
+            subject = item.canonical_subject or span.text
+            if item.kind == JDDraftCriterionKind.DOMAIN_EXPERIENCE:
+                subject = _canonical_display_subject(item.kind, subject)
             value = None if kind == CriterionKind.EXPERIENCE else subject
             try:
                 criterion = CriterionIn(
                     id=slugify_criterion_label(subject, used_ids),
                     kind=kind,
-                    type=semantic.criterion_type,
+                    type=item.criterion_type,
                     label=subject,
                     value=value,
-                    min_years=semantic.min_years,
-                    required_level=semantic.required_level,
+                    min_years=item.min_years,
+                    required_level=item.required_level,
                     weight=1.0,
                 )
             except ValidationError:
                 state = SemanticRequirementState.NEEDS_HUMAN_REVIEW
+                shape_validated = False
 
         if criterion is not None:
             bucket = must_have if criterion.type == CriterionType.MUST_HAVE else preferred
             bucket.append(criterion)
         elif state == SemanticRequirementState.PROHIBITED:
             prohibited_count += 1
-        elif state == SemanticRequirementState.UNSUPPORTED and semantic.criterion_type is not None:
+        elif state == SemanticRequirementState.UNSUPPORTED and item.criterion_type is not None:
             unsupported.append(
                 UnsupportedJDCriterionItem(
                     requirement=span.text,
-                    criterion_type=semantic.criterion_type,
+                    criterion_type=item.criterion_type,
                 )
             )
         else:
+            reviewable_shape = bool(
+                state == SemanticRequirementState.NEEDS_HUMAN_REVIEW
+                and shape_validated
+                and item.kind is not None
+                and item.canonical_subject
+            )
+            blocking = bool(
+                state == SemanticRequirementState.NEEDS_HUMAN_REVIEW
+                and item.criterion_type == CriterionType.MUST_HAVE
+            )
             needs_review.append(
                 NeedsReviewJDCriterionItem(
                     requirement=span.text,
-                    criterion_type=semantic.criterion_type,
-                    span_id=(
-                        span.span_id
-                        if state == SemanticRequirementState.NEEDS_HUMAN_REVIEW
-                        and semantic.criterion_family is not None
-                        and semantic.normalized_subject
-                        else None
-                    ),
-                    kind=(
-                        semantic.criterion_family
-                        if state == SemanticRequirementState.NEEDS_HUMAN_REVIEW
-                        and semantic.normalized_subject
-                        else None
-                    ),
-                    subject=(
-                        semantic.normalized_subject
-                        if state == SemanticRequirementState.NEEDS_HUMAN_REVIEW
-                        and semantic.normalized_subject
-                        else None
-                    ),
-                    min_years=semantic.min_years,
-                    required_level=semantic.required_level,
+                    criterion_type=item.criterion_type,
+                    span_id=span.span_id if (reviewable_shape or blocking) else None,
+                    kind=item.kind if reviewable_shape else None,
+                    subject=item.canonical_subject if reviewable_shape else None,
+                    min_years=item.min_years,
+                    required_level=item.required_level,
                     allowed_types=(
                         [CriterionType.MUST_HAVE, CriterionType.PREFERRED]
-                        if state == SemanticRequirementState.NEEDS_HUMAN_REVIEW
-                        and semantic.criterion_type is None
-                        and semantic.criterion_family not in (None, JDDraftCriterionKind.OTHER)
+                        if reviewable_shape and item.criterion_type is None
                         else []
                     ),
+                    blocking=blocking,
                 )
             )
 
@@ -1362,7 +1363,7 @@ def _build_authorized_semantic_draft(
                     None if public_state == RequirementSpanState.PROHIBITED else span.normalized
                 ),
                 state=public_state,
-                criterion_type=semantic.criterion_type,
+                criterion_type=item.criterion_type,
                 criterion_id=criterion.id if criterion is not None else None,
             )
         )
@@ -1386,6 +1387,7 @@ def _build_authorized_semantic_draft(
             requirements=results,
             unsupported_language=unsupported_language,
             wrong_mode_guidance=wrong_mode_guidance,
+            semantic_policy_version=JD_SEMANTIC_POLICY_VERSION,
         ),
     )
 
@@ -1531,20 +1533,41 @@ def _build_authorized_model_draft(
     )
 
 
-async def _dispatch_draft_job_criteria(llm: LLMProvider, *, jd_text: str) -> AgentToolResult | None:
-    """Interpret a JD through source-bound server authority.
+def _span_hints(analysis: SemanticAnalysis) -> dict[str, dict[str, str]]:
+    """Safe deterministic hints for the local model (structure only)."""
+    hints: dict[str, dict[str, str]] = {}
+    for semantic in analysis.requirements:
+        hint: dict[str, str] = {}
+        if semantic.criterion_type is not None:
+            hint["modality"] = semantic.criterion_type.value
+        if semantic.criterion_family is not None:
+            hint["family"] = semantic.criterion_family.value
+        if semantic.min_years is not None:
+            hint["min_years"] = f"{semantic.min_years:g}"
+        if semantic.required_level is not None:
+            hint["required_level"] = semantic.required_level
+        hints[semantic.requirement_span_id] = hint
+    return hints
 
-    Real local inference is still used for interpretation/title assistance,
-    but provider failure cannot erase requirements the server can safely
-    ground. Unsupported languages fail closed before inference and therefore
-    before any criterion is created.
+
+async def _dispatch_draft_job_criteria(llm: LLMProvider, *, jd_text: str) -> AgentToolResult | None:
+    """Interpret a JD through the canonical, source-bound server boundary.
+
+    Issue #84 (policy ``JD_SEMANTIC_POLICY_VERSION``): the deterministic
+    analysis owns spans, offsets, modality, prohibited/unsupported
+    classification, duration and level. The local model (via LLMProvider) is
+    asked only for canonical professional subjects of those exact spans; every
+    proposal is server-validated (meyar.agent.canonical_requirements) and can
+    close only a subject-normalization gap. Provider failure never erases a
+    requirement and never degrades to a malformed scorable subject.
+    Unsupported languages fail closed before inference.
     """
     analysis = analyze_hr_text(jd_text)
     if analysis.language == SupportedInputLanguage.UNSUPPORTED:
         return _build_authorized_semantic_draft(
             jd_text=jd_text,
             title=None,
-            requirements=[],
+            canonical=[],
             source_spans=[],
             requested_result_limit=analysis.result_count.requested,
             result_limit=analysis.result_count.effective,
@@ -1553,11 +1576,6 @@ async def _dispatch_draft_job_criteria(llm: LLMProvider, *, jd_text: str) -> Age
             unsupported_language=SupportedInputLanguage.UNSUPPORTED,
         )
 
-    # Preserve the established model/source reconciliation contract for a
-    # successful model response.  The semantic boundary is an independent
-    # safe fallback and is also shared with ordinary search; it must not turn
-    # a contradictory model proposal into a silently different criterion.
-    source_spans = segment_requirement_spans(jd_text)
     folded_jd = _fold(jd_text)
     raw_has_prohibited_text = find_prohibited_term(jd_text) is not None
     simple_search_in_vacancy_mode = bool(
@@ -1582,12 +1600,29 @@ async def _dispatch_draft_job_criteria(llm: LLMProvider, *, jd_text: str) -> Age
             folded_jd,
         )
     )
+    if simple_search_in_vacancy_mode:
+        return _build_authorized_semantic_draft(
+            jd_text=jd_text,
+            title=None,
+            canonical=[],
+            source_spans=[],
+            requested_result_limit=analysis.result_count.requested,
+            result_limit=analysis.result_count.effective,
+            result_limit_was_bounded=analysis.result_count.was_bounded,
+            result_limit_needs_review=analysis.result_count_needs_review,
+            wrong_mode_guidance=True,
+        )
+
     draft: JDCriteriaDraft | None = None
-    if not raw_has_prohibited_text and not simple_search_in_vacancy_mode:
+    if not raw_has_prohibited_text:
+        hints = _span_hints(analysis)
         for attempt in range(1, MAX_JD_DRAFT_ATTEMPTS + 1):
             try:
                 draft, _provenance = await llm.draft_job_criteria(
-                    jd_text, requirement_spans=source_spans, repair=attempt > 1
+                    jd_text,
+                    requirement_spans=analysis.spans,
+                    span_hints=hints,
+                    repair=attempt > 1,
                 )
                 break
             except ModelSchemaInvalidError:
@@ -1595,31 +1630,46 @@ async def _dispatch_draft_job_criteria(llm: LLMProvider, *, jd_text: str) -> Age
             except (ModelTimeoutError, ModelUnavailableError, LLMProviderError):
                 break
 
-    known_span_ids = {span.span_id for span in source_spans}
-    ungrounded_count = (
-        sum(
-            item.span_id not in known_span_ids and not is_result_count_only(item.requirement)
+    proposals = (
+        [
+            item
             for item in [*draft.must_have, *draft.preferred]
-        )
+            if not is_result_count_only(item.requirement)
+        ]
         if draft is not None
-        else 0
+        else None
+    )
+    canonicalization = canonicalize_requirements(
+        spans=analysis.spans, semantics=analysis.requirements, proposals=proposals
     )
     return _build_authorized_semantic_draft(
         jd_text=jd_text,
         title=draft.title if draft is not None else None,
-        requirements=[] if simple_search_in_vacancy_mode else analysis.requirements,
-        source_spans=[] if simple_search_in_vacancy_mode else analysis.spans,
+        canonical=canonicalization.requirements,
+        source_spans=analysis.spans,
         requested_result_limit=analysis.result_count.requested,
         result_limit=analysis.result_count.effective,
         result_limit_was_bounded=analysis.result_count.was_bounded,
         result_limit_needs_review=analysis.result_count_needs_review,
-        # This is disclosure only: model proposals never participate in
-        # material authority. Count genuinely source-unbound proposals, but
-        # exclude result-count intent because it is intentionally separate
-        # from canonical requirement spans.
-        ungrounded_count=ungrounded_count,
-        wrong_mode_guidance=simple_search_in_vacancy_mode,
+        # Disclosure only: source-unbound model proposals are counted, never
+        # redisplayed and never material.
+        ungrounded_count=canonicalization.ungrounded_proposal_count,
     )
+
+
+def jd_draft_audit_metadata(draft: AgentJobDraftToolResult) -> dict[str, object]:
+    """Structural-only audit facts for one draft (no text, no model output)."""
+    states = [item.state for item in draft.requirements]
+    return {
+        "semantic_policy_version": draft.semantic_policy_version,
+        "scorable_count": states.count(RequirementSpanState.SCORABLE),
+        "review_count": states.count(RequirementSpanState.NEEDS_HUMAN_REVIEW),
+        "unsupported_count": states.count(RequirementSpanState.UNSUPPORTED),
+        "prohibited_count": states.count(RequirementSpanState.PROHIBITED),
+        "blocking_review_count": sum(
+            1 for item in draft.needs_review if item.blocking and not item.acknowledged_excluded
+        ),
+    }
 
 
 def resolve_job_draft_review_modality(
@@ -1628,7 +1678,12 @@ def resolve_job_draft_review_modality(
     span_id: str,
     criterion_type: CriterionType,
 ) -> AgentJobDraftToolResult:
-    """Resolve only a server-declared modality ambiguity for one span."""
+    """Resolve only a server-declared modality ambiguity for one span.
+
+    Issue #84: a modality click can mint a CriterionIn only when the review
+    item carries a server-validated canonical shape AND that canonical
+    subject still re-validates against the exact source span. Arbitrary
+    source text ("Bakıda") can never become scoring authority this way."""
     matches = [item for item in draft.needs_review if item.span_id == span_id]
     if len(matches) != 1:
         raise ValueError("Reviewable source requirement was not found.")
@@ -1643,6 +1698,18 @@ def resolve_job_draft_review_modality(
         or result_matches[0].state != RequirementSpanState.NEEDS_HUMAN_REVIEW
     ):
         raise ValueError("Source requirement is not awaiting review.")
+    source_text = result_matches[0].text or ""
+    if (
+        review.kind == JDDraftCriterionKind.OTHER
+        or is_non_professional_requirement(source_text)
+        or not is_canonical_subject(review.kind, review.subject)
+        or (
+            review.kind != JDDraftCriterionKind.EXPERIENCE
+            and not subject_grounded_in_span(review.kind, review.subject, source_text)
+        )
+        or find_prohibited_term(source_text, review.subject)
+    ):
+        raise ValueError("Reviewable source requirement has no canonical criterion shape.")
 
     used_ids = {criterion.id for criterion in [*draft.must_have, *draft.preferred]}
     criterion = CriterionIn(
@@ -1676,6 +1743,32 @@ def resolve_job_draft_review_modality(
     else:
         updates["preferred"] = [*draft.preferred, criterion]
     return draft.model_copy(update=updates)
+
+
+def exclude_blocking_review_requirement(
+    draft: AgentJobDraftToolResult, *, span_id: str
+) -> AgentJobDraftToolResult:
+    """HR explicitly acknowledges that one unresolved MUST_HAVE source
+    requirement is NOT part of automatic ranking (issue #84).
+
+    Never mints a CriterionIn: the requirement stays disclosed as
+    review-required on the draft and on the persisted criteria version."""
+    matches = [item for item in draft.needs_review if item.span_id == span_id]
+    if len(matches) != 1:
+        raise ValueError("Reviewable source requirement was not found.")
+    review = matches[0]
+    if not review.blocking or review.acknowledged_excluded:
+        raise ValueError("That review resolution is not allowed for this requirement.")
+    return draft.model_copy(
+        update={
+            "needs_review": [
+                item.model_copy(update={"acknowledged_excluded": True})
+                if item.span_id == span_id
+                else item
+                for item in draft.needs_review
+            ]
+        }
+    )
 
 
 _FOLLOWUP_RE = re.compile(
@@ -2337,11 +2430,16 @@ async def run_agent_turn(
                 )
             tool_calls_made += 1
             tool_results.append(job_draft_result)
+            assert job_draft_result.job_draft is not None
             await record_event(
                 db,
                 tenant_id=tenant_id,
                 event_type="agent.tool.executed",
-                metadata={"tool_name": decision.action.value, "tool_call_index": tool_calls_made},
+                metadata={
+                    "tool_name": decision.action.value,
+                    "tool_call_index": tool_calls_made,
+                    **jd_draft_audit_metadata(job_draft_result.job_draft),
+                },
             )
             result = _build_result(
                 outcome=AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT,
