@@ -13,6 +13,25 @@ Decision record: D-092 (`docs/DECISIONS.md`). Audited baseline: `main` @
 `fb03477a4b4c3ec4698b7294f2589fbbbeafa4e7` (#84, #85, #86, #87 closed).
 Alembic head at audit time: `a87d4c6e2b19`.
 
+**Amendment A1 (ACCEPTED AMENDMENT / IMPLEMENTATION NOT STARTED; owner-selected
+"Variant 1"):**
+- A1 was independently reviewed and accepted.
+- Slice A implementation has NOT started. #88 remains OPEN, and #50 remains
+  OPEN and out of scope.
+- Slice A may begin only after the OWNER manually merges PR #94 and
+  post-merge verification succeeds.
+
+The change: the clarification liveness binding changes from
+`turn_version` equality to an **append-position** binding through a new
+`question_turn_id` (§6.2 rule 2, §4.3, §18). Reason: the audit of `main`
+@ `3ac42a5` for slice A found that the lane-B human routes
+(`/ui/agent/drafts/{id}/confirm` via `mark_pending_job_draft_confirmed`, and
+`/ui/agent/drafts/{id}/resolve` via `replace_pending_job_draft`) rewrite
+transcript entries **in place** and bump `turn_version` (D-089: every
+transcript write advances it). Under the original rule, confirming or
+reviewing D1 would stale an open lane-A clarification. That contradicts
+§4.4 rule 4. No other part of the accepted architecture changes.
+
 ---
 
 ## 0. Product contract
@@ -339,11 +358,12 @@ can point at its source turn.
 | `context_epoch` | yes | — | — | — | — | no | mismatch → STALE | session context at creation | new |
 | `clarification_type` closed: `SEARCH_OR_VACANCY`, `VACANCY_SOURCE_REQUIRED` | yes | — | — | — | — | no | — | deterministic router | new + CHECK |
 | `answer_schema_version` (e.g. `clarification-answers-v1`) | yes | — | — | — | — | no | unknown → EXPIRED | code | new |
-| `source_turn_id` UUID (id of the user transcript entry) | yes | — | — | — | — | no | missing → STALE | transcript entry id | new |
-| `source_sha256` (SHA-256 of the canonical LF source span) | yes | — | — | — | — | no | mismatch → STALE | computed | new |
+| `question_turn_id` UUID (id of the assistant transcript entry that asked the question), NOT NULL (A1) | yes | — | — | — | — | no | answerable only while this entry is the **last** transcript entry (§6.2 rule 2) → otherwise STALE | server-issued transcript entry id | new |
+| `source_turn_id` UUID (id of the user transcript entry); SEARCH_OR_VACANCY only, NULL for VACANCY_SOURCE_REQUIRED | yes | — | — | — | — | no | missing → STALE | transcript entry id | new |
+| `source_sha256` (SHA-256 of the canonical LF source span); same nullability as `source_turn_id` | yes | — | — | — | — | no | mismatch → STALE | computed | new |
 | `source_start`, `source_end` (exact offsets into that user turn; CHECK `0 ≤ start < end ≤ 4000`) | yes | — | — | — | — | no | — | router (whole message today) | new |
 | `semantic_policy_version`, `routing_policy_version` | yes | — | — | — | — | no | mismatch → STALE | code | new |
-| `created_turn_version` (conversation `turn_version` after the creating Phase B) | yes | — | — | — | — | no | the answer must arrive while `turn_version` still equals this | DB | new |
+| `created_turn_version` (conversation's final committed `turn_version` after the creating Phase B, i.e. after the D-045 display sync) | yes | — | — | — | — | no | **provenance only** since A1; not a liveness condition | DB | new |
 | `status` closed: `OPEN`, `RESOLVED`, `SUPERSEDED`, `EXPIRED` | yes | — | — | — | — | no | §6 | server | new + CHECK |
 | `attempt` 1..2 | yes | — | — | — | — | no | >2 → EXPIRED | server | new + CHECK |
 | `expires_at` | yes | — | — | — | — | no | TTL §6.7 | server clock | new |
@@ -399,9 +419,10 @@ Lane rules:
    in lane B.
 4. **Lane B never cancels lane A.** Confirming D1 (T10) in the separate
    confirm route leaves an OPEN clarification in lane A untouched. The next
-   agent turn still resolves it by §6.4. That clarification's
-   `created_turn_version` binding is conversation-level, and the confirm
-   route does not write the transcript.
+   agent turn still resolves it by §6.4. The confirm and review-resolve
+   routes rewrite pending-draft payloads **in place**. They bump
+   `turn_version` but never append a transcript entry, so the append-position
+   binding (§6.2 rule 2, A1) keeps the clarification answerable.
 5. **Turn ordering when both lanes are live.**
    - If lane A has an OPEN clarification, §6.4 runs **first**.
    - The existing pending-draft amendment branch (`_FOLLOWUP_RE`, lane B)
@@ -466,12 +487,14 @@ The turn stages:
   WAITING_CLARIFICATION);
 - a clarification (OPEN, attempt 1);
 - `active_clarification_id` pointing at it;
-- the user turn (`turn_id` = new UUID) and the assistant turn, which
-  carries a display-only `clarification` payload (question code plus
+- the user turn (`turn_id` = new server UUID) and the assistant turn
+  (`turn_id` = new server UUID = the clarification's `question_turn_id`),
+  which carries a display-only `clarification` payload (question code plus
   choice codes, used to render buttons).
 
-All of it is written in Phase B (§12). `created_turn_version` is the
-conversation's final `turn_version` after that commit.
+All of it is written in Phase B (§12). `created_turn_version` records the
+conversation's final committed `turn_version` after that Phase B, after the
+D-045 display sync. It is provenance only (A1).
 
 ### 6.2 Source binding and verification on resume
 
@@ -481,9 +504,23 @@ clarification becomes EXPIRED/stale and the turn gives safe re-clarify copy:
 1. `session_context.active_clarification_id == clarification.id`. The row is
    locked FOR UPDATE, `status == OPEN`, `expires_at > now`, and
    `context_epoch` equals the context's epoch.
-2. `conversation.turn_version == clarification.created_turn_version`. The
-   answer must be the very next transcript write. A turn from another tab or
-   session on the same conversation makes the clarification stale.
+2. **Append-position binding (A1).** The conversation's **last**
+   transcript entry must have `turn_id == question_turn_id` and role
+   `assistant`. For SEARCH_OR_VACANCY, the entry immediately before it must
+   be the source user turn (`turn_id == source_turn_id`).
+   - The answer is therefore the very next **appended** turn. Any turn
+     appended by another tab or session on the same conversation makes the
+     clarification stale.
+   - In-place rewrites that append nothing do not affect liveness, although
+     they bump `turn_version`. This covers the D-045 display sync, lane-B
+     confirm (`mark_pending_job_draft_confirmed`) and lane-B review
+     resolution (`replace_pending_job_draft`).
+   - Invariant required of every transcript writer: an in-place rewrite
+     preserves each entry's `turn_id`, order and role. The 100-entry bound
+     only drops entries from the front, so the last two entries are always
+     retained.
+   - This is evaluated under the conversation row lock in the resuming
+     turn, and again in Phase B.
 3. The transcript entry with `turn_id == source_turn_id` exists, has role
    `user`, and SHA-256 of `text[source_start:source_end]` equals
    `source_sha256`.
@@ -492,8 +529,8 @@ clarification becomes EXPIRED/stale and the turn gives safe re-clarify copy:
    yield ≥1 material requirement and no PROHIBITED span.
 5. Answer schema version is known.
 
-Rule 2 makes the 100-turn transcript bound irrelevant: the source is at most
-two entries back. The server never rebuilds the source from model memory or
+Rule 2 makes the 100-turn transcript bound irrelevant: the question is the
+last entry and the source is directly before it. The server never rebuilds the source from model memory or
 from "the latest user message that looks like a requirement".
 
 ### 6.3 Answer schema (server-owned)
@@ -599,8 +636,8 @@ the user's turn, but it is **never** used as search or JD input.
 ### 6.7 Expiry, concurrency, sessions, replay
 
 - **TTL.** `agent_clarification_ttl_seconds`, default 1800, bounds 60–3600,
-  and never beyond the BrowserSession expiry. Expiry is also forced by
-  rule 2 of §6.2 (next write only).
+  and never beyond the BrowserSession expiry. Staleness is also forced by
+  rule 2 of §6.2 (next appended turn only).
 - **Cardinality.** This is per session context, per waiting lane (§4.4):
   at most one OPEN clarification and one WAITING_CLARIFICATION task in the
   dialogue lane. A new dialogue-lane task supersedes the old one (T7).
@@ -1064,7 +1101,8 @@ is unchanged, extending the existing CONTEXT_CHANGED check), the server:
    principal → conversation → session context → clarification → task →
    submission);
 2. re-verifies each staged transition's precondition (still OPEN, still
-   unexpired, same `created_turn_version`). For a `PLAN_INCOMPLETE` turn it
+   unexpired, `question_turn_id` still the last transcript entry per §6.2
+   rule 2). For a `PLAN_INCOMPLETE` turn it
    stages **no** plan-produced pointer and no successful task transition;
 3. writes transcript (with `turn_id`s), ResultSet/draft/clarification
    pointers, task/clarification rows, and task/clarification audit events;
@@ -1238,8 +1276,10 @@ Chained after `a87d4c6e2b19`, single head:
 - **`agent_clarifications`**:
   - columns per §4.3;
   - CHECKs on type, status, attempt 1..2, resolved_value ⇔ RESOLVED,
-    resolution_source ⇔ RESOLVED, offsets required for SEARCH_OR_VACANCY and
-    NULL for VACANCY_SOURCE_REQUIRED, `0 ≤ source_start < source_end ≤ 4000`;
+    resolution_source ⇔ RESOLVED, `0 ≤ source_start < source_end ≤ 4000`;
+  - `source_turn_id`, `source_sha256` and offsets are all required for
+    SEARCH_OR_VACANCY and all NULL for VACANCY_SOURCE_REQUIRED;
+  - `question_turn_id` NOT NULL (A1);
   - FKs: tenant/conversation/session_context/task CASCADE; `superseded_by_id`
     self SET NULL;
   - UNIQUE(`created_by_submission_id`), UNIQUE(`resolved_by_submission_id`);
@@ -1356,17 +1396,18 @@ It contains no HR text, UUIDs or identity.
   - user turn `u1` (turn_id U1);
   - task τ (UNDETERMINED, WAITING_CLARIFICATION, NEEDS_INTENT_CHOICE);
   - clarification κ (SEARCH_OR_VACANCY, OPEN, source U1 [0,17),
-    sha256(“Python mütləqdir.”), `created_turn_version = v`);
+    sha256(“Python mütləqdir.”), `question_turn_id = Q1`,
+    `created_turn_version = v` as provenance);
   - pointer `active_clarification_id = κ`;
-  - assistant question with buttons.
+  - assistant question with buttons (turn_id Q1).
 - T2: `namizəd axtarışı` goes through §6.4:
   - no button;
   - the step 2 whole-message label match gives CANDIDATE_SEARCH (steps 3
     and 4 are not reached).
 - Checks pass:
   - pointer = κ, OPEN, unexpired, epoch equal;
-  - `turn_version == v`;
-  - U1 is present and the hash matches;
+  - the last transcript entry is Q1, directly preceded by U1;
+  - U1's hash matches;
   - versions equal;
   - analysis still finds a requirement.
 - The server plan is `SEARCH_CANDIDATES(query = "Python mütləqdir.")`, run
@@ -1403,8 +1444,8 @@ göstər`).
 - κ can never be answered afterwards.
 
 **D. Expired clarification → late answer.**
-- κ `expires_at` has passed, or another tab wrote to the conversation, or
-  the session changed. The late `namizəd axtarışı` fails §6.2.
+- κ `expires_at` has passed, or another tab or session appended a turn to
+  the conversation (Q1 is no longer last), or the session changed. The late `namizəd axtarışı` fails §6.2.
 - Phase B:
   - κ EXPIRED(TTL/STALE);
   - τ EXPIRED;
@@ -1475,7 +1516,7 @@ outside the per-call subset).
 - Two tabs with *different* tokens answering the same κ:
   - both share the session context, and conversation-level reservation
     serializes them;
-  - the first resolves κ and bumps `turn_version`;
+  - the first resolves κ and appends its turn pair (Q1 is no longer last);
   - the second then fails §6.2 rule 1/2 (κ no longer OPEN or the pointer
     changed) and gets the "no longer active" copy.
 - Exactly one resolution and one execution. The UNIQUE submission columns
@@ -1573,6 +1614,15 @@ For slices A to C, each item is a failing-first regression:
     clarification fails closed.
 15. **Source-turn / hash mismatch**: tampered transcript text, a missing
     `turn_id` or a policy version bump each give STALE and no execution.
+15a. **Append-position binding (A1)**:
+    - a turn appended after the question (another tab or session) gives
+      STALE and no execution;
+    - lane-B confirm or review-resolve of D1 between question and answer
+      (turn_version bumped, nothing appended) leaves the clarification
+      answerable, and it resolves correctly;
+    - `created_turn_version` equals the persisted `turn_version` right
+      after the creating commit, including the D-045 display sync bump;
+    - every in-place transcript writer preserves `turn_id`.
 16. **The model tries to add tenant/session/candidate UUID or scope fields**:
     rejected by `extra="forbid"`; parametrized over each forbidden key.
 17. **The model tries a protected attribute** (AZ/EN) in search/refine args:
@@ -1765,7 +1815,10 @@ inputs (§10.2).
    - The transcript is conversation-bound and durable.
 3. **How is a clarification source-bound?**
    - `source_turn_id` + `source_sha256` + exact offsets, plus semantic and
-     routing policy versions and `created_turn_version`.
+     routing policy versions, and (A1) the append-position binding: the
+     `question_turn_id` entry must still be the last transcript entry,
+     directly preceded by the source turn. `created_turn_version` is
+     provenance only.
    - All are re-verified in the resuming turn and again under lock in
      Phase B. Any mismatch fails closed.
 4. **How does natural language resolve a closed clarification?**
@@ -1827,7 +1880,7 @@ inputs (§10.2).
       No task, clarification or draft ids are sent.
     - For the classifier: only the answer text, type and allowed codes.
 14. **What expires and what remains durable?**
-    - Clarifications expire (TTL / next-write / attempts / versions).
+    - Clarifications expire (TTL / next appended turn (A1) / attempts / versions).
       Waiting tasks end with their pointer or session.
     - Terminal tasks are pruned to 10 per context. Conversation history,
       audit, Jobs, criteria versions, confirmations and Evaluations remain.

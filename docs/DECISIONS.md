@@ -7562,6 +7562,42 @@ the owner merges the design PR. Full design: `docs/AGENT_CORE_V2_DESIGN.md`. Aud
 `main` @ `fb03477a4b4c3ec4698b7294f2589fbbbeafa4e7` (#84–#87 closed).
 #88 stays open; #50 is out of scope.
 
+**Amendment A1 — clarification append-position binding (ACCEPTED AMENDMENT /
+IMPLEMENTATION NOT STARTED; owner selected "Variant 1", separate docs PR
+#94, before slice A).**
+- *Status.* A1 was independently reviewed and accepted. Slice A
+  implementation has NOT started. #88 remains OPEN, and #50 remains OPEN and
+  out of scope. Slice A may begin only after the OWNER manually merges PR #94
+  and post-merge verification succeeds.
+- *Finding.* The slice A audit of `main` @ `3ac42a5` shows that the lane-B
+  human routes rewrite transcript entries in place and bump `turn_version`
+  (D-089):
+  - confirm, via `mark_pending_job_draft_confirmed`;
+  - review-resolve, via `replace_pending_job_draft`.
+
+  The original liveness rule (`turn_version == created_turn_version`) would
+  therefore stale an open lane-A clarification whenever HR confirms or
+  reviews D1. That contradicts item 2 ("confirmation never cancels lane A").
+- *Change.* Clarifications gain `question_turn_id` (NOT NULL), the
+  server-issued `turn_id` of the assistant entry that asked. A clarification
+  is live only while that entry is the **last** transcript entry, with the
+  source user turn (`source_turn_id`) directly before it for
+  SEARCH_OR_VACANCY. All other checks are unchanged: pointer, OPEN, TTL,
+  epoch, source hash/offsets, policy versions.
+  - Any appended turn (another tab or session) still stales it.
+  - In-place rewrites (D-045 display sync, lane-B confirm and review) do not.
+  - Every transcript writer must preserve entry `turn_id`, order and role.
+  - `created_turn_version` stays as provenance only. It records the final
+    committed `turn_version` after the D-045 sync.
+  - `source_turn_id`, `source_sha256` and offsets are required for
+    SEARCH_OR_VACANCY and NULL for VACANCY_SOURCE_REQUIRED.
+- *Rejected alternatives.*
+  - Stop bumping `turn_version` in lane-B routes: this weakens the #85 /
+    D-089 invariant.
+  - Keep the equality rule and let lane-B actions stale lane A: this
+    breaks lane independence.
+- No other architecture changes, and implementation has not started.
+
 1. **Authority.** The hierarchy (DB ownership > live BrowserSession/ResultSet
    /mutation authority > deterministic services > capability execution >
    evidence > structured task state > transcript/model context > model) is
@@ -7601,9 +7637,11 @@ the owner merges the design PR. Full design: `docs/AGENT_CORE_V2_DESIGN.md`. Aud
    - UNCLEAR re-asks (≤2 attempts) and never executes.
    - A resolved answer resumes the **original bound source** through the
      existing forced search / JD-draft paths.
-   - A clarification is answerable only on the next transcript write, within
-     its TTL (default 1800 s), in the same session context and epoch.
-     Superseded and expired clarifications are terminal.
+   - A clarification is answerable only on the next **appended** transcript
+     turn (A1: its `question_turn_id` is still the last entry, directly
+     preceded by the source turn), within its TTL (default 1800 s), in the
+     same session context and epoch. Superseded and expired clarifications
+     are terminal.
 4. **Capability registry.**
    - A strict `CapabilityName` enum and a `CapabilityDefinition` covering
      schemas, scopes, real side effect, execution mode, proposability, live
