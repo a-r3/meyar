@@ -17,6 +17,9 @@ jobs:
   quality:
     name: ruff + mypy(src) + pytest
     runs-on: ubuntu-latest
+    # A healthy run takes ~6 minutes. Fail a hung run instead of letting it
+    # sit until GitHub's 6-hour default (intermittent pytest hang, 2026-09-30).
+    timeout-minutes: 25
 
     services:
       postgres:
@@ -71,7 +74,10 @@ jobs:
           fi
 
       - name: pytest
-        run: uv run pytest -q
+        # -v prints each test id before it runs, so a hung run's last log
+        # line names the hanging test (asyncio hangs do not show it in the
+        # faulthandler dump configured in pyproject.toml).
+        run: uv run pytest -v
 
       - name: local demo wrapper tests
         run: |
