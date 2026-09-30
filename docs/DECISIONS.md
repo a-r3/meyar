@@ -6941,7 +6941,7 @@ A-1. **Durable semantic provenance.** The pending draft is bounded session
   version. One nullable JSON column,
   `job_criteria_versions.agent_semantic_provenance` (migration
   `c84a5e2f9d17`, parent `b7e3c9d41f28`, single head), stores a strict
-  `jd-semantic-provenance-v1` record (`meyar.agent.semantic_provenance`,
+  `jd-semantic-provenance-v1` record (superseded by v2, A-4) (`meyar.agent.semantic_provenance`,
   Pydantic v2, `extra=forbid`, frozen): draft_id, `source_sha256` of the JD,
   semantic policy version, prompt version and `{provider, model_name,
   model_revision}` only when a schema-valid local-model result was accepted
@@ -6977,3 +6977,45 @@ A-3. **Span overflow.** A JD with more than 64 source requirement spans
   previously raised a validation error in production; it now yields one
   blocking review item covering the source, so nothing can be confirmed
   and nothing is silently dropped.
+A-4. **Human amendments are durable provenance (schema
+  `jd-semantic-provenance-v2`).** A bounded HR follow-up that changes one
+  criterion's `criterion_type`, `min_years` or `required_level` (only these
+  three, closed enum) appends an immutable, ordered, server-created
+  `SemanticCriterionAmendment {sequence, criterion_id, span_id, field,
+  previous_value, new_value, source_text, source_sha256}`; `source_text` is
+  the bounded HR follow-up that authorized it (an HR instruction, never
+  candidate data or model output). Chains are kept whole (3→5→7, B2→C1→C2).
+  New values are validated through `CriterionIn` before they apply. A
+  follow-up may name the old value instead of the subject ("3 ili 5 et")
+  only when exactly one criterion carries that value. At confirmation the
+  builder re-hashes and deterministically re-analyses the session-held JD
+  (the pending draft keeps it, excluded from every render/dump and from
+  durable provenance), re-derives each span's offsets/text/family/modality/
+  duration/level, and proves each final value = source value (+ explicit
+  review decision or conflict choice) replayed through an unbroken
+  amendment chain. Missing/forged source text, a value change with no
+  amendment, a broken `previous_value`, a cross-criterion/span, unknown,
+  duplicate or out-of-order amendment → 422, nothing created. The persisted
+  record stores per criterion `origin` and `final` parameters plus the full
+  chain; strict read validation replays it. v2 supersedes v1, which was
+  never part of an accepted release, so v1 JSON is not accepted on read; no
+  new column or migration (head stays `c84a5e2f9d17`).
+A-5. **Canonical collision policy.** After canonicalization and before any
+  `CriterionIn` exists, SCORABLE spans are grouped by the one central key
+  `semantic_identity = (kind, normalized canonical subject)` (skill aliases
+  via `normalize_skill_name`, domain via `canonicalize_domain` with
+  bank→banking, language via the language alias map; `EXPERIENCE` has no
+  subject). Kinds stay distinct because evaluator semantics differ (`SKILL`
+  presence ≠ `SKILL_EXPERIENCE` duration). Equal `(criterion_type,
+  min_years, required_level)` → exact duplicate: ONE criterion supported
+  by every span (provenance lists all `source_spans`). Different parameters
+  → every span of the group is a blocking `SEMANTIC_CONFLICT` review
+  (non-liftable by the model), shown as one item that says the requirement
+  appears with conflicting importance/parameters; no value is chosen
+  automatically (no max/min, no MUST_HAVE default). HR either picks one
+  server-declared option (`option` on the resolve route; recorded as a
+  `SemanticConflictResolution` whose options are re-derived from the source
+  at confirmation) or explicitly excludes it. A review resolution that
+  would recreate an existing identity merges into it only with identical
+  parameters and is refused otherwise. Confirmation also fails closed if two
+  confirmed criteria share one identity.

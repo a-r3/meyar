@@ -205,6 +205,8 @@ class AgentJobDraftReviewView(BaseModel):
     # Issue #84: an unresolved explicit MUST_HAVE source requirement.
     blocking: bool = False
     acknowledged_excluded: bool = False
+    # Issue #84: closed server labels of the conflicting parameter sets.
+    conflict_options: list[str] = Field(default_factory=list)
 
 
 class AgentJobDraftView(BaseModel):

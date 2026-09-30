@@ -406,6 +406,16 @@ unlabeled number but never guesses that an arbitrary identifier is a phone.
   review decisions. No raw model output, chain-of-thought or candidate data.
   Built fail-closed from the server draft, validated on read, tenant-scoped,
   never a scoring input.
+- Human follow-up amendments (type/min_years/level only) are stored with the
+  version as an ordered chain including the HR follow-up text that
+  authorized each change and its sha256 (HR instruction, not candidate
+  data). The pending draft holds the analysed JD only in the session
+  transcript, excluded from every rendered/dumped result, so confirmation
+  can re-derive source values; the JD itself never enters provenance or
+  audit metadata.
+- One canonical requirement never carries two scoring weights: duplicates
+  collapse to one criterion, conflicts require an explicit HR choice
+  (D-088 A-5).
 
 ## Local-only Ollama operating contract
 

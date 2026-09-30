@@ -43,7 +43,7 @@ CRITERIA = [
 ]
 # Synthetic, schema-shaped provenance: exact fragment + digest, no JD text.
 PROVENANCE = {
-    "schema_version": "jd-semantic-provenance-v1",
+    "schema_version": "jd-semantic-provenance-v2",
     "draft_id": "00000000-0000-0000-0000-0000000084d1",
     "source_sha256": "a" * 64,
     "semantic_policy_version": "jd-semantic-policy-v2",
@@ -53,14 +53,22 @@ PROVENANCE = {
     "criteria": [
         {
             "criterion_id": "python",
-            "span_id": "req-0001",
-            "start_offset": 0,
-            "end_offset": 15,
-            "source_text": "Python required",
-            "interpretation_source": "DETERMINISTIC",
+            "source_spans": [
+                {
+                    "span_id": "req-0001",
+                    "start_offset": 0,
+                    "end_offset": 15,
+                    "source_text": "Python required",
+                    "interpretation_source": "DETERMINISTIC",
+                }
+            ],
+            "origin": {"criterion_type": "MUST_HAVE", "min_years": None, "required_level": None},
+            "final": {"criterion_type": "MUST_HAVE", "min_years": None, "required_level": None},
         }
     ],
     "review_decisions": [],
+    "conflict_resolutions": [],
+    "amendments": [],
 }
 
 
@@ -199,6 +207,10 @@ def test_downgrade_refuses_while_provenance_exists_and_keeps_data(monkeypatch) -
             )
         )
         assert stored[0][0] == PROVENANCE
+        # The stored sample is itself a valid strict v2 record.
+        from meyar.agent.semantic_provenance import parse_agent_semantic_provenance
+
+        assert parse_agent_semantic_provenance(stored[0][0]) is not None
         legacy = asyncio.run(
             _query(
                 url,

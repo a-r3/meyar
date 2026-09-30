@@ -5,11 +5,14 @@ Revises: b7e3c9d41f28
 Create Date: 2026-09-30
 
 Adds ONE nullable JSON column, ``job_criteria_versions.agent_semantic_
-provenance``, holding the strict ``jd-semantic-provenance-v1`` record
+provenance``, holding the strict ``jd-semantic-provenance-v2`` record
 (meyar.agent.semantic_provenance) for a JD draft confirmed through the
-agent: per-criterion source span id/offsets/exact fragment and
-interpretation source, the semantic policy/prompt version, the accepted
-local-model identity and explicit human review decisions.
+agent: per criterion every supporting source span (id/offsets/exact
+fragment/interpretation source), the source-derived origin and confirmed
+final parameters, the semantic policy/prompt version, the accepted
+local-model identity, and explicit human review decisions, semantic-conflict
+choices and the ordered follow-up amendment chain. The JSON contract is
+versioned inside the record; the column itself is schema-agnostic.
 
 Backfill: existing rows get NULL. Pre-#84, manual and API versions have no
 agent semantic provenance and none is fabricated.

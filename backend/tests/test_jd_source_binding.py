@@ -891,10 +891,12 @@ async def test_repeated_identical_occurrences_reconcile_by_span_id() -> None:
             )
         ],
     )
-    # Each occurrence keeps its own span and its own distinct criterion id.
+    # Issue #84 collision policy: both occurrences stay attributable, but
+    # they support ONE criterion (one weight), never two.
     assert _states(draft) == [RequirementSpanState.SCORABLE, RequirementSpanState.SCORABLE]
     ids = [result.criterion_id for result in draft.requirements]
-    assert len(set(ids)) == 2 and None not in ids
+    assert len(set(ids)) == 1 and None not in ids
+    assert [criterion.value for criterion in draft.must_have] == ["Python"]
     assert [result.span_id for result in draft.requirements] == [s.span_id for s in spans]
 
 

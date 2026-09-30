@@ -24,6 +24,7 @@ from meyar.agent.schemas import (
     AgentTurnOutcome,
     AgentTurnResult,
     ConfirmedAgentJobDraft,
+    pending_draft_payload,
 )
 from meyar.models.agent_conversation import (
     AgentConversation,
@@ -585,7 +586,7 @@ async def replace_pending_job_draft(
         current = dict(turn)
         payload = current.get("pending_job_draft")
         if isinstance(payload, dict) and payload.get("draft_id") == str(draft.draft_id):
-            current["pending_job_draft"] = draft.model_dump(mode="json")
+            current["pending_job_draft"] = pending_draft_payload(draft)
             changed = True
         turns.append(current)
     if not changed:

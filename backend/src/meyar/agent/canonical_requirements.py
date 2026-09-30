@@ -44,6 +44,7 @@ from meyar.agent.schemas import (
     JDDraftCriterionKind,
     RequirementSpan,
     SemanticInterpretationSource,
+    SemanticParameters,
     SemanticRequirement,
     SemanticRequirementState,
     SemanticReviewReason,
@@ -272,6 +273,9 @@ class CanonicalRequirement(BaseModel):
     # unresolved state can only be a modality ambiguity (review may offer
     # MUST_HAVE/PREFERRED) — never a free-text-to-criterion transformation.
     shape_validated: bool = False
+    # Issue #84: spans sharing one ``conflict_group`` carry the same canonical
+    # identity with different semantic parameters (SEMANTIC_CONFLICT).
+    conflict_group: int | None = None
 
 
 @dataclass(frozen=True)
@@ -285,6 +289,86 @@ class CanonicalizationResult:
 
 def _normalized_level(level: str | None) -> str | None:
     return level.strip().upper() if level else None
+
+
+def semantic_identity(kind: JDDraftCriterionKind, subject: str | None) -> tuple[str, str]:
+    """The ONE canonical collision key of a professional requirement.
+
+    ``(kind, normalized canonical subject)``. Aliases collapse (``Postgres``
+    = ``PostgreSQL``, ``bank`` = ``Banking``, ``ingilis dili`` = ``English``).
+    Kinds stay distinct because the evaluator semantics differ: ``SKILL``
+    (presence) ≠ ``SKILL_EXPERIENCE`` (duration-scoped) and unscoped
+    ``EXPERIENCE`` has no subject. The semantic parameters
+    (``semantic_parameters``) are deliberately NOT part of the key: equal
+    parameters make an exact duplicate, different ones a conflict."""
+    folded = " ".join(_tokens(subject or ""))
+    if kind == JDDraftCriterionKind.EXPERIENCE:
+        normalized = ""
+    elif kind in (JDDraftCriterionKind.SKILL, JDDraftCriterionKind.SKILL_EXPERIENCE):
+        normalized = normalize_skill_name(folded).casefold()
+    elif kind == JDDraftCriterionKind.DOMAIN_EXPERIENCE:
+        normalized = "banking" if folded == "bank" else canonicalize_domain(folded)
+    elif kind == JDDraftCriterionKind.LANGUAGE:
+        alias = language_alias_for(folded)
+        normalized = (alias or folded).casefold()
+    else:
+        normalized = folded
+    return kind.value, normalized
+
+
+def semantic_parameters(
+    criterion_type: CriterionType, min_years: float | None, required_level: str | None
+) -> SemanticParameters:
+    return SemanticParameters(
+        criterion_type=criterion_type,
+        min_years=min_years,
+        required_level=_normalized_level(required_level),
+    )
+
+
+def _apply_collision_policy(
+    ordered: list[CanonicalRequirement],
+) -> list[CanonicalRequirement]:
+    """Issue #84: one canonical requirement never carries two weights.
+
+    Scorable spans are grouped by ``semantic_identity``. Identical
+    parameters → exact duplicates (all stay SCORABLE; the draft builder
+    materializes ONE CriterionIn supported by every span). Different
+    modality/duration/level → every span of the group becomes a blocking
+    SEMANTIC_CONFLICT review; no value is chosen automatically."""
+    groups: dict[tuple[str, str], list[int]] = {}
+    for index, item in enumerate(ordered):
+        if (
+            item.interpretation_state == SemanticRequirementState.SCORABLE
+            and item.kind is not None
+            and item.criterion_type is not None
+        ):
+            groups.setdefault(semantic_identity(item.kind, item.canonical_subject), []).append(
+                index
+            )
+    result = list(ordered)
+    conflict_number = 0
+    for indices in groups.values():
+        parameters = {
+            semantic_parameters(
+                ordered[i].criterion_type,  # type: ignore[arg-type]
+                ordered[i].min_years,
+                ordered[i].required_level,
+            )
+            for i in indices
+        }
+        if len(indices) < 2 or len(parameters) == 1:
+            continue
+        conflict_number += 1
+        for i in indices:
+            result[i] = ordered[i].model_copy(
+                update={
+                    "interpretation_state": SemanticRequirementState.NEEDS_HUMAN_REVIEW,
+                    "review_reason": SemanticReviewReason.SEMANTIC_CONFLICT,
+                    "conflict_group": conflict_number,
+                }
+            )
+    return result
 
 
 def _canonical_display(kind: JDDraftCriterionKind, subject: str) -> str:
@@ -481,7 +565,7 @@ def canonicalize_requirements(
                 )
 
     return CanonicalizationResult(
-        requirements=[results[span.span_id] for span in spans],
+        requirements=_apply_collision_policy([results[span.span_id] for span in spans]),
         ungrounded_proposal_count=ungrounded,
         rejected_proposal_count=rejected,
     )

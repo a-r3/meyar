@@ -9,7 +9,12 @@ from pydantic import ValidationError
 from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meyar.agent.schemas import AgentActionType, AgentJobDraftToolResult, AgentTurnResult
+from meyar.agent.schemas import (
+    AgentActionType,
+    AgentJobDraftToolResult,
+    AgentTurnResult,
+    SemanticParameters,
+)
 from meyar.core.text import (
     combine_degree_and_field,
     fold_az_ascii,
@@ -893,6 +898,18 @@ async def build_agent_turn_view(
     )
 
 
+def _conflict_option_label(option: SemanticParameters) -> str:
+    """Closed server copy for one conflicting parameter set (issue #84)."""
+    parts = [
+        "Əsas tələb" if option.criterion_type == CriterionType.MUST_HAVE else "Üstünlük"
+    ]
+    if option.min_years is not None:
+        parts.append(f"minimum {option.min_years:g} il")
+    if option.required_level:
+        parts.append(f"səviyyə {option.required_level}")
+    return " — ".join(parts)
+
+
 def agent_draft_requires_resolution(draft: AgentJobDraftToolResult) -> bool:
     """Single server-owned confirmability predicate for a pending job draft.
 
@@ -962,6 +979,9 @@ def build_agent_job_draft_view(draft: AgentJobDraftToolResult) -> AgentJobDraftV
                 allowed_types=[value.value for value in item.allowed_types],
                 blocking=item.blocking,
                 acknowledged_excluded=item.acknowledged_excluded,
+                conflict_options=[
+                    _conflict_option_label(option) for option in item.conflict_options
+                ],
             )
             for item in draft.needs_review
         ],
@@ -1539,8 +1559,19 @@ def authorize_agent_draft_confirmation(
         )
     if len(request.criteria) != len(submitted_span_ids):
         raise UIServiceInputError("Qaralama meyarlarının mənbə təsdiqi etibarsızdır.")
-    expected_by_span = {
-        result.span_id: next(
+    # Issue #84: one criterion may be supported by several duplicate source
+    # spans; its PRIMARY (first) span is the one confirmation identifier.
+    expected_by_span: dict[str, CriterionIn | None] = {}
+    seen_criteria: set[str] = set()
+    for result in draft.requirements:
+        if (
+            result.state.value != "SCORABLE"
+            or result.criterion_id is None
+            or result.criterion_id in seen_criteria
+        ):
+            continue
+        seen_criteria.add(result.criterion_id)
+        expected_by_span[result.span_id] = next(
             (
                 criterion
                 for criterion in [*draft.must_have, *draft.preferred]
@@ -1548,9 +1579,6 @@ def authorize_agent_draft_confirmation(
             ),
             None,
         )
-        for result in draft.requirements
-        if result.state.value == "SCORABLE" and result.criterion_id is not None
-    }
     if len(request.criteria) != len(expected_by_span):
         raise UIServiceInputError(
             "Qaralamanın təsdiqli meyarları silinə və ya yeni meyarla əvəz edilə bilməz."

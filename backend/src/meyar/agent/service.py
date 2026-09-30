@@ -32,6 +32,8 @@ from meyar.agent.canonical_requirements import (
     CanonicalRequirement,
     canonicalize_requirements,
     is_canonical_subject,
+    semantic_identity,
+    semantic_parameters,
     subject_grounded_in_span,
 )
 from meyar.agent.intent_routing import (
@@ -69,12 +71,18 @@ from meyar.agent.schemas import (
     RequirementSpan,
     RequirementSpanResult,
     RequirementSpanState,
+    SemanticConflictResolution,
+    SemanticCriterionAmendment,
+    SemanticCriterionAmendmentField,
     SemanticModelProvenance,
+    SemanticParameters,
     SemanticRequirementState,
     SemanticReviewDecision,
     SemanticReviewDecisionKind,
     SupportedInputLanguage,
     UnsupportedJDCriterionItem,
+    encode_amendment_value,
+    pending_draft_payload,
 )
 from meyar.agent.semantic_requirements import (
     SemanticAnalysis,
@@ -932,6 +940,16 @@ def _build_authorized_semantic_draft(
     """
     spans_by_id = {span.span_id: span for span in source_spans}
     used_ids: set[str] = set()
+    # Issue #84 collision policy: at most one CriterionIn per canonical
+    # identity; exact-duplicate spans all point at it (one weight).
+    criteria_by_identity: dict[tuple[str, str], CriterionIn] = {}
+    conflict_members: dict[int, list[CanonicalRequirement]] = {}
+    for item in canonical:
+        if (
+            item.conflict_group is not None
+            and item.interpretation_state == SemanticRequirementState.NEEDS_HUMAN_REVIEW
+        ):
+            conflict_members.setdefault(item.conflict_group, []).append(item)
     must_have: list[CriterionIn] = []
     preferred: list[CriterionIn] = []
     unsupported: list[UnsupportedJDCriterionItem] = []
@@ -944,6 +962,7 @@ def _build_authorized_semantic_draft(
         state = item.interpretation_state
         criterion: CriterionIn | None = None
         shape_validated = item.shape_validated
+        duplicate_of_existing = False
         if state == SemanticRequirementState.SCORABLE:
             assert item.kind is not None
             assert item.criterion_type is not None
@@ -952,24 +971,65 @@ def _build_authorized_semantic_draft(
             if item.kind == JDDraftCriterionKind.DOMAIN_EXPERIENCE:
                 subject = _canonical_display_subject(item.kind, subject)
             value = None if kind == CriterionKind.EXPERIENCE else subject
-            try:
-                criterion = CriterionIn(
-                    id=slugify_criterion_label(subject, used_ids),
-                    kind=kind,
-                    type=item.criterion_type,
-                    label=subject,
-                    value=value,
-                    min_years=item.min_years,
-                    required_level=item.required_level,
-                    weight=1.0,
-                )
-            except ValidationError:
-                state = SemanticRequirementState.NEEDS_HUMAN_REVIEW
-                shape_validated = False
+            identity = semantic_identity(item.kind, item.canonical_subject)
+            existing = criteria_by_identity.get(identity)
+            if existing is not None and semantic_parameters(
+                existing.type, existing.min_years, existing.required_level
+            ) == semantic_parameters(item.criterion_type, item.min_years, item.required_level):
+                criterion = existing
+                duplicate_of_existing = True
+            elif existing is not None:  # pragma: no cover - collision policy invariant
+                raise RuntimeError("Semantic collision reached criterion materialization.")
+            else:
+                try:
+                    criterion = CriterionIn(
+                        id=slugify_criterion_label(subject, used_ids),
+                        kind=kind,
+                        type=item.criterion_type,
+                        label=subject,
+                        value=value,
+                        min_years=item.min_years,
+                        required_level=item.required_level,
+                        weight=1.0,
+                    )
+                    criteria_by_identity[identity] = criterion
+                except ValidationError:
+                    state = SemanticRequirementState.NEEDS_HUMAN_REVIEW
+                    shape_validated = False
 
         if criterion is not None:
-            bucket = must_have if criterion.type == CriterionType.MUST_HAVE else preferred
-            bucket.append(criterion)
+            if not duplicate_of_existing:
+                bucket = must_have if criterion.type == CriterionType.MUST_HAVE else preferred
+                bucket.append(criterion)
+        elif item.conflict_group is not None and item.conflict_group in conflict_members:
+            members = conflict_members[item.conflict_group]
+            if members[0].span_id == item.span_id:
+                assert item.kind is not None and item.canonical_subject is not None
+                options: list[SemanticParameters] = []
+                for member in members:
+                    assert member.criterion_type is not None
+                    option = semantic_parameters(
+                        member.criterion_type, member.min_years, member.required_level
+                    )
+                    if option not in options:
+                        options.append(option)
+                joined = " · ".join(spans_by_id[member.span_id].text for member in members)
+                needs_review.append(
+                    NeedsReviewJDCriterionItem(
+                        requirement=joined[:500],
+                        criterion_type=None,
+                        span_id=item.span_id,
+                        kind=item.kind,
+                        subject=(
+                            _canonical_display_subject(item.kind, item.canonical_subject)
+                            if item.kind == JDDraftCriterionKind.DOMAIN_EXPERIENCE
+                            else item.canonical_subject
+                        ),
+                        blocking=True,
+                        conflict_span_ids=[member.span_id for member in members],
+                        conflict_options=options,
+                    )
+                )
         elif state == SemanticRequirementState.PROHIBITED:
             prohibited_count += 1
         elif state == SemanticRequirementState.UNSUPPORTED and item.criterion_type is not None:
@@ -1053,6 +1113,7 @@ def _build_authorized_semantic_draft(
             semantic_prompt_version=semantic_prompt_version,
             semantic_model=semantic_model,
             rejected_proposal_count=rejected_proposal_count,
+            source_jd_text=jd_text if source_sha256 is not None else None,
         ),
     )
 
@@ -1307,6 +1368,35 @@ def resolve_job_draft_review_modality(
     ):
         raise ValueError("Reviewable source requirement has no canonical criterion shape.")
 
+    existing = _criterion_with_identity(draft, review.kind, review.subject)
+    if existing is not None:
+        # Issue #84: never a second weight for the same canonical requirement.
+        if semantic_parameters(
+            existing.type, existing.min_years, existing.required_level
+        ) != semantic_parameters(criterion_type, review.min_years, review.required_level):
+            raise ValueError("The same requirement already exists with different parameters.")
+        return draft.model_copy(
+            update={
+                "needs_review": [item for item in draft.needs_review if item.span_id != span_id],
+                "requirements": [
+                    item.model_copy(
+                        update={
+                            "state": RequirementSpanState.SCORABLE,
+                            "criterion_type": criterion_type,
+                            "criterion_id": existing.id,
+                        }
+                    )
+                    if item.span_id == span_id
+                    else item
+                    for item in draft.requirements
+                ],
+                "review_decisions": _with_review_decision(
+                    draft,
+                    span_id=span_id,
+                    decision=SemanticReviewDecisionKind(criterion_type.value),
+                ),
+            }
+        )
     used_ids = {criterion.id for criterion in [*draft.must_have, *draft.preferred]}
     criterion = CriterionIn(
         id=slugify_criterion_label(review.subject, used_ids),
@@ -1338,6 +1428,97 @@ def resolve_job_draft_review_modality(
         ),
     }
     if criterion_type == CriterionType.MUST_HAVE:
+        updates["must_have"] = [*draft.must_have, criterion]
+    else:
+        updates["preferred"] = [*draft.preferred, criterion]
+    return draft.model_copy(update=updates)
+
+
+def _criterion_identity(criterion: CriterionIn) -> tuple[str, str]:
+    return semantic_identity(JDDraftCriterionKind(criterion.kind.value), criterion.value)
+
+
+def _criterion_with_identity(
+    draft: AgentJobDraftToolResult, kind: JDDraftCriterionKind, subject: str | None
+) -> CriterionIn | None:
+    identity = semantic_identity(kind, subject)
+    return next(
+        (
+            criterion
+            for criterion in [*draft.must_have, *draft.preferred]
+            if _criterion_identity(criterion) == identity
+        ),
+        None,
+    )
+
+
+def resolve_job_draft_semantic_conflict(
+    draft: AgentJobDraftToolResult, *, span_id: str, option_index: int
+) -> AgentJobDraftToolResult:
+    """HR chooses ONE server-declared parameter set for a semantic conflict
+    (issue #84). The chosen set becomes one CriterionIn supported by every
+    conflicting span; the choice is recorded for durable provenance. No
+    value is ever chosen automatically."""
+    matches = [
+        item for item in draft.needs_review if item.span_id == span_id and item.conflict_options
+    ]
+    if len(matches) != 1:
+        raise ValueError("Conflicting source requirement was not found.")
+    review = matches[0]
+    if review.acknowledged_excluded:
+        raise ValueError("That review resolution is not allowed for this requirement.")
+    if not 0 <= option_index < len(review.conflict_options):
+        raise ValueError("That review resolution is not allowed for this requirement.")
+    assert review.kind is not None and review.subject is not None
+    conflict_spans = set(review.conflict_span_ids)
+    results = [item for item in draft.requirements if item.span_id in conflict_spans]
+    if len(results) != len(conflict_spans) or any(
+        item.state != RequirementSpanState.NEEDS_HUMAN_REVIEW or not item.text
+        for item in results
+    ):
+        raise ValueError("Source requirement is not awaiting review.")
+    if review.kind != JDDraftCriterionKind.EXPERIENCE and not all(
+        subject_grounded_in_span(review.kind, review.subject, item.text or "") for item in results
+    ):
+        raise ValueError("Reviewable source requirement has no canonical criterion shape.")
+    if _criterion_with_identity(draft, review.kind, review.subject) is not None:
+        raise ValueError("The same requirement already exists with different parameters.")
+    chosen = review.conflict_options[option_index]
+    used_ids = {criterion.id for criterion in [*draft.must_have, *draft.preferred]}
+    criterion = CriterionIn(
+        id=slugify_criterion_label(review.subject, used_ids),
+        kind=CriterionKind(review.kind.value),
+        type=chosen.criterion_type,
+        label=review.subject,
+        value=None if review.kind == JDDraftCriterionKind.EXPERIENCE else review.subject,
+        min_years=chosen.min_years,
+        required_level=chosen.required_level,
+        weight=1.0,
+    )
+    updates: dict[str, object] = {
+        "needs_review": [item for item in draft.needs_review if item.span_id != span_id],
+        "requirements": [
+            item.model_copy(
+                update={
+                    "state": RequirementSpanState.SCORABLE,
+                    "criterion_type": chosen.criterion_type,
+                    "criterion_id": criterion.id,
+                }
+            )
+            if item.span_id in conflict_spans
+            else item
+            for item in draft.requirements
+        ],
+        "conflict_resolutions": [
+            *draft.conflict_resolutions,
+            SemanticConflictResolution(
+                span_ids=list(review.conflict_span_ids),
+                options=list(review.conflict_options),
+                chosen_index=option_index,
+            ),
+        ],
+    }
+    if chosen.criterion_type == CriterionType.MUST_HAVE:
         updates["must_have"] = [*draft.must_have, criterion]
     else:
         updates["preferred"] = [*draft.preferred, criterion]
@@ -1499,6 +1680,27 @@ def _apply_pending_draft_followup(
 
     requested_type = _requested_followup_modality(user_message)
     targets = [criterion for criterion in all_criteria if is_mentioned(criterion)]
+    levels = re.findall(r"(?i)\b(?:a1|a2|b1|b2|c1|c2)\b", user_message)
+    numeric = [
+        float(value.replace(",", ".")) for value in re.findall(r"\d+(?:[.,]\d+)?", folded)
+    ]
+    if not targets and len(levels) >= 2:
+        # "B2-ni C1 et": the old value itself identifies the target, but
+        # only when exactly one criterion currently carries it.
+        targets = [
+            criterion
+            for criterion in all_criteria
+            if criterion.kind == CriterionKind.LANGUAGE
+            and (criterion.required_level or "").casefold() == levels[0].casefold()
+        ]
+    elif not targets and len(numeric) >= 2:
+        # "3 ili 5 et": likewise, exactly one criterion with that duration.
+        targets = [
+            criterion
+            for criterion in all_criteria
+            if criterion.kind in (CriterionKind.SKILL_EXPERIENCE, CriterionKind.DOMAIN_EXPERIENCE)
+            and criterion.min_years == numeric[0]
+        ]
     if (
         not targets
         and requested_type is not None
@@ -1512,82 +1714,117 @@ def _apply_pending_draft_followup(
     if len(targets) != 1:
         return None
     target = targets[0]
+    target_span = next(
+        (item.span_id for item in draft.requirements if item.criterion_id == target.id), None
+    )
+    if target_span is None:
+        return None
 
-    levels = re.findall(r"(?i)\b(?:a1|a2|b1|b2|c1|c2)\b", user_message)
     if target.kind == CriterionKind.LANGUAGE and len(levels) >= 2:
         if (
             target.required_level is None
             or target.required_level.casefold() != levels[0].casefold()
         ):
             return None
-        replacement = target.model_copy(update={"required_level": levels[-1].upper()})
-        return draft.model_copy(
-            update={
-                "draft_id": uuid.uuid4(),
-                "must_have": [
-                    replacement if item.id == target.id else item for item in draft.must_have
-                ],
-                "preferred": [
-                    replacement if item.id == target.id else item for item in draft.preferred
-                ],
-                "modification_source_text": user_message,
-            }
+        return _amended_draft(
+            draft,
+            target=target,
+            span_id=target_span,
+            field=SemanticCriterionAmendmentField.REQUIRED_LEVEL,
+            new_value=levels[-1].upper(),
+            user_message=user_message,
         )
 
     if target.kind in (CriterionKind.SKILL_EXPERIENCE, CriterionKind.DOMAIN_EXPERIENCE):
-        numeric = [
-            float(value.replace(",", ".")) for value in re.findall(r"\d+(?:[.,]\d+)?", folded)
-        ]
         if len(numeric) >= 2 and target.min_years == numeric[0]:
-            replacement = target.model_copy(update={"min_years": numeric[-1]})
-            return draft.model_copy(
-                update={
-                    "draft_id": uuid.uuid4(),
-                    "must_have": [
-                        replacement if item.id == target.id else item for item in draft.must_have
-                    ],
-                    "preferred": [
-                        replacement if item.id == target.id else item for item in draft.preferred
-                    ],
-                    "modification_source_text": user_message,
-                }
+            return _amended_draft(
+                draft,
+                target=target,
+                span_id=target_span,
+                field=SemanticCriterionAmendmentField.MIN_YEARS,
+                new_value=numeric[-1],
+                user_message=user_message,
             )
 
     if requested_type is not None and requested_type != target.type:
-        replacement = target.model_copy(update={"type": requested_type})
-        updated_must_have = [item for item in draft.must_have if item.id != target.id]
-        updated_preferred = [item for item in draft.preferred if item.id != target.id]
-        if requested_type == CriterionType.MUST_HAVE:
-            updated_must_have.append(replacement)
-        else:
-            updated_preferred.append(replacement)
-        target_span = next(
-            (item.span_id for item in draft.requirements if item.criterion_id == target.id),
-            None,
-        )
-        return draft.model_copy(
-            update={
-                "draft_id": uuid.uuid4(),
-                "must_have": updated_must_have,
-                "preferred": updated_preferred,
-                "requirements": _modified_requirement_results(
-                    draft, criterion_id=target.id, criterion_type=requested_type
-                ),
-                "modification_source_text": user_message,
-                "review_decisions": (
-                    _with_review_decision(
-                        draft,
-                        span_id=target_span,
-                        decision=SemanticReviewDecisionKind(requested_type.value),
-                    )
-                    if target_span is not None
-                    else list(draft.review_decisions)
-                ),
-            }
+        return _amended_draft(
+            draft,
+            target=target,
+            span_id=target_span,
+            field=SemanticCriterionAmendmentField.CRITERION_TYPE,
+            new_value=requested_type,
+            user_message=user_message,
         )
     # An explicit no-op or ambiguous direction fails truthfully. It must not
     # mint a fresh draft id that implies a mutation was applied.
     return None
+
+
+_AMENDED_ATTRIBUTE = {
+    SemanticCriterionAmendmentField.CRITERION_TYPE: "type",
+    SemanticCriterionAmendmentField.MIN_YEARS: "min_years",
+    SemanticCriterionAmendmentField.REQUIRED_LEVEL: "required_level",
+}
+
+
+def _amended_draft(
+    draft: AgentJobDraftToolResult,
+    *,
+    target: CriterionIn,
+    span_id: str,
+    field: SemanticCriterionAmendmentField,
+    new_value: object,
+    user_message: str,
+) -> AgentJobDraftToolResult | None:
+    """Apply ONE bounded field change to ONE resolved criterion and append an
+    immutable, ordered, server-owned amendment (issue #84). The amendment is
+    the durable explanation of why the confirmed value differs from the
+    source span; the whole ordered chain is persisted, never only the last."""
+    attribute = _AMENDED_ATTRIBUTE[field]
+    previous = getattr(target, attribute)
+    if previous is None:
+        return None
+    try:
+        replacement = CriterionIn.model_validate(
+            {**target.model_dump(), attribute: new_value}
+        )
+        amendment = SemanticCriterionAmendment(
+            sequence=len(draft.amendments) + 1,
+            criterion_id=target.id,
+            span_id=span_id,
+            field=field,
+            previous_value=encode_amendment_value(field, previous),
+            new_value=encode_amendment_value(field, new_value),
+            source_text=user_message,
+            source_sha256=hashlib.sha256(user_message.encode("utf-8")).hexdigest(),
+        )
+    except ValidationError:
+        return None
+    others_must = [item for item in draft.must_have if item.id != target.id]
+    others_pref = [item for item in draft.preferred if item.id != target.id]
+    if field == SemanticCriterionAmendmentField.CRITERION_TYPE:
+        to_must = replacement.type == CriterionType.MUST_HAVE
+        must_have = [*others_must, replacement] if to_must else others_must
+        preferred = others_pref if to_must else [*others_pref, replacement]
+    else:
+        must_have = [replacement if item.id == target.id else item for item in draft.must_have]
+        preferred = [replacement if item.id == target.id else item for item in draft.preferred]
+    return draft.model_copy(
+        update={
+            "draft_id": uuid.uuid4(),
+            "must_have": must_have,
+            "preferred": preferred,
+            "requirements": (
+                _modified_requirement_results(
+                    draft, criterion_id=target.id, criterion_type=replacement.type
+                )
+                if field == SemanticCriterionAmendmentField.CRITERION_TYPE
+                else list(draft.requirements)
+            ),
+            "modification_source_text": user_message,
+            "amendments": [*draft.amendments, amendment],
+        }
+    )
 
 
 def _configured_provenance(llm: LLMProvider) -> LLMResultProvenance:
@@ -1659,7 +1896,7 @@ async def _finish_turn(
         # context starts with no pointer at all. Browser fields never
         # recreate either.
         latest_draft = pending_drafts[-1]
-        assistant_turn["pending_job_draft"] = latest_draft.model_dump(mode="json")
+        assistant_turn["pending_job_draft"] = pending_draft_payload(latest_draft)
         session_context.active_pending_draft_id = latest_draft.draft_id
     # Durable storage bound (MAX_PERSISTED_AGENT_TURNS) — deliberately NOT
     # the model context window; see save_conversation_turns.

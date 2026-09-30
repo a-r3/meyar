@@ -112,6 +112,29 @@
               </select>
               <button class="button button-secondary" type="submit">Dəqiqləşdirməni yadda saxla</button>
             </form>
+            {% elif review.conflict_options and not review.acknowledged_excluded %}
+            <div class="review-blocking review-conflict">
+              <p><strong>{{ review.subject }}</strong></p>
+              <p>Eyni tələb elanda bir neçə dəfə, fərqli əhəmiyyət və ya parametrlərlə göstərilib: {{ review.requirement }}. Sistem bunlardan birini özü seçmir və tələbi iki dəfə hesablamır. Hansının keçərli olduğunu seçin və ya tələbi sıralamaya daxil etmədən davam edin.</p>
+              {% if draft.can_act %}
+              <form method="post" action="/ui/agent/drafts/{{ draft.draft_id }}/resolve" class="stack-form review-resolution-form">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="span_id" value="{{ review.span_id }}">
+                <label for="review-conflict-{{ loop.index0 }}">Keçərli variantı seçin</label>
+                <select id="review-conflict-{{ loop.index0 }}" name="option" required>
+                  <option value="">Seçin</option>
+                  {% for label in review.conflict_options %}<option value="{{ loop.index0 }}">{{ label }}</option>{% endfor %}
+                </select>
+                <button class="button button-secondary" type="submit">Seçimi yadda saxla</button>
+              </form>
+              <form method="post" action="/ui/agent/drafts/{{ draft.draft_id }}/resolve" class="stack-form review-resolution-form">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="span_id" value="{{ review.span_id }}">
+                <input type="hidden" name="decision" value="exclude">
+                <button class="button button-secondary" type="submit">Bu tələbi sıralamaya daxil etmədən davam et</button>
+              </form>
+              {% endif %}
+            </div>
             {% elif review.blocking and review.acknowledged_excluded %}
             <p><strong>{{ review.requirement }}</strong> — əsas tələb kimi qeyd olunub, lakin sizin qərarınızla avtomatik sıralamaya daxil edilmir.</p>
             {% elif review.blocking %}

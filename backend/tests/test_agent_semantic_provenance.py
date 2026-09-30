@@ -136,8 +136,12 @@ async def test_builder_reconstructs_exact_fragments_for_every_criterion() -> Non
     assert {item.criterion_id for item in provenance.criteria} == {
         c.id for c in _criteria(draft)
     }
+    assert provenance.schema_version == "jd-semantic-provenance-v2"
     for item in provenance.criteria:
-        assert COORDINATED_AZ[item.start_offset : item.end_offset] == item.source_text
+        assert len(item.source_spans) == 1
+        for span in item.source_spans:
+            assert COORDINATED_AZ[span.start_offset : span.end_offset] == span.source_text
+        assert item.origin == item.final
     dumped = provenance.model_dump(mode="json")
     assert COORDINATED_AZ not in str(dumped)  # never the full JD, only fragments
     assert parse_agent_semantic_provenance(dumped) == provenance
@@ -264,11 +268,18 @@ def test_parse_returns_none_for_versions_without_agent_provenance() -> None:
         lambda p: p.update(source_sha256="not-a-digest"),
         lambda p: p.update(model=None),  # MODEL_VALIDATED criteria require a model
         lambda p: p["criteria"].append(dict(p["criteria"][0])),
-        lambda p: p["criteria"][0].update(source_text="x"),
+        lambda p: p["criteria"][0]["source_spans"][0].update(source_text="x"),
         lambda p: p["criteria"][0].update(jd_text="full vacancy text"),
+        lambda p: p["criteria"][0]["final"].update(criterion_type="PREFERRED"),
+        lambda p: p["criteria"][0]["source_spans"].append(
+            dict(p["criteria"][1]["source_spans"][0])
+        ),
         lambda p: p.update(
             review_decisions=[
-                {"span_id": p["criteria"][0]["span_id"], "decision": "EXCLUDED_BY_REVIEWER"}
+                {
+                    "span_id": p["criteria"][0]["source_spans"][0]["span_id"],
+                    "decision": "EXCLUDED_BY_REVIEWER",
+                }
             ]
         ),
     ],
@@ -373,13 +384,13 @@ async def test_confirmed_version_reconstructs_semantic_provenance_and_still_matc
     assert set(by_id) == {criterion.id for criterion in criteria}
     spans = {span.span_id: span for span in analyze_hr_text(VACANCY_MESSAGE).spans}
     for criterion in criteria:
-        record = by_id[criterion.id]
+        (record,) = by_id[criterion.id].source_spans
         span = spans[record.span_id]
         assert (record.start_offset, record.end_offset) == (span.start_offset, span.end_offset)
         assert VACANCY_MESSAGE[record.start_offset : record.end_offset] == record.source_text
         assert criterion.value in record.source_text
     postgres = next(c for c in criteria if c.value == "PostgreSQL")
-    assert by_id[postgres.id].interpretation_source == (
+    assert by_id[postgres.id].source_spans[0].interpretation_source == (
         SemanticInterpretationSource.MODEL_VALIDATED
     )
     # Provenance is audit evidence only: the deterministic scorer consumes the
@@ -465,5 +476,7 @@ async def test_exclusion_is_durable_on_the_version_across_transcript_truncation(
     assert [(d.span_id, d.decision) for d in provenance.review_decisions] == [
         (span.group(1), SemanticReviewDecisionKind.EXCLUDED_BY_REVIEWER)
     ]
-    assert span.group(1) not in {item.span_id for item in provenance.criteria}
+    assert span.group(1) not in {
+        source.span_id for item in provenance.criteria for source in item.source_spans
+    }
     assert [c["value"] for c in version.criteria] == ["Python"]

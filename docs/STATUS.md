@@ -15,7 +15,11 @@ follow-up parity; explicit unsupported-language copy. The review
 correction pass adds durable per-criterion semantic provenance on
 agent-confirmed criteria versions (one nullable JSON column, migration
 `c84a5e2f9d17`, single head) and removes the legacy second semantic
-authority (D-088 amendment). Real-Ollama acceptance of the four mandatory
+authority (D-088 amendment). A second correction pass makes HR follow-up
+amendments durable, ordered provenance (schema `jd-semantic-provenance-v2`,
+no new migration) and adds the canonical collision policy (duplicates score
+once; conflicting importance/duration/level require explicit HR choice).
+Real-Ollama acceptance of the four mandatory
 cases is pending (`REAL_OLLAMA_ACCEPTANCE_PENDING`). Not accepted until
 independent review and owner merge.
 Issues #85, #86, #87, #88 and #50 remain OPEN and untouched; #35/#36/#46
