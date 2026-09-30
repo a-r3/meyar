@@ -3,10 +3,17 @@ import math
 import httpx
 
 from meyar.embedding.provider import (
+    EmbeddingBusyError,
     EmbeddingInvalidOutputError,
     EmbeddingResult,
     EmbeddingTimeoutError,
     EmbeddingUnavailableError,
+)
+from meyar.llm.concurrency import (
+    DEFAULT_INFERENCE_QUEUE_MAX_WAITERS,
+    DEFAULT_INFERENCE_QUEUE_TIMEOUT_SECONDS,
+    InferenceAdmissionError,
+    get_inference_admission,
 )
 from meyar.llm.loopback import build_local_only_async_client, require_loopback_url
 
@@ -32,10 +39,18 @@ class OllamaEmbeddingProvider:
         model: str,
         timeout_seconds: float,
         transport: httpx.AsyncBaseTransport | None = None,
+        max_concurrency: int = 1,
+        max_queued: int = DEFAULT_INFERENCE_QUEUE_MAX_WAITERS,
+        queue_timeout_seconds: float = DEFAULT_INFERENCE_QUEUE_TIMEOUT_SECONDS,
     ) -> None:
         require_loopback_url(base_url, setting_name="MEYAR_OLLAMA_BASE_URL")
         self._base_url = base_url.rstrip("/")
         self._timeout_seconds = timeout_seconds
+        # Issue #85: the SAME process-wide admission policy as
+        # OllamaLLMProvider — one Ollama daemon, one capacity budget.
+        self._max_concurrency = max_concurrency
+        self._max_queued = max_queued
+        self._queue_timeout_seconds = queue_timeout_seconds
         # Injectable only for deterministic offline unit tests of this
         # provider's own HTTP/validation behavior (httpx.MockTransport) —
         # never used in production, where it stays None (real transport).
@@ -46,11 +61,19 @@ class OllamaEmbeddingProvider:
 
     async def embed(self, text: str) -> EmbeddingResult:
         payload = {"model": self.model_name, "prompt": text}
+        admission = get_inference_admission(
+            max_active=self._max_concurrency,
+            max_queued=self._max_queued,
+            queue_timeout_seconds=self._queue_timeout_seconds,
+        )
         try:
-            async with build_local_only_async_client(
-                timeout=self._timeout_seconds, transport=self._transport
-            ) as client:
-                resp = await client.post(f"{self._base_url}/api/embeddings", json=payload)
+            async with admission.slot():
+                async with build_local_only_async_client(
+                    timeout=self._timeout_seconds, transport=self._transport
+                ) as client:
+                    resp = await client.post(f"{self._base_url}/api/embeddings", json=payload)
+        except InferenceAdmissionError as exc:
+            raise EmbeddingBusyError(exc.reason.value) from None
         except httpx.TimeoutException as exc:
             raise EmbeddingTimeoutError(
                 f"Ollama embedding request timed out after {self._timeout_seconds}s."

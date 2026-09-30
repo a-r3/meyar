@@ -4,7 +4,8 @@ from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meyar.embedding.provider import EmbeddingProvider, EmbeddingProviderError
+from meyar.embedding.provider import EmbeddingBusyError, EmbeddingProvider, EmbeddingProviderError
+from meyar.extraction.deferral import ExtractionDeferredError
 from meyar.extraction.evidence import EvidenceValidationError
 from meyar.extraction.identity_service import (
     IdentityExtractionPreconditionError,
@@ -47,6 +48,10 @@ class ReconciliationSummary:
     ready_after: int
     failed: int
     skipped_due_to_limit: int
+    # Issue #85: candidates not processed this run because the shared local
+    # inference gate was busy (QUEUE_FULL/QUEUE_TIMEOUT). Not failures: no
+    # FAILED version was written; a later run retries them.
+    deferred: int = 0
 
 
 async def _is_ready(
@@ -170,6 +175,8 @@ async def _process_one_candidate_document(
                 max_input_chars=max_embedding_input_chars,
             )
             embedded = True
+        except EmbeddingBusyError:
+            raise  # transient: defer the candidate, never count it failed
         except (EmbeddingPreconditionError, EmbeddingProviderError):
             embedded = False
 
@@ -231,6 +238,8 @@ async def process_pending_candidates(
     )
 
     considered = already_ready = processed = ready_after = failed = skipped_due_to_limit = 0
+    deferred = 0
+    inference_busy = False
     seen_documents: set[uuid.UUID] = set()
     pending: list[tuple[uuid.UUID, uuid.UUID, str, bool]] = []
 
@@ -267,6 +276,11 @@ async def process_pending_candidates(
         if limit is not None and processed >= limit:
             skipped_due_to_limit += 1
             continue
+        if inference_busy:
+            # Issue #85: local inference is saturated right now; attempting
+            # more candidates this run would only queue/time out again.
+            deferred += 1
+            continue
 
         processed += 1
         try:
@@ -283,6 +297,14 @@ async def process_pending_candidates(
                 max_embedding_input_chars=max_embedding_input_chars,
             )
             await db.commit()
+        except (ExtractionDeferredError, EmbeddingBusyError):
+            # Transient admission refusal: keep any stage already completed
+            # for this candidate plus the deferral audit; no FAILED version
+            # was minted, so the next run retries exactly what is missing.
+            await db.commit()
+            inference_busy = True
+            deferred += 1
+            continue
         except Exception as exc:
             await db.rollback()
             await record_event(
@@ -306,6 +328,7 @@ async def process_pending_candidates(
         ready_after=ready_after + already_ready,
         failed=failed,
         skipped_due_to_limit=skipped_due_to_limit,
+        deferred=deferred,
     )
 
 

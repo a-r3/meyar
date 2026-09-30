@@ -54,6 +54,13 @@ _MODEL_DECLINED_INTERPRETATION_TEXT = (
     "məhdudiyyəti ola bilər. Tələbi sadələşdirib yenidən cəhd edin.",
 )
 
+# Issue #85: the shared local-inference gate was busy — a transient
+# overload, not an unavailable AI service. Same truthful copy as the agent.
+INFERENCE_BUSY_TEXT = (
+    "MEYAR məşğuldur",
+    "MEYAR hazırda digər sorğuları emal edir. Bir qədər sonra yenidən cəhd edin.",
+)
+
 # Issue #84 (audit M-11): an unsupported input language is stated honestly —
 # never the generic "could not execute without weakening meaning" copy.
 UNSUPPORTED_INPUT_LANGUAGE_TEXT = (
@@ -358,6 +365,11 @@ def planner_outcome_view(
         and PlannerReasonCode.UNSUPPORTED_INPUT_LANGUAGE in plan.reason_codes
     ):
         title, message = UNSUPPORTED_INPUT_LANGUAGE_TEXT
+    elif (
+        plan.outcome == PlannerOutcome.PLANNER_PROVIDER_FAILURE
+        and PlannerReasonCode.INFERENCE_BUSY in plan.reason_codes
+    ):
+        title, message = INFERENCE_BUSY_TEXT
     else:
         title, message = PLANNER_OUTCOME_TEXT[plan.outcome]
     return PlannerOutcomeView(

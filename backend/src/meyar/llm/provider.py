@@ -31,6 +31,25 @@ class ModelSchemaInvalidError(LLMProviderError):
     code = "MODEL_SCHEMA_INVALID"
 
 
+class InferenceBusyError(LLMProviderError):
+    """Issue #85: the process-wide local-inference admission gate rejected
+    the call (queue full, or not admitted within the bounded queue wait).
+
+    A TRANSIENT admission outcome: NO model attempt was made, Ollama is not
+    necessarily unavailable, and nothing about the input failed. It is
+    therefore deliberately NOT a ``ModelUnavailableError``/
+    ``ModelTimeoutError``: callers that persist immutable failure versions
+    must not treat it as a model failure (they defer instead — see
+    meyar.extraction.service.ExtractionDeferredError). Carries only the
+    closed reason code (``QUEUE_FULL``/``QUEUE_TIMEOUT``)."""
+
+    code = "INFERENCE_BUSY"
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(f"Local inference busy: {reason}.")
+
+
 class LLMResultProvenance(BaseModel):
     """Provider-reported metadata for one structured local inference call."""
 

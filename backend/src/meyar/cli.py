@@ -13,6 +13,7 @@ from meyar.db import get_session_factory
 from meyar.embedding.dependency import get_embedding_provider, get_embedding_search_config
 from meyar.embedding.provider import EmbeddingProviderError
 from meyar.evaluation.service import EvaluationInputError, evaluate_and_score_candidate
+from meyar.extraction.deferral import ExtractionDeferredError
 from meyar.extraction.identity_service import (
     IdentityExtractionPreconditionError,
     extract_candidate_identity,
@@ -235,6 +236,13 @@ async def _extract_profile(tenant_id: str, candidate_id: str, document_id: str) 
         except ExtractionPreconditionError as exc:
             await db.commit()
             print(f"Extraction could not run: {exc.code} — {exc}")
+            return
+        except ExtractionDeferredError as exc:
+            await db.commit()
+            print(
+                f"Extraction deferred: {exc.code} ({exc.reason}) — "
+                "no version created; retry later."
+            )
             return
 
         await db.commit()
@@ -480,7 +488,12 @@ async def _reconcile_folder(tenant_id: str, root: str, limit: int | None) -> Non
     print(f"Ready after this run: {reconciliation_summary.ready_after}")
     print(f"Not fully ready (pending retry): {reconciliation_summary.failed}")
     print(f"Skipped due to --limit: {reconciliation_summary.skipped_due_to_limit}")
-    if scan_summary.failed > 0 or reconciliation_summary.failed > 0:
+    print(f"Deferred (local inference busy, retry later): {reconciliation_summary.deferred}")
+    if (
+        scan_summary.failed > 0
+        or reconciliation_summary.failed > 0
+        or reconciliation_summary.deferred > 0
+    ):
         raise SystemExit(1)
 
 
@@ -607,6 +620,13 @@ async def _extract_identity(tenant_id: str, candidate_id: str, document_id: str)
         except IdentityExtractionPreconditionError as exc:
             await db.commit()
             print(f"Identity extraction could not run: {exc.code} — {exc}")
+            return
+        except ExtractionDeferredError as exc:
+            await db.commit()
+            print(
+                f"Identity extraction deferred: {exc.code} ({exc.reason}) — "
+                "no version created; retry later."
+            )
             return
 
         await db.commit()

@@ -10,8 +10,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.core.auth import TenantContext, require_scope
 from meyar.db import get_db
+from meyar.embedding.db_release import DbReleasingEmbeddingProvider
 from meyar.embedding.dependency import get_embedding_provider, get_embedding_search_config
-from meyar.embedding.provider import EmbeddingProvider, EmbeddingProviderError
+from meyar.embedding.provider import EmbeddingBusyError, EmbeddingProvider, EmbeddingProviderError
 from meyar.llm.dependency import get_llm_provider
 from meyar.llm.provider import LLMProvider
 from meyar.schemas.api_search import (
@@ -106,10 +107,16 @@ async def post_search(
             db,
             tenant_id=ctx.tenant_id,
             request=internal_request,
-            embedding_provider=embedding_provider,
+            embedding_provider=DbReleasingEmbeddingProvider(embedding_provider, db),
         )
         views = await build_search_result_views(db, tenant_id=ctx.tenant_id, response=response)
         await db.commit()
+    except EmbeddingBusyError as exc:
+        # Issue #85: shared local-inference gate busy — transient, retryable.
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="INFERENCE_BUSY"
+        ) from exc
     except (SearchRequestError, EmbeddingProviderError) as exc:
         await db.rollback()
         code = exc.code if isinstance(exc, SearchRequestError) else "EMBEDDING_PROVIDER_ERROR"
@@ -137,7 +144,7 @@ async def post_natural_language_search(
             natural_language_request=body.query,
             as_of_date=body.as_of_date,
             embedding_config=embedding_config,
-            embedding_provider=embedding_provider,
+            embedding_provider=DbReleasingEmbeddingProvider(embedding_provider, db),
         )
         search_api_response = None
         if planned.search_response is not None:

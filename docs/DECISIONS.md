@@ -7043,3 +7043,213 @@ A-6. **Canonical transport newlines and explicit vacancy title.** Real
   a header the existing model-title grounding rule and generic fallback are
   unchanged. No first-line heuristic. Title is not part of provenance or
   scoring.
+
+## D-089 — Agent inference transaction boundary and overload control (issue #85)
+
+Status: proposed with the #85 PR; not accepted until owner acceptance.
+
+Context: the final independent audit of `main` @ `096afb8` (H-2, agent part
+of L-5) and a synthetic reproduction on `650492866572` showed that
+`POST /ui/agent` took the durable conversation row lock
+(`SELECT … FOR UPDATE`, #80) and kept that pooled PostgreSQL connection and
+transaction open for the WHOLE turn. That included the wait on the
+process-wide inference semaphore (unbounded waiters, unbounded wait) and
+every local-model HTTP call (up to `llm_timeout_seconds` each, several per
+turn). The request session was also already in a transaction from the UI
+auth dependency's reads. With a slow model, N concurrent model-bound turns
+held N connections. Once the pool (SQLAlchemy defaults 5 + 10 overflow)
+was exhausted, unrelated routes (`/ui/library`, candidate detail, login)
+failed after `pool_timeout`, `/api/v1/health` still said ok, and queued
+turns kept running long after their clients had left. Pre-fix reproduction
+(`tests/test_agent_inference_boundary.py`, pool 2 + 0, concurrency 1):
+
+- the agent request held 1 connection while the model call was blocked;
+- with 22 slow turns on distinct conversations, `GET /ui/library` did not
+  answer within the 5 s budget.
+
+Decision:
+
+1. **Transaction boundary (`meyar.agent.turn_boundary`).** No pooled
+   connection, SQL transaction or row lock is held while a turn waits for
+   admission or runs a local model or embedding call.
+   - **Phase A** (`reserve_agent_turn[_waiting]`): lock the conversation
+     row, check ownership against the live `UIContext` principal, get or
+     create this BrowserSession's context, and write a server-owned
+     reservation.
+   - **Orchestration** (`execute_agent_turn`) runs on plain snapshots
+     (`ConversationSnapshot`, `TurnSessionState`), never on live ORM
+     authority.
+   - `BoundaryLLM` and `BoundaryEmbedding` wrap every provider call:
+     `leave_db()` COMMITs first (the connection goes back to the pool),
+     and `reenter()` then re-locks and revalidates.
+   - **Phase B**: `reenter()` once more, then `apply_agent_turn_commit`
+     appends the (user, assistant) pair to the current transcript, sets
+     the live pointers, applies the title transition, audits completion,
+     and clears the reservation in one COMMIT.
+   - Tool-phase DB writes that commit early are only append-only audit
+     events and new `AgentResultSet` rows. Those rows stay inert until a
+     committed live pointer references them, so an abandoned turn leaves
+     no dangling authority.
+   - A turn that makes no model call never leaves its Phase A transaction.
+     Deterministic-only turns keep the short, simple locked path, and any
+     path that may call a model cannot carry a lock into the call.
+   - `run_agent_turn` keeps its single-transaction contract for
+     service-level callers (it now composes execute + apply).
+   - `/ui/search` commits its read-only auth transaction before NL planning.
+     The API NL-search path already committed in its auth dependency.
+2. **Turn reservation / version (migration `e5d7a3c91b04`).**
+   `agent_conversations` gains three columns:
+   - `turn_version`, bumped by every transcript write
+     (`save_conversation_turns`, `sync_last_turn_display_text`);
+   - `active_turn_id` and `active_turn_expires_at`, set together (CHECK).
+
+   The reservation token is a server-generated UUID and is never sent to
+   the client. Re-entry and Phase B require the same token, an unchanged
+   `turn_version`, and the same context row, `context_epoch`,
+   `active_result_set_id` and `active_pending_draft_id` as at reservation.
+   Every re-entry refreshes the expiry. `agent_turn_reservation_seconds`
+   (default 600, validated to exceed queue timeout + LLM timeout) only
+   matters when a process died mid-turn.
+3. **Same-conversation serialization (#80 preserved).** At most ONE
+   accepted in-flight turn per conversation. A second turn on a
+   conversation with a live reservation is refused IMMEDIATELY with the
+   truthful "still processing" outcome (409). Its text is shown back and
+   nothing is persisted. There is deliberately no hidden wait queue, so
+   ordering never depends on poll or scheduling timing; the HR user
+   resends after the first turn finishes.
+   - Result: no lost update, no duplicate execution of a reserved turn,
+     and commit order = acceptance order.
+   - Each BrowserSession keeps its own live context.
+   - Different conversations never share a reservation. They contend only
+     for global inference capacity, which is intentional.
+   - Deterministic-only turns never release the row lock, so a concurrent
+     request simply waits on that short lock (PostgreSQL lock order).
+4. **Bounded inference admission (`meyar.llm.concurrency.InferenceAdmission`).**
+   One process-wide gate replaces the plain `asyncio.Semaphore`. It is
+   shared by EVERY request-serving local-model execution:
+   `OllamaLLMProvider._chat` AND `OllamaEmbeddingProvider.embed`. It is one
+   Ollama daemon, so there is one capacity budget. Health checks are
+   never gated.
+   - Settings, all validated: `inference_concurrency` (1..16, default 1),
+     `inference_queue_max_waiters` (0..64, default 4) and
+     `inference_queue_timeout_seconds` (0..300, default 30). Both provider
+     factories pass these same fields.
+   - The singleton records its policy. A provider presenting a different
+     policy raises `InferenceAdmissionPolicyMismatchError` instead of
+     silently sharing, or splitting, the budget.
+   - FIFO admission; a full queue is rejected immediately (`QUEUE_FULL`).
+   - A waiter not admitted in time is rejected (`QUEUE_TIMEOUT`).
+   - Accounting is cancellation-safe: a cancelled waiter leaves the queue,
+     and a slot handed to a waiter that is cancelled in the same tick is
+     given back. Only the gate's own counters are authority.
+   - Refusals surface as `InferenceBusyError` (LLM) and
+     `EmbeddingBusyError` (embedding), both with code `INFERENCE_BUSY`.
+     This is a TRANSIENT admission outcome, deliberately distinct from
+     `MODEL_UNAVAILABLE`, `MODEL_TIMEOUT` and `MODEL_SCHEMA_INVALID`:
+     no model attempt happened.
+   - The agent boundary maps both to `AgentInferenceBusyError`, which is
+     deliberately not an `LLMProviderError`, so no planner or agent
+     fallback can turn it into a degraded "successful" answer.
+   - Non-agent callers:
+     - **Profile and identity extraction** DEFER. They raise
+       `ExtractionDeferredError`, write NO `CandidateProfileVersion` or
+       `CandidateIdentityVersion`, and audit
+       `CANDIDATE_{PROFILE,IDENTITY}_EXTRACTION_DEFERRED` with ids and
+       codes only. A transient overload therefore never creates an
+       immutable FAILED version that would supersede the accepted
+       COMPLETED one (profile authority follows the highest version).
+     - **Folder reconciliation** keeps any stage already completed and
+       counts the candidate as `deferred`, never `failed`. It stops
+       attempting further candidates in that run, and the next run
+       retries exactly what is missing.
+     - **Embedding creation** never persists a failure anyway. It audits
+       `CANDIDATE_EMBEDDING_DEFERRED`.
+     - **CLI** prints a deferral and exits non-zero.
+     - **NL planner** returns `PLANNER_PROVIDER_FAILURE` with reason
+       `INFERENCE_BUSY`. `attempt_count` excludes the refused attempt,
+       and the UI shows the busy copy.
+     - **`/ui/search` and `/api/v1/search`** map an embedding busy to the
+       busy copy (503) or `503 INFERENCE_BUSY`.
+     - Because the query embedding can now wait on the shared gate, the
+       non-agent search routes wrap the embedding provider in
+       `DbReleasingEmbeddingProvider`, which commits before `embed()`. No
+       pooled connection is held while it waits or runs.
+5. **Busy UX.** A rejected turn is abandoned: its reservation is cleared,
+   and no transcript entry or fabricated answer is written.
+   - HR sees "MEYAR hazırda digər sorğuları emal edir. Bir qədər sonra
+     yenidən cəhd edin." (503). Their own text is still shown.
+   - Audit records only `agent.turn.busy {reason_code}`.
+   - No queue, pool, semaphore, exception or Ollama detail is rendered.
+6. **Stale authority fails closed.** Any re-entry or Phase B mismatch
+   raises `TurnAuthorityLostError` with a closed `TurnStaleReason`
+   (`PRINCIPAL_REVOKED`, `CONVERSATION_UNAVAILABLE`, `RESERVATION_LOST`,
+   `CONVERSATION_CHANGED`, `CONTEXT_CHANGED`).
+   - Nothing is committed, the turn's own reservation is cleared, and
+     `agent.turn.stale {reason_code}` is audited.
+   - A revoked principal (disabled user or membership, revoked or expired
+     BrowserSession) gets the same 303-to-login as any request after
+     revocation.
+   - Every other reason gets truthful copy (409): the conversation changed,
+     nothing was applied, please resend.
+   - Never replayed against new context, never tenant-wide, never with old
+     candidate refs or revived draft authority.
+7. **Cancellation and abandoned clients.** The route runs orchestration
+   under `run_until_client_disconnects`, which polls Starlette
+   `Request.is_disconnected()` every 0.5 s.
+   - On disconnect, the work is cancelled: queued admission is left, the
+     in-flight local HTTP call is cancelled, and slots are released by
+     their context managers. No detached task survives; both tasks are
+     cancelled and awaited in `finally`.
+   - A shielded `abandon_reserved_turn` clears the reservation. If even
+     that fails, the reservation expires by TTL.
+   - Worst case: a queued wait is bounded by the queue timeout. An active
+     call is cancelled at the next disconnect poll (≤ 0.5 s). If the server
+     cannot observe the disconnect, the turn still ends within its own
+     bounds (bounded model calls × `llm_timeout_seconds`, each wait ≤ the
+     queue timeout). Ollama itself may finish computing a cancelled
+     request server-side; MEYAR does not wait for or use it.
+8. **Liveness vs readiness (boundary with #46).** `GET /api/v1/health`
+   stays liveness only and never reflects AI or DB load, so a busy model
+   never triggers a restart.
+   - New minimal `GET /api/v1/health/ready`
+     (`meyar.core.saturation.probe_saturation`) returns 200
+     `{"status":"ready"}`, or 503 with closed reasons:
+     - `INFERENCE_SATURATED`: all slots busy and the queue full,
+       continuously for `inference_saturation_grace_seconds` (default 10);
+     - `DB_POOL_SATURATED`: every pooled connection is checked out.
+   - It is process-local: no DB query, no queue contents, no figures, no
+     user or candidate data.
+   - DB/migration/storage/model reachability readiness remains #46.
+9. **DB pool policy.** `make_engine` now passes explicit, validated
+   `db_pool_size` (5), `db_max_overflow` (10) and `db_pool_timeout_seconds`
+   (30). These equal SQLAlchemy's previous implicit defaults, so there is
+   no behaviour change, only a reviewable contract. With the boundary
+   above, the pool bounds concurrent DB work, not concurrent AI work. #85
+   is deliberately NOT solved by enlarging the pool.
+
+Early-commit side effects (independent review correction pass). While a
+turn waits on the model, `leave_db()` commits only the rows in this table.
+Nothing else becomes authoritative before Phase B. No existing row is
+updated before Phase B.
+
+| Operation | Rows written | Committed before Phase B? | Authoritative / live? | Safe if the turn becomes stale? |
+|---|---|---|---|---|
+| Phase A reservation | `agent_conversations.active_turn_id/expires_at` | yes (first `leave_db`) | reservation only | yes: cleared by `abandon_reserved_turn`, else TTL |
+| Session context get/create + touch | new `agent_conversation_session_contexts` row (clean: no pointers) or `updated_at` | yes | clean context only | yes: identical to opening the conversation |
+| Entry routing / tool audit | `audit_events` (`agent.entry.*`, `agent.tool.*`) | yes | no (append-only) | yes: truthful record of what ran |
+| NL planning audit | `audit_events` (`SEARCH_PLAN_*`) | yes | no | yes |
+| Search execution audit | `audit_events` (`CANDIDATE_SEARCH_EXECUTED`) | yes | no | yes |
+| Search result set | new `agent_result_sets` + members, `agent.result_set.created` | yes | NO: only the session context pointer (written in Phase B) makes a set live | yes: an inert orphan; `resolve_active_candidate_ref` requires the live pointer + session + conversation + epoch (regression-tested) |
+| Refinement result set | new `agent_result_sets` (REFINEMENT) + members, `agent.result_set.refined` | yes | NO (same as above) | yes |
+| Reference / refine rejection audit | `audit_events` | yes | no | yes |
+| Transcript, title kind, `turn_version` | `agent_conversations` | NO (Phase B only) | yes | n/a |
+| Live ResultSet / pending-draft pointers | `agent_conversation_session_contexts` | NO (Phase B only) | yes | n/a |
+| `agent.turn.completed` | `audit_events` | NO (Phase B only) | no | n/a |
+
+Non-scope: #86 (ResultSet corpus snapshot scalability), #87 (session
+revocation / request integrity / PRG / idempotency), #88 (Agent Core v2), #50
+(candidate Q&A), #46 (full readiness design), #20/#36 (target-host
+benchmarks). No new process, worker, queue service, Kafka, Celery or Redis.
+The local-only inference boundary (`LLMProvider`, loopback Ollama), tenant
+isolation, BrowserSession/ResultSet/draft authority, deterministic scoring
+and CandidateIdentity exclusion are unchanged.

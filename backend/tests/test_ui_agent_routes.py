@@ -3636,20 +3636,17 @@ async def test_real_ui_agent_route_serializes_concurrent_same_session_refinement
 
     app.dependency_overrides[get_db] = _round_robin_get_db
 
-    loop = asyncio.get_event_loop()
-    started = loop.time()
+    messages = ("bunlardan ilk 2", "bunlardan SQL bilənlər")
     try:
-        response_1, response_2 = await asyncio.gather(
-            # Model-routed on purpose (a bare "ilk 2" is server-routed and
-            # would skip the delayed model call this test relies on).
-            client.post("/ui/agent", data={"message": "bunlardan ilk 2", "csrf_token": csrf}),
-            client.post(
-                "/ui/agent",
-                data={"message": "bunlardan SQL bilənlər", "csrf_token": csrf},
-            ),
+        # Model-routed on purpose (a bare "ilk 2" is server-routed and
+        # would skip the delayed model call this test relies on).
+        responses = await asyncio.gather(
+            *(
+                client.post("/ui/agent", data={"message": message, "csrf_token": csrf})
+                for message in messages
+            )
         )
     finally:
-        elapsed = loop.time() - started
         await engine_a.dispose()
         await engine_b.dispose()
 
@@ -3658,9 +3655,18 @@ async def test_real_ui_agent_route_serializes_concurrent_same_session_refinement
 
         app.dependency_overrides[get_db] = _restore_get_db
 
-    assert response_1.status_code == 200
-    assert response_2.status_code == 200
-    assert elapsed >= 0.28
+    # issue #85 (D-089): at most ONE accepted in-flight turn per
+    # conversation. The concurrent second turn is refused immediately with
+    # truthful copy (never queued/reordered, never executed), then retried
+    # once the first has committed — so the chain is still R0 -> R1 -> R2.
+    assert sorted(response.status_code for response in responses) == [200, 409]
+    rejected = responses[0] if responses[0].status_code == 409 else responses[1]
+    assert "əvvəlki sorğu hələ emal olunur" in rejected.text
+    retried_message = messages[0] if rejected is responses[0] else messages[1]
+    retry = await client.post(
+        "/ui/agent", data={"message": retried_message, "csrf_token": csrf}
+    )
+    assert retry.status_code == 200
 
     await db_session.refresh(conversation)
     refined_events = (

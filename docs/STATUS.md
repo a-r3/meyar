@@ -2,6 +2,25 @@
 
 ## Current phase
 
+**Current issue #85 working baseline:** accepted `main` is
+`650492866572feaed2b890eded7fbbcb4fe1f400` (PR #89 merged; #84 closed).
+The #85 PR proposes the agent inference transaction boundary and overload
+control (D-089): no DB connection, transaction or row lock is held while an
+agent turn waits for or runs local inference (phase A reservation → model
+calls outside transactions → phase B re-lock + revalidation), a server-owned
+turn reservation + `turn_version` (migration `e5d7a3c91b04`, single head)
+keeps same-conversation turns serialized, a bounded process-wide inference
+admission gate (max active / max queued / finite queue wait), shared by LLM
+and embedding calls, returns an HR-safe BUSY outcome instead of exhausting
+the pool (a busy gate defers extraction — it never mints a FAILED profile or
+identity version), a second concurrent turn on the same conversation is
+refused immediately with truthful copy, stale authority fails
+closed, abandoned clients cancel their queued/active work, and a minimal
+process-local `GET /api/v1/health/ready` reports serious saturation while
+`/api/v1/health` stays liveness only (full readiness remains #46). Not
+accepted until independent review and owner merge. Issues #86, #87, #88
+and #50 remain OPEN and untouched; #35/#36/#46 remain OPEN.
+
 **Current issue #84 working baseline:** accepted `main` is
 `096afb8caec18750f27499f20dc9ceeb00981102` (PR #83 merged; #80 closed).
 Branch `feat/84-jd-semantic-canonicalization` proposes the post-audit JD

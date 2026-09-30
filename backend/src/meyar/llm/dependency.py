@@ -12,4 +12,6 @@ def llm_provider_from_settings(settings: Settings) -> OllamaLLMProvider:
         model=settings.ollama_model,
         timeout_seconds=settings.llm_timeout_seconds,
         max_concurrency=settings.inference_concurrency,
+        max_queued=settings.inference_queue_max_waiters,
+        queue_timeout_seconds=settings.inference_queue_timeout_seconds,
     )

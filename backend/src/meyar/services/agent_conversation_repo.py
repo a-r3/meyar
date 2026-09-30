@@ -11,8 +11,10 @@ all of them at the data-access layer. A foreign/missing conversation id is
 indistinguishable from a nonexistent one (both return ``None``)."""
 
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Protocol
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -502,10 +504,18 @@ def bound_persisted_turns(turns: list[dict]) -> list[dict]:
     return turns[-MAX_PERSISTED_AGENT_TURNS:]
 
 
+def _bump_turn_version(conversation: AgentConversation) -> None:
+    """Every transcript write advances ``turn_version`` (issue #85, D-089):
+    a turn that released its row lock for local inference commits only if
+    the transcript it was built on is still the current one."""
+    conversation.turn_version = (conversation.turn_version or 0) + 1
+
+
 async def save_conversation_turns(
     db: AsyncSession, conversation: AgentConversation, *, turns: list[dict]
 ) -> None:
     conversation.turns = bound_persisted_turns(turns)
+    _bump_turn_version(conversation)
     await db.flush()
 
 
@@ -533,11 +543,37 @@ async def sync_last_turn_display_text(
         },
     ]
     conversation.turns = turns
+    _bump_turn_version(conversation)
     await db.flush()
 
 
+class TranscriptView(Protocol):
+    """Read-only transcript owner: the ORM row or an immutable snapshot
+    (meyar.agent.turn_boundary.ConversationSnapshot)."""
+
+    @property
+    def id(self) -> uuid.UUID: ...
+
+    @property
+    def tenant_id(self) -> uuid.UUID: ...
+
+    @property
+    def turns(self) -> Sequence[dict]: ...
+
+
+class PendingDraftContextView(Protocol):
+    @property
+    def tenant_id(self) -> uuid.UUID: ...
+
+    @property
+    def conversation_id(self) -> uuid.UUID: ...
+
+    @property
+    def active_pending_draft_id(self) -> uuid.UUID | None: ...
+
+
 def _find_pending_payload(
-    conversation: AgentConversation, *, draft_id: uuid.UUID
+    conversation: TranscriptView, *, draft_id: uuid.UUID
 ) -> AgentJobDraftToolResult | None:
     for turn in reversed(conversation.turns):
         payload = turn.get("pending_job_draft")
@@ -553,8 +589,8 @@ def _find_pending_payload(
 
 
 def get_active_pending_job_draft(
-    conversation: AgentConversation,
-    session_context: AgentConversationSessionContext | None,
+    conversation: TranscriptView,
+    session_context: PendingDraftContextView | None,
 ) -> AgentJobDraftToolResult | None:
     """The ONLY pending-draft lookup used for authority. Requires the live
     session context to belong to this conversation and to point at a draft

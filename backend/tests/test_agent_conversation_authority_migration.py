@@ -28,8 +28,9 @@ BASE_URL = ADMIN_DATABASE_URL.rsplit("/", 1)[0]
 ADMIN_URL = f"{BASE_URL}/postgres"
 PRIOR_HEAD = "543c60f7efc5"
 NEW_HEAD = "b7e3c9d41f28"
-# Current single Alembic head (issue #84 chains c84a5e2f9d17 on NEW_HEAD).
-CURRENT_HEAD = "c84a5e2f9d17"
+# Current single Alembic head (issue #84 chains c84a5e2f9d17 on NEW_HEAD;
+# issue #85 chains e5d7a3c91b04 on that).
+CURRENT_HEAD = "e5d7a3c91b04"
 
 TENANT = "00000000-0000-0000-0000-0000000080a1"
 OTHER_TENANT = "00000000-0000-0000-0000-0000000080a2"
