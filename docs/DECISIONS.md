@@ -7552,3 +7552,117 @@ merged. Accepted baseline: `ac9a249359c9a5dcf417b4e3f269a2c0b92b3ab0`.
    conversations or sessions. Downgrade refuses to erase nonempty durable
    auth/submission tables, and revokes all BrowserSessions before removing
    security stamps when representable. #88 and #50 remain out of scope.
+
+## D-092 — Agent Core v2 task/dialogue/capability architecture (issue #88)
+
+**Status: ACCEPTED DESIGN / IMPLEMENTATION NOT STARTED.** Independently
+reviewed and accepted at design head `dfc7636b1c0b788024c28d17f2b913784b5a897c`.
+No code exists yet. #88 remains OPEN, and implementation begins only after
+the owner merges the design PR. Full design: `docs/AGENT_CORE_V2_DESIGN.md`. Audited baseline:
+`main` @ `fb03477a4b4c3ec4698b7294f2589fbbbeafa4e7` (#84–#87 closed).
+#88 stays open; #50 is out of scope.
+
+1. **Authority.** The hierarchy (DB ownership > live BrowserSession/ResultSet
+   /mutation authority > deterministic services > capability execution >
+   evidence > structured task state > transcript/model context > model) is
+   preserved. The model proposes goals, bounded plans, ordinals and closed
+   clarification answers. It never authorizes candidates, ResultSets,
+   drafts, tenant/session, scopes, scores, dates or confirmation.
+2. **State.** Two new BrowserSession-context-bound tables:
+   - `agent_tasks`: closed task_type/status/phase plus a versioned
+     `AgentTaskStateV1` with closed codes only. A row is persisted only when
+     a turn ends waiting.
+   - `agent_clarifications`: source-bound by transcript `turn_id` +
+     SHA-256 + exact offsets + policy versions + `created_turn_version`.
+     No text is copied.
+
+   There is one new live pointer, `active_clarification_id`, on the session
+   context. Plans are not persisted; plan provenance goes to audit. Nothing
+   survives into a new BrowserSession as live authority.
+
+   **Two independent waiting lanes** exist per session context and may
+   coexist:
+   - the dialogue lane: ≤1 WAITING_CLARIFICATION task, pointer
+     `active_clarification_id`;
+   - the mutation-confirmation lane: ≤1 WAITING_CONFIRMATION vacancy task,
+     pointer `active_pending_draft_id`.
+
+   Clarifications, searches and lookups never cancel lane B. Only a new
+   pending draft replacing the pointer does (T11). Confirmation never
+   cancels lane A. With both lanes live, clarification resolution runs
+   before the pending-draft amendment branch. The model sees only
+   `waiting_clarification` {task_type, phase} | null and
+   `pending_vacancy_confirmation` {present}, never ids.
+3. **Resumable clarification (M-8).**
+   - SEARCH_OR_VACANCY and VACANCY_SOURCE_REQUIRED are server-typed.
+   - The next message is resolved in a fixed order: button (exact) → strict
+     whole-message closed-label table → clear new task (supersede) → local
+     classifier returning exactly one allowed value, NEW_REQUEST or UNCLEAR.
+   - UNCLEAR re-asks (≤2 attempts) and never executes.
+   - A resolved answer resumes the **original bound source** through the
+     existing forced search / JD-draft paths.
+   - A clarification is answerable only on the next transcript write, within
+     its TTL (default 1800 s), in the same session context and epoch.
+     Superseded and expired clarifications are terminal.
+4. **Capability registry.**
+   - A strict `CapabilityName` enum and a `CapabilityDefinition` covering
+     schemas, scopes, real side effect, execution mode, proposability, live
+     context, confirmation, content and identity policy, and a server-bound
+     executor.
+   - Each Ollama call gets an enum subset of what is offered.
+   - The initial seven capabilities wrap the existing services unchanged.
+   - CREATE_JOB and RANK_JOB_CANDIDATES are `HUMAN_ACTION_ONLY`. Ranking
+     writes Evaluation rows, so it is recorded as DERIVED_RECORDS, not
+     read-only.
+5. **Plans.**
+   - `agent-plan-v1` with `extra=forbid`: no ids, scopes, confirmation,
+     dates, scores, and no model-authored search/filter/topic text or
+     numbers.
+   - At most 3 steps (`min(3, agent_max_tool_calls)`).
+   - One planner call plus one repair, and no post-tool re-decision loop.
+   - **Source grounding.** SEARCH/REFINE inputs are the whole canonical
+     message or exact, unique quotes of it. The server resolves offsets and
+     hashes. Every material requirement must be covered by some grounded
+     span, prohibited content forces WHOLE_MESSAGE, limits and ordinals are
+     parsed by closed server parsers from grounded quotes, and the evidence
+     topic is a grounded quote or absent. The planner still normalizes
+     source-bound text into filters; faithfulness is enforced before it.
+   - **Validation has two layers.**
+     - Layer 1 is static and whole-plan: schema, offered capabilities,
+       length, duplicates, scopes, task type, grounding, prohibited content,
+       dependency shape, pre-existing live context, HUMAN_ACTION_ONLY. Any
+       failure means **zero execution**.
+     - Layer 2 is dynamic and runs before each step: a producer succeeded,
+       the actual count supports the ordinal, ResultSet/member authority is
+       current, and the executor's own checks pass.
+   - **v1 plans are atomic.** A later step failing gives `PLAN_INCOMPLETE`.
+     No plan-produced pointer is activated (inert ResultSets stay inert),
+     no successful task transition is recorded, the turn completes with
+     truthful fixed copy, and bounded attempt audit is kept. Step
+     criticality is deferred.
+6. **Transactions.**
+   - The #85 boundary is unchanged: no DB connection or lock is held during
+     inference.
+   - Task and clarification changes are staged in `AgentTurnCommit`.
+   - Phase B locks in the order principal → conversation → context →
+     clarification → task → submission and commits everything once.
+   - #87 replay protection is preserved, with UNIQUE submission-id columns
+     as the backstop.
+7. **Deterministic rules.** Rules are kept for safety and authority
+   boundaries. `intent_routing.py` regexes and `_FOLLOWUP_RE` are frozen as
+   the general-understanding layer and do not grow. The capability layer is
+   language-neutral. Claimed input languages are AZ, EN and mixed AZ/EN;
+   Russian is not claimed.
+8. **Migration shape.** Additive tables, a column, and CHECK/partial-unique
+   constraints after `a87d4c6e2b19`. No history is fabricated. Downgrade is
+   representable, drops only session working state, and keeps pending-draft
+   authority intact. No revision is assigned in the design PR.
+9. **Slices.** Implementation proceeds in three slices, only after owner
+   merge of the accepted design:
+   - A: persistence + resumable clarification;
+   - B: registry + validator, behaviour-preserving;
+   - C: model plan contract + full grounding contract + retirement of
+     `AgentDecision` and the loop.
+
+   Slice B MUST pass WHOLE_MESSAGE instead of the model's `search_query`
+   for model-routed searches.
