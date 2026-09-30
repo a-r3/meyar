@@ -243,7 +243,10 @@ async def test_legacy_completed_python_claim_with_excel_only_evidence_is_not_aut
     assert evaluation.status == "FAILED"
     assert evaluation.error_code == "PROFILE_EVIDENCE_UNSUPPORTED"
     assert evaluation.id != legacy_evaluation.id
-    assert agent_result.outcome == AgentTurnOutcome.CANDIDATE_REF_NOT_FOUND
+    # issue #86: a member whose profile no longer passes professional
+    # evidence authority is member-snapshot STALE (fail closed, truthful
+    # "re-run the search" copy) — never served, never NOT_FOUND-probed.
+    assert agent_result.outcome == AgentTurnOutcome.RESULT_SET_STALE
     assert agent_result.tool_results[0].profile is not None
     assert agent_result.tool_results[0].profile.found is False
     assert detail is not None

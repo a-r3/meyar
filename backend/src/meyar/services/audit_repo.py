@@ -88,3 +88,24 @@ async def record_event(
     db.add(event)
     await db.flush()
     return event
+
+
+async def record_events(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    event_type: str,
+    metadata_rows: list[dict],
+) -> None:
+    """Batched ``record_event`` for one event type (issue #86 bounded
+    retention): the same privacy guard per row, one flush — so N events
+    cost one batched INSERT, not N round trips."""
+    for metadata in metadata_rows:
+        _assert_metadata_is_privacy_safe(metadata)
+    db.add_all(
+        [
+            AuditEvent(tenant_id=tenant_id, event_type=event_type, event_metadata=metadata)
+            for metadata in metadata_rows
+        ]
+    )
+    await db.flush()

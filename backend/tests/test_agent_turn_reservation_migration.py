@@ -223,7 +223,9 @@ def test_expired_reservation_does_not_block_clean_roundtrip(monkeypatch) -> None
         asyncio.run(_admin(f'DROP DATABASE IF EXISTS "{name}"'))
 
 
-def test_single_head_is_the_turn_reservation_revision() -> None:
+def test_single_head_chains_through_the_turn_reservation_revision() -> None:
     script = ScriptDirectory.from_config(_config())
-    assert script.get_heads() == [NEW_HEAD]
+    # issue #86 (D-090) chains f3a9c6d2e815 directly on this revision.
+    assert script.get_heads() == ["f3a9c6d2e815"]
+    assert script.get_revision("f3a9c6d2e815").down_revision == NEW_HEAD
     assert script.get_revision(NEW_HEAD).down_revision == PRIOR_HEAD

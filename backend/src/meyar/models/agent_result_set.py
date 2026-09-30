@@ -43,8 +43,10 @@ class AgentResultSet(Base):
     one ``AgentResultSet`` row: the one the BrowserSession-bound
     AgentConversationSessionContext's ``active_result_set_id`` currently
     points at (issue #80), and only while every one of tenant/session/
-    conversation/context-epoch/expiry/corpus-freshness still holds
-    (see meyar.services.agent_result_set_repo.resolve_active_candidate_ref).
+    conversation/context-epoch/expiry still holds AND the referenced
+    member's own snapshot authority is unchanged (issue #86 — an immutable
+    search snapshot, never a live mirror of the tenant corpus; see
+    meyar.services.agent_result_set_repo.resolve_active_candidate_ref).
     A REFINEMENT row resolves through the EXACT SAME check — it is just
     another AgentResultSet row, never a second authority definition.
 
@@ -114,11 +116,17 @@ class AgentResultSet(Base):
     search_policy_version: Mapped[str] = mapped_column(String(64), nullable=False)
     search_mode: Mapped[str] = mapped_column(String(32), nullable=False)
     result_count: Mapped[int] = mapped_column(Integer, nullable=False)
-    # sha256 over sorted (candidate_id, current_profile_version_id[,
-    # compatible_embedding_version_id]) tuples for this tenant/mode at
-    # creation time — never over profile content/CV text/CandidateIdentity.
-    # See meyar.services.agent_result_set_repo.compute_corpus_fingerprint.
-    corpus_fingerprint_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    # LEGACY (issue #86, docs/DECISIONS.md D-090): a sha256 over the whole
+    # tenant's current searchable corpus, recorded by ResultSets created
+    # before #86. It is no longer computed, compared or trusted: validity is
+    # member-scoped (``snapshot_policy_version``). Kept NULL for new rows and
+    # left untouched on old rows (historical provenance, never fabricated).
+    corpus_fingerprint_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # issue #86: the explicit policy that judges this row's validity —
+    # ``member-snapshot-v1``: ownership + expiry + each member's OWN current
+    # professional authority (meyar.services.agent_result_set_repo.
+    # validate_member_snapshots). Unrelated corpus changes never stale it.
+    snapshot_policy_version: Mapped[str] = mapped_column(String(32), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -148,10 +156,10 @@ class AgentResultSetMember(Base):
     relationship. A later hard candidate delete (meyar.services.
     candidate_service.delete_candidate_cascade) must never be blocked by,
     and must never cascade-delete or silently renumber, a historical
-    membership row here — the corpus-fingerprint staleness check (see
-    AgentResultSet.corpus_fingerprint_sha256) is what detects a member
-    whose candidate/profile/embedding no longer exists or is no longer
-    current, not a DB foreign key."""
+    membership row here — member-scoped snapshot validation (issue #86,
+    meyar.services.agent_result_set_repo.validate_member_snapshots) is what
+    detects a member whose candidate/profile/embedding no longer exists or
+    is no longer current, not a DB foreign key."""
 
     __tablename__ = "agent_result_set_members"
     __table_args__ = (

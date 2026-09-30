@@ -194,7 +194,10 @@ unlabeled number but never guesses that an arbitrary identifier is a phone.
   `context_epoch` (bumped on every "Yeni söhbət" reset), and bounded by the
   `AgentResultSet`'s own `expires_at` (tied to the owning `BrowserSession`).
   A tenant/session/epoch mismatch, expiry, ordinal out of range, or a
-  corpus-fingerprint mismatch all fail closed to a non-identifying outcome
+  member-snapshot mismatch (issue #86, D-090: the referenced member's own
+  current profile version / evidence authority / recorded embedding no
+  longer matches — never a tenant-wide fingerprint) all fail closed to a
+  non-identifying outcome
   — cross-tenant/cross-session probing cannot distinguish "exists but not
   yours" from "does not exist."
 - `AgentResultSet.canonical_search_request` (the validated
@@ -208,8 +211,20 @@ unlabeled number but never guesses that an arbitrary identifier is a phone.
   `candidate_embedding_version_id` are immutable snapshot references (no DB
   foreign key against the live candidate/profile/embedding tables) — a
   later hard candidate delete is never blocked by, and never corrupts, a
-  historical membership row; a stale reference is detected via the corpus
-  fingerprint, not a foreign-key violation.
+  historical membership row; a stale reference is detected by member-scoped
+  snapshot validation (D-090), not a foreign-key violation.
+- ResultSet validity never reads CandidateIdentity, and unrelated tenant
+  changes (new CVs, other candidates' reprocessing/embeddings, identity
+  changes) never affect it. Retired ResultSets (bounded creation-time
+  retention, D-090) leave an `agent.result_set.retired` audit record with
+  ids/hashes/policy versions/mode/counts/timestamps only — never query text,
+  canonical request JSON, CV content, or CandidateIdentity. A record is
+  written only for a row the DELETE actually removed in the same
+  transaction. The ops backlog drain (`meyar retire-result-sets`) takes
+  one explicit tenant id (no global mode) and prints counts only. A
+  ResultSet under an unknown `snapshot_policy_version` fails closed
+  (outward RESULT_SET_STALE, audit reason `STALE`), and the raw policy
+  string is never exposed.
 - Audit events `agent.result_set.created`, `agent.result_set.
   reference_resolved`, and `agent.result_set.reference_rejected` carry only
   ids/enums/counts/version strings (result_set_id, candidate_id,
@@ -249,7 +264,7 @@ unlabeled number but never guesses that an arbitrary identifier is a phone.
   eligibility gate) is evaluated — `preferred_filters` is never applied
   (no reranking within a refinement).
 - `create_result_set_from_refinement` reuses `resolve_active_candidate_ref`'s
-  own tenant/session/context-epoch/expiry/corpus-fingerprint validation via
+  own tenant/session/context-epoch/expiry validation via
   a shared `_validate_active_result_set` helper (one authoritative
   definition, never a second staleness policy) — plus a defense-in-depth
   check that each source member's recorded `candidate_profile_version_id`

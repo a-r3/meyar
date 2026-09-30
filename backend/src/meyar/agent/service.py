@@ -231,7 +231,10 @@ def _outcome_for_resolution_failure(
     distinguished further outward, so cross-tenant/cross-session probing
     can never learn anything from the outcome text (see
     meyar.services.agent_result_set_repo.ResultSetResolutionFailure)."""
-    if failure == ResultSetResolutionFailure.STALE:
+    if failure in (
+        ResultSetResolutionFailure.STALE,
+        ResultSetResolutionFailure.UNSUPPORTED_SNAPSHOT_POLICY,
+    ):
         return AgentTurnOutcome.RESULT_SET_STALE
     if failure == ResultSetResolutionFailure.EXPIRED:
         return AgentTurnOutcome.RESULT_SET_EXPIRED
@@ -249,7 +252,10 @@ def _outcome_and_message_for_refinement_failure(
     mismatch) collapses to one deterministic clarification — deliberately
     not distinguished further outward, mirroring
     _outcome_for_resolution_failure's own fail-closed discipline."""
-    if failure == ResultSetResolutionFailure.STALE:
+    if failure in (
+        ResultSetResolutionFailure.STALE,
+        ResultSetResolutionFailure.UNSUPPORTED_SNAPSHOT_POLICY,
+    ):
         return AgentTurnOutcome.RESULT_SET_STALE, None
     if failure == ResultSetResolutionFailure.EXPIRED:
         return AgentTurnOutcome.RESULT_SET_EXPIRED, None

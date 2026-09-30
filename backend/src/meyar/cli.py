@@ -29,6 +29,10 @@ from meyar.search.planner_schemas import PlannerOutcome
 from meyar.search.planner_service import plan_and_search_candidates, plan_candidate_search
 from meyar.search.schemas import CandidateSearchRequest, SearchMode
 from meyar.search.service import SearchRequestError, search_candidates
+from meyar.services.agent_result_set_repo import (
+    result_set_retirement_pending,
+    retire_next_result_set_batch,
+)
 from meyar.services.api_key_repo import create_api_key
 from meyar.services.audit_repo import record_event
 from meyar.services.candidate_document_repo import get_candidate_document
@@ -497,6 +501,47 @@ async def _reconcile_folder(tenant_id: str, root: str, limit: int | None) -> Non
         raise SystemExit(1)
 
 
+async def _retire_result_sets(tenant_id: str, max_batches: int) -> None:
+    """Agentless ops sweep for issue #86 ResultSet retention: drains a
+    historical backlog for ONE explicit tenant in bounded batches (each
+    <= RESULT_SET_RETIRE_BATCH_SIZE rows, committed separately), down to
+    the 1 active + at most 5 inactive per (conversation, BrowserSession)
+    policy. Never a global mode. PII-safe output: counts only. Exit codes:
+    0 = done or batch budget used (see "Pending"), 2 = invalid/unknown
+    tenant, 3 = infrastructure/database failure."""
+    try:
+        parsed_tenant_id = uuid.UUID(tenant_id)
+    except ValueError as exc:
+        print("Invalid tenant id (expected UUID).")
+        raise SystemExit(2) from exc
+    factory = get_session_factory()
+    batches = retired = 0
+    pending = True
+    try:
+        async with factory() as db:
+            if await get_tenant(db, parsed_tenant_id) is None:
+                print("Tenant not found.")
+                raise SystemExit(2)
+            while batches < max_batches:
+                count = await retire_next_result_set_batch(db, tenant_id=parsed_tenant_id)
+                await db.commit()
+                if count == 0:
+                    pending = False
+                    break
+                batches += 1
+                retired += count
+            else:
+                pending = await result_set_retirement_pending(db, tenant_id=parsed_tenant_id)
+    except SystemExit:
+        raise
+    except Exception as exc:  # infrastructure/database failure
+        print(f"Result set retirement failed: {type(exc).__name__}")
+        raise SystemExit(3) from exc
+    print(f"Batches: {batches}")
+    print(f"Retired: {retired}")
+    print(f"Pending: {'yes' if pending else 'no'}")
+
+
 async def _seed_demo(reset: bool) -> None:
     """CLI entry point for the presentation-readiness synthetic demo
     bootstrap (issue #25 — not a product feature; see
@@ -892,6 +937,18 @@ def main() -> None:
     index_folder_parser.add_argument("--tenant-id", required=True)
     index_folder_parser.add_argument("--root", required=True, help="Local folder path to scan.")
 
+    retire_result_sets_parser = sub.add_parser(
+        "retire-result-sets",
+        help=(
+            "Drain one tenant's historical agent ResultSet backlog in bounded batches "
+            "(1 active + at most 5 inactive per conversation/session)."
+        ),
+    )
+    retire_result_sets_parser.add_argument("--tenant-id", required=True)
+    retire_result_sets_parser.add_argument(
+        "--max-batches", type=int, default=100, help="Batch budget for this run (default 100)."
+    )
+
     reconcile_folder_parser = sub.add_parser(
         "reconcile-folder",
         help=(
@@ -1005,6 +1062,8 @@ def main() -> None:
         )
     elif args.command == "index-folder":
         asyncio.run(_index_folder(args.tenant_id, args.root))
+    elif args.command == "retire-result-sets":
+        asyncio.run(_retire_result_sets(args.tenant_id, max(args.max_batches, 0)))
     elif args.command == "reconcile-folder":
         asyncio.run(_reconcile_folder(args.tenant_id, args.root, args.limit))
     elif args.command == "seed-demo":

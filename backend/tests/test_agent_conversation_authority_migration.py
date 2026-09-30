@@ -29,8 +29,8 @@ ADMIN_URL = f"{BASE_URL}/postgres"
 PRIOR_HEAD = "543c60f7efc5"
 NEW_HEAD = "b7e3c9d41f28"
 # Current single Alembic head (issue #84 chains c84a5e2f9d17 on NEW_HEAD;
-# issue #85 chains e5d7a3c91b04 on that).
-CURRENT_HEAD = "e5d7a3c91b04"
+# issue #85 chains e5d7a3c91b04 on that; issue #86 chains f3a9c6d2e815).
+CURRENT_HEAD = "f3a9c6d2e815"
 
 TENANT = "00000000-0000-0000-0000-0000000080a1"
 OTHER_TENANT = "00000000-0000-0000-0000-0000000080a2"

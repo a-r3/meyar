@@ -1,8 +1,10 @@
 import uuid
+from collections.abc import Collection
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meyar.models.candidate import Candidate
 from meyar.models.candidate_profile_version import CandidateProfileVersion
 
 
@@ -149,3 +151,35 @@ async def list_current_profile_versions_for_tenant(
         .where(CandidateProfileVersion.tenant_id == tenant_id)
     )
     return list(result.scalars().all())
+
+
+async def get_current_profile_versions_for_candidates(
+    db: AsyncSession, *, tenant_id: uuid.UUID, candidate_ids: Collection[uuid.UUID]
+) -> dict[uuid.UUID, CandidateProfileVersion]:
+    """ONE bounded query (issue #86): the CURRENT CandidateProfileVersion
+    (max version_number — the same definition as get_current_profile_version
+    and list_current_profile_versions_for_tenant) for exactly the given
+    candidates of this tenant, and only for candidates that still exist
+    here. ``candidate_ids`` is bounded by the caller (ResultSet members,
+    <= MAX_SEARCH_LIMIT) — never the whole tenant. A candidate with no
+    profile version, or no longer present, is simply absent."""
+    if not candidate_ids:
+        return {}
+    result = await db.execute(
+        select(CandidateProfileVersion)
+        .join(
+            Candidate,
+            (Candidate.id == CandidateProfileVersion.candidate_id)
+            & (Candidate.tenant_id == CandidateProfileVersion.tenant_id),
+        )
+        .where(
+            CandidateProfileVersion.tenant_id == tenant_id,
+            CandidateProfileVersion.candidate_id.in_(list(candidate_ids)),
+        )
+        .order_by(
+            CandidateProfileVersion.candidate_id,
+            CandidateProfileVersion.version_number.desc(),
+        )
+        .distinct(CandidateProfileVersion.candidate_id)
+    )
+    return {version.candidate_id: version for version in result.scalars().all()}
