@@ -2,13 +2,18 @@
 
 ## Current phase
 
-**Issue #88 design phase (not accepted, not implemented):** accepted `main` is
-`fb03477a4b4c3ec4698b7294f2589fbbbeafa4e7` (#84, #85, #86, #87 closed).
-Branch `design/88-agent-core-v2` proposes D-092 and
-`docs/AGENT_CORE_V2_DESIGN.md` (task/dialogue/clarification state, resumable
-M-8 clarification, capability registry, bounded plan validation). It is
-docs-only. **Implementation has NOT started** and begins only after
-independent design review and owner merge. #88 and #50 remain OPEN.
+**Issue #88 — design accepted, implementation NOT started:** accepted `main`
+is `fb03477a4b4c3ec4698b7294f2589fbbbeafa4e7` (#84, #85, #86, #87 closed).
+- The Agent Core v2 design (D-092, `docs/AGENT_CORE_V2_DESIGN.md`) was
+  independently reviewed and **accepted**. It covers task/dialogue/
+  clarification state, the two waiting lanes, resumable M-8 clarification,
+  the capability registry, two-layer plan validation and source-grounded
+  inputs.
+- It is docs-only. Docs-only PR #93 is still awaiting owner merge.
+- **Implementation has NOT started.**
+- #88 remains OPEN. #50 remains OPEN and out of scope.
+- Next engineering action after the merge: #88 **Slice A**, typed
+  clarification/task persistence plus resumable clarification.
 
 **Issue #87 working branch (not accepted):** accepted `main` is
 `ac9a249359c9a5dcf417b4e3f269a2c0b92b3ab0` (#84, #85, #86 closed).

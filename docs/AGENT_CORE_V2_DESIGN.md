@@ -1,11 +1,17 @@
 # Agent Core v2 — task, dialogue and capability architecture (issue #88)
 
-**Status: PROPOSED / DESIGN REVIEW ONLY.** Nothing in this document is
-implemented, accepted or merged. Decision record: D-092 (`docs/DECISIONS.md`).
-Audited baseline: `main` @ `fb03477a4b4c3ec4698b7294f2589fbbbeafa4e7`
-(#84, #85, #86, #87 closed). Alembic head at audit time: `a87d4c6e2b19`.
-#88 stays OPEN after this design PR; implementation starts only after the
-owner merges an accepted version of this design. #50 is non-scope.
+**Status: ACCEPTED DESIGN / IMPLEMENTATION NOT STARTED.**
+- This design was independently reviewed and accepted, at design head
+  `dfc7636b1c0b788024c28d17f2b913784b5a897c`.
+- **Implementation has NOT started.** Nothing in this document exists in
+  code yet.
+- #88 remains OPEN. Implementation (slice A first, §23) begins only after
+  the OWNER manually merges this accepted design PR.
+- #50 remains out of scope.
+
+Decision record: D-092 (`docs/DECISIONS.md`). Audited baseline: `main` @
+`fb03477a4b4c3ec4698b7294f2589fbbbeafa4e7` (#84, #85, #86, #87 closed).
+Alembic head at audit time: `a87d4c6e2b19`.
 
 ---
 

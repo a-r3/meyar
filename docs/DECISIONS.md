@@ -7555,8 +7555,10 @@ merged. Accepted baseline: `ac9a249359c9a5dcf417b4e3f269a2c0b92b3ab0`.
 
 ## D-092 — Agent Core v2 task/dialogue/capability architecture (issue #88)
 
-**Status: PROPOSED / DESIGN REVIEW ONLY.** Not accepted, not implemented,
-not merged. Full design: `docs/AGENT_CORE_V2_DESIGN.md`. Audited baseline:
+**Status: ACCEPTED DESIGN / IMPLEMENTATION NOT STARTED.** Independently
+reviewed and accepted at design head `dfc7636b1c0b788024c28d17f2b913784b5a897c`.
+No code exists yet. #88 remains OPEN, and implementation begins only after
+the owner merges the design PR. Full design: `docs/AGENT_CORE_V2_DESIGN.md`. Audited baseline:
 `main` @ `fb03477a4b4c3ec4698b7294f2589fbbbeafa4e7` (#84–#87 closed).
 #88 stays open; #50 is out of scope.
 
@@ -7662,5 +7664,5 @@ not merged. Full design: `docs/AGENT_CORE_V2_DESIGN.md`. Audited baseline:
    - C: model plan contract + full grounding contract + retirement of
      `AgentDecision` and the loop.
 
-   Slice B already passes WHOLE_MESSAGE instead of the model's
-   `search_query` for model-routed searches.
+   Slice B MUST pass WHOLE_MESSAGE instead of the model's `search_query`
+   for model-routed searches.
