@@ -13,6 +13,11 @@ def embedding_provider_from_settings(settings: Settings) -> OllamaEmbeddingProvi
         base_url=settings.ollama_base_url,
         model=settings.ollama_embedding_model,
         timeout_seconds=settings.embedding_timeout_seconds,
+        # Issue #85: same shared admission policy fields as the LLM provider
+        # (meyar.llm.dependency) — one gate, never divergent budgets.
+        max_concurrency=settings.inference_concurrency,
+        max_queued=settings.inference_queue_max_waiters,
+        queue_timeout_seconds=settings.inference_queue_timeout_seconds,
     )
 
 

@@ -21,8 +21,13 @@ from meyar.config import Settings, get_settings
 from meyar.core.business_date import resolve_business_date
 from meyar.core.password import hash_password, needs_rehash, verify_password
 from meyar.db import get_db
+from meyar.embedding.db_release import DbReleasingEmbeddingProvider
 from meyar.embedding.dependency import get_embedding_provider, get_embedding_search_config
-from meyar.embedding.provider import EmbeddingProvider, EmbeddingProviderError
+from meyar.embedding.provider import (
+    EmbeddingBusyError,
+    EmbeddingProvider,
+    EmbeddingProviderError,
+)
 from meyar.ingestion.validation import PDF_MIME
 from meyar.llm.dependency import get_llm_provider
 from meyar.llm.provider import LLMProvider
@@ -67,6 +72,7 @@ from meyar.ui.presentation import (
     CRITERION_KIND_LABELS,
     CRITERION_STATUS_LABELS,
     FIT_BAND_LABELS,
+    INFERENCE_BUSY_TEXT,
     JOB_STATUS_LABELS,
     STATE_LABELS,
     agent_turn_outcome_message,
@@ -408,7 +414,7 @@ async def search(
             natural_language_request=query,
             as_of_date=as_of_date,
             embedding_config=embedding_config,
-            embedding_provider=embedding_provider,
+            embedding_provider=DbReleasingEmbeddingProvider(embedding_provider, db),
         )
         search_response = planned.search_response
         result_views = (
@@ -417,16 +423,31 @@ async def search(
             else []
         )
         await db.commit()
-    except (EmbeddingProviderError, SearchRequestError, SQLAlchemyError):
+    except (EmbeddingProviderError, SearchRequestError, SQLAlchemyError) as exc:
         await db.rollback()
-        outcome = PlannerOutcomeView(
-            outcome="INFRASTRUCTURE_FAILURE",
-            title="Axtarış xidməti əlçatan deyil",
-            message="Axtarış xidməti hazırda əlçatan deyil. Bir qədər sonra yenidən cəhd edin.",
-            executable=False,
-            reason_codes=[],
-            infrastructure_error=True,
-        )
+        if isinstance(exc, EmbeddingBusyError):
+            # Issue #85: shared local-inference gate busy — transient, not an
+            # unavailable service.
+            title, message = INFERENCE_BUSY_TEXT
+            outcome = PlannerOutcomeView(
+                outcome="INFERENCE_BUSY",
+                title=title,
+                message=message,
+                executable=False,
+                reason_codes=[],
+                infrastructure_error=True,
+            )
+        else:
+            outcome = PlannerOutcomeView(
+                outcome="INFRASTRUCTURE_FAILURE",
+                title="Axtarış xidməti əlçatan deyil",
+                message=(
+                    "Axtarış xidməti hazırda əlçatan deyil. Bir qədər sonra yenidən cəhd edin."
+                ),
+                executable=False,
+                reason_codes=[],
+                infrastructure_error=True,
+            )
         return _render(
             request,
             "search_results.html",
@@ -707,7 +728,7 @@ async def agent_turn(
         TurnStaleReason,
         abandon_reserved_turn,
         clear_turn_reservation,
-        reserve_agent_turn_waiting,
+        reserve_agent_turn,
         run_until_client_disconnects,
     )
     from meyar.services.agent_conversation_repo import (
@@ -732,20 +753,19 @@ async def agent_turn(
         conversation_id = current.id
         await db.commit()
     # issue #85 (D-089) PHASE A: lock the durable conversation row briefly,
-    # authorize, wait (bounded, connection-free) behind another in-flight
-    # turn on this same conversation, and write the server-owned
+    # authorize, refuse (immediately, 409) when another turn on this same
+    # conversation is still in flight, and write the server-owned
     # reservation. The row lock is NOT held across local inference any more:
     # TurnBoundary commits before every model/embedding wait and re-locks +
     # revalidates afterwards. Same-conversation serialization (#80) is kept
     # by the reservation + turn_version, never by a lock held across Ollama.
     try:
-        reserved = await reserve_agent_turn_waiting(
+        reserved = await reserve_agent_turn(
             db,
             owner=owner,
             conversation_id=conversation_id,
             browser_session_id=ctx.session_id,
             ttl_seconds=settings.agent_turn_reservation_seconds,
-            wait_seconds=settings.agent_turn_conversation_wait_seconds,
         )
     except ConversationTurnInProgressError:
         await db.rollback()

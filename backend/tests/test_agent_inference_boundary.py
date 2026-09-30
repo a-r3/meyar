@@ -47,34 +47,49 @@ POOL_TIMEOUT_SECONDS = 8.0
 
 
 class GatedOllama:
-    """In-memory stand-in for the local Ollama ``/api/chat`` endpoint.
+    """In-memory stand-in for the local Ollama ``/api/chat`` and
+    ``/api/embeddings`` endpoints.
 
-    Every call blocks on ``release`` so a test can observe the system while
-    inference is genuinely in flight. ``on_enter`` runs synchronously the
-    moment a model call is actually executing (i.e. after admission)."""
+    Calls after the first ``pass_through`` block on ``release`` so a test can
+    observe the system while inference is genuinely in flight. ``on_enter``
+    runs synchronously the moment a blocking call is actually executing
+    (i.e. after admission). ``decisions`` are returned in order (the last
+    one repeats)."""
 
-    def __init__(self, decision: dict | None = None) -> None:
+    def __init__(
+        self,
+        decision: dict | None = None,
+        *,
+        decisions: list[dict] | None = None,
+        pass_through: int = 0,
+    ) -> None:
         self.release = asyncio.Event()
         self.entered = asyncio.Event()
         self.calls = 0
         self.active = 0
         self.max_active = 0
         self.on_enter: Callable[[], None] | None = None
-        self._decision = decision or GREETING_DECISION
+        self._decisions = decisions or [decision or GREETING_DECISION]
+        self._pass_through = pass_through
 
     async def handler(self, request: httpx.Request) -> httpx.Response:
+        index = self.calls
         self.calls += 1
         self.active += 1
         self.max_active = max(self.max_active, self.active)
         try:
-            if self.on_enter is not None:
-                self.on_enter()
-            self.entered.set()
-            await self.release.wait()
+            if index >= self._pass_through:
+                if self.on_enter is not None:
+                    self.on_enter()
+                self.entered.set()
+                await self.release.wait()
         finally:
             self.active -= 1
+        if request.url.path.endswith("/api/embeddings"):
+            return httpx.Response(200, json={"embedding": [0.1 * (i + 1) for i in range(8)]})
+        decision = self._decisions[min(index, len(self._decisions) - 1)]
         return httpx.Response(
-            200, json={"model": MODEL, "message": {"content": json.dumps(self._decision)}}
+            200, json={"model": MODEL, "message": {"content": json.dumps(decision)}}
         )
 
 
@@ -568,91 +583,70 @@ async def test_client_disconnect_cancels_queued_work_without_detached_tasks() ->
 # ---------------------------------------------------------------------------
 
 
-async def test_same_conversation_two_sessions_serialize_without_holding_connections(
+async def test_three_sessions_same_conversation_one_accepted_turn_others_rejected(
     small_pool, tenant_and_user
 ) -> None:
+    """Blocker C contract (D-089): at most ONE accepted in-flight turn per
+    conversation, and no hidden wait queue. Three BrowserSessions submit A,
+    B, C to the same conversation in a controlled staggered order while A
+    is blocked in the model: B and C get the truthful 409 at once (not
+    after a wait), never reach the model, never appear in the transcript
+    and never touch A's live authority. After A completes, a retry of B is
+    accepted. Repeated rounds give the identical outcome — nothing depends
+    on poll or scheduling luck."""
     engine, factory, probe = small_pool
-    _tenant, user, password, _membership = tenant_and_user
-    gate = GatedOllama()
-    _install(Settings(ui_cookie_secure=False, inference_concurrency=1), gate)
+    tenant, user, password, _membership = tenant_and_user
+    _install(Settings(ui_cookie_secure=False, inference_concurrency=1), GatedOllama())
     transport = ASGITransport(app=app)
     async with (
         AsyncClient(transport=transport, base_url="http://test") as tab_a,
         AsyncClient(transport=transport, base_url="http://test") as tab_b,
+        AsyncClient(transport=transport, base_url="http://test") as tab_c,
     ):
         csrf_a = await _login(tab_a, user.username, password)
         csrf_b = await _login(tab_b, user.username, password)
+        csrf_c = await _login(tab_c, user.username, password)
         conversation_id = await _new_conversation(tab_a, csrf_a)
-        first = _spawn(_agent_post(tab_a, csrf_a, conversation_id, "birinci mesaj"))
-        await asyncio.wait_for(gate.entered.wait(), timeout=10)
-        second = _spawn(_agent_post(tab_b, csrf_b, conversation_id, "ikinci mesaj"))
-        await asyncio.sleep(0.4)  # the second turn is waiting on the reservation
-        assert not second.done()
-        assert gate.calls == 1  # it has NOT started inference out of order
-        library, _elapsed = await _timed(tab_a.get("/ui/library"))
-        assert library.status_code == 200
-        gate.release.set()
-        first_response, second_response = await asyncio.wait_for(
-            asyncio.gather(first, second), timeout=15
-        )
-    assert first_response.status_code == 200
-    assert second_response.status_code == 200
-    stored = await _stored(factory, conversation_id)
-    # No lost update, no duplicate, server order preserved.
-    assert [(t["role"], t.get("text")) for t in stored.turns if t["role"] == "user"] == [
-        ("user", "birinci mesaj"),
-        ("user", "ikinci mesaj"),
-    ]
-    assert [t["role"] for t in stored.turns] == ["user", "assistant", "user", "assistant"]
-    assert stored.active_turn_id is None
-    assert gate.calls == 2
-    from meyar.models.agent_conversation import AgentConversationSessionContext
-
-    async with factory() as db:
-        contexts = (
-            await db.scalars(
-                select(AgentConversationSessionContext).where(
-                    AgentConversationSessionContext.conversation_id == conversation_id
-                )
+        expected_users: list[str] = []
+        # Digit-free, model-routed texts (a digit could read as a count).
+        rounds = ("birinci", "ikinci", "üçüncü")
+        for round_number in rounds:
+            gate = GatedOllama()
+            _install(Settings(ui_cookie_secure=False, inference_concurrency=1), gate)
+            concurrency.reset_inference_admission()
+            a_text = f"salam A {round_number}"
+            first = _spawn(_agent_post(tab_a, csrf_a, conversation_id, a_text))
+            await asyncio.wait_for(gate.entered.wait(), timeout=10)
+            token = (await _stored(factory, conversation_id)).active_turn_id
+            assert token is not None
+            for client, csrf, text in (
+                (tab_b, csrf_b, f"salam B {round_number}"),
+                (tab_c, csrf_c, f"salam C {round_number}"),
+            ):
+                refused, elapsed = await _timed(_agent_post(client, csrf, conversation_id, text))
+                assert refused.status_code == 409
+                assert IN_PROGRESS_COPY_FRAGMENT in refused.text
+                assert text in refused.text  # HR's own text is shown back, not lost
+                _assert_hr_safe(refused.text)
+                assert elapsed < 2.0  # immediate: no hidden wait queue
+            assert gate.calls == 1  # B/C never reached the model
+            # A's reservation (and live authority) untouched by B/C.
+            assert (await _stored(factory, conversation_id)).active_turn_id == token
+            gate.release.set()
+            assert (await asyncio.wait_for(first, timeout=10)).status_code == 200
+            expected_users.append(a_text)
+            # Retry after A finished: accepted.
+            retry = await asyncio.wait_for(
+                _agent_post(tab_b, csrf_b, conversation_id, f"salam B {round_number} retry"),
+                timeout=10,
             )
-        ).all()
-    # Each BrowserSession keeps its OWN live context — neither took the
-    # other's authority.
-    assert len(contexts) == 2
-    assert len({context.browser_session_id for context in contexts}) == 2
-
-
-async def test_same_conversation_second_turn_past_wait_budget_gets_truthful_copy(
-    small_pool, tenant_and_user
-) -> None:
-    engine, factory, probe = small_pool
-    tenant, user, password, _membership = tenant_and_user
-    gate = GatedOllama()
-    _install(
-        Settings(
-            ui_cookie_secure=False,
-            inference_concurrency=1,
-            agent_turn_conversation_wait_seconds=0.3,
-        ),
-        gate,
-    )
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        csrf = await _login(client, user.username, password)
-        conversation_id = await _new_conversation(client, csrf)
-        first = await _block_first_turn(client, csrf, conversation_id, gate)
-        refused = await asyncio.wait_for(
-            _agent_post(client, csrf, conversation_id, "ikinci"), timeout=5
-        )
-        assert refused.status_code == 409
-        assert IN_PROGRESS_COPY_FRAGMENT in refused.text
-        _assert_hr_safe(refused.text)
-        gate.release.set()
-        assert (await asyncio.wait_for(first, timeout=10)).status_code == 200
-    stored = await _stored(factory, conversation_id)
-    assert [t["text"] for t in stored.turns if t["role"] == "user"] == ["salam"]
-    assert await _audit(factory, tenant.id, "agent.turn.rejected") == [
-        {"reason_code": "TURN_IN_PROGRESS"}
-    ]
+            assert retry.status_code == 200
+            expected_users.append(f"salam B {round_number} retry")
+            stored = await _stored(factory, conversation_id)
+            assert [t["text"] for t in stored.turns if t["role"] == "user"] == expected_users
+            assert stored.active_turn_id is None
+    assert len(stored.turns) == 2 * len(expected_users)
+    assert len(await _audit(factory, tenant.id, "agent.turn.rejected")) == 6
 
 
 # ---------------------------------------------------------------------------
@@ -1012,7 +1006,6 @@ def test_settings_validate_queue_and_reservation_bounds() -> None:
         {"inference_concurrency": 0},
         {"inference_queue_max_waiters": -1},
         {"inference_queue_timeout_seconds": 0},
-        {"agent_turn_conversation_wait_seconds": -1},
         {"db_pool_size": 0},
         # A reservation must outlive one full inference gap.
         {"agent_turn_reservation_seconds": 60, "llm_timeout_seconds": 120.0},
@@ -1154,3 +1147,291 @@ async def test_foreign_owner_cannot_observe_or_touch_an_in_flight_turn(
     stored = await _stored(factory, conversation_id)
     assert [t["text"] for t in stored.turns if t["role"] == "user"] == ["salam"]
     assert stored.active_turn_id is None
+
+
+# ---------------------------------------------------------------------------
+# Blocker A — embedding inference: shared gate + no DB checkout
+# ---------------------------------------------------------------------------
+
+EMBED_MODEL = "meyar-test-embed:v1"
+HYBRID_REQUEST = "Java is required; backend modernization experience is preferred."
+
+
+def _install_gated_embedding(settings: Settings, gate: GatedOllama) -> None:
+    from meyar.embedding.dependency import get_embedding_provider, get_embedding_search_config
+    from meyar.embedding.ollama_provider import OllamaEmbeddingProvider
+    from meyar.embedding.serializer import SERIALIZER_VERSION
+    from meyar.search.schemas import EmbeddingSearchConfig
+
+    _GATES.append(gate)
+    app.dependency_overrides[get_embedding_provider] = lambda: OllamaEmbeddingProvider(
+        base_url="http://127.0.0.1:11434",
+        model=EMBED_MODEL,
+        timeout_seconds=30.0,
+        transport=httpx.MockTransport(gate.handler),
+        max_concurrency=settings.inference_concurrency,
+        max_queued=settings.inference_queue_max_waiters,
+        queue_timeout_seconds=settings.inference_queue_timeout_seconds,
+    )
+    app.dependency_overrides[get_embedding_search_config] = lambda: EmbeddingSearchConfig(
+        provider="ollama",
+        model_name=EMBED_MODEL,
+        model_revision="",
+        serializer_version=SERIALIZER_VERSION,
+        embedding_dimensions=8,
+    )
+
+
+async def test_hybrid_agent_search_holds_no_db_connection_while_embedding_waits_or_runs(
+    small_pool, tenant_and_user
+) -> None:
+    """Blocker A (5): the agent's semantic/hybrid query embedding goes through
+    the SHARED admission gate, and neither while it WAITS for the slot (held
+    by another model call) nor while it RUNS does the agent request hold a
+    pooled connection."""
+    from fakes import FakeLLMProvider
+
+    from meyar.agent.schemas import AgentActionType, AgentDecision
+    from meyar.search.planner_schemas import PlannerDraft
+    from meyar.search.schemas import RequiredFilters
+
+    engine, factory, probe = small_pool
+    _tenant, user, password, _membership = tenant_and_user
+    settings = Settings(ui_cookie_secure=False, inference_concurrency=1)
+    app.dependency_overrides[get_settings] = lambda: settings
+    fake_llm = FakeLLMProvider(
+        agent_decision=AgentDecision(
+            action=AgentActionType.SEARCH_CANDIDATES, search_query=HYBRID_REQUEST
+        ),
+        planner_draft=PlannerDraft(
+            required_filters=RequiredFilters(skills=["Java"]),
+            semantic_query="backend modernization experience",
+        ),
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake_llm
+    embed_gate = GatedOllama()
+    _install_gated_embedding(settings, embed_gate)
+    observed: dict[str, int] = {}
+    embed_gate.on_enter = lambda: observed.setdefault("running", probe.checked_out)
+    admission = concurrency.get_inference_admission(
+        max_active=1, max_queued=4, queue_timeout_seconds=30.0
+    )
+    # Another model call (e.g. an LLM turn elsewhere) holds the only slot.
+    holder = admission.slot()
+    await holder.__aenter__()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        csrf = await _login(client, user.username, password)
+        conversation_id = await _new_conversation(client, csrf)
+        turn = _spawn(_agent_post(client, csrf, conversation_id, "salam"))
+        for _ in range(500):
+            if admission.queued == 1:
+                break
+            await asyncio.sleep(0.01)
+        # WAITING: the embedding call is queued behind the held slot.
+        assert admission.queued == 1
+        assert embed_gate.calls == 0  # it did not bypass capacity
+        assert probe.checked_out == 0  # and holds no DB connection
+        library, _elapsed = await _timed(client.get("/ui/library"))
+        assert library.status_code == 200
+        await holder.__aexit__(None, None, None)
+        # RUNNING: admitted, blocked inside the Ollama embedding call.
+        await asyncio.wait_for(embed_gate.entered.wait(), timeout=10)
+        assert observed["running"] == 0
+        assert (admission.active, admission.queued) == (1, 0)
+        embed_gate.release.set()
+        response = await asyncio.wait_for(turn, timeout=10)
+    assert response.status_code == 200
+    assert embed_gate.calls == 1
+    stored = await _stored(factory, conversation_id)
+    assert [t["role"] for t in stored.turns] == ["user", "assistant"]
+    assert (admission.active, admission.queued) == (0, 0)
+
+
+async def test_hybrid_agent_search_busy_embedding_gate_gives_busy_outcome(
+    small_pool, tenant_and_user
+) -> None:
+    from fakes import FakeLLMProvider
+
+    from meyar.agent.schemas import AgentActionType, AgentDecision
+    from meyar.search.planner_schemas import PlannerDraft
+    from meyar.search.schemas import RequiredFilters
+
+    engine, factory, probe = small_pool
+    tenant, user, password, _membership = tenant_and_user
+    settings = Settings(
+        ui_cookie_secure=False, inference_concurrency=1, inference_queue_max_waiters=0
+    )
+    app.dependency_overrides[get_settings] = lambda: settings
+    app.dependency_overrides[get_llm_provider] = lambda: FakeLLMProvider(
+        agent_decision=AgentDecision(
+            action=AgentActionType.SEARCH_CANDIDATES, search_query=HYBRID_REQUEST
+        ),
+        planner_draft=PlannerDraft(
+            required_filters=RequiredFilters(skills=["Java"]),
+            semantic_query="backend modernization experience",
+        ),
+    )
+    embed_gate = GatedOllama()
+    _install_gated_embedding(settings, embed_gate)
+    admission = concurrency.get_inference_admission(
+        max_active=1, max_queued=0, queue_timeout_seconds=30.0
+    )
+    holder = admission.slot()
+    await holder.__aenter__()
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            csrf = await _login(client, user.username, password)
+            conversation_id = await _new_conversation(client, csrf)
+            busy = await asyncio.wait_for(
+                _agent_post(client, csrf, conversation_id, "salam"), timeout=10
+            )
+    finally:
+        await holder.__aexit__(None, None, None)
+    assert busy.status_code == 503
+    assert BUSY_COPY in busy.text
+    _assert_hr_safe(busy.text)
+    assert embed_gate.calls == 0
+    stored = await _stored(factory, conversation_id)
+    assert stored.turns == [] and stored.active_turn_id is None
+    assert await _audit(factory, tenant.id, "agent.turn.busy") == [{"reason_code": "QUEUE_FULL"}]
+
+
+async def test_readiness_reflects_shared_gate_saturated_by_embedding_calls(small_pool) -> None:
+    """Readiness observes the ONE shared gate: saturation caused by an
+    embedding call reports INFERENCE_SATURATED; liveness stays 200."""
+    from meyar.embedding.ollama_provider import OllamaEmbeddingProvider
+
+    settings = Settings(
+        inference_concurrency=1,
+        inference_queue_max_waiters=0,
+        inference_saturation_grace_seconds=0.0,
+    )
+    app.dependency_overrides[get_settings] = lambda: settings
+    gate = GatedOllama()
+    _GATES.append(gate)
+    provider = OllamaEmbeddingProvider(
+        base_url="http://127.0.0.1:11434",
+        model=EMBED_MODEL,
+        timeout_seconds=30.0,
+        transport=httpx.MockTransport(gate.handler),
+        max_concurrency=1,
+        max_queued=0,
+        queue_timeout_seconds=settings.inference_queue_timeout_seconds,
+    )
+    running = _spawn(provider.embed("synthetic professional text"))
+    await asyncio.wait_for(gate.entered.wait(), timeout=10)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        saturated = await client.get("/api/v1/health/ready")
+        assert saturated.status_code == 503
+        assert saturated.json() == {"status": "not_ready", "reasons": ["INFERENCE_SATURATED"]}
+        assert (await client.get("/api/v1/health")).status_code == 200
+        gate.release.set()
+        await asyncio.wait_for(running, timeout=10)
+        assert (await client.get("/api/v1/health/ready")).status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Early-commit audit: an orphan ResultSet from a stale turn is never authority
+# ---------------------------------------------------------------------------
+
+
+async def test_orphan_result_set_from_stale_turn_never_becomes_live_authority(
+    small_pool, tenant_and_user, db_session: AsyncSession
+) -> None:
+    """A turn searches (its new AgentResultSet row is committed early, before
+    the next model call), then goes stale while the model decides. The
+    ResultSet row survives as an inert orphan: the live pointer is NOT set,
+    and a later candidate_ref follow-up — from the same session or from
+    another BrowserSession — cannot resolve against it."""
+    from meyar.models.agent_conversation import AgentConversationSessionContext
+    from meyar.models.agent_result_set import AgentResultSet
+
+    engine, factory, probe = small_pool
+    tenant, user, password, _membership = tenant_and_user
+    candidate, _ = await seed_candidate_with_profile(
+        db_session,
+        tenant_id=tenant.id,
+        profile_content={
+            "skills": [
+                {
+                    "name": "Python",
+                    "category": None,
+                    "evidence": [{"page": 1, "block_index": 0, "quote": "Synthetic: Python"}],
+                }
+            ],
+            "employment_history": [], "education": [], "certifications": [],
+            "languages": [], "projects": [],
+        },
+    )
+    await db_session.commit()
+    gate = GatedOllama(
+        decisions=[
+            {"action": "SEARCH_CANDIDATES", "search_query": "Python bilən namizədləri göstər"},
+            GREETING_DECISION,
+        ],
+        pass_through=1,
+    )
+    _install(Settings(ui_cookie_secure=False, inference_concurrency=1), gate)
+    transport = ASGITransport(app=app)
+    async with (
+        AsyncClient(transport=transport, base_url="http://test") as tab_a,
+        AsyncClient(transport=transport, base_url="http://test") as tab_b,
+    ):
+        csrf_a = await _login(tab_a, user.username, password)
+        csrf_b = await _login(tab_b, user.username, password)
+        conversation_id = await _new_conversation(tab_a, csrf_a)
+        turn = _spawn(_agent_post(tab_a, csrf_a, conversation_id, "salam"))
+        # The search ran and committed its ResultSet; the 2nd decision blocks.
+        await asyncio.wait_for(gate.entered.wait(), timeout=10)
+        async with factory() as db:
+            orphan = (
+                await db.scalars(
+                    select(AgentResultSet).where(
+                        AgentResultSet.conversation_id == conversation_id
+                    )
+                )
+            ).one()
+            context = (
+                await db.scalars(
+                    select(AgentConversationSessionContext).where(
+                        AgentConversationSessionContext.conversation_id == conversation_id
+                    )
+                )
+            ).one()
+            assert context.active_result_set_id is None  # not live before Phase B
+            context.active_pending_draft_id = uuid.uuid4()  # make the turn stale
+            await db.commit()
+        gate.release.set()
+        stale = await asyncio.wait_for(turn, timeout=10)
+        assert stale.status_code == 409
+        assert str(candidate.id) not in stale.text
+
+        # Follow-ups asking for "the first candidate" from both sessions.
+        follow_gate = GatedOllama(decision={"action": "GET_CANDIDATE_PROFILE", "candidate_ref": 1})
+        follow_gate.release.set()
+        _install(Settings(ui_cookie_secure=False, inference_concurrency=1), follow_gate)
+        async with factory() as db:
+            live = await db.get(AgentConversationSessionContext, context.id)
+            live.active_pending_draft_id = None
+            await db.commit()
+        same = await asyncio.wait_for(
+            _agent_post(tab_a, csrf_a, conversation_id, "birincinin profilini aç"), timeout=10
+        )
+        other = await asyncio.wait_for(
+            _agent_post(tab_b, csrf_b, conversation_id, "birincinin profilini aç"), timeout=10
+        )
+    for response in (same, other):
+        assert response.status_code == 200
+        assert str(candidate.id) not in response.text
+    async with factory() as db:
+        contexts = (
+            await db.scalars(
+                select(AgentConversationSessionContext).where(
+                    AgentConversationSessionContext.conversation_id == conversation_id
+                )
+            )
+        ).all()
+        assert all(c.active_result_set_id != orphan.id for c in contexts)
+        assert await db.get(AgentResultSet, orphan.id) is not None  # inert, not deleted

@@ -7110,33 +7110,70 @@ Decision:
    Every re-entry refreshes the expiry. `agent_turn_reservation_seconds`
    (default 600, validated to exceed queue timeout + LLM timeout) only
    matters when a process died mid-turn.
-3. **Same-conversation serialization (#80 preserved).** A second turn on
-   a conversation with a live reservation waits in
-   `reserve_agent_turn_waiting`. Between attempts it rolls back, so it
-   holds no connection, and it retries until
-   `agent_turn_conversation_wait_seconds` (default 30) elapse. After that
-   it gets the truthful "still processing" outcome (409), with nothing
-   persisted.
+3. **Same-conversation serialization (#80 preserved).** At most ONE
+   accepted in-flight turn per conversation. A second turn on a
+   conversation with a live reservation is refused IMMEDIATELY with the
+   truthful "still processing" outcome (409). Its text is shown back and
+   nothing is persisted. There is deliberately no hidden wait queue, so
+   ordering never depends on poll or scheduling timing; the HR user
+   resends after the first turn finishes.
    - Result: no lost update, no duplicate execution of a reserved turn,
-     and commit order = reservation order.
+     and commit order = acceptance order.
    - Each BrowserSession keeps its own live context.
    - Different conversations never share a reservation. They contend only
      for global inference capacity, which is intentional.
+   - Deterministic-only turns never release the row lock, so a concurrent
+     request simply waits on that short lock (PostgreSQL lock order).
 4. **Bounded inference admission (`meyar.llm.concurrency.InferenceAdmission`).**
-   One process-wide gate replaces the plain `asyncio.Semaphore`.
+   One process-wide gate replaces the plain `asyncio.Semaphore`. It is
+   shared by EVERY request-serving local-model execution:
+   `OllamaLLMProvider._chat` AND `OllamaEmbeddingProvider.embed`. It is one
+   Ollama daemon, so there is one capacity budget. Health checks are
+   never gated.
    - Settings, all validated: `inference_concurrency` (1..16, default 1),
      `inference_queue_max_waiters` (0..64, default 4) and
-     `inference_queue_timeout_seconds` (0..300, default 30).
+     `inference_queue_timeout_seconds` (0..300, default 30). Both provider
+     factories pass these same fields.
+   - The singleton records its policy. A provider presenting a different
+     policy raises `InferenceAdmissionPolicyMismatchError` instead of
+     silently sharing, or splitting, the budget.
    - FIFO admission; a full queue is rejected immediately (`QUEUE_FULL`).
    - A waiter not admitted in time is rejected (`QUEUE_TIMEOUT`).
    - Accounting is cancellation-safe: a cancelled waiter leaves the queue,
      and a slot handed to a waiter that is cancelled in the same tick is
      given back. Only the gate's own counters are authority.
-   - The provider raises `InferenceBusyError`, a `ModelUnavailableError`,
-     so non-agent callers keep their handled "unavailable" outcome.
-   - The agent boundary maps it to `AgentInferenceBusyError`, which is
+   - Refusals surface as `InferenceBusyError` (LLM) and
+     `EmbeddingBusyError` (embedding), both with code `INFERENCE_BUSY`.
+     This is a TRANSIENT admission outcome, deliberately distinct from
+     `MODEL_UNAVAILABLE`, `MODEL_TIMEOUT` and `MODEL_SCHEMA_INVALID`:
+     no model attempt happened.
+   - The agent boundary maps both to `AgentInferenceBusyError`, which is
      deliberately not an `LLMProviderError`, so no planner or agent
      fallback can turn it into a degraded "successful" answer.
+   - Non-agent callers:
+     - **Profile and identity extraction** DEFER. They raise
+       `ExtractionDeferredError`, write NO `CandidateProfileVersion` or
+       `CandidateIdentityVersion`, and audit
+       `CANDIDATE_{PROFILE,IDENTITY}_EXTRACTION_DEFERRED` with ids and
+       codes only. A transient overload therefore never creates an
+       immutable FAILED version that would supersede the accepted
+       COMPLETED one (profile authority follows the highest version).
+     - **Folder reconciliation** keeps any stage already completed and
+       counts the candidate as `deferred`, never `failed`. It stops
+       attempting further candidates in that run, and the next run
+       retries exactly what is missing.
+     - **Embedding creation** never persists a failure anyway. It audits
+       `CANDIDATE_EMBEDDING_DEFERRED`.
+     - **CLI** prints a deferral and exits non-zero.
+     - **NL planner** returns `PLANNER_PROVIDER_FAILURE` with reason
+       `INFERENCE_BUSY`. `attempt_count` excludes the refused attempt,
+       and the UI shows the busy copy.
+     - **`/ui/search` and `/api/v1/search`** map an embedding busy to the
+       busy copy (503) or `503 INFERENCE_BUSY`.
+     - Because the query embedding can now wait on the shared gate, the
+       non-agent search routes wrap the embedding provider in
+       `DbReleasingEmbeddingProvider`, which commits before `embed()`. No
+       pooled connection is held while it waits or runs.
 5. **Busy UX.** A rejected turn is abandoned: its reservation is cleared,
    and no transcript entry or fabricated answer is written.
    - HR sees "MEYAR hazırda digər sorğuları emal edir. Bir qədər sonra
@@ -7189,6 +7226,25 @@ Decision:
    no behaviour change, only a reviewable contract. With the boundary
    above, the pool bounds concurrent DB work, not concurrent AI work. #85
    is deliberately NOT solved by enlarging the pool.
+
+Early-commit side effects (independent review correction pass). While a
+turn waits on the model, `leave_db()` commits only the rows in this table.
+Nothing else becomes authoritative before Phase B. No existing row is
+updated before Phase B.
+
+| Operation | Rows written | Committed before Phase B? | Authoritative / live? | Safe if the turn becomes stale? |
+|---|---|---|---|---|
+| Phase A reservation | `agent_conversations.active_turn_id/expires_at` | yes (first `leave_db`) | reservation only | yes: cleared by `abandon_reserved_turn`, else TTL |
+| Session context get/create + touch | new `agent_conversation_session_contexts` row (clean: no pointers) or `updated_at` | yes | clean context only | yes: identical to opening the conversation |
+| Entry routing / tool audit | `audit_events` (`agent.entry.*`, `agent.tool.*`) | yes | no (append-only) | yes: truthful record of what ran |
+| NL planning audit | `audit_events` (`SEARCH_PLAN_*`) | yes | no | yes |
+| Search execution audit | `audit_events` (`CANDIDATE_SEARCH_EXECUTED`) | yes | no | yes |
+| Search result set | new `agent_result_sets` + members, `agent.result_set.created` | yes | NO: only the session context pointer (written in Phase B) makes a set live | yes: an inert orphan; `resolve_active_candidate_ref` requires the live pointer + session + conversation + epoch (regression-tested) |
+| Refinement result set | new `agent_result_sets` (REFINEMENT) + members, `agent.result_set.refined` | yes | NO (same as above) | yes |
+| Reference / refine rejection audit | `audit_events` | yes | no | yes |
+| Transcript, title kind, `turn_version` | `agent_conversations` | NO (Phase B only) | yes | n/a |
+| Live ResultSet / pending-draft pointers | `agent_conversation_session_contexts` | NO (Phase B only) | yes | n/a |
+| `agent.turn.completed` | `audit_events` | NO (Phase B only) | no | n/a |
 
 Non-scope: #86 (ResultSet corpus snapshot scalability), #87 (session
 revocation / request integrity / PRG / idempotency), #88 (Agent Core v2), #50

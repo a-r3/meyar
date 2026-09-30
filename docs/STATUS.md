@@ -10,8 +10,11 @@ agent turn waits for or runs local inference (phase A reservation → model
 calls outside transactions → phase B re-lock + revalidation), a server-owned
 turn reservation + `turn_version` (migration `e5d7a3c91b04`, single head)
 keeps same-conversation turns serialized, a bounded process-wide inference
-admission gate (max active / max queued / finite queue wait) returns an
-HR-safe BUSY outcome instead of exhausting the pool, stale authority fails
+admission gate (max active / max queued / finite queue wait), shared by LLM
+and embedding calls, returns an HR-safe BUSY outcome instead of exhausting
+the pool (a busy gate defers extraction — it never mints a FAILED profile or
+identity version), a second concurrent turn on the same conversation is
+refused immediately with truthful copy, stale authority fails
 closed, abandoned clients cancel their queued/active work, and a minimal
 process-local `GET /api/v1/health/ready` reports serious saturation while
 `/api/v1/health` stays liveness only (full readiness remains #46). Not

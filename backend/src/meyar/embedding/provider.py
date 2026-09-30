@@ -19,6 +19,19 @@ class EmbeddingInvalidOutputError(EmbeddingProviderError):
     code = "EMBEDDING_INVALID_OUTPUT"
 
 
+class EmbeddingBusyError(EmbeddingProviderError):
+    """Issue #85: the SAME process-wide local-inference admission gate that
+    bounds LLM calls (meyar.llm.concurrency) rejected this embedding call
+    (``QUEUE_FULL``/``QUEUE_TIMEOUT``). Transient: no embedding was
+    attempted. Never an "unavailable"/"timeout"/"invalid output" failure."""
+
+    code = "INFERENCE_BUSY"
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(f"Local inference busy: {reason}.")
+
+
 class EmbeddingResult(BaseModel):
     vector: list[float]
     dimensions: int

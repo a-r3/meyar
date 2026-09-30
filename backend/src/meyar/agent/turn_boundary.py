@@ -27,10 +27,12 @@ Lifecycle of one ``POST /ui/agent`` turn::
 A turn that never calls a model never leaves its Phase A transaction, i.e.
 deterministic-only turns keep the simple locked path (they are short).
 
-Same-conversation serialization (#80) is preserved by the reservation: a
-second turn on a conversation with a live reservation is refused with a
-truthful "still processing" outcome instead of waiting behind the model, and
-a turn whose reservation or transcript version changed can never commit.
+Same-conversation serialization (#80) is preserved by the reservation: at
+most ONE accepted in-flight turn per conversation. A second turn on a
+conversation with a live reservation is refused IMMEDIATELY with a truthful
+"still processing" outcome (no hidden wait queue, so no ordering that depends
+on poll timing), and a turn whose reservation or transcript version changed
+can never commit.
 Different conversations never share a reservation, so they stay
 independent; they only contend for the GLOBAL inference admission gate
 (meyar.llm.concurrency), which is intentional."""
@@ -57,7 +59,7 @@ from meyar.agent.schemas import (
     RequirementSpan,
 )
 from meyar.core.roles import permissions_for_role
-from meyar.embedding.provider import EmbeddingProvider, EmbeddingResult
+from meyar.embedding.provider import EmbeddingBusyError, EmbeddingProvider, EmbeddingResult
 from meyar.extraction.view import ProfessionalDocumentView
 from meyar.llm.provider import InferenceBusyError, LLMProvider, LLMResultProvenance
 from meyar.models.agent_conversation import (
@@ -248,39 +250,6 @@ async def reserve_agent_turn(
     )
 
 
-async def reserve_agent_turn_waiting(
-    db: AsyncSession,
-    *,
-    owner: OwnerPrincipal,
-    conversation_id: uuid.UUID,
-    browser_session_id: uuid.UUID,
-    ttl_seconds: int,
-    wait_seconds: float,
-    poll_seconds: float = 0.1,
-) -> ReservedTurn | None:
-    """Phase A with bounded same-conversation serialization (#80): when
-    another turn holds the reservation, roll back (releasing the row lock
-    AND the pooled connection) and retry until ``wait_seconds`` elapse. The
-    waiting request never holds a connection between attempts. Raises
-    ``ConversationTurnInProgressError`` once the budget is spent."""
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + wait_seconds
-    while True:
-        try:
-            return await reserve_agent_turn(
-                db,
-                owner=owner,
-                conversation_id=conversation_id,
-                browser_session_id=browser_session_id,
-                ttl_seconds=ttl_seconds,
-            )
-        except ConversationTurnInProgressError:
-            await db.rollback()
-            if loop.time() + poll_seconds > deadline:
-                raise
-            await asyncio.sleep(poll_seconds)
-
-
 # ---------------------------------------------------------------------------
 # Re-entry / Phase B — revalidate
 # ---------------------------------------------------------------------------
@@ -423,7 +392,8 @@ class TurnBoundary:
         self.model_calls += 1
         try:
             result = await call()
-        except InferenceBusyError as exc:
+        except (InferenceBusyError, EmbeddingBusyError) as exc:
+            # Shared LLM/embedding admission gate refused: abandon the turn.
             raise AgentInferenceBusyError(exc.reason) from None
         except Exception:
             # A model failure is a normal handled outcome for the

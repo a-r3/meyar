@@ -2,10 +2,12 @@ import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meyar.extraction.deferral import defer_extraction
 from meyar.extraction.evidence import EvidenceValidationError, verify_extraction_evidence
 from meyar.extraction.prompts import PROMPT_VERSION
 from meyar.extraction.view import build_professional_document_view
 from meyar.llm.provider import (
+    InferenceBusyError,
     LLMProvider,
     ModelSchemaInvalidError,
     ModelTimeoutError,
@@ -102,6 +104,18 @@ async def extract_candidate_profile(
     for _attempt in range(MAX_MODEL_ATTEMPTS):
         try:
             extraction, model_name = await llm.extract_candidate_profile(view)
+        except InferenceBusyError as exc:
+            # Issue #85: admission refused -> no model attempt happened.
+            # Never persist a fake FAILED version (it would supersede the
+            # current accepted one); defer to a later run instead.
+            raise await defer_extraction(
+                db,
+                tenant_id=tenant_id,
+                event_type="CANDIDATE_PROFILE_EXTRACTION_DEFERRED",
+                candidate_id=candidate_id,
+                document_id=candidate_document.id,
+                reason=exc.reason,
+            ) from None
         except ModelUnavailableError as exc:
             return await _persist_failure(
                 db,

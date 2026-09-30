@@ -2,7 +2,7 @@ import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meyar.embedding.provider import EmbeddingProvider, EmbeddingProviderError
+from meyar.embedding.provider import EmbeddingBusyError, EmbeddingProvider, EmbeddingProviderError
 from meyar.embedding.serializer import (
     SERIALIZER_VERSION,
     build_professional_embedding_text,
@@ -125,7 +125,13 @@ async def embed_candidate_profile(
         await record_event(
             db,
             tenant_id=tenant_id,
-            event_type="CANDIDATE_EMBEDDING_FAILED",
+            # Issue #85: a busy shared inference gate is a transient
+            # deferral (no embedding attempted), not a provider failure.
+            event_type=(
+                "CANDIDATE_EMBEDDING_DEFERRED"
+                if isinstance(exc, EmbeddingBusyError)
+                else "CANDIDATE_EMBEDDING_FAILED"
+            ),
             metadata={
                 "candidate_id": str(candidate_id),
                 "profile_version_id": str(profile_version.id),

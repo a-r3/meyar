@@ -25,6 +25,7 @@ from meyar.evaluation.normalization import (
     normalize_text,
 )
 from meyar.llm.provider import (
+    InferenceBusyError,
     LLMProvider,
     LLMProviderError,
     LLMResultProvenance,
@@ -462,6 +463,18 @@ async def plan_candidate_search(
             )
         except ModelSchemaInvalidError:
             continue
+        except InferenceBusyError:
+            # Issue #85: admission refused -> this attempt never reached the
+            # model; report the transient BUSY outcome truthfully.
+            result = _result(
+                outcome=PlannerOutcome.PLANNER_PROVIDER_FAILURE,
+                request_sha256=request_hash,
+                provenance=configured_provenance,
+                attempt_count=attempt - 1,
+                reason_codes=[PlannerReasonCode.INFERENCE_BUSY],
+            )
+            await _audit_plan_result(db, tenant_id=tenant_id, result=result)
+            return result
         except ModelTimeoutError:
             result = _result(
                 outcome=PlannerOutcome.PLANNER_PROVIDER_FAILURE,

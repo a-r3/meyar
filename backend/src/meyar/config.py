@@ -46,11 +46,6 @@ class Settings(BaseSettings):
     # inference gap (queue wait + one model call) and is refreshed at every
     # re-entry; it only matters when a process died mid-turn.
     agent_turn_reservation_seconds: int = Field(default=600, ge=60, le=3600)
-    # Issue #85: a second turn on the SAME conversation waits (holding no
-    # DB connection) at most this long for the in-flight turn to finish,
-    # then receives the truthful "still processing" outcome. 0 = refuse at
-    # once. Different conversations never wait on each other.
-    agent_turn_conversation_wait_seconds: float = Field(default=30.0, ge=0, le=300)
     # Explicit single-process SQLAlchemy pool policy (issue #85, D-089).
     # These equal SQLAlchemy's own QueuePool defaults; they are explicit so
     # the operability contract is reviewable. Agent inference never holds a

@@ -64,6 +64,9 @@ class PlannerReasonCode(StrEnum):
     NO_SEARCH_CRITERIA = "NO_SEARCH_CRITERIA"
     MODEL_SCHEMA_INVALID = "MODEL_SCHEMA_INVALID"
     MODEL_UNAVAILABLE = "MODEL_UNAVAILABLE"
+    # Issue #85: the shared local-inference admission gate refused the call
+    # (queue full / queue wait expired). Transient; no model attempt made.
+    INFERENCE_BUSY = "INFERENCE_BUSY"
     MODEL_TIMEOUT = "MODEL_TIMEOUT"
     MODEL_PROVENANCE_MISMATCH = "MODEL_PROVENANCE_MISMATCH"
     STRUCTURED_FILTER_NOT_SUPPORTED_BY_REQUEST = "STRUCTURED_FILTER_NOT_SUPPORTED_BY_REQUEST"

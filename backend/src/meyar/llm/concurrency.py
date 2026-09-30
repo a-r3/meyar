@@ -4,9 +4,12 @@ A fresh ``OllamaLLMProvider`` instance is constructed per request (see
 meyar.llm.dependency.get_llm_provider), so the bound must live outside any
 one instance — otherwise every browser tab/session would get its own
 independent budget and the setting would do nothing. ONE module-level
-``InferenceAdmission`` is shared by every call through
-``OllamaLLMProvider._chat`` (extraction, identity extraction, NL search
-planning, and the agent loop alike).
+``InferenceAdmission`` is shared by EVERY request-serving local-model
+execution: ``OllamaLLMProvider._chat`` (extraction, identity extraction, NL
+search planning, the agent loop) AND ``OllamaEmbeddingProvider.embed``
+(query and profile embeddings). One Ollama daemon executes both, so they
+share one capacity budget (issue #85 correction pass, D-089). Health checks
+are never gated.
 
 Issue #85 replaced the former plain ``asyncio.Semaphore`` (unbounded
 waiters, unbounded wait) with a bounded admission gate:
@@ -199,22 +202,50 @@ class InferenceAdmission:
             self._saturated_since = None
 
 
+@dataclass(frozen=True)
+class InferenceAdmissionPolicy:
+    max_active: int
+    max_queued: int
+    queue_timeout_seconds: float
+
+
+class InferenceAdmissionPolicyMismatchError(RuntimeError):
+    """Two local-inference providers in one process were configured with
+    different admission policies. The shared gate never silently adopts
+    whichever policy happened to arrive first."""
+
+
 _admission: InferenceAdmission | None = None
+_admission_policy: InferenceAdmissionPolicy | None = None
 
 
 def get_inference_admission(
     *, max_active: int, max_queued: int, queue_timeout_seconds: float
 ) -> InferenceAdmission:
-    """Lazily creates the shared gate at the first configured policy and
-    reuses it thereafter. Resizing in-flight admission state is not safe, so
-    a changed policy only takes effect after ``reset_inference_admission``
-    (tests only) or a process restart."""
-    global _admission
+    """The ONE process-wide gate shared by the LLM and embedding providers.
+    Created lazily from the first caller's policy; every later caller must
+    present the SAME policy (both providers are built from the same
+    ``Settings`` fields in production) or ``InferenceAdmissionPolicyMismatchError``
+    is raised — the LLM and embedding budgets can never silently diverge.
+    Resizing in-flight admission state is not safe, so a changed policy only
+    takes effect after ``reset_inference_admission`` (tests only) or a
+    process restart."""
+    global _admission, _admission_policy
+    policy = InferenceAdmissionPolicy(
+        max_active=max_active,
+        max_queued=max_queued,
+        queue_timeout_seconds=float(queue_timeout_seconds),
+    )
     if _admission is None:
         _admission = InferenceAdmission(
             max_active=max_active,
             max_queued=max_queued,
             queue_timeout_seconds=queue_timeout_seconds,
+        )
+        _admission_policy = policy
+    elif policy != _admission_policy:
+        raise InferenceAdmissionPolicyMismatchError(
+            "Local inference providers were configured with different admission policies."
         )
     return _admission
 
@@ -227,5 +258,6 @@ def current_inference_admission() -> InferenceAdmission | None:
 
 def reset_inference_admission() -> None:
     """Test-only: clears the process-wide singleton."""
-    global _admission
+    global _admission, _admission_policy
     _admission = None
+    _admission_policy = None
