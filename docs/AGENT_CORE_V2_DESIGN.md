@@ -32,6 +32,35 @@ transcript write advances it). Under the original rule, confirming or
 reviewing D1 would stale an open lane-A clarification. That contradicts
 §4.4 rule 4. No other part of the accepted architecture changes.
 
+
+**Amendment A2 (ACCEPTED AMENDMENT / IMPLEMENTATION NOT STARTED;
+owner-specified exchange-chain rule):**
+- A2 was independently reviewed and accepted.
+- Slice A implementation remains PAUSED. #88 remains OPEN, and #50 remains
+  OPEN and out of scope.
+- Implementation resumes only after (1) the OWNER merges PR #96, (2)
+  post-merge verification succeeds, and (3) the recurring CI pytest hang is
+  investigated separately.
+
+The change: A1's adjacency rule is correct for attempt 1 but
+incomplete for the attempt-2 UNCLEAR retry (§6.4 step 5, T5). After a retry
+the tail is `[U1 source, Q1, U2 unclear answer, Q2]`, so the entry before Q2
+is U2, not the source. Read literally, every attempt-2 clarification would be
+born stale. A2 replaces A1's adjacency clause with a **structural
+exchange-chain rule** (§6.2 rule 2), validated only from persisted
+clarification/task/submission relationships, for at most 2 attempts. It
+applies to **both** resumable types: SEARCH_OR_VACANCY, with its source
+binding, and VACANCY_SOURCE_REQUIRED, which has no source but still has the
+2-attempt policy. It adds two persisted fields (`created_from_turn_id`,
+`superseded_reason`, §4.3, §18) and one closed value (`SOURCE_MESSAGE`,
+§6.3).
+
+A2 also separates three cases (§6.4):
+- user ambiguity (a valid UNCLEAR result) consumes an attempt;
+- classifier infrastructure failure abandons the turn and consumes nothing;
+- a stale or foreign button is a rejected request, not a state transition.
+
+A2 is not implemented yet (see its status above).
 ---
 
 ## 0. Product contract
@@ -359,6 +388,8 @@ can point at its source turn.
 | `clarification_type` closed: `SEARCH_OR_VACANCY`, `VACANCY_SOURCE_REQUIRED` | yes | — | — | — | — | no | — | deterministic router | new + CHECK |
 | `answer_schema_version` (e.g. `clarification-answers-v1`) | yes | — | — | — | — | no | unknown → EXPIRED | code | new |
 | `question_turn_id` UUID (id of the assistant transcript entry that asked the question), NOT NULL (A1) | yes | — | — | — | — | no | answerable only while this entry is the **last** transcript entry (§6.2 rule 2) → otherwise STALE | server-issued transcript entry id | new |
+| `created_from_turn_id` UUID (A2), NOT NULL: the server-issued user transcript turn whose processing created this clarification attempt (appended by `created_by_submission_id`). SEARCH_OR_VACANCY attempt 1: equals `source_turn_id`. VACANCY_SOURCE_REQUIRED attempt 1: the trigger user turn U0 (`source_turn_id` stays NULL). Attempt 2 of either type: the UNCLEAR answer turn U2. **Sequencing provenance only, never source authority**; server-selected only, never client- or model-supplied | yes | — | — | — | — | no | chain check (§6.2 rule 2) | server-issued transcript entry id | new |
+| `superseded_reason` closed (A2): `UNCLEAR`, `NEW_TASK`; non-null ⇔ status SUPERSEDED. Each value is a real persisted transition of the clarification itself (§6.4 steps 3–5) | yes | — | — | — | — | no | — | server | new + CHECK |
 | `source_turn_id` UUID (id of the user transcript entry); SEARCH_OR_VACANCY only, NULL for VACANCY_SOURCE_REQUIRED | yes | — | — | — | — | no | missing → STALE | transcript entry id | new |
 | `source_sha256` (SHA-256 of the canonical LF source span); same nullability as `source_turn_id` | yes | — | — | — | — | no | mismatch → STALE | computed | new |
 | `source_start`, `source_end` (exact offsets into that user turn; CHECK `0 ≤ start < end ≤ 4000`) | yes | — | — | — | — | no | — | router (whole message today) | new |
@@ -475,8 +506,10 @@ fixed before execution starts (§9, §11).
   This keeps #79: the model never starts JD drafting. It can only cause a
   question.
 - CLARIFY_JOB_SOURCE_REQUIRED → `VACANCY_SOURCE_REQUIRED` with no source
-  binding (offsets NULL, CHECK by type). The slot is filled by the *next*
-  message.
+  binding (`source_turn_id`, hash and offsets NULL, CHECK by type).
+  `created_from_turn_id` is the trigger user turn U0. U0 is sequencing
+  provenance, **not** JD source authority. The slot is filled by a later
+  qualifying *current* message (§6.4 step 3).
 - CLARIFY_INPUT_STRUCTURE and the model's closed CLARIFY codes
   (NEED_MORE_DETAIL, CANDIDATE_REFERENCE_REQUIRED, RESULT_CONTEXT_REQUIRED,
   UNSUPPORTED_REQUEST, HIRING_DECISION_REQUIRES_HUMAN) stay **non-resumable**
@@ -504,13 +537,55 @@ clarification becomes EXPIRED/stale and the turn gives safe re-clarify copy:
 1. `session_context.active_clarification_id == clarification.id`. The row is
    locked FOR UPDATE, `status == OPEN`, `expires_at > now`, and
    `context_epoch` equals the context's epoch.
-2. **Append-position binding (A1).** The conversation's **last**
-   transcript entry must have `turn_id == question_turn_id` and role
-   `assistant`. For SEARCH_OR_VACANCY, the entry immediately before it must
-   be the source user turn (`turn_id == source_turn_id`).
+2. **Append-position binding (A1) with exchange chain (A2).** For the
+   current clarification C at attempt n:
+   1. C's `question_turn_id` must be the conversation's **last** appended
+      transcript entry, with role `assistant`.
+   2. C keeps the **same original source binding**: `source_turn_id`, source
+      hash and offsets never move to a user's unclear answer. For
+      VACANCY_SOURCE_REQUIRED they stay NULL at every attempt.
+   3. Between the chain start and C's question, only the server-recognized
+      retry chain may exist. The tail must be exactly:
+
+      | Type | Attempt 1 | Attempt 2 |
+      |---|---|---|
+      | SEARCH_OR_VACANCY | `[source U1, Q1]` | `[source U1, Q1, unclear answer U2, Q2]` |
+      | VACANCY_SOURCE_REQUIRED | `[trigger U0, Q1]` | `[trigger U0, Q1, unclear answer U2, Q2]` |
+
+      Attempt 1 requires:
+      - `C.created_from_turn_id` at `T[-2]`, role `user`;
+      - `C.question_turn_id` at `T[-1]`, role `assistant`;
+      - for SEARCH_OR_VACANCY, also `C.created_from_turn_id =
+        C.source_turn_id`.
+
+      Attempt 2 requires, from persisted rows only:
+      - the predecessor P has `P.superseded_by_id = C.id`;
+      - `P.status = SUPERSEDED`, `P.superseded_reason = UNCLEAR`;
+      - `P.attempt = 1` and `C.attempt = 2`;
+      - P and C share `task_id`, `session_context_id` and
+        `clarification_type`;
+      - `T[-4]` is `P.created_from_turn_id` (U1 or U0), role `user`;
+      - `T[-3]` is `P.question_turn_id` (Q1), role `assistant`;
+      - `T[-2]` is `C.created_from_turn_id` (U2), role `user`. U2 is the
+        entry appended by `C.created_by_submission_id`, the exact submission
+        whose answer was classified UNCLEAR;
+      - `T[-1]` is `C.question_turn_id` (Q2), role `assistant`, the latest
+        appended entry;
+      - for SEARCH_OR_VACANCY, P and C carry the identical original source
+        binding, and it is valid (rules 3–4 below), with
+        `P.created_from_turn_id = P.source_turn_id`.
+   4. Any foreign appended entry anywhere in that chain makes C stale. There
+      is no backward transcript scanning or semantic history search: at most
+      four tail entries and one predecessor row are read.
+   5. Chain participation never makes a turn a source. U0 and U2 are never
+      JD or search sources. For VACANCY_SOURCE_REQUIRED the JD source is
+      only the qualifying **current** message (§6.4 step 3).
    - The answer is therefore the very next **appended** turn. Any turn
      appended by another tab or session on the same conversation makes the
      clarification stale.
+   - `created_turn_version` stays provenance only. `turn_version` stays the
+     #85/D-089 concurrency authority. `question_turn_id` stays the
+     current-question append-order authority.
    - In-place rewrites that append nothing do not affect liveness, although
      they bump `turn_version`. This covers the D-045 display sync, lane-B
      confirm (`mark_pending_job_draft_confirmed`) and lane-B review
@@ -530,7 +605,7 @@ clarification becomes EXPIRED/stale and the turn gives safe re-clarify copy:
 5. Answer schema version is known.
 
 Rule 2 makes the 100-turn transcript bound irrelevant: the question is the
-last entry and the source is directly before it. The server never rebuilds the source from model memory or
+last entry and the source is at most four entries back (A2). The server never rebuilds the source from model memory or
 from "the latest user message that looks like a requirement".
 
 ### 6.3 Answer schema (server-owned)
@@ -539,6 +614,17 @@ from "the latest user message that looks like a requirement".
 SEARCH_OR_VACANCY        → CANDIDATE_SEARCH | VACANCY_ANALYSIS
 VACANCY_SOURCE_REQUIRED  → the next message is the source (slot fill), no choice enum
 ```
+
+Resolution sources are closed: `BUTTON`, `LABEL`, `MODEL`, and (A2)
+`SOURCE_MESSAGE`.
+- `SOURCE_MESSAGE` is the **deterministic server-side** resolution source
+  for one case only: a VACANCY_SOURCE_REQUIRED clarification satisfied by the
+  user's current qualifying source message (§6.4 step 3).
+- That exact current message becomes the JD source, recorded with
+  `resolved_value = VACANCY_ANALYSIS`.
+- It is distinct from BUTTON (explicit closed choice), LABEL (closed-label
+  table) and MODEL (local classifier). It never implies model-authored
+  source text.
 
 `ClarificationAnswer` is a closed StrEnum. Allowed answers per type are a
 code constant, versioned by `answer_schema_version`. The model never widens
@@ -551,7 +637,18 @@ With a live OPEN clarification in this session context:
 1. **Button.** The form posts `clarification_id` + `clarification_choice`.
    Both must equal the live pointer and be an allowed value. If not, the
    turn fails closed with "this question is no longer active" copy. It
-   **never** falls back to interpreting the text. The #87 request hash
+   **never** falls back to interpreting the text.
+   - (A2) A stale, foreign or mismatched button is a **rejected request,
+     not a clarification transition**:
+     - no transcript entry is appended, so the live clarification cannot be
+       staled;
+     - the live clarification is not superseded and no attempt is consumed;
+     - `active_clarification_id` is not cleared or replaced;
+     - no capability runs;
+     - the submission ends ABANDONED (#85/#87 not-run semantics), and the
+       re-rendered page carries a fresh submission token;
+     - bounded structural audit only: `agent.clarification.rejected` with
+       a closed reason (`NOT_ACTIVE`, `INVALID_CHOICE`). The #87 request hash
    covers message + choice + clarification id, so a replay with a different
    choice fails closed.
 2. **Closed-choice label match (deterministic).**
@@ -576,8 +673,15 @@ With a live OPEN clarification in this session context:
    - Result: the old clarification becomes **SUPERSEDED**, its task becomes
      CANCELLED, and the message is handled as a normal new turn.
    - For VACANCY_SOURCE_REQUIRED, a message with material requirements or
-     useful multi-line vacancy structure is the **slot fill**, not a new
-     task. It resolves and runs ANALYZE_VACANCY over that exact message.
+     useful multi-line vacancy structure, or a FORCE_JOB_DRAFT route, is the
+     **slot fill**, not a new task. It resolves (`SOURCE_MESSAGE`) and runs
+     ANALYZE_VACANCY over that exact current message, or over the router's
+     exact source span for FORCE_JOB_DRAFT.
+   - For VACANCY_SOURCE_REQUIRED, the clear new tasks are only
+     FORCE_CANDIDATE_SEARCH and FORCE_RESULT_LIMIT. A message that is
+     neither a qualifying source nor a clear new task is handled
+     deterministically as **UNCLEAR** (step 5). No model is called for this
+     type.
 4. **Local model classifier.**
    `LLMProvider.resolve_clarification_answer(type, allowed_answers,
    answer_text)` returns a strict `ClarificationAnswerProposal(value ∈
@@ -586,20 +690,39 @@ With a live OPEN clarification in this session context:
      **not** get the source text or the transcript.
    - An allowed value resolves the clarification.
    - NEW_REQUEST is handled as in step 3 (supersede, then a normal turn).
-   - UNCLEAR or a validation failure after one repair → step 5.
-   - VACANCY_SOURCE_REQUIRED has no choice enum, so step 4 is skipped: any
-     message that is not a step 3 slot fill is a new request (supersede).
+   - Only a successfully returned, valid closed `UNCLEAR` result → step 5.
+   - (A2) **Classifier infrastructure or contract failure is not UNCLEAR.**
+     This covers INFERENCE_BUSY, timeout, a transport or provider error,
+     Ollama unavailable, malformed output after the one allowed repair, and
+     any other classifier execution failure. The turn uses the existing
+     #85/#87 abandon semantics:
+     - no transcript entry is appended (the clarification is not staled);
+     - no supersession, no attempt increment, no attempt 2;
+     - no task state change;
+     - the submission ends ABANDONED, and HR sees the fixed
+       temporary-unavailability copy with a fresh token;
+     - the live clarification stays OPEN and answerable for the retry.
+   - VACANCY_SOURCE_REQUIRED does not use the classifier (step 3).
 5. **Unclear.**
-   - The old clarification becomes SUPERSEDED by a new clarification with
+   - The old clarification becomes SUPERSEDED (`superseded_reason =
+     UNCLEAR`, `superseded_by_id` = the new row) by a new clarification with
      the **same source binding** and `attempt + 1` (same task, still
-     WAITING_CLARIFICATION). The assistant repeats the question with
-     buttons.
+     WAITING_CLARIFICATION).
+   - The new row's `created_from_turn_id` is this unclear answer's user
+     entry, and its `question_turn_id` is the re-asked question entry. Both
+     are appended by the same submission, so the A2 chain (§6.2 rule 2) holds.
+   - The assistant repeats the question with buttons.
+   - This applies to both resumable types. For VACANCY_SOURCE_REQUIRED the
+     source fields stay NULL, and the unclear answer U2 is never a source.
+   - Infrastructure failures never reach this step (step 4).
    - If the next attempt would be 3, the clarification becomes EXPIRED and
      the task FAILED_SAFE, with copy asking the user to rephrase the request.
      **No capability executes** on an unclear answer.
 
-This is one documented policy: **supersede on any turn that is not an
-answer**. There is no "retained in the background" clarification, and no
+This is one documented policy: **supersede on any appended turn that is
+not an answer**. A2 adds two cases that append nothing and therefore change
+no clarification state: a rejected button (step 1) and a classifier
+infrastructure failure (step 4). There is no "retained in the background" clarification, and no
 hidden guessing.
 
 ### 6.5 Why a label table is not "regex creep"
@@ -677,10 +800,12 @@ Lane A = dialogue lane (T1–T8); lane B = mutation-confirmation lane
 | T2 | Valid answer (button/label/model), resume succeeds, search | WAITING_CLARIFICATION | COMPLETED | + live OPEN clarification (§6.2) | Phase B | `agent.clarification.resolved`, `agent.task.state_changed` |
 | T3 | Valid answer, vacancy draft produced (task moves lane A → lane B; any previous lane-B task gets T11 in the same Phase B) | WAITING_CLARIFICATION | WAITING_CONFIRMATION | + draft pointer set in the same Phase B | Phase B | same |
 | T4 | Valid answer, capability returns a truthful failure (e.g. JOB_DRAFT_FAILED, non-executable plan) | WAITING_CLARIFICATION | FAILED_SAFE | same | Phase B | `agent.clarification.resolved`, `agent.task.state_changed` |
-| T5 | Unclear answer, attempt < 2 | WAITING_CLARIFICATION | WAITING_CLARIFICATION (new clarification row) | same | Phase B | `agent.clarification.superseded(reason=UNCLEAR)`, `agent.clarification.created` |
+| T5 | Unclear answer (valid closed UNCLEAR result, or VACANCY_SOURCE_REQUIRED neither-source-nor-new-task), attempt < 2; either resumable type (A2) | WAITING_CLARIFICATION | WAITING_CLARIFICATION (new clarification row) | same | Phase B | `agent.clarification.superseded(reason=UNCLEAR)`, `agent.clarification.created` |
 | T6 | Unclear answer at attempt 2 | WAITING_CLARIFICATION | FAILED_SAFE | same | Phase B | `agent.clarification.expired(reason=ATTEMPTS)` |
 | T7 | New task while a clarification is open | WAITING_CLARIFICATION | CANCELLED | same | Phase B of the new turn | `agent.clarification.superseded(reason=NEW_TASK)` |
 | T8 | TTL passed, stale source, or version mismatch, observed by a turn | WAITING_CLARIFICATION | EXPIRED | same | Phase B of that turn | `agent.clarification.expired(reason=TTL\|STALE\|VERSION)` |
+| T8a (A2) | Clarification classifier infrastructure/contract failure (busy, timeout, provider/transport error, unavailable, malformed after repair) | WAITING_CLARIFICATION | WAITING_CLARIFICATION (**no transition**; nothing appended; attempt unchanged) | — | none (turn abandoned, submission ABANDONED) | existing `agent.turn.busy` / not-committed audit |
+| T8b (A2) | Stale/foreign/mismatched clarification button | WAITING_CLARIFICATION | WAITING_CLARIFICATION (**no transition**; request rejected; pointer kept) | — | none (submission ABANDONED) | `agent.clarification.rejected(reason=NOT_ACTIVE\|INVALID_CHOICE)` |
 | T9 | Draft modified (new draft id) | WAITING_CONFIRMATION | WAITING_CONFIRMATION (`pending_draft_id` updated) | live pending-draft authority | Phase B | `agent.task.state_changed(same)` |
 | T10 | HR confirms draft (`/ui/agent/drafts/{id}/confirm`, CSRF) | WAITING_CONFIRMATION | COMPLETED | existing confirm route scopes + `resolve_pending_draft_authority` | the confirm route's single commit, with `create_job`/`AgentDraftConfirmation` | existing `job.created` + `agent.task.state_changed` |
 | T11 | Pending-draft pointer replaced by a new vacancy analysis (forced, or a resolved VACANCY_ANALYSIS clarification) | WAITING_CONFIRMATION | CANCELLED | live pointer | Phase B | `agent.task.state_changed(reason=DRAFT_REPLACED)` |
@@ -1280,6 +1405,13 @@ Chained after `a87d4c6e2b19`, single head:
   - `source_turn_id`, `source_sha256` and offsets are all required for
     SEARCH_OR_VACANCY and all NULL for VACANCY_SOURCE_REQUIRED;
   - `question_turn_id` NOT NULL (A1);
+  - `created_from_turn_id` NOT NULL (A2). For SEARCH_OR_VACANCY at
+    attempt 1, CHECK `created_from_turn_id = source_turn_id`. For
+    VACANCY_SOURCE_REQUIRED, the source fields are NULL at every attempt;
+  - `superseded_reason` IN (`UNCLEAR`, `NEW_TASK`) and non-null ⇔
+    `status = SUPERSEDED` (A2);
+  - `resolution_source` IN (`BUTTON`, `LABEL`, `MODEL`, `SOURCE_MESSAGE`)
+    (A2);
   - FKs: tenant/conversation/session_context/task CASCADE; `superseded_by_id`
     self SET NULL;
   - UNIQUE(`created_by_submission_id`), UNIQUE(`resolved_by_submission_id`);
@@ -1623,6 +1755,31 @@ For slices A to C, each item is a failing-first regression:
     - `created_turn_version` equals the persisted `turn_version` right
       after the creating commit, including the D-045 display sync bump;
     - every in-place transcript writer preserves `turn_id`.
+15b. **Exchange-chain retry and failure semantics (A2)**:
+    - A. SEARCH_OR_VACANCY attempt 1 UNCLEAR → a valid attempt-2 chain
+      `[U1, Q1, U2, Q2]`. The original source binding is unchanged, and the
+      resumed planner/JD drafter receives U1's text, never U2's.
+    - B. VACANCY_SOURCE_REQUIRED attempt 1 UNCLEAR → a valid attempt-2 chain
+      `[U0, Q1, U2, Q2]`. The source fields are still NULL, and a later
+      qualifying current message is the only JD source (never U0 or U2).
+    - C. Attempt 2 UNCLEAR → clarification EXPIRED, task FAILED_SAFE,
+      pointer cleared, no attempt 3, no capability.
+    - D. Classifier timeout or provider/transport error/Ollama unavailable →
+      turn abandoned. No attempt consumed, no transcript appended,
+      clarification and task unchanged and still answerable.
+    - E. Malformed classifier output after the one repair → same as D.
+    - F. INFERENCE_BUSY → same as D.
+    - G. Foreign, stale or mismatched clarification button → request
+      rejected, nothing appended, live clarification/pointer/attempt
+      unchanged, `agent.clarification.rejected` audited.
+    - H. An extra appended turn inside the expected retry sequence (before
+      or after Q1, or after Q2) → stale, fail closed.
+    - Forged chain cases → stale: predecessor with a different task,
+      session context or type; `superseded_reason` ≠ UNCLEAR; attempt not
+      1 → 2; SEARCH_OR_VACANCY source binding differing between P and C;
+      wrong ids at `T[-4]`..`T[-1]`.
+    - Bounded work: liveness reads at most four tail entries and one
+      predecessor row.
 16. **The model tries to add tenant/session/candidate UUID or scope fields**:
     rejected by `extra="forbid"`; parametrized over each forbidden key.
 17. **The model tries a protected attribute** (AZ/EN) in search/refine args:
@@ -1815,10 +1972,13 @@ inputs (§10.2).
    - The transcript is conversation-bound and durable.
 3. **How is a clarification source-bound?**
    - `source_turn_id` + `source_sha256` + exact offsets, plus semantic and
-     routing policy versions, and (A1) the append-position binding: the
-     `question_turn_id` entry must still be the last transcript entry,
-     directly preceded by the source turn. `created_turn_version` is
-     provenance only.
+     routing policy versions.
+   - (A1/A2) the append-position binding with the exchange chain: the
+     current `question_turn_id` is the last transcript entry, and the tail
+     back to the source is exactly the server-linked retry chain
+     (`[U1, Q1]` or `[U1, Q1, U2, Q2]`), validated from persisted
+     predecessor/submission relationships.
+   - `created_turn_version` is provenance only.
    - All are re-verified in the resuming turn and again under lock in
      Phase B. Any mismatch fails closed.
 4. **How does natural language resolve a closed clarification?**
