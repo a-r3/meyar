@@ -4,11 +4,14 @@ from typing import Any
 import httpx
 from pydantic import ValidationError
 
+from meyar.agent.clarification_schemas import ClarificationAnswerProposal
 from meyar.agent.prompts import (
     AGENT_SYSTEM_PROMPT,
+    CLARIFICATION_CLASSIFIER_SYSTEM_PROMPT,
     GROUNDED_SELECTION_SYSTEM_PROMPT,
     JD_CRITERIA_DRAFT_SYSTEM_PROMPT,
     build_agent_user_prompt,
+    build_clarification_classifier_user_prompt,
     build_grounded_selection_user_prompt,
     build_jd_criteria_draft_user_prompt,
 )
@@ -222,6 +225,33 @@ class OllamaLLMProvider:
                 "Model output failed JDCriteriaDraft structured-schema validation."
             ) from exc
         return draft, provenance
+
+    async def resolve_clarification_answer(
+        self,
+        *,
+        clarification_type: str,
+        allowed_answers: list[str],
+        answer_text: str,
+        repair: bool = False,
+    ) -> tuple[ClarificationAnswerProposal, LLMResultProvenance]:
+        content, provenance = await self._chat(
+            system_prompt=CLARIFICATION_CLASSIFIER_SYSTEM_PROMPT,
+            user_prompt=build_clarification_classifier_user_prompt(
+                clarification_type=clarification_type,
+                allowed_answers=allowed_answers,
+                answer_text=answer_text,
+                repair=repair,
+            ),
+            schema=ClarificationAnswerProposal.model_json_schema(),
+            think=False,
+        )
+        try:
+            proposal = ClarificationAnswerProposal.model_validate(json.loads(content))
+        except (json.JSONDecodeError, ValidationError) as exc:
+            raise ModelSchemaInvalidError(
+                "Model output failed ClarificationAnswerProposal structured-schema validation."
+            ) from exc
+        return proposal, provenance
 
     async def _chat(
         self,

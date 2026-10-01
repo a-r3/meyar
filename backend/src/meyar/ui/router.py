@@ -794,6 +794,10 @@ async def agent_turn(
     csrf_token: str = Form(...),
     conversation_id: uuid.UUID | None = Form(default=None),
     submission_id: uuid.UUID = Form(...),
+    # Issue #88 (D-092 §6.4 step 1): closed-choice clarification button.
+    # Untrusted proposals only; rejected unless they equal the live pointer.
+    clarification_id: uuid.UUID | None = Form(default=None),
+    clarification_choice: str | None = Form(default=None, max_length=64),
     ctx: UIContext = Depends(require_ui_scopes("candidates:read")),
     db: AsyncSession = Depends(get_db),
     llm: LLMProvider = Depends(get_llm_provider),
@@ -828,7 +832,16 @@ async def agent_turn(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         )
     message = canonical_message
-    from meyar.agent.service import apply_agent_turn_commit, execute_agent_turn
+    from meyar.agent.dialogue import (
+        CLARIFICATION_REJECTED_COPY,
+        ClarificationClassifierError,
+        ClarificationRejectedError,
+    )
+    from meyar.agent.service import (
+        ClarificationButton,
+        apply_agent_turn_commit,
+        execute_agent_turn,
+    )
     from meyar.agent.turn_boundary import (
         AgentInferenceBusyError,
         BoundaryEmbedding,
@@ -856,6 +869,7 @@ async def agent_turn(
         get_bound_submission,
         request_hash,
     )
+    from meyar.services.agent_task_repo import lock_dialogue_rows, stamp_created_turn_version
     from meyar.ui.service import build_agent_turn_view
 
     owner = _conversation_owner(ctx)
@@ -872,7 +886,16 @@ async def agent_turn(
             return _render_conversation_not_found(request, ctx)
         conversation_id = current.id
         await db.commit()
-    message_sha256 = request_hash(message)
+    clarification_button = (
+        ClarificationButton(clarification_id=clarification_id, choice=clarification_choice)
+        if clarification_id is not None or clarification_choice is not None
+        else None
+    )
+    # #87 replay evidence over the WHOLE semantic request (D-092 §13): the
+    # message plus any clarification id/choice. Never authorization.
+    message_sha256 = request_hash(
+        message, clarification_id=clarification_id, clarification_choice=clarification_choice
+    )
     submission = await get_bound_submission(
         db, submission_id=submission_id, owner=owner,
         browser_session_id=ctx.session_id, conversation_id=conversation_id,
@@ -987,12 +1010,20 @@ async def agent_turn(
                 embedding_provider=BoundaryEmbedding(embedding_provider, boundary),
                 max_tool_calls=settings.agent_max_tool_calls,
                 max_context_turns=settings.agent_max_context_turns,
+                clarification_button=clarification_button,
             ),
         )
         # PHASE B: re-lock and revalidate principal, reservation,
         # turn_version and live context; only then persist the outcome and
         # clear the reservation in the same commit.
         conversation, session_context = await boundary.reenter()
+        # Issue #88 (§12.2): clarification/task rows are locked and their
+        # staged preconditions re-verified AFTER conversation/context and
+        # BEFORE the submission row (fixed lock order).
+        locked_dialogue = await lock_dialogue_rows(
+            db, conversation=conversation, session_context=session_context,
+            dialogue=commit.dialogue,
+        )
         phase_b_submission = await get_bound_submission(
             db, submission_id=submission_id, owner=owner,
             browser_session_id=ctx.session_id, conversation_id=conversation_id,
@@ -1007,7 +1038,9 @@ async def agent_turn(
         ):
             raise TurnAuthorityLostError(TurnStaleReason.CONTEXT_CHANGED)
         result = await apply_agent_turn_commit(
-            db, conversation, session_context, tenant_id=ctx.tenant_id, commit=commit
+            db, conversation, session_context, tenant_id=ctx.tenant_id, commit=commit,
+            submission_id=submission_id, locked_dialogue=locked_dialogue,
+            clarification_ttl_seconds=settings.agent_clarification_ttl_seconds,
         )
         clear_turn_reservation(conversation)
         latest = await build_agent_turn_view(db, tenant_id=ctx.tenant_id, result=result)
@@ -1017,6 +1050,11 @@ async def agent_turn(
         # saw live instead of falling back to a generic per-outcome
         # message — see sync_last_turn_display_text's own docstring.
         await sync_last_turn_display_text(db, conversation, text=latest.headline)
+        # A1: provenance = the FINAL committed turn_version (after D-045).
+        await stamp_created_turn_version(
+            db, session_context=session_context, conversation=conversation,
+            submission_id=submission_id,
+        )
         complete_submission(
             phase_b_submission, reservation=reservation, message_sha256=message_sha256,
             completed_turn_version=conversation.turn_version,
@@ -1033,6 +1071,37 @@ async def agent_turn(
         await abandon_reserved_turn(db, reservation, submission_id=submission_id)
         await _audit_agent_turn_not_committed(db, ctx, "agent.turn.busy", exc.reason)
         failure = ("AGENT_BUSY", _AGENT_BUSY_COPY, status.HTTP_503_SERVICE_UNAVAILABLE)
+    except ClarificationRejectedError as exc:
+        # A2 (T8b): a rejected request, not a clarification transition —
+        # nothing appended, pointer/attempt untouched, submission ABANDONED.
+        await abandon_reserved_turn(db, reservation, submission_id=submission_id)
+        # Rejected before any inference: the rollback above also undid the
+        # PROCESSING claim, so retire the still-ISSUED token explicitly.
+        rejected_submission = await get_bound_submission(
+            db, submission_id=submission_id, owner=owner,
+            browser_session_id=ctx.session_id, conversation_id=reservation.conversation_id,
+            for_update=True,
+        )
+        if rejected_submission is not None and rejected_submission.status == "ISSUED":
+            rejected_submission.status = "ABANDONED"
+        await _audit_agent_turn_not_committed(
+            db, ctx, "agent.clarification.rejected", exc.reason.value
+        )
+        failure = (
+            "CLARIFICATION_NOT_ACTIVE", CLARIFICATION_REJECTED_COPY, status.HTTP_409_CONFLICT
+        )
+    except ClarificationClassifierError:
+        # A2 (T8a): classifier infrastructure/contract failure is NOT
+        # UNCLEAR — the turn is abandoned and the clarification stays live.
+        await abandon_reserved_turn(db, reservation, submission_id=submission_id)
+        await _audit_agent_turn_not_committed(
+            db, ctx, "agent.turn.abandoned", "CLARIFICATION_CLASSIFIER_FAILURE"
+        )
+        failure = (
+            "AGENT_PROVIDER_FAILURE",
+            "MEYAR AI xidməti hazırda əlçatan deyil. Bir qədər sonra yenidən cəhd edin.",
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
     except ClientDisconnectedError:
         await abandon_reserved_turn(db, reservation, submission_id=submission_id)
         await _audit_agent_turn_not_committed(
@@ -1714,6 +1783,7 @@ async def confirm_agent_job_draft(
         create_draft_confirmation,
         get_draft_confirmation,
     )
+    from meyar.services.agent_task_repo import complete_confirmed_draft_task
 
     verify_csrf(ctx.csrf_token, csrf_token)
     evaluation_as_of_date = resolve_business_date(settings.business_timezone)
@@ -1889,6 +1959,10 @@ async def confirm_agent_job_draft(
             criteria_version_id=version.id,
         )
         await mark_pending_job_draft_confirmed(db, authority, confirmation=confirmation)
+        # Issue #88 T10: complete the lane-B task; lane A is never touched.
+        await complete_confirmed_draft_task(
+            db, session_context=authority.session_context, draft_id=draft_id
+        )
         await db.commit()
     except UIServiceInputError as exc:
         await db.rollback()

@@ -191,6 +191,18 @@ class AgentConversationSessionContext(Base):
     # table row. Actionable only when it equals the requested draft id AND
     # the matching payload exists in the owning conversation's transcript.
     active_pending_draft_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
+    # Issue #88 (D-092): the ONLY live authority for which clarification may
+    # be answered now in this session. ``use_alter``: the clarification row
+    # itself references this context (cycle broken by a deferred FK).
+    active_clarification_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey(
+            "agent_clarifications.id",
+            ondelete="SET NULL",
+            use_alter=True,
+            name="fk_agent_session_context_active_clarification",
+        ),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

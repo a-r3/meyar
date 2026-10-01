@@ -61,6 +61,8 @@ A2 also separates three cases (§6.4):
 - a stale or foreign button is a rejected request, not a state transition.
 
 A2 is not implemented yet (see its status above).
+
+**Slice A implementation status:** implemented on branch `feat/88a-resumable-clarification-a2` (D-093, PROPOSED), pending independent acceptance and owner merge. This design text is unchanged.
 ---
 
 ## 0. Product contract

@@ -2,6 +2,7 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel, Field
 
+from meyar.agent.clarification_schemas import ClarificationAnswerProposal
 from meyar.agent.schemas import (
     AgentDecision,
     GroundedFact,
@@ -153,6 +154,23 @@ class LLMProvider(Protocol):
         (modality/family/duration/level) — never permissions, weights or
         policy. meyar.agent.canonical_requirements validates every proposal
         against the exact span text."""
+        ...
+
+    async def resolve_clarification_answer(
+        self,
+        *,
+        clarification_type: str,
+        allowed_answers: list[str],
+        answer_text: str,
+        repair: bool = False,
+    ) -> tuple[ClarificationAnswerProposal, "LLMResultProvenance"]:
+        """Issue #88 slice A (D-092 §6.4 step 4): classify one typed reply to
+        an open server-typed clarification into exactly one closed code
+        (an allowed answer, NEW_REQUEST or UNCLEAR). Receives ONLY the reply
+        text, the clarification type and the allowed codes — never the
+        source text, transcript, ids or identity. Raises the usual
+        LLMProviderError subclasses; the caller treats any failure (after
+        one repair) as classifier unavailability, never as UNCLEAR."""
         ...
 
     async def health(self) -> dict:

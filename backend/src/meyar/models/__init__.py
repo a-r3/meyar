@@ -5,6 +5,7 @@ from meyar.models.agent_conversation import (
 )
 from meyar.models.agent_draft_confirmation import AgentDraftConfirmation
 from meyar.models.agent_result_set import AgentResultSet, AgentResultSetMember
+from meyar.models.agent_task import AgentClarification, AgentTask
 from meyar.models.agent_turn_submission import AgentTurnSubmission
 from meyar.models.api_key import ApiKey
 from meyar.models.audit_event import AuditEvent
@@ -27,12 +28,14 @@ from meyar.models.tenant_membership import TenantMembership
 from meyar.models.user import User
 
 __all__ = [
+    "AgentClarification",
     "AgentConversation",
     "AgentConversationSessionContext",
     "AgentConversationTitleKind",
     "AgentDraftConfirmation",
     "AgentResultSet",
     "AgentResultSetMember",
+    "AgentTask",
     "AgentTurnSubmission",
     "ApiKey",
     "AuditEvent",

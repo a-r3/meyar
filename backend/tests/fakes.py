@@ -3,6 +3,10 @@ real running LLM or embedding model — see Slice 4 spec §21."""
 
 from typing import Any
 
+from meyar.agent.clarification_schemas import (
+    ClarificationAnswerProposal,
+    ClarificationProposalValue,
+)
 from meyar.agent.schemas import (
     AgentDecision,
     GroundedFact,
@@ -45,6 +49,9 @@ class FakeLLMProvider:
         jd_draft_error: LLMProviderError | None = None,
         jd_draft_fail_first_n_calls: int = 0,
         health_result: dict | None = None,
+        clarification_proposals: list[ClarificationProposalValue] | None = None,
+        clarification_error: LLMProviderError | None = None,
+        clarification_fail_first_n_calls: int = 0,
     ) -> None:
         self._extraction = extraction
         self._identity_extraction = identity_extraction
@@ -74,6 +81,12 @@ class FakeLLMProvider:
         self.last_jd_text: str | None = None
         self.last_requirement_spans: list[RequirementSpan] | None = None
         self._health_result = health_result
+        self._clarification_proposals = clarification_proposals or []
+        self._clarification_error = clarification_error
+        self._clarification_fail_first_n_calls = clarification_fail_first_n_calls
+        # (type, allowed answers, reply text, repair) per call: the ENTIRE
+        # model input of the clarification classifier.
+        self.clarification_calls: list[tuple[str, list[str], str, bool]] = []
 
     async def extract_candidate_profile(
         self, view: ProfessionalDocumentView
@@ -221,6 +234,37 @@ class FakeLLMProvider:
             model_revision=self.model_revision,
         )
         return self._jd_draft, provenance
+
+
+    async def resolve_clarification_answer(
+        self,
+        *,
+        clarification_type: str,
+        allowed_answers: list[str],
+        answer_text: str,
+        repair: bool = False,
+    ) -> tuple[ClarificationAnswerProposal, LLMResultProvenance]:
+        self.clarification_calls.append(
+            (clarification_type, list(allowed_answers), answer_text, repair)
+        )
+        if len(self.clarification_calls) <= self._clarification_fail_first_n_calls:
+            from meyar.llm.provider import ModelSchemaInvalidError
+
+            raise ModelSchemaInvalidError("Simulated schema-invalid clarification output.")
+        if self._clarification_error is not None:
+            raise self._clarification_error
+        if not self._clarification_proposals:
+            from meyar.llm.provider import ModelUnavailableError
+
+            raise ModelUnavailableError("FakeLLMProvider: clarification not configured.")
+        index = len(self.clarification_calls) - self._clarification_fail_first_n_calls - 1
+        value = self._clarification_proposals[min(index, len(self._clarification_proposals) - 1)]
+        provenance = LLMResultProvenance(
+            provider=self.provider_name,
+            model_name=self.model_name,
+            model_revision=self.model_revision,
+        )
+        return ClarificationAnswerProposal(value=value), provenance
 
 
 class FakeEmbeddingProvider:

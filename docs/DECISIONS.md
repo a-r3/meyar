@@ -7784,3 +7784,69 @@ PR #96 before slice A; corrected per review).**
 
    Slice B MUST pass WHOLE_MESSAGE instead of the model's `search_query`
    for model-routed searches.
+
+## D-093 — Issue #88 slice A implementation record (D-092 + A1/A2)
+
+**Status: PROPOSED — slice A implemented on branch
+`feat/88a-resumable-clarification-a2`, pending independent acceptance.**
+D-092, A1 and A2 semantics are unchanged; this entry records only the
+implementation choices the accepted design left open. #88 stays OPEN
+(slices B and C remain); #50 is out of scope.
+
+- **Schema.** Migration `b88a2c4d6e10` (after `a87d4c6e2b19`, single head)
+  adds `agent_tasks`, `agent_clarifications` and
+  `agent_conversation_session_contexts.active_clarification_id` exactly as
+  §4.3/§18, with CHECKs for every closed value, the type-dependent source
+  binding, attempt-1 `created_from_turn_id = source_turn_id`, and
+  `superseded_reason ∈ {UNCLEAR, NEW_TASK}` ⇔ SUPERSEDED. The pointer FK is
+  a deferred (`use_alter`) constraint to break the context ↔ clarification
+  cycle. Downgrade drops pointer, clarifications, tasks (counts logged) and
+  leaves `active_pending_draft_id` intact.
+- **Turn ids.** Every new user/assistant entry gets a server uuid4
+  `turn_id`; legacy entries get none and therefore never validate a chain.
+- **Phase B order.** `reenter` (principal → conversation → context) →
+  `lock_dialogue_rows` (clarification → task → lane-B task) → submission →
+  writes → D-045 sync → `created_turn_version` stamped with the final
+  `turn_version` → one commit.
+- **Request hash.** `request_hash` is SHA-256 of canonical JSON
+  `{"v":1,"message","clarification_id","clarification_choice"}` for every
+  turn. A PROCESSING submission claimed under the old message-only hash at
+  deploy time fails closed (re-render with a fresh token).
+- **Observed-stale pointer (T8).** When the live pointer's clarification
+  fails §6.2 (TTL, appended foreign turn, epoch, versions, source), the turn
+  expires it (task EXPIRED, pointer cleared) and answers with fixed
+  "resend" copy without executing anything — the literal §6.2 / scenario D
+  rule, whatever the message says. A pointer whose row is no longer OPEN is
+  cleared defensively (no row transition).
+- **Rejected button (T8b).** 409 with "Bu sual artıq aktiv deyil.", audit
+  `agent.clarification.rejected(NOT_ACTIVE|INVALID_CHOICE)`. Because the
+  rejection happens before any inference, the rollback also undoes the
+  PROCESSING claim, so the router retires the still-ISSUED token as
+  ABANDONED explicitly.
+- **Classifier failure (T8a).** Timeout/unavailable/provider error or
+  malformed output after the one repair → `ClarificationClassifierError`:
+  turn abandoned, existing provider-failure copy (503), audit
+  `agent.turn.abandoned(CLARIFICATION_CLASSIFIER_FAILURE)`. INFERENCE_BUSY
+  keeps the existing #85 busy path. A proposal outside the type's allowed
+  codes is a contract failure, not UNCLEAR.
+- **VACANCY_SOURCE_REQUIRED order.** FORCE_CANDIDATE_SEARCH /
+  FORCE_RESULT_LIMIT (new task) are checked before the slot fill, so an
+  explicit search with a requirement is never mistaken for a JD. A
+  CLARIFY_INPUT_STRUCTURE (unrepresentable) reply is UNCLEAR, never a source.
+- **Resumed search bound.** A resolved CANDIDATE_SEARCH whose bound source
+  exceeds the forced-search input bound (2000) ends T4 FAILED_SAFE with the
+  existing input-structure copy; nothing executes.
+- **Lane B.** Every turn that produces a new pending draft (forced JD,
+  SOURCE_MESSAGE, resumed VACANCY_ANALYSIS) owns a WAITING_CONFIRMATION
+  task; the deterministic amendment updates its `pending_draft_id` (T9);
+  the confirm route completes it (T10). Legacy pending drafts without a task
+  stay confirmable.
+- **Unchanged until slice C.** A model-proposed DRAFT_JOB_CRITERIA still
+  gets the non-resumable fixed copy (§23 lists that conversion under C).
+- **Deferred (slice A optional per §19.1/§20).** The `meyar
+  retire-agent-tasks` CLI, T12 lazy task expiry, the quoted-source
+  continuity headline, and disabled historical buttons. Buttons render only
+  for the one answerable question (live pointer, OPEN, unexpired, last entry).
+- **Test bootstrap.** `tests/conftest.py` drops the session-context table
+  before `drop_all` so the deferred FK cannot break a reset of a test schema
+  created by an earlier revision.

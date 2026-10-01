@@ -710,3 +710,7 @@ tbody tr:hover { background: var(--surface-subtle); }
   margin-bottom: 6px;
 }
 .criterion-label { font-weight: 700; }
+
+/* Issue #88 slice A: closed-choice clarification answers (§20). */
+.agent-clarification__choices { display: flex; flex-wrap: wrap; gap: .5rem; }
+.agent-clarification__choice { margin: 0; }

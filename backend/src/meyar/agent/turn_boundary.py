@@ -51,6 +51,7 @@ import anyio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meyar.agent.clarification_schemas import ClarificationAnswerProposal
 from meyar.agent.schemas import (
     AgentDecision,
     GroundedFact,
@@ -157,6 +158,11 @@ class TurnSessionState:
     context_epoch: int
     active_result_set_id: uuid.UUID | None
     active_pending_draft_id: uuid.UUID | None
+    # Issue #88 slice A: the context row id (task/clarification scope) and
+    # the dialogue-lane pointer as reserved. Read-only for orchestration:
+    # clarification state changes are staged and applied only in Phase B.
+    context_id: uuid.UUID | None = None
+    active_clarification_id: uuid.UUID | None = None
 
     @classmethod
     def of(cls, context: AgentConversationSessionContext) -> TurnSessionState:
@@ -167,6 +173,8 @@ class TurnSessionState:
             context_epoch=context.context_epoch,
             active_result_set_id=context.active_result_set_id,
             active_pending_draft_id=context.active_pending_draft_id,
+            context_id=context.id,
+            active_clarification_id=context.active_clarification_id,
         )
 
 
@@ -183,6 +191,7 @@ class TurnReservation:
     context_epoch: int
     active_result_set_id: uuid.UUID | None
     active_pending_draft_id: uuid.UUID | None
+    active_clarification_id: uuid.UUID | None = None
 
 
 @dataclass
@@ -247,6 +256,7 @@ async def reserve_agent_turn(
             context_epoch=session_context.context_epoch,
             active_result_set_id=session_context.active_result_set_id,
             active_pending_draft_id=session_context.active_pending_draft_id,
+            active_clarification_id=session_context.active_clarification_id,
         ),
     )
 
@@ -339,6 +349,7 @@ async def revalidate_reserved_turn(
         or session_context.context_epoch != reservation.context_epoch
         or session_context.active_result_set_id != reservation.active_result_set_id
         or session_context.active_pending_draft_id != reservation.active_pending_draft_id
+        or session_context.active_clarification_id != reservation.active_clarification_id
     ):
         raise TurnAuthorityLostError(TurnStaleReason.CONTEXT_CHANGED)
     conversation.active_turn_expires_at = datetime.now(UTC) + timedelta(seconds=ttl_seconds)
@@ -513,6 +524,23 @@ class BoundaryLLM:
         return await self._boundary.around_inference(
             lambda: self._inner.draft_job_criteria(
                 jd_text, requirement_spans=requirement_spans, span_hints=span_hints, repair=repair
+            )
+        )
+
+    async def resolve_clarification_answer(
+        self,
+        *,
+        clarification_type: str,
+        allowed_answers: list[str],
+        answer_text: str,
+        repair: bool = False,
+    ) -> tuple[ClarificationAnswerProposal, LLMResultProvenance]:
+        return await self._boundary.around_inference(
+            lambda: self._inner.resolve_clarification_answer(
+                clarification_type=clarification_type,
+                allowed_answers=allowed_answers,
+                answer_text=answer_text,
+                repair=repair,
             )
         )
 

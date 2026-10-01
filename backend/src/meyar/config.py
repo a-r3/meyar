@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     # inference gap (queue wait + one model call) and is refreshed at every
     # re-entry; it only matters when a process died mid-turn.
     agent_turn_reservation_seconds: int = Field(default=600, ge=60, le=3600)
+    # Issue #88 slice A (D-092 §6.7): resumable clarification TTL. Never
+    # beyond the owning BrowserSession's own expiry (capped in Phase B).
+    agent_clarification_ttl_seconds: int = Field(default=1800, ge=60, le=3600)
     # Explicit single-process SQLAlchemy pool policy (issue #85, D-089).
     # These equal SQLAlchemy's own QueuePool defaults; they are explicit so
     # the operability contract is reviewable. Agent inference never holds a

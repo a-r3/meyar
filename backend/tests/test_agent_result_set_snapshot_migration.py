@@ -222,7 +222,7 @@ def test_legacy_only_database_round_trips(monkeypatch) -> None:
 
 def test_member_snapshot_revision_is_ancestor_of_single_head() -> None:
     script = ScriptDirectory.from_config(_config())
-    assert script.get_heads() == ["a87d4c6e2b19"]
+    assert script.get_heads() == ["b88a2c4d6e10"]
     assert script.get_revision(NEW_HEAD).down_revision == PRIOR_HEAD
 
 
