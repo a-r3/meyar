@@ -7598,9 +7598,14 @@ IMPLEMENTATION NOT STARTED; owner selected "Variant 1", separate docs PR
     breaks lane independence.
 - No other architecture changes, and implementation has not started.
 
-**Amendment A2 — exchange-chain liveness for the UNCLEAR retry (PROPOSED,
-pending independent re-review; owner-specified rule, separate docs PR #96
-before slice A; corrected per review).**
+**Amendment A2 — exchange-chain liveness for the UNCLEAR retry (ACCEPTED
+AMENDMENT / IMPLEMENTATION NOT STARTED; owner-specified rule, separate docs
+PR #96 before slice A; corrected per review).**
+- *Status.* A2 was independently reviewed and accepted. Slice A
+  implementation remains PAUSED. #88 remains OPEN, and #50 remains OPEN and
+  out of scope. Implementation resumes only after the OWNER merges PR #96,
+  post-merge verification succeeds, and the recurring CI pytest hang is
+  investigated separately.
 - *Finding.* A1's adjacency clause ("the entry immediately before the
   question is the source turn") cannot hold for attempt 2. The tail is then
   `[U1 source, Q1, U2 unclear answer, Q2]`, so every retry would be born
@@ -7671,8 +7676,7 @@ before slice A; corrected per review).**
   stays the #85/D-089 concurrency authority, and `question_turn_id` stays
   the current-question append-order authority. A1 lane independence is
   unchanged.
-- Implementation has not started. A2 is implemented in slice A only after
-  this amendment is accepted and owner-merged.
+- Implementation has not started (see *Status* above).
 
 1. **Authority.** The hierarchy (DB ownership > live BrowserSession/ResultSet
    /mutation authority > deterministic services > capability execution >

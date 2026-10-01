@@ -33,8 +33,16 @@ reviewing D1 would stale an open lane-A clarification. That contradicts
 §4.4 rule 4. No other part of the accepted architecture changes.
 
 
-**Amendment A2 (PROPOSED, pending independent review; owner-specified
-exchange-chain rule):** A1's adjacency rule is correct for attempt 1 but
+**Amendment A2 (ACCEPTED AMENDMENT / IMPLEMENTATION NOT STARTED;
+owner-specified exchange-chain rule):**
+- A2 was independently reviewed and accepted.
+- Slice A implementation remains PAUSED. #88 remains OPEN, and #50 remains
+  OPEN and out of scope.
+- Implementation resumes only after (1) the OWNER merges PR #96, (2)
+  post-merge verification succeeds, and (3) the recurring CI pytest hang is
+  investigated separately.
+
+The change: A1's adjacency rule is correct for attempt 1 but
 incomplete for the attempt-2 UNCLEAR retry (§6.4 step 5, T5). After a retry
 the tail is `[U1 source, Q1, U2 unclear answer, Q2]`, so the entry before Q2
 is U2, not the source. Read literally, every attempt-2 clarification would be
@@ -52,8 +60,7 @@ A2 also separates three cases (§6.4):
 - classifier infrastructure failure abandons the turn and consumes nothing;
 - a stale or foreign button is a rejected request, not a state transition.
 
-Implementation of A2 waits for acceptance and owner merge of this docs
-amendment.
+A2 is not implemented yet (see its status above).
 ---
 
 ## 0. Product contract

@@ -19,15 +19,17 @@ merged via PR #93, Amendment A1 via PR #94).
   clarification binding.
 - The owner chose **D-092 Amendment A1**: the append-position binding via
   `question_turn_id`. A1 was independently reviewed and **accepted** (docs PR
-  #94, awaiting owner merge).
+  #94).
 - PR #94 (A1) merged as `d6fd53f`; CI hang diagnostics PR #95 merged as
   `2445caa`. The hang root cause is still open.
 - The slice A pre-implementation review found that A1's adjacency rule cannot
   hold for the attempt-2 UNCLEAR retry. The owner specified the
-  **exchange-chain rule (D-092 Amendment A2)**. It is proposed in a separate
-  docs PR and pending independent review.
+  **exchange-chain rule (D-092 Amendment A2)**. A2 was independently reviewed
+  and **accepted** (docs PR #96, awaiting owner merge).
 - **Slice A implementation has NOT started** (no slice A code is committed).
-  It restarts from the post-A2 `main` only after A2 is accepted and merged.
+  It resumes from the post-A2 `main` only after the OWNER merges PR #96,
+  post-merge verification succeeds, and the recurring CI pytest hang
+  (stalls around pytest 91–92%) is investigated separately.
 
 **Issue #87 working branch (not accepted):** accepted `main` is
 `ac9a249359c9a5dcf417b4e3f269a2c0b92b3ab0` (#84, #85, #86 closed).
