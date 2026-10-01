@@ -33,6 +33,9 @@ _pools = weakref.WeakSet()
 _checked_out = {}
 _recent_events = deque(maxlen=256)
 _thread = None
+# Ownership: _output_fd (direct pipe/terminal output) is owned by this module
+# and closed only after being detached under _lock; emitters write to their
+# own dup of it. A regular-file fd is owned solely by its writer thread.
 _output_fd = None
 _output_queue = None
 _writer_thread = None
@@ -40,6 +43,8 @@ _dropped_records = 0
 _repo_root = Path(__file__).resolve().parents[2]
 THRESHOLD_SECONDS = 120
 MAX_RECORD_BYTES = 4096
+WATCHDOG_JOIN_SECONDS = 21
+WRITER_JOIN_SECONDS = 1
 
 
 def _safe_nodeid(nodeid):
@@ -81,39 +86,72 @@ def _safe_path(filename):
     return "external-sha256=" + hashlib.sha256(filename.encode()).hexdigest()[:12]
 
 
-def _emit(kind, **fields):
+def _drop():
     global _dropped_records
     with _lock:
-        fd = _output_fd
-        output_queue = _output_queue
-    if fd is None:
-        with _lock:
-            _dropped_records += 1
-        return
+        _dropped_records += 1
+
+
+def _emit(kind, **fields):
     try:
         line = ("MEYAR_HANG " + json.dumps({"kind": kind, **fields}) + "\n").encode()
-        if len(line) > MAX_RECORD_BYTES:
-            with _lock:
-                _dropped_records += 1
-        elif output_queue is not None:
+    except (TypeError, ValueError):
+        _drop()
+        return
+    if len(line) > MAX_RECORD_BYTES:
+        _drop()
+        return
+    owned_fd = None
+    with _lock:
+        output_queue = _output_queue
+        if output_queue is None and _output_fd is not None:
+            # The dup shares the open file description (and its O_NONBLOCK)
+            # but is ours alone: closing or reusing the module fd number
+            # cannot redirect this write. dup never waits on the pipe.
+            try:
+                owned_fd = os.dup(_output_fd)
+            except OSError:
+                pass
+    if output_queue is not None:
+        try:
             output_queue.put_nowait(line)
-        elif os.write(fd, line) != len(line):
-            with _lock:
-                _dropped_records += 1
-    except (BlockingIOError, OSError, TypeError, ValueError, queue.Full):
-        with _lock:
-            _dropped_records += 1
+        except queue.Full:
+            _drop()
+        return
+    if owned_fd is None:
+        _drop()
+        return
+    try:
+        if os.write(owned_fd, line) != len(line):
+            _drop()
+    except OSError:
+        _drop()
+    finally:
+        try:
+            os.close(owned_fd)
+        except OSError:
+            pass
 
 
 def _write_regular_file(stop, output_queue, fd):
-    """Only this daemon worker may wait on regular-file I/O; tests never do."""
-    while not stop.is_set() or not output_queue.empty():
+    """Only this daemon worker may wait on regular-file I/O; tests never do.
+
+    It owns ``fd`` and is the only code that closes it, so teardown can never
+    close a descriptor this thread may still write to.
+    """
+    try:
+        while not stop.is_set() or not output_queue.empty():
+            try:
+                line = output_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            try:
+                os.write(fd, line)
+            except OSError:
+                pass
+    finally:
         try:
-            line = output_queue.get(timeout=0.1)
-        except queue.Empty:
-            continue
-        try:
-            os.write(fd, line)
+            os.close(fd)
         except OSError:
             pass
 
@@ -294,25 +332,37 @@ def _watch(stop):
             _emit("PG_OBSERVER_ERROR", error_type=type(exc).__name__)
 
 
+def _shutdown():
+    """Detach output under _lock first, then clean up with bounded joins.
+
+    No new emitter can acquire the old output once detached; one already
+    writing holds its own dup. The writer fd is never closed here: a writer
+    outliving its join keeps its fd until it exits (daemon/process exit
+    bounds it), which is preferable to writing into a reused descriptor.
+    """
+    global _output_fd, _output_queue, _writer_thread
+    with _lock:
+        _stop.set()
+        direct_fd, _output_fd = _output_fd, None
+        _output_queue = None
+        watchdog, writer = _thread, _writer_thread
+        _writer_thread = None
+    if direct_fd is not None:
+        try:
+            os.close(direct_fd)
+        except OSError:
+            pass
+    if watchdog is not None:
+        watchdog.join(timeout=WATCHDOG_JOIN_SECONDS)
+    if writer is not None:
+        writer.join(timeout=WRITER_JOIN_SECONDS)
+
+
 def pytest_configure(config):
     global _thread, _output_fd, _output_queue, _writer_thread
     global _stop, _phase, _loops, _pools, _dropped_records
     # A new pytest.main() in this interpreter must not inherit old state.
-    with _lock:
-        _stop.set()
-        previous_thread = _thread
-        previous_writer = _writer_thread
-        previous_fd = _output_fd
-        _output_fd = None
-    if previous_thread is not None:
-        previous_thread.join(timeout=21)
-    if previous_writer is not None:
-        previous_writer.join(timeout=1)
-    if previous_fd is not None:
-        try:
-            os.close(previous_fd)
-        except OSError:
-            pass
+    _shutdown()
     with _lock:
         _stop = threading.Event()
         _phase = ("", "IDLE", 0.0)
@@ -321,8 +371,6 @@ def pytest_configure(config):
         _checked_out.clear()
         _recent_events.clear()
         _dropped_records = 0
-        _output_queue = None
-        _writer_thread = None
     # A separate open-file description keeps O_NONBLOCK off pytest's own pipe.
     # A regular file instead shares its offset with pytest via dup and writes
     # on a bounded-queue daemon: independent offsets can overwrite output.
@@ -332,22 +380,36 @@ def pytest_configure(config):
     original_fd = getattr(stderr_capture, "targetfd_save", 2)
     try:
         duplicate = os.dup(original_fd)
-        if stat.S_ISREG(os.fstat(duplicate).st_mode):
-            _output_fd = duplicate
-            _output_queue = queue.Queue(maxsize=1024)
-            _writer_thread = threading.Thread(
-                target=_write_regular_file, args=(_stop, _output_queue, duplicate),
+    except OSError:
+        duplicate = None
+    if duplicate is not None:
+        try:
+            regular = stat.S_ISREG(os.fstat(duplicate).st_mode)
+        except OSError:
+            regular = False
+        if regular:
+            output_queue = queue.Queue(maxsize=1024)
+            writer = threading.Thread(
+                target=_write_regular_file, args=(_stop, output_queue, duplicate),
                 name="meyar-hang-output", daemon=True,
             )
-            _writer_thread.start()
+            try:
+                writer.start()  # From here the writer alone owns `duplicate`.
+            except RuntimeError:
+                os.close(duplicate)
+            else:
+                with _lock:
+                    _output_queue, _writer_thread = output_queue, writer
         else:
             try:
-                _output_fd = os.open(f"/proc/self/fd/{duplicate}",
-                                     os.O_WRONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+                direct_fd = os.open(f"/proc/self/fd/{duplicate}",
+                                    os.O_WRONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+            except OSError:
+                direct_fd = None
             finally:
                 os.close(duplicate)
-    except OSError:
-        _output_fd = None
+            with _lock:
+                _output_fd = direct_fd
     event.listen(Pool, "connect", _connect)
     event.listen(Pool, "checkout", _checkout)
     event.listen(Pool, "checkin", _checkin)
@@ -368,26 +430,12 @@ def _reset(connection, record, reset_state):
 
 
 def pytest_unconfigure(config):
-    global _output_fd, _output_queue
-    _stop.set()
     for name, callback in [("connect", _connect), ("checkout", _checkout),
                            ("checkin", _checkin), ("reset", _reset)]:
         event.remove(Pool, name, callback)
     event.remove(Engine, "engine_connect", _engine_connect)
     event.remove(Session, "after_begin", _session_begin)
-    if _thread is not None:
-        _thread.join(timeout=21)
-    if _writer_thread is not None:
-        _writer_thread.join(timeout=1)
-    with _lock:
-        fd = _output_fd
-        _output_fd = None
-        _output_queue = None
-    if fd is not None:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
+    _shutdown()
 
 
 def _mark(item, phase, boundary):

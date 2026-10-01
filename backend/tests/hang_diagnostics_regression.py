@@ -6,6 +6,7 @@ import inspect
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -179,6 +180,7 @@ def test_exception_cleanup_and_second_pytest_session(tmp_path):
         "from sqlalchemy.orm import Session; "
         f"path={str(test_file)!r}; "
         "check=lambda: (not d._thread.is_alive() and d._output_fd is None and "
+        "d._output_queue is None and d._writer_thread is None and "
         "all(not event.contains(t,n,f) for t,n,f in "
         "[(Pool,'connect',d._connect),(Pool,'checkout',d._checkout),"
         "(Pool,'checkin',d._checkin),(Pool,'reset',d._reset),"
@@ -214,3 +216,127 @@ def test_redirected_regular_file_keeps_diagnostic_markers(tmp_path):
     content = log.read_text()
     assert '"kind": "PHASE"' in content
     assert "1 passed" in content
+
+
+class _GatedOs:
+    """Module-local ``os`` stand-in: pauses one write on Events, records closes."""
+
+    def __init__(self, gate_fd=None):
+        self.gate_fd = gate_fd
+        self.write_fds = []
+        self.closed = []
+        self.acquired = threading.Event()
+        self.proceed = threading.Event()
+
+    def __getattr__(self, name):
+        return getattr(os, name)
+
+    def write(self, fd, data):
+        self.write_fds.append(fd)
+        if self.gate_fd is None or fd == self.gate_fd:
+            self.acquired.set()
+            assert self.proceed.wait(10)
+        return os.write(fd, data)
+
+    def close(self, fd):
+        self.closed.append((fd, threading.get_ident()))
+        return os.close(fd)
+
+
+def _read_available(fd):
+    os.set_blocking(fd, False)
+    try:
+        return os.read(fd, 65536)
+    except BlockingIOError:
+        return b""
+
+
+def test_inflight_direct_write_cannot_reach_reused_descriptor_number(monkeypatch):
+    read_a, write_a = os.pipe()
+    module_fd = os.open(f"/proc/self/fd/{write_a}", os.O_WRONLY | os.O_NONBLOCK)
+    gated = _GatedOs()
+    unrelated = []
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(diagnostics, "os", gated)
+            patch.setattr(diagnostics, "_output_fd", module_fd)
+            patch.setattr(diagnostics, "_output_queue", None)
+            patch.setattr(diagnostics, "_writer_thread", None)
+            patch.setattr(diagnostics, "_thread", None)
+            patch.setattr(diagnostics, "_stop", threading.Event())
+            emitter = threading.Thread(
+                target=diagnostics._emit, args=("SYNTHETIC",), kwargs={"marker": "RACE"}
+            )
+            emitter.start()
+            # T1: the emitter holds its output and is about to write.
+            assert gated.acquired.wait(10)
+            owned_fd = gated.write_fds[0]
+            assert owned_fd != module_fd
+            # T2: teardown detaches and closes the module descriptor.
+            diagnostics._shutdown()
+            assert diagnostics._output_fd is None
+            assert (module_fd, threading.get_ident()) in gated.closed
+            # T3: deliberately make the old number name an unrelated pipe.
+            read_b, write_b = os.pipe()
+            unrelated += [read_b, write_b]
+            if read_b == module_fd:
+                read_b = os.dup(read_b)
+                unrelated.append(read_b)
+            if write_b != module_fd:
+                os.dup2(write_b, module_fd)
+                unrelated.append(module_fd)
+            assert os.fstat(module_fd).st_ino == os.fstat(write_b).st_ino
+            # T1 resumes: the delayed write must not land in the unrelated pipe.
+            gated.proceed.set()
+            emitter.join(10)
+            assert not emitter.is_alive()
+        assert _read_available(read_b) == b""
+        assert b'"marker": "RACE"' in _read_available(read_a)
+        assert owned_fd in [fd for fd, _ident in gated.closed]
+    finally:
+        gated.proceed.set()
+        for fd in {*unrelated, read_a, write_a}:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def test_teardown_never_closes_fd_owned_by_writer_outliving_its_join(monkeypatch, tmp_path):
+    writer_fd = os.open(tmp_path / "output.log", os.O_WRONLY | os.O_CREAT, 0o600)
+    gated = _GatedOs(gate_fd=writer_fd)
+    stop = threading.Event()
+    output_queue = diagnostics.queue.Queue(maxsize=1024)
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(diagnostics, "os", gated)
+            patch.setattr(diagnostics, "WRITER_JOIN_SECONDS", 0.05)
+            writer = threading.Thread(
+                target=diagnostics._write_regular_file, args=(stop, output_queue, writer_fd),
+                daemon=True,
+            )
+            patch.setattr(diagnostics, "_output_fd", None)
+            patch.setattr(diagnostics, "_output_queue", output_queue)
+            patch.setattr(diagnostics, "_writer_thread", writer)
+            patch.setattr(diagnostics, "_thread", None)
+            patch.setattr(diagnostics, "_stop", stop)
+            writer.start()
+            diagnostics._emit("SYNTHETIC", marker="SLOW")
+            assert gated.acquired.wait(10)
+            diagnostics._shutdown()
+            # The writer outlived its bounded join: teardown detached it but
+            # neither closed nor reassigned the fd the writer still owns.
+            assert writer.is_alive()
+            assert stop.is_set()
+            assert diagnostics._output_queue is None and diagnostics._writer_thread is None
+            assert writer_fd not in [fd for fd, _ident in gated.closed]
+            os.fstat(writer_fd)
+            gated.proceed.set()
+            writer.join(10)
+            assert not writer.is_alive()
+        assert [ident for fd, ident in gated.closed if fd == writer_fd] == [writer.ident]
+        assert b'"marker": "SLOW"' in (tmp_path / "output.log").read_bytes()
+    finally:
+        gated.proceed.set()
+        if writer_fd not in [fd for fd, _ident in gated.closed]:
+            os.close(writer_fd)
