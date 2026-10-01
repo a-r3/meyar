@@ -1011,6 +1011,11 @@ class AgentTurnOutcome(StrEnum):
     TOOL_CALL_LIMIT_EXCEEDED = "TOOL_CALL_LIMIT_EXCEEDED"
     AGENT_PROVIDER_FAILURE = "AGENT_PROVIDER_FAILURE"
     MALFORMED_MODEL_OUTPUT = "MALFORMED_MODEL_OUTPUT"
+    # Issue #88 slice B (D-092 §11.3): a multi-step capability plan whose
+    # later step failed its Layer-2 precondition or returned a non-success
+    # outcome. Nothing the plan produced is activated; the previous live
+    # pointers are kept exactly. Single-step plans never use this outcome.
+    PLAN_INCOMPLETE = "PLAN_INCOMPLETE"
 
 
 class GroundedFact(BaseModel):

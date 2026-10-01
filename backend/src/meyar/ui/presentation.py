@@ -311,6 +311,11 @@ AGENT_TURN_OUTCOME_TEXT: dict[str, str] = {
         "AI xidmətinin cavabını təhlükəsiz şəkildə emal etmək mümkün olmadı. Sorğunu daha "
         "konkret ifadə edib yenidən cəhd edin."
     ),
+    # Issue #88 slice B (D-092 §11.3): never a raw code, capability or id.
+    "PLAN_INCOMPLETE": (
+        "Sorğunun bütün addımları icra oluna bilmədi, ona görə nəticə aktivləşdirilmədi. "
+        "Sorğunu hissə-hissə göndərin."
+    ),
 }
 
 

@@ -1382,6 +1382,11 @@ async def test_foreign_owner_cannot_observe_or_touch_an_in_flight_turn(
 
 EMBED_MODEL = "meyar-test-embed:v1"
 HYBRID_REQUEST = "Java is required; backend modernization experience is preferred."
+# Issue #88 slice B: the planner receives the HR user's OWN message (never a
+# model search_query), so the hybrid request is the message itself. It is an
+# explicit search (FORCE_CANDIDATE_SEARCH), planned by the fake planner as
+# Java + the grounded semantic phrase -> HYBRID -> one query embedding.
+HYBRID_REQUEST_MESSAGE = "Find Java candidates with backend modernization experience"
 
 
 def _install_gated_embedding(settings: Settings, gate: GatedOllama) -> None:
@@ -1449,7 +1454,7 @@ async def test_hybrid_agent_search_holds_no_db_connection_while_embedding_waits_
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         csrf = await _login(client, user.username, password)
         conversation_id = await _new_conversation(client, csrf)
-        turn = _spawn(_agent_post(client, csrf, conversation_id, "salam"))
+        turn = _spawn(_agent_post(client, csrf, conversation_id, HYBRID_REQUEST_MESSAGE))
         for _ in range(500):
             if admission.queued == 1:
                 break
@@ -1512,7 +1517,7 @@ async def test_hybrid_agent_search_busy_embedding_gate_gives_busy_outcome(
             csrf = await _login(client, user.username, password)
             conversation_id = await _new_conversation(client, csrf)
             busy = await asyncio.wait_for(
-                _agent_post(client, csrf, conversation_id, "salam"), timeout=10
+                _agent_post(client, csrf, conversation_id, HYBRID_REQUEST_MESSAGE), timeout=10
             )
     finally:
         await holder.__aexit__(None, None, None)
@@ -1593,12 +1598,16 @@ async def test_orphan_result_set_from_stale_turn_never_becomes_live_authority(
         },
     )
     await db_session.commit()
+    # Issue #88 slice B: the model only CHOOSES search; the planner gets the
+    # HR user's own (model-routed) message, planned by the local model (call
+    # 2) — then the post-search decision (call 3) blocks.
     gate = GatedOllama(
         decisions=[
             {"action": "SEARCH_CANDIDATES", "search_query": "Python bilən namizədləri göstər"},
+            {"required_filters": {"skills": ["Python"]}},
             GREETING_DECISION,
         ],
-        pass_through=1,
+        pass_through=2,
     )
     _install(Settings(ui_cookie_secure=False, inference_concurrency=1), gate)
     transport = ASGITransport(app=app)
@@ -1609,7 +1618,7 @@ async def test_orphan_result_set_from_stale_turn_never_becomes_live_authority(
         csrf_a = await _login(tab_a, user.username, password)
         csrf_b = await _login(tab_b, user.username, password)
         conversation_id = await _new_conversation(tab_a, csrf_a)
-        turn = _spawn(_agent_post(tab_a, csrf_a, conversation_id, "salam"))
+        turn = _spawn(_agent_post(tab_a, csrf_a, conversation_id, "Python haqqında məlumat ver"))
         # The search ran and committed its ResultSet; the 2nd decision blocks.
         await asyncio.wait_for(gate.entered.wait(), timeout=10)
         async with factory() as db:

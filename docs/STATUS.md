@@ -2,6 +2,18 @@
 
 ## Current phase
 
+**Issue #88 Slice B — implemented on branch, NOT accepted:** branch
+`feat/88b-capability-registry` from `main` @
+`1dc79eadf92bc433d0772a9ebd863385a1e90cf6` implements D-092 §23 slice B
+(implementation record D-094, PROPOSED): `meyar.agent.capabilities` with the
+seven registry definitions wrapping the unchanged `_dispatch_*` functions,
+the pure Layer-1 `validate_plan`, the Layer-2 hook with atomic activation
+(PLAN_INCOMPLETE), CREATE_JOB/RANK as HUMAN_ACTION_ONLY, the transitional
+one-step adapter, and the WHOLE_MESSAGE grounding of model-routed searches.
+No migration (head `b88a2c4d6e10`). Slice C has NOT started; #88 remains
+OPEN; #50 remains OPEN and out of scope. Independent acceptance and owner
+merge are pending. The historical CI hang root cause remains NOT PROVEN.
+
 **Issue #88 Slice A — IMPLEMENTED, independently technically accepted, and
 MERGED through PR #98.** Squash commit on `main`:
 `a9b8ff39746aa5767f8ad2b3b95809db5b1b9bc4` (single parent
@@ -15,8 +27,8 @@ Alembic single head: `b88a2c4d6e10`.
   order, A2 exchange-chain liveness, SOURCE_MESSAGE, and a final Phase B
   that always starts from a fresh transaction (principal locked first; D-093
   supersedes D-089's deterministic-only Phase-B statements).
-- Slices B and C have NOT started. #88 remains OPEN. #50 remains OPEN and
-  out of scope for Slice A.
+- Slice C has NOT started (slice B: see the block above). #88 remains
+  OPEN. #50 remains OPEN and out of scope for Slice A.
 - The historical CI pytest hang root cause remains NOT PROVEN; the PR #97
   diagnostics remain relevant and active.
 

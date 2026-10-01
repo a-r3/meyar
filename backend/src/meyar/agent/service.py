@@ -36,6 +36,29 @@ from meyar.agent.canonical_requirements import (
     semantic_parameters,
     subject_grounded_in_span,
 )
+from meyar.agent.capabilities import (
+    CAPABILITY_PLAN_SCHEMA_VERSION,
+    CAPABILITY_REGISTRY,
+    CapabilityName,
+    ExecutionContext,
+    PlanExecution,
+    PlanOrigin,
+    PlanRejection,
+    PlanRejectionCode,
+    PlanStatus,
+    ResultSetContext,
+    ResultSetStatus,
+    ValidationContext,
+    capability_audit_metadata,
+    execute_plan,
+    validate_plan,
+)
+from meyar.agent.capabilities.adapter import (
+    plan_for_model_decision,
+    result_limit_plan,
+    search_plan,
+    vacancy_plan,
+)
 from meyar.agent.clarification_schemas import (
     ALLOWED_ANSWERS,
     MAX_CLARIFICATION_ATTEMPTS,
@@ -195,6 +218,12 @@ MAX_EVIDENCE_MATCHES = 30
 # Bounded retry for DRAFT_JOB_CRITERIA's own drafting call, matching the
 # D-038 grounded-synthesis precedent (_synthesize_grounded_answer).
 MAX_JD_DRAFT_ATTEMPTS = 2
+# Issue #88 slice B: the scope POST /ui/agent itself requires; service-level
+# callers without a UIContext validate capability plans against it.
+DEFAULT_AGENT_TURN_SCOPES = frozenset({"candidates:read"})
+# D-092 §11.3: fixed HR copy for a Layer-1 plan rejection. Codes, capability
+# names and ids go to audit only.
+PLAN_REJECTED_COPY = "Bu sorğunu təhlükəsiz icra edə bilmədim; zəhmət olmasa dəqiqləşdirin."
 
 
 def _fold(text: str) -> str:
@@ -345,12 +374,14 @@ async def _dispatch_search(
     tenant_id: uuid.UUID,
     session_context: TurnSessionState,
     previous_result_set_id: uuid.UUID | None,
-    decision: AgentDecision,
+    natural_language_request: str,
     as_of_date: date,
     embedding_config: EmbeddingSearchConfig,
     embedding_provider: EmbeddingProvider | None,
 ) -> tuple[AgentToolResult, uuid.UUID | None]:
-    """Forwards decision.search_query, unmodified, into the existing
+    """Forwards the SERVER-resolved search source (issue #88 slice B: the
+    capability step's WHOLE_MESSAGE / bound resume source — never a
+    model-authored ``search_query``), unmodified, into the existing
     frozen NL search-planner pipeline (D-031) — this module never
     re-implements filter extraction, prohibited-attribute checks, or the
     no-silent-weakening rule; it only reuses them. On an executable
@@ -358,12 +389,11 @@ async def _dispatch_search(
     and returns its id; a non-executable/failed search never clears a
     prior valid active_result_set_id — only a successful search replaces
     it (returns None to signal "keep the existing pointer")."""
-    assert decision.search_query is not None
     planned = await plan_and_search_candidates(
         db,
         llm,
         tenant_id=tenant_id,
-        natural_language_request=decision.search_query,
+        natural_language_request=natural_language_request,
         as_of_date=as_of_date,
         embedding_config=embedding_config,
         embedding_provider=embedding_provider,
@@ -2120,6 +2150,7 @@ async def run_agent_turn(
     embedding_provider: EmbeddingProvider | None,
     max_tool_calls: int,
     max_context_turns: int,
+    principal_scopes: frozenset[str] = DEFAULT_AGENT_TURN_SCOPES,
 ) -> AgentTurnResult:
     """Single-transaction form: the caller already holds the durable
     conversation row lock for the whole turn and commits/rolls back. Used by
@@ -2138,6 +2169,7 @@ async def run_agent_turn(
         embedding_provider=embedding_provider,
         max_tool_calls=max_tool_calls,
         max_context_turns=max_context_turns,
+        principal_scopes=principal_scopes,
     )
     return await apply_agent_turn_commit(
         db, conversation, session_context, tenant_id=tenant_id, commit=commit
@@ -2355,6 +2387,7 @@ async def execute_agent_turn(
     max_tool_calls: int,
     max_context_turns: int,
     clarification_button: ClarificationButton | None = None,
+    principal_scopes: frozenset[str] = DEFAULT_AGENT_TURN_SCOPES,
 ) -> AgentTurnCommit:
     """One bounded orchestration turn over SNAPSHOTS (issue #85). Never
     persists a mutation to any candidate/job/evaluation row, and never
@@ -2446,22 +2479,30 @@ async def execute_agent_turn(
             )
         return finish(result)
 
+    # Issue #88 slice B (D-092 §23): every capability invocation is a
+    # one-step plan validated by the pure Layer 1 and executed through the
+    # registry. A forced or resumed route yields a SERVER plan over its
+    # server-owned source text; otherwise the model's AgentDecision is
+    # adapted inside the loop below.
+    server_plan: tuple[dict, str] | None = None
     if resume is not None:
         # §6.6: the resolved answer maps to exactly one server-built step over
         # the server-owned source (bound U1 span, or the qualifying current
         # message for SOURCE_MESSAGE) — the same FORCE_* paths as today. The
         # answer words themselves are never search or JD input.
-        server_authorized_draft = resume.answer == ClarificationAnswer.VACANCY_ANALYSIS
-        server_authorized_search = resume.answer == ClarificationAnswer.CANDIDATE_SEARCH
-        job_draft_source = resume.source_text
-        forced_search_text = resume.source_text
-        server_result_limit = None
-        if server_authorized_search and len(forced_search_text) > MAX_AGENT_SEARCH_QUERY_LENGTH:
-            # T4: a truthful capability failure (the forced search input is
-            # bounded); the task fails safe and nothing executes.
-            return finish(
-                _fixed_clarification_result(llm, INPUT_STRUCTURE_CLARIFICATION_COPY)
+        if resume.answer == ClarificationAnswer.VACANCY_ANALYSIS:
+            server_plan = (
+                vacancy_plan(start=0, end=len(resume.source_text)),
+                resume.source_text,
             )
+        elif resume.answer == ClarificationAnswer.CANDIDATE_SEARCH:
+            if len(resume.source_text) > MAX_AGENT_SEARCH_QUERY_LENGTH:
+                # T4: a truthful capability failure (the forced search input
+                # is bounded); the task fails safe and nothing executes.
+                return finish(
+                    _fixed_clarification_result(llm, INPUT_STRUCTURE_CLARIFICATION_COPY)
+                )
+            server_plan = (search_plan(), resume.source_text)
     else:
         entry_routing = route_agent_entry(user_message)
         await record_event(
@@ -2501,23 +2542,37 @@ async def execute_agent_turn(
                     )
             return finish(_fixed_clarification_result(llm, clarification_copy))
 
-        server_authorized_draft = entry_routing.route == AgentEntryRoute.FORCE_JOB_DRAFT
-        # Exact user-owned source (offsets into user_message), never rewritten.
-        job_draft_source = entry_routing.draft_source(user_message)
-        server_authorized_search = entry_routing.route == AgentEntryRoute.FORCE_CANDIDATE_SEARCH
-        forced_search_text = user_message
-        # Count-only current-result follow-up ("ilk 3"): the server supplies
-        # the typed limit; the existing #49 refinement dispatch validates the
-        # active ResultSet and rejects truthfully when there is none.
-        server_result_limit = (
-            entry_routing.result_limit
-            if entry_routing.route == AgentEntryRoute.FORCE_RESULT_LIMIT
-            else None
-        )
+        if entry_routing.route == AgentEntryRoute.FORCE_JOB_DRAFT:
+            # Confirmed JDs bypass the orchestration model entirely. The
+            # exact user-owned source (offsets into user_message), never
+            # rewritten; drafting stays source-bound and review-only.
+            start = entry_routing.draft_source_start
+            end = entry_routing.draft_source_end
+            server_plan = (
+                vacancy_plan(
+                    start=0 if start is None or end is None else start,
+                    end=len(user_message) if start is None or end is None else end,
+                ),
+                user_message,
+            )
+        elif entry_routing.route == AgentEntryRoute.FORCE_CANDIDATE_SEARCH:
+            # Explicit new searches bypass the orchestration model's action
+            # classification: the user's own text reaches the planner.
+            server_plan = (search_plan(), user_message)
+        elif (
+            entry_routing.route == AgentEntryRoute.FORCE_RESULT_LIMIT
+            and entry_routing.result_limit is not None
+        ):
+            # Count-only current-result follow-up ("ilk 3"): the server
+            # supplies the typed limit; the existing #49 refinement dispatch
+            # validates the active ResultSet and rejects truthfully.
+            server_plan = (result_limit_plan(entry_routing.result_limit), user_message)
     # Search forced by the entry router (or a resumed clarification) is
     # turn-terminal once the existing planner/search path returns: no second
     # orchestration guess is needed.
-    search_turn_terminal = server_authorized_search
+    search_turn_terminal = server_plan is not None and (
+        server_plan[0]["steps"][0]["capability"] == CapabilityName.SEARCH_CANDIDATES.value
+    )
     tool_results: list[AgentToolResult] = []
     last_tool_summary: dict | None = None
     tool_calls_made = 0
@@ -2529,31 +2584,24 @@ async def execute_agent_turn(
     # produced a contradictory-looking TOOL_CALL_LIMIT_EXCEEDED banner
     # stacked above several duplicated result blocks. Guarded structurally
     # rather than only by prompt instruction, matching this module's D-038
-    # precedent.
+    # precedent. Keyed on the SERVER-resolved search source (slice B).
     searched_queries: set[str] = set()
+    execution_context = ExecutionContext(
+        db=db,
+        llm=llm,
+        tenant_id=tenant_id,
+        session_context=session_context,
+        as_of_date=as_of_date,
+        embedding_config=embedding_config,
+        embedding_provider=embedding_provider,
+    )
 
     while True:
         decision: AgentDecision | None
-        draft_authorized_for_decision = server_authorized_draft
-        if server_authorized_draft:
-            # Confirmed JDs bypass the orchestration model entirely. Drafting
-            # itself remains source-bound and review-only in
-            # _dispatch_draft_job_criteria below.
-            decision = AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA)
-            server_authorized_draft = False
-        elif server_authorized_search:
-            # Explicit new searches bypass the orchestration model's action
-            # classification. The user's text is forwarded unmodified into
-            # the existing validated NL planner in _dispatch_search.
-            decision = AgentDecision(
-                action=AgentActionType.SEARCH_CANDIDATES, search_query=forced_search_text
-            )
-            server_authorized_search = False
-        elif server_result_limit is not None:
-            decision = AgentDecision(
-                action=AgentActionType.REFINE_CANDIDATE_RESULTS, limit=server_result_limit
-            )
-            server_result_limit = None
+        if server_plan is not None:
+            proposal, source_text = server_plan
+            origin = PlanOrigin.SERVER
+            server_plan = None
         else:
             # Two separate advisory facts are sent to the model. Pointer
             # presence says only that a result context exists, including a
@@ -2603,66 +2651,104 @@ async def execute_agent_turn(
                     return finish(result)
                 break
 
-        if decision is None:
-            result = _build_result(
-                outcome=(
-                    AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
-                    if tool_results
-                    else AgentTurnOutcome.MALFORMED_MODEL_OUTPUT
-                ),
-                message=None,
-                tool_results=tool_results,
-                tool_call_count=tool_calls_made,
-                provenance=provenance,
-            )
-            return finish(result)
+            if decision is None:
+                result = _build_result(
+                    outcome=(
+                        AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
+                        if tool_results
+                        else AgentTurnOutcome.MALFORMED_MODEL_OUTPUT
+                    ),
+                    message=None,
+                    tool_results=tool_results,
+                    tool_call_count=tool_calls_made,
+                    provenance=provenance,
+                )
+                return finish(result)
 
-        if (
-            decision.action == AgentActionType.DRAFT_JOB_CRITERIA
-            and not draft_authorized_for_decision
-        ):
-            # The deterministic entry route above is the only authority that
-            # can reach the drafting branch. A DRAFT_JOB_CRITERIA proposal
-            # made during normal model routing is not reinterpreted as search
-            # or another action; it receives fixed clarification and has no
-            # tool/business side effect.
+            if decision.action in (AgentActionType.FINAL_ANSWER, AgentActionType.CLARIFY):
+                assert decision.response_code is not None
+                outcome = (
+                    AgentTurnOutcome.ANSWERED
+                    if decision.action == AgentActionType.FINAL_ANSWER
+                    else AgentTurnOutcome.CLARIFICATION_REQUESTED
+                )
+                result = _build_result(
+                    outcome=outcome,
+                    # Once a tool has run, its validated result owns the
+                    # answer headline. The closed response code is only
+                    # useful for zero-tool generic conversation/clarification.
+                    message=(
+                        None if tool_results else _agent_response_text(decision.response_code)
+                    ),
+                    tool_results=tool_results,
+                    tool_call_count=tool_calls_made,
+                    provenance=provenance,
+                )
+                return finish(result)
+            # Transitional adapter (D-092 §23): one MODEL-origin step. A
+            # model SEARCH_CANDIDATES is WHOLE_MESSAGE — its search_query
+            # never reaches the planner.
+            proposal = plan_for_model_decision(decision, message=user_message)
+            source_text = user_message
+            origin = PlanOrigin.MODEL
+
+        validated = validate_plan(
+            proposal,
+            origin=origin,
+            source_text=source_text,
+            ctx=ValidationContext(
+                principal_scopes=principal_scopes,
+                # Single-step transitional plans keep each executor's own
+                # authoritative #86 outcome (§11.3); see D-094.
+                pre_existing_result_set=ResultSetContext(ResultSetStatus.UNVALIDATED),
+                pending_draft_live=session_context.active_pending_draft_id is not None,
+                confirmed_job_in_session=False,
+                max_tool_calls=max_tool_calls,
+            ),
+        )
+        if isinstance(validated, PlanRejection):
+            # Layer 1: zero capabilities executed.
             await record_event(
                 db,
                 tenant_id=tenant_id,
-                event_type="agent.entry.action_rejected",
+                event_type="agent.plan.rejected",
                 metadata={
-                    "routing_source": "MODEL",
-                    "routed_action": AgentRoutedAction.CLARIFY.value,
-                    "routing_policy_version": ENTRY_ROUTING_POLICY_VERSION,
+                    "reason_code": validated.code.value,
+                    "schema_version": CAPABILITY_PLAN_SCHEMA_VERSION,
                 },
             )
+            if validated.code == PlanRejectionCode.NOT_MODEL_PROPOSABLE:
+                # The deterministic entry route is the only authority that
+                # can reach drafting. A model DRAFT_JOB_CRITERIA proposal is
+                # not reinterpreted as search or another action; it gets the
+                # fixed clarification and has no tool/business side effect.
+                await record_event(
+                    db,
+                    tenant_id=tenant_id,
+                    event_type="agent.entry.action_rejected",
+                    metadata={
+                        "routing_source": "MODEL",
+                        "routed_action": AgentRoutedAction.CLARIFY.value,
+                        "routing_policy_version": ENTRY_ROUTING_POLICY_VERSION,
+                    },
+                )
+                message = AMBIGUOUS_SEARCH_OR_JOB_COPY
+            else:
+                message = PLAN_REJECTED_COPY
             result = _build_result(
                 outcome=AgentTurnOutcome.CLARIFICATION_REQUESTED,
-                message=AMBIGUOUS_SEARCH_OR_JOB_COPY,
+                message=message,
                 tool_results=tool_results,
                 tool_call_count=tool_calls_made,
                 provenance=provenance,
             )
             return finish(result)
 
-        if decision.action in (AgentActionType.FINAL_ANSWER, AgentActionType.CLARIFY):
-            assert decision.response_code is not None
-            outcome = (
-                AgentTurnOutcome.ANSWERED
-                if decision.action == AgentActionType.FINAL_ANSWER
-                else AgentTurnOutcome.CLARIFICATION_REQUESTED
-            )
-            result = _build_result(
-                outcome=outcome,
-                # Once a tool has run, its validated result owns the
-                # answer headline. The closed response code is only useful
-                # for zero-tool generic conversation/clarification.
-                message=(None if tool_results else _agent_response_text(decision.response_code)),
-                tool_results=tool_results,
-                tool_call_count=tool_calls_made,
-                provenance=provenance,
-            )
-            return finish(result)
+        (step,) = validated.steps
+        definition = CAPABILITY_REGISTRY[step.capability]
+        action = definition.legacy_tool_name
+        assert action is not None
+        audit_capability = capability_audit_metadata(definition)
 
         if tool_calls_made >= max_tool_calls:
             result = _build_result(
@@ -2674,9 +2760,9 @@ async def execute_agent_turn(
             )
             return finish(result)
 
-        if decision.action == AgentActionType.SEARCH_CANDIDATES:
-            assert decision.search_query is not None
-            normalized_query = _fold(decision.search_query)
+        if step.capability == CapabilityName.SEARCH_CANDIDATES:
+            assert step.resolved_text is not None
+            normalized_query = _fold(step.resolved_text)
             if normalized_query in searched_queries:
                 # Already answered by an identical search this same turn —
                 # finalize on the existing results instead of repeating (or
@@ -2693,19 +2779,24 @@ async def execute_agent_turn(
                 return finish(result)
             searched_queries.add(normalized_query)
 
-        if decision.action == AgentActionType.DRAFT_JOB_CRITERIA:
+        # Registry dispatch (Layer 2 + executor + atomic activation). A
+        # successful producing step's ResultSet becomes the in-turn working
+        # pointer so a later step of this turn and available_candidate_refs
+        # see it immediately; a failed step keeps the previous pointer.
+        execution = await execute_plan(validated, execution_context)
+        (capability_outcome,) = execution.outcomes
+
+        if step.capability == CapabilityName.ANALYZE_VACANCY:
             # Always turn-terminal, like GET_CANDIDATE_PROFILE/EVIDENCE —
             # unlike those, the dispatch call itself can genuinely fail
-            # (a real LLM call, not a deterministic DB lookup), so it is
-            # handled as its own branch rather than forced into the
-            # uniform tool_result/matched_profile shape below.
-            job_draft_result = await _dispatch_draft_job_criteria(llm, jd_text=job_draft_source)
+            # (a real LLM call, not a deterministic DB lookup).
+            job_draft_result = capability_outcome.tool_result
             if job_draft_result is None:
                 await record_event(
                     db,
                     tenant_id=tenant_id,
                     event_type="agent.tool.failed",
-                    metadata={"tool_name": decision.action.value},
+                    metadata={"tool_name": action.value, **audit_capability},
                 )
                 result = _build_result(
                     outcome=AgentTurnOutcome.JOB_DRAFT_FAILED,
@@ -2723,8 +2814,9 @@ async def execute_agent_turn(
                 tenant_id=tenant_id,
                 event_type="agent.tool.executed",
                 metadata={
-                    "tool_name": decision.action.value,
+                    "tool_name": action.value,
                     "tool_call_index": tool_calls_made,
+                    **audit_capability,
                     **jd_draft_audit_metadata(job_draft_result.job_draft),
                 },
             )
@@ -2737,34 +2829,24 @@ async def execute_agent_turn(
             )
             return finish(result)
 
-        if decision.action == AgentActionType.REFINE_CANDIDATE_RESULTS:
+        if step.capability == CapabilityName.REFINE_RESULTS:
             # Always turn-terminal (issue #49 PR49-2, docs/DECISIONS.md
             # D-084) — never let the model keep looping and accidentally
-            # launch a fresh search after a valid refinement. Handled as
-            # its own branch (not the uniform tool_result/matched_profile
-            # shape below): a rejection here means "the active result set
-            # is untouched", never a candidate_ref resolution outcome.
-            refine_dispatch = await _dispatch_refine(
-                db,
-                llm,
-                tenant_id=tenant_id,
-                session_context=session_context,
-                decision=decision,
-                as_of_date=as_of_date,
-                embedding_config=embedding_config,
-            )
-            if refine_dispatch.rejection_message is not None:
+            # launch a fresh search after a valid refinement. A rejection
+            # here means "the active result set is untouched", never a
+            # candidate_ref resolution outcome.
+            if capability_outcome.rejection_message is not None:
                 result = _build_result(
                     outcome=AgentTurnOutcome.CLARIFICATION_REQUESTED,
-                    message=refine_dispatch.rejection_message,
+                    message=capability_outcome.rejection_message,
                     tool_results=tool_results,
                     tool_call_count=tool_calls_made,
                     provenance=provenance,
                 )
                 return finish(result)
-            if refine_dispatch.resolution_failure is not None:
+            if capability_outcome.resolution_failure is not None:
                 failure_outcome, failure_message = _outcome_and_message_for_refinement_failure(
-                    refine_dispatch.resolution_failure
+                    capability_outcome.resolution_failure
                 )
                 result = _build_result(
                     outcome=failure_outcome,
@@ -2775,21 +2857,20 @@ async def execute_agent_turn(
                 )
                 return finish(result)
             assert (
-                refine_dispatch.tool_result is not None
-                and refine_dispatch.new_result_set_id is not None
+                capability_outcome.tool_result is not None
+                and execution.activated_result_set_id is not None
             )
             tool_calls_made += 1
-            tool_results.append(refine_dispatch.tool_result)
-            # Eagerly synced (not deferred to _finish_turn), same as a
-            # successful SEARCH_CANDIDATES result set switch above — the
-            # committed active pointer must be the derived set the moment
-            # this turn ends.
-            session_context.active_result_set_id = refine_dispatch.new_result_set_id
+            tool_results.append(capability_outcome.tool_result)
             await record_event(
                 db,
                 tenant_id=tenant_id,
                 event_type="agent.tool.executed",
-                metadata={"tool_name": decision.action.value, "tool_call_index": tool_calls_made},
+                metadata={
+                    "tool_name": action.value,
+                    "tool_call_index": tool_calls_made,
+                    **audit_capability,
+                },
             )
             result = _build_result(
                 outcome=AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT,
@@ -2800,43 +2881,12 @@ async def execute_agent_turn(
             )
             return finish(result)
 
-        matched_profile: CandidateProfileExtraction | None = None
-        resolution_failure: ResultSetResolutionFailure | None = None
-        if decision.action == AgentActionType.SEARCH_CANDIDATES:
-            previous_result_set_id = session_context.active_result_set_id
-            tool_result, new_result_set_id = await _dispatch_search(
-                db,
-                llm,
-                tenant_id=tenant_id,
-                session_context=session_context,
-                previous_result_set_id=previous_result_set_id,
-                decision=decision,
-                as_of_date=as_of_date,
-                embedding_config=embedding_config,
-                embedding_provider=embedding_provider,
-            )
-            if new_result_set_id is not None:
-                # Kept in sync eagerly (not deferred to _finish_turn) so a
-                # later GET_CANDIDATE_PROFILE/EVIDENCE call within this
-                # SAME turn, and this turn's own available_candidate_refs
-                # computation, both see the freshly created result set
-                # immediately — mirrors the old local-variable semantics
-                # of last_search_candidate_ids exactly.
-                session_context.active_result_set_id = new_result_set_id
-        elif decision.action == AgentActionType.GET_CANDIDATE_PROFILE:
-            tool_result, matched_profile, resolution_failure = await _dispatch_profile(
-                db,
-                tenant_id=tenant_id,
-                decision=decision,
-                session_context=session_context,
-            )
-        else:
-            tool_result, matched_profile, resolution_failure = await _dispatch_evidence(
-                db,
-                tenant_id=tenant_id,
-                decision=decision,
-                session_context=session_context,
-            )
+        # SEARCH_CANDIDATES / GET_CANDIDATE_PROFILE / GET_CANDIDATE_EVIDENCE:
+        # every outcome (found or not) is a recorded tool result, as today.
+        tool_result = capability_outcome.tool_result
+        assert tool_result is not None
+        matched_profile = capability_outcome.matched_profile
+        resolution_failure = capability_outcome.resolution_failure
 
         tool_calls_made += 1
         tool_results.append(tool_result)
@@ -2845,10 +2895,14 @@ async def execute_agent_turn(
             db,
             tenant_id=tenant_id,
             event_type="agent.tool.executed",
-            metadata={"tool_name": decision.action.value, "tool_call_index": tool_calls_made},
+            metadata={
+                "tool_name": action.value,
+                "tool_call_index": tool_calls_made,
+                **audit_capability,
+            },
         )
 
-        if search_turn_terminal and decision.action == AgentActionType.SEARCH_CANDIDATES:
+        if search_turn_terminal and step.capability == CapabilityName.SEARCH_CANDIDATES:
             # Server-authorized search: the validated planner/search result
             # (executable, empty, or a truthful non-executable plan) is the
             # whole answer.
@@ -2868,9 +2922,9 @@ async def execute_agent_turn(
         # it. Only SEARCH_CANDIDATES loops back — the model may still
         # decide to look at a specific result (a second tool call, bounded
         # by max_tool_calls) or close the turn with FINAL_ANSWER/CLARIFY.
-        if decision.action in (
-            AgentActionType.GET_CANDIDATE_PROFILE,
-            AgentActionType.GET_CANDIDATE_EVIDENCE,
+        if step.capability in (
+            CapabilityName.GET_CANDIDATE_PROFILE,
+            CapabilityName.GET_CANDIDATE_EVIDENCE,
         ):
             found = (
                 tool_result.profile.found
@@ -2905,3 +2959,17 @@ async def execute_agent_turn(
                 provenance=provenance,
             )
             return finish(result)
+
+
+def plan_incomplete_result(llm: LLMProvider, execution: PlanExecution) -> AgentTurnResult:
+    """§11.3: a multi-step plan that did not complete. Fixed truthful copy
+    (presentation), no active result cards, nothing activated — the caller
+    leaves the previous live pointers exactly as they were."""
+    assert execution.status == PlanStatus.INCOMPLETE
+    return _build_result(
+        outcome=AgentTurnOutcome.PLAN_INCOMPLETE,
+        message=None,
+        tool_results=[],
+        tool_call_count=len(execution.outcomes),
+        provenance=_configured_provenance(llm),
+    )
