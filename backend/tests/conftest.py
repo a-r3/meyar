@@ -25,6 +25,10 @@ from meyar.storage.photo import LocalPhotoStorage
 
 DEFAULT_TEST_PASSWORD = "correct-horse-battery-staple-1"
 
+# No hooks, threads, listeners or fixtures are installed without explicit opt-in.
+if os.environ.get("MEYAR_TEST_HANG_DIAGNOSTICS") == "1":
+    pytest_plugins = ["hang_diagnostics"]
+
 
 class BrowserTestClient(AsyncClient):
     """Legacy route tests submit like a browser with its rendered composer.
