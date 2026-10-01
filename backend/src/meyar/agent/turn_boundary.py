@@ -20,12 +20,23 @@ Lifecycle of one ``POST /ui/agent`` turn::
       after the call          TurnBoundary.reenter(): new transaction,
                               re-lock + revalidate the live principal,
                               reservation, turn_version and session context.
-    PHASE B (short, locked)   TurnBoundary.reenter() once more, then apply
+    PHASE B (short, locked)   TurnBoundary.enter_phase_b(): ALWAYS a fresh
+                              transaction — commit whatever DB phase is
+                              still open (Phase A for a deterministic,
+                              no-inference turn; the post-inference
+                              re-entry otherwise), then re-lock principal
+                              -> conversation -> context, then (router)
+                              clarification -> task -> submission, apply
                               the transcript/pointer outcome and clear the
                               reservation in the same COMMIT.
 
-A turn that never calls a model never leaves its Phase A transaction, i.e.
-deterministic-only turns keep the simple locked path (they are short).
+Issue #88 (D-092 §12.2): the consequential Phase B transaction therefore
+never inherits Phase A's conversation/context/submission row locks, whether
+or not the turn called a model, and its FIRST lock is always the principal's
+``FOR SHARE``. The commit before it can only persist what any #85 leave_db
+already persists: the reservation and #87 PROCESSING claim, attempt-
+provenance audit rows, and inert (pointer-less) ResultSet rows. Transcript,
+pointers, task and clarification state are written only inside Phase B.
 
 Same-conversation serialization (#80) is preserved by the reservation: at
 most ONE accepted in-flight turn per conversation. A second turn on a
@@ -434,6 +445,20 @@ class TurnBoundary:
         return await revalidate_reserved_turn(
             self._db, self.reservation, ttl_seconds=self._ttl_seconds
         )
+
+    async def enter_phase_b(self) -> tuple[AgentConversation, AgentConversationSessionContext]:
+        """Start the final consequential Phase B from a FRESH transaction.
+
+        Unconditional: a deterministic turn is still inside its Phase A
+        transaction (conversation/context/submission locked), and a turn that
+        called a model is inside its last post-inference re-entry. Either is
+        committed first (only reservation/claim, attempt audit and inert
+        ResultSet rows can be pending — see the module docstring), so the
+        principal ``FOR SHARE`` locks taken by revalidation are the first
+        locks of the transaction that writes consequential state (D-092
+        §12.2 order)."""
+        await self.leave_db()
+        return await self.reenter()
 
     async def around_inference[T](self, call: Callable[[], Awaitable[T]]) -> T:
         await self.leave_db()

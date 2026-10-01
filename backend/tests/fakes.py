@@ -87,6 +87,8 @@ class FakeLLMProvider:
         # (type, allowed answers, reply text, repair) per call: the ENTIRE
         # model input of the clarification classifier.
         self.clarification_calls: list[tuple[str, list[str], str, bool]] = []
+        # Every natural-language request the planner received, in order.
+        self.planner_requests: list[str] = []
 
     async def extract_candidate_profile(
         self, view: ProfessionalDocumentView
@@ -122,6 +124,7 @@ class FakeLLMProvider:
     async def plan_candidate_search(
         self, natural_language_request: str, *, repair: bool = False
     ) -> tuple[PlannerDraft, LLMResultProvenance]:
+        self.planner_requests.append(natural_language_request)
         self.call_count += 1
         if self.call_count <= self._fail_first_n_calls:
             from meyar.llm.provider import ModelSchemaInvalidError

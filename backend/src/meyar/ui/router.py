@@ -1013,10 +1013,13 @@ async def agent_turn(
                 clarification_button=clarification_button,
             ),
         )
-        # PHASE B: re-lock and revalidate principal, reservation,
-        # turn_version and live context; only then persist the outcome and
-        # clear the reservation in the same commit.
-        conversation, session_context = await boundary.reenter()
+        # PHASE B: ALWAYS a fresh transaction (issue #88, D-092 §12.2) — end
+        # Phase A / the last re-entry first, so no Phase A conversation/
+        # context/submission lock is held when the principal is re-locked.
+        # Then re-lock and revalidate principal, reservation, turn_version and
+        # live context; only then persist the outcome and clear the
+        # reservation in the same commit.
+        conversation, session_context = await boundary.enter_phase_b()
         # Issue #88 (§12.2): clarification/task rows are locked and their
         # staged preconditions re-verified AFTER conversation/context and
         # BEFORE the submission row (fixed lock order).

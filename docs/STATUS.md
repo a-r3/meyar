@@ -9,8 +9,12 @@ Amendments A1/A2 (implementation record D-093, PROPOSED): migration
 `b88a2c4d6e10` (single head), server `turn_id`s, BrowserSession-bound
 tasks/clarifications with the dual waiting lanes, the §6.4 resolution order
 (button → label → clear new task → local classifier), the A2 exchange-chain
-liveness, SOURCE_MESSAGE, and #85/#87-preserving Phase B. Slices B and C
-have not started; #88 and #50 remain OPEN. The CI pytest hang root cause is
+liveness, SOURCE_MESSAGE, and #85/#87-preserving Phase B. Acceptance
+correction (independent review): the final Phase B now always starts from a
+fresh transaction (principal locked first, also on no-inference turns), and
+the §22 language-matrix, replay, real-concurrency, cross-session,
+review-resolve and resumed busy/cancel/revoke regressions were added.
+Slices B and C have not started; #88 and #50 remain OPEN. The CI pytest hang root cause is
 still NOT PROVEN (diagnostics from PR #97 remain active). Independent
 acceptance and owner merge are pending.
 

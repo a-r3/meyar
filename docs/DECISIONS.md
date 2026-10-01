@@ -7804,10 +7804,32 @@ implementation choices the accepted design left open. #88 stays OPEN
   leaves `active_pending_draft_id` intact.
 - **Turn ids.** Every new user/assistant entry gets a server uuid4
   `turn_id`; legacy entries get none and therefore never validate a chain.
-- **Phase B order.** `reenter` (principal → conversation → context) →
+- **Phase B order.** The final consequential Phase B ALWAYS starts from a
+  fresh transaction (`TurnBoundary.enter_phase_b`): whatever DB phase is
+  still open is committed first — Phase A for a deterministic, no-inference
+  turn (T1, label-resolved search, T5, T6, T8), or the last post-inference
+  re-entry otherwise — so no Phase A conversation/context/submission lock
+  is held when the principal is re-locked. That commit can only contain
+  what any #85 `leave_db` already persists: the reservation and #87
+  PROCESSING claim, attempt-provenance audit rows and inert (pointer-less)
+  ResultSet rows; transcript, pointers and task/clarification state are
+  written only in Phase B. Order: `reenter` (User → TenantMembership →
+  BrowserSession `FOR SHARE` → conversation → context `FOR UPDATE`) →
   `lock_dialogue_rows` (clarification → task → lane-B task) → submission →
   writes → D-045 sync → `created_turn_version` stamped with the final
-  `turn_version` → one commit.
+  `turn_version` → one commit. No lock is held across Ollama (#85).
+  *Correction (Slice-A independent review):* the first implementation
+  re-entered inside the still-open Phase A transaction on no-inference
+  turns, taking the principal locks after the conversation/context/
+  submission locks; fixed with a failing-first engine/`pg_locks` probe
+  regression (`tests/test_issue88_slice_a_phase_b.py`). Visible
+  consequence: a second same-conversation turn arriving while a
+  deterministic turn runs now first blocks on its Phase A row lock and then
+  gets the D-089 409 "still processing" outcome (as it already did during
+  inference turns) instead of running afterwards;
+  `test_real_ui_agent_route_serializes_concurrent_same_session_turns` was
+  updated to that contract (one 200, one 409, nothing persisted by the
+  refused turn).
 - **Request hash.** `request_hash` is SHA-256 of canonical JSON
   `{"v":1,"message","clarification_id","clarification_choice"}` for every
   turn. A PROCESSING submission claimed under the old message-only hash at
@@ -7843,10 +7865,13 @@ implementation choices the accepted design left open. #88 stays OPEN
   stay confirmable.
 - **Unchanged until slice C.** A model-proposed DRAFT_JOB_CRITERIA still
   gets the non-resumable fixed copy (§23 lists that conversion under C).
-- **Deferred (slice A optional per §19.1/§20).** The `meyar
-  retire-agent-tasks` CLI, T12 lazy task expiry, the quoted-source
-  continuity headline, and disabled historical buttons. Buttons render only
-  for the one answerable question (live pointer, OPEN, unexpired, last entry).
+- **Deferred.** The `meyar retire-agent-tasks` CLI and its T12
+  maintenance expiry remain optional in slice A per §19.1 (required before
+  pilot). The quoted-source continuity headline and disabled historical
+  buttons (§20) are deferred by Slice-A independent review as non-authority
+  UX follow-up; D-092 §20 remains the target contract. Buttons render only
+  for the one answerable question (live pointer, OPEN, unexpired, last
+  entry).
 - **Test bootstrap.** `tests/conftest.py` drops the session-context table
   before `drop_all` so the deferred FK cannot break a reset of a test schema
   created by an earlier revision.
