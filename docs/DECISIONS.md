@@ -7898,13 +7898,18 @@ implementation choices the accepted design left open. #88 stays OPEN
 
 ## D-094 — Issue #88 slice B implementation record (capability registry + validator)
 
-**Status: PROPOSED — slice B implemented on branch
+**Status: IMPLEMENTED — slice B independently technically accepted at code head
+`76d3719bde0a5bfb8a8b1c8e7aab84832a8de198` (accepted code tree
+`0a89fd6a12f1d4ec23f5580d7a71b72f1a908282`; exact-head CI run
+`36909027654` SUCCESS: 3073 pytest passed, 10 hang diagnostics passed).
+Owner Squash-and-merge is pending on branch
 `feat/88b-capability-registry` from `main` @
-`1dc79eadf92bc433d0772a9ebd863385a1e90cf6`, pending independent acceptance
-and owner merge.** D-092 §8–§11/§23, A1, A2 and D-093 are unchanged; this
+`1dc79eadf92bc433d0772a9ebd863385a1e90cf6`.** D-092 §8–§11/§23, A1,
+A2 and D-093 are unchanged; this
 entry records only the slice-B implementation choices. Slice C has NOT
 started; #88 stays OPEN; #50 stays OPEN and out of scope. No migration
-(Alembic head stays `b88a2c4d6e10`).
+(Alembic head stays `b88a2c4d6e10`). The historical CI hang root cause
+remains NOT PROVEN.
 
 - **Package `meyar.agent.capabilities`.** `contracts` (closed enums, strict
   `extra="forbid"` input schemas, plan/outcome types), `registry` (the seven
