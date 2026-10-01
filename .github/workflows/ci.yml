@@ -74,9 +74,10 @@ jobs:
           fi
 
       - name: pytest
-        # -v prints each test id before it runs, so a hung run's last log
-        # line names the hanging test (asyncio hangs do not show it in the
-        # faulthandler dump configured in pyproject.toml).
+        # Test-only phase, task, pool and PostgreSQL diagnostics fire before
+        # pytest's existing 180-second faulthandler and the 25-minute job bound.
+        env:
+          MEYAR_TEST_HANG_DIAGNOSTICS: "1"
         run: uv run pytest -v
 
       - name: local demo wrapper tests
