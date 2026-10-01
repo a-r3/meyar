@@ -7796,10 +7796,11 @@ PR #96 before slice A; corrected per review).**
 
 ## D-093 — Issue #88 slice A implementation record (D-092 + A1/A2)
 
-**Status: slice A implemented on branch
-`feat/88a-resumable-clarification-a2` and technically accepted by
-independent review (code head `195387bddaf7f1f4b6d11aa3c2dd56e070478bf6`);
-pending owner merge of PR #98.**
+**Status: IMPLEMENTED, technically accepted by independent review (code
+head `195387bddaf7f1f4b6d11aa3c2dd56e070478bf6`) and MERGED through PR #98
+(accepted head `4b27e6a87cebed083fdeb0cfa4afbf8c99b5c2c6`, squash commit
+`a9b8ff39746aa5767f8ad2b3b95809db5b1b9bc4` on `main`; accepted tree ==
+squash tree).**
 D-092, A1 and A2 semantics are unchanged; this entry records only the
 implementation choices the accepted design left open. #88 stays OPEN
 (slices B and C remain); #50 is out of scope.
