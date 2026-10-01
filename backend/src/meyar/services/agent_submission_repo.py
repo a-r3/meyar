@@ -1,6 +1,7 @@
 """Durable browser submission identity bound to #85's turn reservation."""
 
 import hashlib
+import json
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -19,8 +20,28 @@ SUBMISSION_TTL = timedelta(hours=24)
 RETIRE_BATCH = 20
 
 
-def request_hash(message: str) -> str:
-    return hashlib.sha256(message.encode("utf-8")).hexdigest()
+def request_hash(
+    message: str,
+    *,
+    clarification_id: uuid.UUID | None = None,
+    clarification_choice: str | None = None,
+) -> str:
+    """Replay/idempotency evidence for one semantic request — never
+    authorization. Issue #88 (D-092 §6.4/§13): the canonical representation
+    covers the message AND the clarification button fields, so a replay of
+    the same token with another choice or clarification id fails closed."""
+    canonical = json.dumps(
+        {
+            "v": 1,
+            "message": message,
+            "clarification_id": str(clarification_id) if clarification_id else None,
+            "clarification_choice": clarification_choice,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 async def issue_submission(

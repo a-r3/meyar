@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.config import Settings
@@ -28,6 +29,60 @@ TITLE_LABELS = {
     "GENERAL": "Ümumi söhbət",
 }
 _MONTHS = ("yan", "fev", "mar", "apr", "may", "iyn", "iyl", "avq", "sen", "okt", "noy", "dek")
+
+
+@dataclass(frozen=True)
+class ClarificationChoiceView:
+    value: str
+    label: str
+
+
+@dataclass(frozen=True)
+class ActiveClarificationView:
+    """Closed-choice buttons for the ONE answerable clarification (§20).
+    Shown only while the live pointer names an OPEN, unexpired question that
+    is still the last transcript entry — never for history alone."""
+
+    id: uuid.UUID
+    choices: tuple[ClarificationChoiceView, ...]
+
+
+async def _active_clarification_view(
+    db: AsyncSession, *, conversation: AgentConversation, session_context: object
+) -> ActiveClarificationView | None:
+    from meyar.agent.clarification_schemas import (
+        ALLOWED_ANSWERS,
+        ClarificationStatus,
+        ClarificationType,
+    )
+    from meyar.agent.dialogue import CHOICE_LABELS
+    from meyar.models.agent_task import AgentClarification
+
+    pointer = getattr(session_context, "active_clarification_id", None)
+    if pointer is None or not conversation.turns:
+        return None
+    row = await db.scalar(
+        select(AgentClarification).where(
+            AgentClarification.id == pointer,
+            AgentClarification.tenant_id == conversation.tenant_id,
+            AgentClarification.session_context_id == session_context.id,  # type: ignore[attr-defined]
+        )
+    )
+    if (
+        row is None
+        or row.status != ClarificationStatus.OPEN.value
+        or row.expires_at <= datetime.now(UTC)
+        or conversation.turns[-1].get("turn_id") != str(row.question_turn_id)
+    ):
+        return None
+    answers = ALLOWED_ANSWERS[ClarificationType(row.clarification_type)]
+    return ActiveClarificationView(
+        id=row.id,
+        choices=tuple(
+            ClarificationChoiceView(value=answer.value, label=CHOICE_LABELS[answer])
+            for answer in answers
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -79,6 +134,13 @@ async def build_agent_workspace_context(
         db, conversation=conversation, browser_session_id=ctx.session_id
     )
     active_draft = get_active_pending_job_draft(conversation, session_context)
+    active_clarification = (
+        await _active_clarification_view(
+            db, conversation=conversation, session_context=session_context
+        )
+        if session_context is not None
+        else None
+    )
     active_draft_view = None
     if active_draft is not None and active_draft.draft_id not in latest_draft_ids:
         active_draft_view = build_agent_job_draft_view(active_draft)
@@ -104,6 +166,7 @@ async def build_agent_workspace_context(
         )
     return {
         "workspace_active_draft": active_draft_view,
+        "workspace_active_clarification": active_clarification,
         "workspace_history": items,
         "workspace_active_outside_page": active_outside_page,
         "workspace_no_past_conversations": (

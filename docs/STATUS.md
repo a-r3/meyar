@@ -2,6 +2,28 @@
 
 ## Current phase
 
+**Issue #88 slice A — SLICE A IMPLEMENTED — TECHNICALLY ACCEPTED BY
+INDEPENDENT REVIEW — FINAL DOC-GOVERNANCE CORRECTION PENDING OWNER MERGE
+(not merged; PR #98):** branch
+`feat/88a-resumable-clarification-a2` from `main` @
+`dbe25dd4df16d27ea49267b169c91b038c4c9148` implements D-092 slice A under
+Amendments A1/A2 (implementation record D-093, PROPOSED): migration
+`b88a2c4d6e10` (single head), server `turn_id`s, BrowserSession-bound
+tasks/clarifications with the dual waiting lanes, the §6.4 resolution order
+(button → label → clear new task → local classifier), the A2 exchange-chain
+liveness, SOURCE_MESSAGE, and #85/#87-preserving Phase B. Acceptance
+correction (independent review): the final Phase B now always starts from a
+fresh transaction (principal locked first, also on no-inference turns), and
+the §22 language-matrix, replay, real-concurrency, cross-session,
+review-resolve and resumed busy/cancel/revoke regressions were added.
+The independent review accepted the corrected code at
+`195387bddaf7f1f4b6d11aa3c2dd56e070478bf6` (full suite 2942 passed,
+exact-head CI green); D-093 now states explicitly that it supersedes
+D-089's deterministic-only Phase-B statements. Owner squash-and-merge is
+pending. Slices B and C have not started; #88 stays OPEN and #50 is out of
+scope and OPEN. The CI pytest hang root cause is still NOT PROVEN
+(diagnostics from PR #97 remain active).
+
 **Issue #88 — design accepted, implementation NOT started:** accepted `main`
 is `2445caaf8cfcb054078227d05a6d97a2f257d978` (#84–#87 closed; D-092 design
 merged via PR #93, Amendment A1 via PR #94).

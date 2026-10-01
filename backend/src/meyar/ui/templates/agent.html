@@ -300,6 +300,23 @@
   </ol>
 </section>
 {% endif %}
+{% if workspace_active_clarification and workspace_active_clarification.choices %}
+<section class="panel agent-clarification" aria-label="Sualın cavabı">
+  <div class="agent-clarification__choices">
+  {% for choice in workspace_active_clarification.choices %}
+    <form method="post" action="/ui/agent" class="agent-clarification__choice">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="submission_id" value="{{ submission_id }}">
+      <input type="hidden" name="conversation_id" value="{{ conversation_id }}">
+      <input type="hidden" name="clarification_id" value="{{ workspace_active_clarification.id }}">
+      <input type="hidden" name="clarification_choice" value="{{ choice.value }}">
+      <input type="hidden" name="message" value="{{ choice.label }}">
+      <button type="submit" class="button-secondary">{{ choice.label }}</button>
+    </form>
+  {% endfor %}
+  </div>
+</section>
+{% endif %}
 {% if workspace_active_draft %}
 {{ draft_panel(workspace_active_draft) }}
 {% endif %}

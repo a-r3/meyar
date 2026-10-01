@@ -21,8 +21,8 @@ which candidate a tool call touches."""
 import hashlib
 import re
 import uuid
-from dataclasses import dataclass
-from datetime import date
+from dataclasses import dataclass, replace
+from datetime import UTC, date, datetime
 
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -36,6 +36,41 @@ from meyar.agent.canonical_requirements import (
     semantic_parameters,
     subject_grounded_in_span,
 )
+from meyar.agent.clarification_schemas import (
+    ALLOWED_ANSWERS,
+    MAX_CLARIFICATION_ATTEMPTS,
+    ClarificationAnswer,
+    ClarificationProposalValue,
+    ClarificationStatus,
+    ClarificationType,
+    ExpiryReason,
+    RejectionReason,
+    ResolutionSource,
+    SupersededReason,
+    TaskStatus,
+    TaskType,
+)
+from meyar.agent.dialogue import (
+    CLARIFICATION_ATTEMPTS_EXHAUSTED_COPY,
+    CLARIFICATION_STALE_COPY,
+    ClarificationClassifierError,
+    ClarificationRejectedError,
+    ClarificationTransition,
+    DialogueCommit,
+    LaneBChange,
+    NewClarification,
+    SourceSlotOutcome,
+    bound_source_text,
+    clarification_payload,
+    classify_vacancy_source_message,
+    eligible_search_or_vacancy_source,
+    is_clear_new_task,
+    liveness_failure,
+    match_answer_label,
+    retry_clarification,
+    search_or_vacancy_clarification,
+    vacancy_source_clarification,
+)
 from meyar.agent.intent_routing import (
     AMBIGUOUS_SEARCH_OR_JOB_COPY,
     ENTRY_ROUTING_POLICY_VERSION,
@@ -48,6 +83,7 @@ from meyar.agent.intent_routing import (
 from meyar.agent.prompts import AGENT_PROMPT_VERSION, JD_CRITERIA_DRAFT_PROMPT_VERSION
 from meyar.agent.schemas import (
     AGENT_POLICY_VERSION,
+    MAX_AGENT_SEARCH_QUERY_LENGTH,
     MAX_CANDIDATE_REF,
     MAX_JD_REQUIREMENT_SPANS,
     AgentActionType,
@@ -141,6 +177,12 @@ from meyar.services.agent_result_set_repo import (
     create_result_set_from_search,
     resolve_active_candidate_ref,
     validate_active_result_set_for_refinement,
+)
+from meyar.services.agent_task_repo import (
+    LockedDialogue,
+    apply_dialogue_commit,
+    lock_dialogue_rows,
+    read_live_clarification,
 )
 from meyar.services.audit_repo import record_event
 from meyar.services.profile_authority import get_current_authorized_profile
@@ -1887,6 +1929,42 @@ class AgentTurnCommit:
     assistant_turn: dict
     active_result_set_id: uuid.UUID | None
     active_pending_draft_id: uuid.UUID | None
+    # Issue #88 slice A: staged lane-A/lane-B task + clarification changes,
+    # written only by Phase B (meyar.services.agent_task_repo).
+    dialogue: DialogueCommit = DialogueCommit()
+
+
+@dataclass(frozen=True)
+class ClarificationButton:
+    """The two closed-choice form fields as posted. Untrusted: they must
+    equal the live pointer and an allowed value or the request is rejected
+    (A2) — never reinterpreted as text."""
+
+    clarification_id: uuid.UUID | None
+    choice: str | None
+
+
+@dataclass
+class _TurnStage:
+    """Per-turn staging of server-issued transcript ids and dialogue state."""
+
+    assistant_turn_id: uuid.UUID
+    transition: ClarificationTransition | None = None
+    new_clarification: NewClarification | None = None
+    clarification_payload: dict | None = None
+    draft_amendment: bool = False
+
+
+def _resolved_task_status(result: AgentTurnResult) -> TaskStatus:
+    """T2/T3/T4: the resumed capability's own truthful outcome decides."""
+    if any(item.job_draft is not None for item in result.tool_results):
+        return TaskStatus.WAITING_CONFIRMATION
+    if any(
+        item.search is not None and item.search.response.plan.executable
+        for item in result.tool_results
+    ):
+        return TaskStatus.COMPLETED
+    return TaskStatus.FAILED_SAFE
 
 
 def _finish_turn(
@@ -1894,6 +1972,7 @@ def _finish_turn(
     *,
     user_turn: dict,
     result: AgentTurnResult,
+    stage: _TurnStage | None = None,
 ) -> AgentTurnCommit:
     """Builds this turn's own (outcome, message) transcript entry as a first pass — the
     router's own sync_last_turn_display_text (D-045) overwrites ``text``
@@ -1915,6 +1994,12 @@ def _finish_turn(
         "text_authority": ASSISTANT_TEXT_AUTHORITY_SERVER,
         "text_authority_version": ASSISTANT_TEXT_AUTHORITY_VERSION,
     }
+    if stage is not None:
+        # Issue #88 (D-092 §4.1): stable server-issued id for every NEW entry.
+        assistant_turn["turn_id"] = str(stage.assistant_turn_id)
+        if stage.clarification_payload is not None:
+            assistant_turn["clarification"] = stage.clarification_payload
+    lane_b = LaneBChange.NONE
     pending_drafts = [
         tool_result.job_draft
         for tool_result in result.tool_results
@@ -1930,12 +2015,29 @@ def _finish_turn(
         latest_draft = pending_drafts[-1]
         assistant_turn["pending_job_draft"] = pending_draft_payload(latest_draft)
         session_context.active_pending_draft_id = latest_draft.draft_id
+        lane_b = (
+            LaneBChange.AMENDED
+            if stage is not None and stage.draft_amendment
+            else LaneBChange.NEW_DRAFT
+        )
+    transition = stage.transition if stage is not None else None
+    if (
+        transition is not None
+        and transition.status == ClarificationStatus.RESOLVED
+        and transition.task_status is None
+    ):
+        transition = replace(transition, task_status=_resolved_task_status(result))
     return AgentTurnCommit(
         result=result,
         user_turn=user_turn,
         assistant_turn=assistant_turn,
         active_result_set_id=session_context.active_result_set_id,
         active_pending_draft_id=session_context.active_pending_draft_id,
+        dialogue=DialogueCommit(
+            transition=transition,
+            new_clarification=stage.new_clarification if stage is not None else None,
+            lane_b=lane_b,
+        ),
     )
 
 
@@ -1946,17 +2048,34 @@ async def apply_agent_turn_commit(
     *,
     tenant_id: uuid.UUID,
     commit: AgentTurnCommit,
+    submission_id: uuid.UUID | None = None,
+    locked_dialogue: LockedDialogue | None = None,
+    clarification_ttl_seconds: int = 1800,
 ) -> AgentTurnResult:
     """Persist one turn's outcome onto the LOCKED, (re)validated live rows:
     append the (user, assistant) pair to the CURRENT transcript, set this
-    BrowserSession's live ResultSet/pending-draft pointers, apply the title
-    transition, and audit completion. The caller commits."""
+    BrowserSession's live ResultSet/pending-draft pointers, apply the staged
+    task/clarification changes (issue #88), apply the title transition, and
+    audit completion. The caller commits.
+
+    ``locked_dialogue`` comes from the router's Phase B (rows locked before
+    the submission row). Service-level callers without one lock here; such
+    callers have no #87 submission, so a fresh opaque id is used as the
+    unique creation provenance."""
     if (
         session_context.conversation_id != conversation.id
         or session_context.tenant_id != tenant_id
         or conversation.tenant_id != tenant_id
     ):
         raise ValueError("Session context does not belong to this conversation.")
+    dialogue = commit.dialogue
+    dialogue_changes = dialogue.touches_lane_a or dialogue.lane_b != LaneBChange.NONE
+    if dialogue_changes and locked_dialogue is None:
+        # Before the transcript append: liveness is re-verified against the
+        # transcript the turn was resolved on (§12.2 step 2).
+        locked_dialogue = await lock_dialogue_rows(
+            db, conversation=conversation, session_context=session_context, dialogue=dialogue
+        )
     # Durable storage bound (MAX_PERSISTED_AGENT_TURNS) — deliberately NOT
     # the model context window; see save_conversation_turns.
     await save_conversation_turns(
@@ -1966,6 +2085,14 @@ async def apply_agent_turn_commit(
     )
     session_context.active_result_set_id = commit.active_result_set_id
     session_context.active_pending_draft_id = commit.active_pending_draft_id
+    if dialogue_changes:
+        assert locked_dialogue is not None
+        await apply_dialogue_commit(
+            db, conversation=conversation, session_context=session_context,
+            locked=locked_dialogue, dialogue=dialogue,
+            submission_id=submission_id or uuid.uuid4(),
+            clarification_ttl_seconds=clarification_ttl_seconds,
+        )
     apply_title_kind_transition(conversation, commit.result)
     await db.flush()
     await record_event(
@@ -2017,6 +2144,203 @@ async def run_agent_turn(
     )
 
 
+@dataclass(frozen=True)
+class _Resume:
+    """A resolved clarification resumes ONE server-built capability over the
+    server-owned source text — never the answer text (§6.6)."""
+
+    answer: ClarificationAnswer
+    source_text: str
+
+
+@dataclass(frozen=True)
+class _DialogueOutcome:
+    result: AgentTurnResult | None = None
+    resume: _Resume | None = None
+
+
+async def _classify_clarification_answer(
+    llm: LLMProvider, clarification_type: ClarificationType, answer_text: str
+) -> ClarificationProposalValue:
+    """§6.4 step 4. Only the answer text, the type and the closed allowed
+    codes reach the model. Any infrastructure or contract failure after the
+    one repair is ``ClarificationClassifierError`` — never UNCLEAR (A2).
+    A busy admission gate propagates as AgentInferenceBusyError (#85)."""
+    allowed = [answer.value for answer in ALLOWED_ANSWERS[clarification_type]]
+    for attempt in range(1, MAX_DECISION_ATTEMPTS + 1):
+        try:
+            proposal, _provenance = await llm.resolve_clarification_answer(
+                clarification_type=clarification_type.value,
+                allowed_answers=allowed,
+                answer_text=answer_text,
+                repair=attempt > 1,
+            )
+        except ModelSchemaInvalidError:
+            continue
+        except LLMProviderError:
+            raise ClarificationClassifierError() from None
+        value = proposal.value
+        if value in (ClarificationProposalValue.NEW_REQUEST, ClarificationProposalValue.UNCLEAR):
+            return value
+        if value.value in allowed:
+            return value
+        raise ClarificationClassifierError()
+    raise ClarificationClassifierError()
+
+
+def _fixed_clarification_result(
+    llm: LLMProvider, message: str
+) -> AgentTurnResult:
+    return _build_result(
+        outcome=AgentTurnOutcome.CLARIFICATION_REQUESTED,
+        message=message,
+        tool_results=[],
+        tool_call_count=0,
+        provenance=_configured_provenance(llm),
+    )
+
+
+async def _resolve_dialogue_state(
+    db: AsyncSession,
+    llm: LLMProvider,
+    *,
+    tenant_id: uuid.UUID,
+    conversation: ConversationSnapshot,
+    session_context: TurnSessionState,
+    message: str,
+    button: ClarificationButton | None,
+    user_turn_id: uuid.UUID,
+    stage: _TurnStage,
+) -> _DialogueOutcome:
+    """§6.4 in its fixed order with a live pointer (or a posted button).
+
+    Stages exactly one lane-A transition; writes nothing (Phase B does).
+    Raises ``ClarificationRejectedError`` for a stale/foreign/mismatched
+    button and ``ClarificationClassifierError`` for a classifier failure —
+    both abandon the turn with no transition and nothing appended (A2)."""
+    pointer = session_context.active_clarification_id
+    live = None
+    if pointer is not None and session_context.context_id is not None:
+        live = await read_live_clarification(
+            db, tenant_id=tenant_id, context_id=session_context.context_id,
+            clarification_id=pointer,
+        )
+    choice: ClarificationAnswer | None = None
+    if button is not None:
+        # Foreign, cross-tenant, stale and missing ids are indistinguishable.
+        if button.clarification_id is None or pointer is None or live is None or (
+            button.clarification_id != pointer
+        ):
+            raise ClarificationRejectedError(RejectionReason.NOT_ACTIVE)
+        allowed = ALLOWED_ANSWERS[ClarificationType(live.current.clarification_type)]
+        if button.choice not in {answer.value for answer in allowed}:
+            raise ClarificationRejectedError(RejectionReason.INVALID_CHOICE)
+        choice = ClarificationAnswer(button.choice)
+    if pointer is None:
+        return _DialogueOutcome()
+    stale_result = _fixed_clarification_result(llm, CLARIFICATION_STALE_COPY)
+    if live is None:
+        stage.transition = ClarificationTransition(
+            clarification_id=pointer, task_id=None, status=ClarificationStatus.EXPIRED,
+            task_status=None, requires_live=False, expiry_reason=ExpiryReason.STALE,
+        )
+        return _DialogueOutcome(result=stale_result)
+    current = live.current
+    failure = (
+        ExpiryReason.STALE
+        if live.predecessor_ambiguous
+        else liveness_failure(
+            conversation.turns, current, live.predecessor, now=datetime.now(UTC),
+            context_id=session_context.context_id,  # type: ignore[arg-type]
+            context_epoch=session_context.context_epoch,
+        )
+    )
+    if failure is not None:
+        # T8 (§6.2 / scenario D): expire, fixed "resend" copy, no execution.
+        stage.transition = ClarificationTransition(
+            clarification_id=current.id, task_id=current.task_id,
+            status=ClarificationStatus.EXPIRED, task_status=TaskStatus.EXPIRED,
+            requires_live=False, expiry_reason=failure,
+        )
+        return _DialogueOutcome(result=stale_result)
+    clarification_type = ClarificationType(current.clarification_type)
+
+    def resolve(
+        answer: ClarificationAnswer, source: ResolutionSource, source_text: str
+    ) -> _DialogueOutcome:
+        stage.transition = ClarificationTransition(
+            clarification_id=current.id, task_id=current.task_id,
+            status=ClarificationStatus.RESOLVED, task_status=None, requires_live=True,
+            resolved_value=answer, resolution_source=source, task_type=TaskType(answer.value),
+        )
+        return _DialogueOutcome(resume=_Resume(answer=answer, source_text=source_text))
+
+    def new_task() -> _DialogueOutcome:
+        # T7: supersede; the message is then handled as a normal new turn.
+        stage.transition = ClarificationTransition(
+            clarification_id=current.id, task_id=current.task_id,
+            status=ClarificationStatus.SUPERSEDED, task_status=TaskStatus.CANCELLED,
+            requires_live=True, superseded_reason=SupersededReason.NEW_TASK,
+        )
+        return _DialogueOutcome()
+
+    def unclear() -> _DialogueOutcome:
+        if current.attempt >= MAX_CLARIFICATION_ATTEMPTS:
+            # T6: no attempt 3, no capability.
+            stage.transition = ClarificationTransition(
+                clarification_id=current.id, task_id=current.task_id,
+                status=ClarificationStatus.EXPIRED, task_status=TaskStatus.FAILED_SAFE,
+                requires_live=True, expiry_reason=ExpiryReason.ATTEMPTS,
+            )
+            return _DialogueOutcome(
+                result=_fixed_clarification_result(llm, CLARIFICATION_ATTEMPTS_EXHAUSTED_COPY)
+            )
+        # T5: same task, same original source binding, attempt + 1 (A2 chain).
+        stage.transition = ClarificationTransition(
+            clarification_id=current.id, task_id=current.task_id,
+            status=ClarificationStatus.SUPERSEDED, task_status=None, requires_live=True,
+            superseded_reason=SupersededReason.UNCLEAR,
+        )
+        stage.new_clarification = retry_clarification(
+            current, user_turn_id=user_turn_id, question_turn_id=stage.assistant_turn_id
+        )
+        stage.clarification_payload = clarification_payload(clarification_type)
+        return _DialogueOutcome(
+            result=_fixed_clarification_result(
+                llm,
+                AMBIGUOUS_SEARCH_OR_JOB_COPY
+                if clarification_type == ClarificationType.SEARCH_OR_VACANCY
+                else JOB_SOURCE_REQUIRED_COPY,
+            )
+        )
+
+    if clarification_type == ClarificationType.SEARCH_OR_VACANCY:
+        source_text = bound_source_text(conversation.turns, current)
+        if choice is not None:
+            return resolve(choice, ResolutionSource.BUTTON, source_text)
+        label = match_answer_label(message)
+        if label is not None:
+            return resolve(label, ResolutionSource.LABEL, source_text)
+        if is_clear_new_task(message, route_agent_entry(message)):
+            return new_task()
+        proposal = await _classify_clarification_answer(llm, clarification_type, message)
+        if proposal == ClarificationProposalValue.NEW_REQUEST:
+            return new_task()
+        if proposal == ClarificationProposalValue.UNCLEAR:
+            return unclear()
+        return resolve(ClarificationAnswer(proposal.value), ResolutionSource.MODEL, source_text)
+    # VACANCY_SOURCE_REQUIRED (A2): deterministic only, no model call.
+    slot, slot_source = classify_vacancy_source_message(message, route_agent_entry(message))
+    if slot == SourceSlotOutcome.SOURCE:
+        assert slot_source is not None
+        return resolve(
+            ClarificationAnswer.VACANCY_ANALYSIS, ResolutionSource.SOURCE_MESSAGE, slot_source
+        )
+    if slot == SourceSlotOutcome.NEW_TASK:
+        return new_task()
+    return unclear()
+
+
 async def execute_agent_turn(
     db: AsyncSession,
     llm: LLMProvider,
@@ -2030,6 +2354,7 @@ async def execute_agent_turn(
     embedding_provider: EmbeddingProvider | None,
     max_tool_calls: int,
     max_context_turns: int,
+    clarification_button: ClarificationButton | None = None,
 ) -> AgentTurnCommit:
     """One bounded orchestration turn over SNAPSHOTS (issue #85). Never
     persists a mutation to any candidate/job/evaluation row, and never
@@ -2061,16 +2386,38 @@ async def execute_agent_turn(
     # Issue #84: canonical source text for everything below (transcript,
     # routing, spans/offsets, hashing, provenance, the local model).
     user_message = normalize_message_newlines(user_message)
-    user_turn: dict = {"role": "user", "text": user_message}
+    # Issue #88 (D-092 §4.1): stable server-issued ids for the two NEW
+    # transcript entries; never model- or client-authored.
+    user_turn_id = uuid.uuid4()
+    stage = _TurnStage(assistant_turn_id=uuid.uuid4())
+    user_turn: dict = {"role": "user", "text": user_message, "turn_id": str(user_turn_id)}
     turns: list[dict] = [*conversation.turns, user_turn]
+
+    def finish(result: AgentTurnResult) -> AgentTurnCommit:
+        return _finish_turn(session_context, user_turn=user_turn, result=result, stage=stage)
+
+    # [1] Dialogue-state resolution (§6.4, lane A) runs FIRST — before the
+    # lane-B pending-draft amendment branch (§4.4 rule 5).
+    resume: _Resume | None = None
+    if clarification_button is not None or session_context.active_clarification_id is not None:
+        dialogue_outcome = await _resolve_dialogue_state(
+            db, llm, tenant_id=tenant_id, conversation=conversation,
+            session_context=session_context, message=user_message,
+            button=clarification_button, user_turn_id=user_turn_id, stage=stage,
+        )
+        if dialogue_outcome.result is not None:
+            return finish(dialogue_outcome.result)
+        resume = dialogue_outcome.resume
     # Live pending authority only (session_context.active_pending_draft_id);
     # historical transcript payloads alone are never actionable.
     pending_draft = get_active_pending_job_draft(conversation, session_context)
     if (
-        pending_draft is not None
+        resume is None
+        and pending_draft is not None
         and _FOLLOWUP_RE.search(_fold(user_message))
     ):
         modified = _apply_pending_draft_followup(pending_draft, user_message)
+        stage.draft_amendment = modified is not None
         provenance = _configured_provenance(llm)
         if modified is None:
             result = _build_result(
@@ -2097,49 +2444,80 @@ async def execute_agent_turn(
                 tool_call_count=0,
                 provenance=provenance,
             )
-        return _finish_turn(session_context, user_turn=user_turn, result=result)
+        return finish(result)
 
-    entry_routing = route_agent_entry(user_message)
-    await record_event(
-        db,
-        tenant_id=tenant_id,
-        event_type="agent.entry.routed",
-        metadata={
-            "routing_source": entry_routing.routing_source.value,
-            "routed_action": entry_routing.routed_action.value,
-            "routing_policy_version": ENTRY_ROUTING_POLICY_VERSION,
-        },
-    )
-    clarification_copy = {
-        AgentEntryRoute.CLARIFY_AMBIGUOUS: AMBIGUOUS_SEARCH_OR_JOB_COPY,
-        AgentEntryRoute.CLARIFY_JOB_SOURCE_REQUIRED: JOB_SOURCE_REQUIRED_COPY,
-        AgentEntryRoute.CLARIFY_INPUT_STRUCTURE: INPUT_STRUCTURE_CLARIFICATION_COPY,
-    }.get(entry_routing.route)
-    if clarification_copy is not None:
-        result = _build_result(
-            outcome=AgentTurnOutcome.CLARIFICATION_REQUESTED,
-            message=clarification_copy,
-            tool_results=[],
-            tool_call_count=0,
-            provenance=_configured_provenance(llm),
+    if resume is not None:
+        # §6.6: the resolved answer maps to exactly one server-built step over
+        # the server-owned source (bound U1 span, or the qualifying current
+        # message for SOURCE_MESSAGE) — the same FORCE_* paths as today. The
+        # answer words themselves are never search or JD input.
+        server_authorized_draft = resume.answer == ClarificationAnswer.VACANCY_ANALYSIS
+        server_authorized_search = resume.answer == ClarificationAnswer.CANDIDATE_SEARCH
+        job_draft_source = resume.source_text
+        forced_search_text = resume.source_text
+        server_result_limit = None
+        if server_authorized_search and len(forced_search_text) > MAX_AGENT_SEARCH_QUERY_LENGTH:
+            # T4: a truthful capability failure (the forced search input is
+            # bounded); the task fails safe and nothing executes.
+            return finish(
+                _fixed_clarification_result(llm, INPUT_STRUCTURE_CLARIFICATION_COPY)
+            )
+    else:
+        entry_routing = route_agent_entry(user_message)
+        await record_event(
+            db,
+            tenant_id=tenant_id,
+            event_type="agent.entry.routed",
+            metadata={
+                "routing_source": entry_routing.routing_source.value,
+                "routed_action": entry_routing.routed_action.value,
+                "routing_policy_version": ENTRY_ROUTING_POLICY_VERSION,
+            },
         )
-        return _finish_turn(session_context, user_turn=user_turn, result=result)
+        clarification_copy = {
+            AgentEntryRoute.CLARIFY_AMBIGUOUS: AMBIGUOUS_SEARCH_OR_JOB_COPY,
+            AgentEntryRoute.CLARIFY_JOB_SOURCE_REQUIRED: JOB_SOURCE_REQUIRED_COPY,
+            AgentEntryRoute.CLARIFY_INPUT_STRUCTURE: INPUT_STRUCTURE_CLARIFICATION_COPY,
+        }.get(entry_routing.route)
+        if clarification_copy is not None:
+            # §6.1: only the two server-typed clarifications become resumable
+            # (T1); CLARIFY_INPUT_STRUCTURE stays non-resumable fixed copy.
+            if session_context.context_id is not None:
+                if (
+                    entry_routing.route == AgentEntryRoute.CLARIFY_AMBIGUOUS
+                    and eligible_search_or_vacancy_source(user_message)
+                ):
+                    stage.new_clarification = search_or_vacancy_clarification(
+                        message=user_message, user_turn_id=user_turn_id,
+                        question_turn_id=stage.assistant_turn_id,
+                    )
+                elif entry_routing.route == AgentEntryRoute.CLARIFY_JOB_SOURCE_REQUIRED:
+                    stage.new_clarification = vacancy_source_clarification(
+                        user_turn_id=user_turn_id, question_turn_id=stage.assistant_turn_id
+                    )
+                if stage.new_clarification is not None:
+                    stage.clarification_payload = clarification_payload(
+                        stage.new_clarification.clarification_type
+                    )
+            return finish(_fixed_clarification_result(llm, clarification_copy))
 
-    server_authorized_draft = entry_routing.route == AgentEntryRoute.FORCE_JOB_DRAFT
-    # Exact user-owned source (offsets into user_message), never rewritten.
-    job_draft_source = entry_routing.draft_source(user_message)
-    server_authorized_search = entry_routing.route == AgentEntryRoute.FORCE_CANDIDATE_SEARCH
-    # Search forced by the entry router is turn-terminal once the existing
-    # planner/search path returns: no second orchestration guess is needed.
+        server_authorized_draft = entry_routing.route == AgentEntryRoute.FORCE_JOB_DRAFT
+        # Exact user-owned source (offsets into user_message), never rewritten.
+        job_draft_source = entry_routing.draft_source(user_message)
+        server_authorized_search = entry_routing.route == AgentEntryRoute.FORCE_CANDIDATE_SEARCH
+        forced_search_text = user_message
+        # Count-only current-result follow-up ("ilk 3"): the server supplies
+        # the typed limit; the existing #49 refinement dispatch validates the
+        # active ResultSet and rejects truthfully when there is none.
+        server_result_limit = (
+            entry_routing.result_limit
+            if entry_routing.route == AgentEntryRoute.FORCE_RESULT_LIMIT
+            else None
+        )
+    # Search forced by the entry router (or a resumed clarification) is
+    # turn-terminal once the existing planner/search path returns: no second
+    # orchestration guess is needed.
     search_turn_terminal = server_authorized_search
-    # Count-only current-result follow-up ("ilk 3"): the server supplies the
-    # typed limit; the existing #49 refinement dispatch validates the active
-    # ResultSet and rejects truthfully when there is none.
-    server_result_limit = (
-        entry_routing.result_limit
-        if entry_routing.route == AgentEntryRoute.FORCE_RESULT_LIMIT
-        else None
-    )
     tool_results: list[AgentToolResult] = []
     last_tool_summary: dict | None = None
     tool_calls_made = 0
@@ -2168,7 +2546,7 @@ async def execute_agent_turn(
             # classification. The user's text is forwarded unmodified into
             # the existing validated NL planner in _dispatch_search.
             decision = AgentDecision(
-                action=AgentActionType.SEARCH_CANDIDATES, search_query=user_message
+                action=AgentActionType.SEARCH_CANDIDATES, search_query=forced_search_text
             )
             server_authorized_search = False
         elif server_result_limit is not None:
@@ -2222,7 +2600,7 @@ async def execute_agent_turn(
                         tool_call_count=tool_calls_made,
                         provenance=provenance,
                     )
-                    return _finish_turn(session_context, user_turn=user_turn, result=result)
+                    return finish(result)
                 break
 
         if decision is None:
@@ -2237,7 +2615,7 @@ async def execute_agent_turn(
                 tool_call_count=tool_calls_made,
                 provenance=provenance,
             )
-            return _finish_turn(session_context, user_turn=user_turn, result=result)
+            return finish(result)
 
         if (
             decision.action == AgentActionType.DRAFT_JOB_CRITERIA
@@ -2265,7 +2643,7 @@ async def execute_agent_turn(
                 tool_call_count=tool_calls_made,
                 provenance=provenance,
             )
-            return _finish_turn(session_context, user_turn=user_turn, result=result)
+            return finish(result)
 
         if decision.action in (AgentActionType.FINAL_ANSWER, AgentActionType.CLARIFY):
             assert decision.response_code is not None
@@ -2284,7 +2662,7 @@ async def execute_agent_turn(
                 tool_call_count=tool_calls_made,
                 provenance=provenance,
             )
-            return _finish_turn(session_context, user_turn=user_turn, result=result)
+            return finish(result)
 
         if tool_calls_made >= max_tool_calls:
             result = _build_result(
@@ -2294,7 +2672,7 @@ async def execute_agent_turn(
                 tool_call_count=tool_calls_made,
                 provenance=provenance,
             )
-            return _finish_turn(session_context, user_turn=user_turn, result=result)
+            return finish(result)
 
         if decision.action == AgentActionType.SEARCH_CANDIDATES:
             assert decision.search_query is not None
@@ -2312,7 +2690,7 @@ async def execute_agent_turn(
                     tool_call_count=tool_calls_made,
                     provenance=provenance,
                 )
-                return _finish_turn(session_context, user_turn=user_turn, result=result)
+                return finish(result)
             searched_queries.add(normalized_query)
 
         if decision.action == AgentActionType.DRAFT_JOB_CRITERIA:
@@ -2336,7 +2714,7 @@ async def execute_agent_turn(
                     tool_call_count=tool_calls_made,
                     provenance=provenance,
                 )
-                return _finish_turn(session_context, user_turn=user_turn, result=result)
+                return finish(result)
             tool_calls_made += 1
             tool_results.append(job_draft_result)
             assert job_draft_result.job_draft is not None
@@ -2357,7 +2735,7 @@ async def execute_agent_turn(
                 tool_call_count=tool_calls_made,
                 provenance=provenance,
             )
-            return _finish_turn(session_context, user_turn=user_turn, result=result)
+            return finish(result)
 
         if decision.action == AgentActionType.REFINE_CANDIDATE_RESULTS:
             # Always turn-terminal (issue #49 PR49-2, docs/DECISIONS.md
@@ -2383,7 +2761,7 @@ async def execute_agent_turn(
                     tool_call_count=tool_calls_made,
                     provenance=provenance,
                 )
-                return _finish_turn(session_context, user_turn=user_turn, result=result)
+                return finish(result)
             if refine_dispatch.resolution_failure is not None:
                 failure_outcome, failure_message = _outcome_and_message_for_refinement_failure(
                     refine_dispatch.resolution_failure
@@ -2395,7 +2773,7 @@ async def execute_agent_turn(
                     tool_call_count=tool_calls_made,
                     provenance=provenance,
                 )
-                return _finish_turn(session_context, user_turn=user_turn, result=result)
+                return finish(result)
             assert (
                 refine_dispatch.tool_result is not None
                 and refine_dispatch.new_result_set_id is not None
@@ -2420,7 +2798,7 @@ async def execute_agent_turn(
                 tool_call_count=tool_calls_made,
                 provenance=provenance,
             )
-            return _finish_turn(session_context, user_turn=user_turn, result=result)
+            return finish(result)
 
         matched_profile: CandidateProfileExtraction | None = None
         resolution_failure: ResultSetResolutionFailure | None = None
@@ -2481,7 +2859,7 @@ async def execute_agent_turn(
                 tool_call_count=tool_calls_made,
                 provenance=provenance,
             )
-            return _finish_turn(session_context, user_turn=user_turn, result=result)
+            return finish(result)
 
         # GET_CANDIDATE_PROFILE / GET_CANDIDATE_EVIDENCE are always
         # turn-terminal, found or not: each is already a complete,
@@ -2526,4 +2904,4 @@ async def execute_agent_turn(
                 tool_call_count=tool_calls_made,
                 provenance=provenance,
             )
-            return _finish_turn(session_context, user_turn=user_turn, result=result)
+            return finish(result)

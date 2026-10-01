@@ -7086,6 +7086,9 @@ Decision:
      appends the (user, assistant) pair to the current transcript, sets
      the live pointers, applies the title transition, audits completion,
      and clears the reservation in one COMMIT.
+     *Superseded for final agent Phase-B transaction entry by D-093 /
+     D-092 §12.2 (issue #88 slice A): Phase B now always starts from a
+     fresh transaction via `TurnBoundary.enter_phase_b()`.*
    - Tool-phase DB writes that commit early are only append-only audit
      events and new `AgentResultSet` rows. Those rows stay inert until a
      committed live pointer references them, so an abandoned turn leaves
@@ -7093,6 +7096,9 @@ Decision:
    - A turn that makes no model call never leaves its Phase A transaction.
      Deterministic-only turns keep the short, simple locked path, and any
      path that may call a model cannot carry a lock into the call.
+     *Superseded by D-093 (issue #88 slice A): a no-inference turn now
+     commits its Phase A before the final Phase B, which starts fresh via
+     `TurnBoundary.enter_phase_b()`.*
    - `run_agent_turn` keeps its single-transaction contract for
      service-level callers (it now composes execute + apply).
    - `/ui/search` commits its read-only auth transaction before NL planning.
@@ -7124,6 +7130,9 @@ Decision:
      for global inference capacity, which is intentional.
    - Deterministic-only turns never release the row lock, so a concurrent
      request simply waits on that short lock (PostgreSQL lock order).
+     *Superseded by D-093 (issue #88 slice A): the concurrent request
+     waits only for the deterministic turn's Phase A, then sees the live
+     reservation and receives the 409 "still processing" outcome above.*
 4. **Bounded inference admission (`meyar.llm.concurrency.InferenceAdmission`).**
    One process-wide gate replaces the plain `asyncio.Semaphore`. It is
    shared by EVERY request-serving local-model execution:
@@ -7784,3 +7793,104 @@ PR #96 before slice A; corrected per review).**
 
    Slice B MUST pass WHOLE_MESSAGE instead of the model's `search_query`
    for model-routed searches.
+
+## D-093 — Issue #88 slice A implementation record (D-092 + A1/A2)
+
+**Status: slice A implemented on branch
+`feat/88a-resumable-clarification-a2` and technically accepted by
+independent review (code head `195387bddaf7f1f4b6d11aa3c2dd56e070478bf6`);
+pending owner merge of PR #98.**
+D-092, A1 and A2 semantics are unchanged; this entry records only the
+implementation choices the accepted design left open. #88 stays OPEN
+(slices B and C remain); #50 is out of scope.
+
+- **Schema.** Migration `b88a2c4d6e10` (after `a87d4c6e2b19`, single head)
+  adds `agent_tasks`, `agent_clarifications` and
+  `agent_conversation_session_contexts.active_clarification_id` exactly as
+  §4.3/§18, with CHECKs for every closed value, the type-dependent source
+  binding, attempt-1 `created_from_turn_id = source_turn_id`, and
+  `superseded_reason ∈ {UNCLEAR, NEW_TASK}` ⇔ SUPERSEDED. The pointer FK is
+  a deferred (`use_alter`) constraint to break the context ↔ clarification
+  cycle. Downgrade drops pointer, clarifications, tasks (counts logged) and
+  leaves `active_pending_draft_id` intact.
+- **Turn ids.** Every new user/assistant entry gets a server uuid4
+  `turn_id`; legacy entries get none and therefore never validate a chain.
+- **Relationship to D-089 (normative).** Slice A supersedes/narrows
+  D-089's deterministic-only Phase-B statements: for `POST /ui/agent` after
+  this slice, every final consequential Phase B starts from a fresh
+  transaction via `TurnBoundary.enter_phase_b()`, including no-inference
+  turns. D-089 remains the historical #85 decision for the pre-Slice-A
+  implementation; its no-DB-across-inference and reservation principles
+  remain authoritative. D-089 carries forward-reference notes at the
+  superseded statements; its text is otherwise unchanged.
+- **Phase B order.** The final consequential Phase B ALWAYS starts from a
+  fresh transaction (`TurnBoundary.enter_phase_b`): whatever DB phase is
+  still open is committed first — Phase A for a deterministic, no-inference
+  turn (T1, label-resolved search, T5, T6, T8), or the last post-inference
+  re-entry otherwise — so no Phase A conversation/context/submission lock
+  is held when the principal is re-locked. That commit can only contain
+  what any #85 `leave_db` already persists: the reservation and #87
+  PROCESSING claim, attempt-provenance audit rows and inert (pointer-less)
+  ResultSet rows; transcript, pointers and task/clarification state are
+  written only in Phase B. Order: `reenter` (User → TenantMembership →
+  BrowserSession `FOR SHARE` → conversation → context `FOR UPDATE`) →
+  `lock_dialogue_rows` (clarification → task → lane-B task) → submission →
+  writes → D-045 sync → `created_turn_version` stamped with the final
+  `turn_version` → one commit. No lock is held across Ollama (#85).
+  *Correction (Slice-A independent review):* the first implementation
+  re-entered inside the still-open Phase A transaction on no-inference
+  turns, taking the principal locks after the conversation/context/
+  submission locks; fixed with a failing-first engine/`pg_locks` probe
+  regression (`tests/test_issue88_slice_a_phase_b.py`). Visible
+  consequence: a second same-conversation turn arriving while a
+  deterministic turn runs now first blocks on its Phase A row lock and then
+  gets the D-089 409 "still processing" outcome (as it already did during
+  inference turns) instead of running afterwards;
+  `test_real_ui_agent_route_serializes_concurrent_same_session_turns` was
+  updated to that contract (one 200, one 409, nothing persisted by the
+  refused turn).
+- **Request hash.** `request_hash` is SHA-256 of canonical JSON
+  `{"v":1,"message","clarification_id","clarification_choice"}` for every
+  turn. A PROCESSING submission claimed under the old message-only hash at
+  deploy time fails closed (re-render with a fresh token).
+- **Observed-stale pointer (T8).** When the live pointer's clarification
+  fails §6.2 (TTL, appended foreign turn, epoch, versions, source), the turn
+  expires it (task EXPIRED, pointer cleared) and answers with fixed
+  "resend" copy without executing anything — the literal §6.2 / scenario D
+  rule, whatever the message says. A pointer whose row is no longer OPEN is
+  cleared defensively (no row transition).
+- **Rejected button (T8b).** 409 with "Bu sual artıq aktiv deyil.", audit
+  `agent.clarification.rejected(NOT_ACTIVE|INVALID_CHOICE)`. Because the
+  rejection happens before any inference, the rollback also undoes the
+  PROCESSING claim, so the router retires the still-ISSUED token as
+  ABANDONED explicitly.
+- **Classifier failure (T8a).** Timeout/unavailable/provider error or
+  malformed output after the one repair → `ClarificationClassifierError`:
+  turn abandoned, existing provider-failure copy (503), audit
+  `agent.turn.abandoned(CLARIFICATION_CLASSIFIER_FAILURE)`. INFERENCE_BUSY
+  keeps the existing #85 busy path. A proposal outside the type's allowed
+  codes is a contract failure, not UNCLEAR.
+- **VACANCY_SOURCE_REQUIRED order.** FORCE_CANDIDATE_SEARCH /
+  FORCE_RESULT_LIMIT (new task) are checked before the slot fill, so an
+  explicit search with a requirement is never mistaken for a JD. A
+  CLARIFY_INPUT_STRUCTURE (unrepresentable) reply is UNCLEAR, never a source.
+- **Resumed search bound.** A resolved CANDIDATE_SEARCH whose bound source
+  exceeds the forced-search input bound (2000) ends T4 FAILED_SAFE with the
+  existing input-structure copy; nothing executes.
+- **Lane B.** Every turn that produces a new pending draft (forced JD,
+  SOURCE_MESSAGE, resumed VACANCY_ANALYSIS) owns a WAITING_CONFIRMATION
+  task; the deterministic amendment updates its `pending_draft_id` (T9);
+  the confirm route completes it (T10). Legacy pending drafts without a task
+  stay confirmable.
+- **Unchanged until slice C.** A model-proposed DRAFT_JOB_CRITERIA still
+  gets the non-resumable fixed copy (§23 lists that conversion under C).
+- **Deferred.** The `meyar retire-agent-tasks` CLI and its T12
+  maintenance expiry remain optional in slice A per §19.1 (required before
+  pilot). The quoted-source continuity headline and disabled historical
+  buttons (§20) are deferred by Slice-A independent review as non-authority
+  UX follow-up; D-092 §20 remains the target contract. Buttons render only
+  for the one answerable question (live pointer, OPEN, unexpired, last
+  entry).
+- **Test bootstrap.** `tests/conftest.py` drops the session-context table
+  before `drop_all` so the deferred FK cannot break a reset of a test schema
+  created by an earlier revision.

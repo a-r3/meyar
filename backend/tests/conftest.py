@@ -143,6 +143,13 @@ async def _prepare_test_database() -> None:
         # metadata.create_all, bypassing the Alembic migration that
         # normally does this for dev/CI.
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+        # Issue #88: the session-context -> clarification FK is a deferred
+        # (use_alter) constraint, which drop_all always tries to DROP while
+        # its table exists — even on a schema built before it existed.
+        # Dropping that owner table first makes the reset schema-agnostic.
+        await conn.execute(
+            text("DROP TABLE IF EXISTS agent_conversation_session_contexts CASCADE")
+        )
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
     await engine.dispose()

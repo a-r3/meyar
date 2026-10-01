@@ -29,6 +29,7 @@ from PIL import Image, ImageDraw
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meyar.agent.clarification_schemas import ClarificationAnswerProposal
 from meyar.agent.schemas import (
     AgentDecision,
     GroundedFact,
@@ -167,6 +168,16 @@ class _DemoLLMProvider:
         repair: bool = False,
     ) -> tuple[JDCriteriaDraft, LLMResultProvenance]:
         raise NotImplementedError("The demo seed provider never drafts job criteria.")
+
+    async def resolve_clarification_answer(
+        self,
+        *,
+        clarification_type: str,
+        allowed_answers: list[str],
+        answer_text: str,
+        repair: bool = False,
+    ) -> tuple[ClarificationAnswerProposal, LLMResultProvenance]:
+        raise NotImplementedError("The demo seed provider never runs the agent loop.")
 
     async def health(self) -> dict:
         return {"reachable": True, "model": self.model_name, "model_available": True}

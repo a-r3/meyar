@@ -3425,38 +3425,60 @@ async def test_real_ui_agent_route_serializes_concurrent_same_session_turns(
 
         app.dependency_overrides[get_db] = _restore_get_db
 
-    assert response_1.status_code == 200
-    assert response_2.status_code == 200
-    # Both explicit searches were server-routed under the lock: the
+    # Issue #88 slice A (D-092 §12.2, D-093): the final Phase B always starts
+    # from a fresh transaction, so even a deterministic turn makes its #85
+    # reservation durable before Phase B. The concurrent turn therefore
+    # first BLOCKS on the winner's Phase A conversation-row lock (real DB
+    # serialization, never an interleaving), then observes the live
+    # reservation and is refused with the truthful D-089 "still
+    # processing" outcome — no hidden wait queue, nothing persisted.
+    statuses = sorted([response_1.status_code, response_2.status_code])
+    assert statuses == [200, 409]
+    winner, loser = (
+        (response_1, response_2) if response_1.status_code == 200 else (response_2, response_1)
+    )
+    assert "əvvəlki sorğu hələ emal olunur" in loser.text
+    winner_message = (
+        "Python bilən namizədləri göstər"
+        if winner is response_1
+        else "Java bilən namizədləri göstər"
+    )
+    winner_candidate = candidate_python if winner is response_1 else candidate_java
+    # The explicit search was server-routed under the lock: the
     # orchestration decision was never consulted.
     assert fake.agent_call_count == 0
-    # Real DB-lock serialization proof: two independent 0.15s holds, each
-    # gating the OTHER request's row lock acquisition, must run back to
-    # back (>= ~0.3s) rather than in parallel (~0.15s) — see class
-    # docstring above.
-    assert elapsed >= 0.28
+    # Real DB-lock serialization proof: the loser's locking SELECT waited
+    # for the winner's whole 0.15s Phase A hold instead of running in
+    # parallel with it.
+    assert elapsed >= 0.14
 
     conversation = await db_session.scalar(
         select(AgentConversation).where(AgentConversation.tenant_id == tenant.id)
     )
     assert conversation is not None
-    # No lost transcript update: both (user, assistant) pairs persisted.
-    assert len(conversation.turns) == 4
-    user_messages = {t["text"] for t in conversation.turns if t.get("role") == "user"}
-    assert user_messages == {
-        "Python bilən namizədləri göstər",
-        "Java bilən namizədləri göstər",
-    }
+    # Exactly the winner's (user, assistant) pair; the refused turn left
+    # no transcript entry and no reservation behind.
+    assert len(conversation.turns) == 2
+    assert [t["text"] for t in conversation.turns if t.get("role") == "user"] == [
+        winner_message
+    ]
+    assert conversation.active_turn_id is None
+    rejected = (
+        await db_session.scalars(
+            select(AuditEvent).where(
+                AuditEvent.tenant_id == tenant.id,
+                AuditEvent.event_type == "agent.turn.rejected",
+            )
+        )
+    ).all()
+    assert [event.event_metadata for event in rejected] == [{"reason_code": "TURN_IN_PROGRESS"}]
 
-    result_sets = (
+    (result_set,) = (
         await db_session.scalars(
             select(AgentResultSet).where(AgentResultSet.tenant_id == tenant.id)
         )
     ).all()
-    assert len(result_sets) == 2
-    result_sets_by_id = {str(rs.id): rs for rs in result_sets}
-
-    created_events = (
+    (created_event,) = (
         await db_session.scalars(
             select(AuditEvent).where(
                 AuditEvent.tenant_id == tenant.id,
@@ -3464,50 +3486,17 @@ async def test_real_ui_agent_route_serializes_concurrent_same_session_turns(
             )
         )
     ).all()
-    assert len(created_events) == 2
-    # Derive serialized order from the audit transition chain itself,
-    # rather than `created_at`: Postgres `now()` is transaction-time
-    # based, so two transactions committed close together are not a
-    # reliable wall-clock ordering signal. The chain is: the FIRST event
-    # chains onto `previous_result_set_id: None`; the SECOND event's
-    # `previous_result_set_id` must equal the first event's own
-    # `result_set_id` — never back onto the original pre-race `None`
-    # pointer both turns would have read from an un-serialized snapshot.
-    first_event, second_event = created_events
-    if first_event.event_metadata["previous_result_set_id"] is not None:
-        first_event, second_event = second_event, first_event
-    assert first_event.event_metadata["previous_result_set_id"] is None
-    assert second_event.event_metadata["previous_result_set_id"] == first_event.event_metadata[
-        "result_set_id"
-    ]
-    first_rs = result_sets_by_id[first_event.event_metadata["result_set_id"]]
-    second_rs = result_sets_by_id[second_event.event_metadata["result_set_id"]]
-
-    # Coherent serialized transition: the conversation's active pointer is
-    # the LATEST committed result set, not the pre-race None both turns
-    # originally read.
-    assert (await _only_context(db_session, conversation)).active_result_set_id == second_rs.id
-
-    first_members = (
+    assert created_event.event_metadata["previous_result_set_id"] is None
+    assert created_event.event_metadata["result_set_id"] == str(result_set.id)
+    assert (await _only_context(db_session, conversation)).active_result_set_id == result_set.id
+    members = (
         await db_session.scalars(
-            select(AgentResultSetMember).where(AgentResultSetMember.result_set_id == first_rs.id)
+            select(AgentResultSetMember).where(AgentResultSetMember.result_set_id == result_set.id)
         )
     ).all()
-    second_members = (
-        await db_session.scalars(
-            select(AgentResultSetMember).where(AgentResultSetMember.result_set_id == second_rs.id)
-        )
-    ).all()
-    # No member/provenance cross-wire: each result set holds exactly the
-    # one candidate its own search matched, and the two are disjoint.
-    assert {m.candidate_id for m in first_members} | {m.candidate_id for m in second_members} == {
-        candidate_python.id,
-        candidate_java.id,
-    }
-    assert {m.candidate_id for m in first_members}.isdisjoint(
-        {m.candidate_id for m in second_members}
-    )
-    final_active_candidate_id = second_members[0].candidate_id
+    # No member/provenance cross-wire: only the winner's own match.
+    assert {m.candidate_id for m in members} == {winner_candidate.id}
+    final_active_candidate_id = members[0].candidate_id
 
     # A subsequent ordinal follow-up must resolve only against the final
     # active result set.
