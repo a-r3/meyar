@@ -1011,6 +1011,9 @@ async def agent_turn(
                 max_tool_calls=settings.agent_max_tool_calls,
                 max_context_turns=settings.agent_max_context_turns,
                 clarification_button=clarification_button,
+                # Issue #88 slice B: Layer-1 SCOPE_MISSING uses the live
+                # principal's scopes (re-derived per request, never client).
+                principal_scopes=ctx.scopes,
             ),
         )
         # PHASE B: ALWAYS a fresh transaction (issue #88, D-092 §12.2) — end

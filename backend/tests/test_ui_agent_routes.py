@@ -361,12 +361,13 @@ async def test_equivalent_zero_result_search_tools_render_one_empty_state(
     tenant_and_user,
     local_ui_settings: Settings,
 ) -> None:
-    """Distinct internal calls that converge to one visible answer stay audited.
+    """A model rephrasing its follow-up SEARCH_CANDIDATES decision converges
+    to one visible answer.
 
-    A small local model can rephrase its follow-up SEARCH_CANDIDATES decision,
-    bypassing the exact-query guard while producing the same effective empty
-    result.  The presentation must collapse that one answer without deleting
-    either underlying tool operation.
+    Issue #88 slice B (D-092 §23): a model-routed search is WHOLE_MESSAGE, so
+    a rephrased ``search_query`` can no longer bypass the identical-search
+    guard — the second proposal resolves to the same server-owned source and
+    finalizes on the first result. One audited search, one empty state.
     """
     from sqlalchemy import select
 
@@ -422,7 +423,9 @@ async def test_equivalent_zero_result_search_tools_render_one_empty_state(
         for event in executed
         if event.event_metadata.get("tool_name") == AgentActionType.SEARCH_CANDIDATES.value
     ]
-    assert [event.event_metadata["tool_call_index"] for event in search_events] == [1, 2]
+    assert [event.event_metadata["tool_call_index"] for event in search_events] == [1]
+    # Neither model-authored query ever reached the planner.
+    assert fake.planner_requests == ["NoMatch haqqında məlumat ver"]
 
 
 async def test_multi_turn_ordinal_reference_over_http(

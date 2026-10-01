@@ -746,6 +746,118 @@ async def active_result_set_size(
     return min(validated.result_count, MAX_CANDIDATE_REF)
 
 
+@dataclass(frozen=True)
+class ResultSetInspection:
+    """Read-only, audit-free Layer-1 view of the PRE-EXISTING active
+    ResultSet (issue #88 slice B, D-092 §11.1), scoped to exactly what a plan
+    consumes so issue #86's member-scoped authority is preserved:
+
+    * ``failure``: the structural ``_validate_active_result_set`` outcome
+      (missing/foreign/expired/unsupported policy), else ``None``;
+    * ``member_count``: the stored snapshot size when structurally valid;
+    * ``stale_ordinals``: requested ordinals whose OWN member snapshot is no
+      longer authoritative (an unrelated changed member never appears);
+    * ``snapshot_stale``: only when the whole snapshot was requested (a
+      refinement is a subset of the entire source snapshot).
+
+    Never a substitute for the executors' own checks, which still run as
+    TOCTOU defense in depth."""
+
+    failure: ResultSetResolutionFailure | None
+    member_count: int = 0
+    stale_ordinals: frozenset[int] = frozenset()
+    snapshot_stale: bool = False
+
+
+async def inspect_active_result_set(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    browser_session_id: uuid.UUID,
+    session_context: SessionContextAuthority,
+    ordinals: frozenset[int] = frozenset(),
+    whole_snapshot: bool = False,
+) -> ResultSetInspection:
+    """Same structural check order as ``resolve_active_candidate_ref`` /
+    ``validate_active_result_set_for_refinement`` and the same shared
+    ``validate_member_snapshots`` authority — but fires NO audit event and
+    resolves nothing. Bounded: one structural query, then at most one member
+    batch per requested ordinal (<= plan length) or one whole-snapshot batch."""
+    validated = await _validate_active_result_set(
+        db,
+        tenant_id=tenant_id,
+        browser_session_id=browser_session_id,
+        session_context=session_context,
+    )
+    if isinstance(validated, ResultSetResolutionFailure):
+        return ResultSetInspection(failure=validated)
+    stale: set[int] = set()
+    for ordinal in sorted(ordinals):
+        if ordinal > validated.result_count:
+            continue  # out of range: statically knowable from member_count
+        member = await db.scalar(
+            select(AgentResultSetMember).where(
+                AgentResultSetMember.result_set_id == validated.id,
+                AgentResultSetMember.ordinal == ordinal,
+            )
+        )
+        if member is None or (
+            await validate_member_snapshots(
+                db, tenant_id=tenant_id, result_set=validated, members=[member]
+            )
+            is None
+        ):
+            stale.add(ordinal)
+    snapshot_stale = False
+    if whole_snapshot:
+        members = await _ordered_members(db, result_set_id=validated.id)
+        snapshot_stale = (
+            await validate_member_snapshots(
+                db, tenant_id=tenant_id, result_set=validated, members=members
+            )
+            is None
+        )
+    return ResultSetInspection(
+        failure=None,
+        member_count=validated.result_count,
+        stale_ordinals=frozenset(stale),
+        snapshot_stale=snapshot_stale,
+    )
+
+
+async def record_reference_rejection(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    session_context: SessionContextAuthority,
+    failure: ResultSetResolutionFailure,
+    candidate_ref: int,
+) -> None:
+    """The exact ``agent.result_set.reference_rejected`` event
+    ``resolve_active_candidate_ref`` fires, for a reference that Layer 1
+    rejected before any resolution (issue #88 slice B)."""
+    await _reject(
+        db, tenant_id=tenant_id, session_context=session_context, failure=failure,
+        candidate_ref=(
+            candidate_ref if failure == ResultSetResolutionFailure.ORDINAL_OUT_OF_RANGE else None
+        ),
+    )
+
+
+async def record_refinement_rejection(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    session_context: SessionContextAuthority,
+    failure: ResultSetResolutionFailure,
+) -> None:
+    """The exact ``agent.result_set.refine_rejected`` event the refinement
+    pre-validation fires, for a refinement Layer 1 rejected."""
+    await _reject_refinement(
+        db, tenant_id=tenant_id, session_context=session_context, failure=failure
+    )
+
+
 async def _ordered_members(
     db: AsyncSession, *, result_set_id: uuid.UUID
 ) -> list[AgentResultSetMember]:

@@ -634,10 +634,10 @@ async def test_bounded_tool_call_loop_stops_at_configured_maximum(
 
     # A misbehaving/adversarial model keeps returning TOOL_CALL decisions
     # forever — the loop must still stop at max_tool_calls, never spin
-    # unboundedly. Each decision uses a DISTINCT query so this test
-    # exercises the true unbounded-loop guard rather than the separate
-    # identical-repeated-query dedup guard (see
-    # test_repeated_identical_search_finalizes_instead_of_looping below).
+    # unboundedly. Issue #88 slice B (D-092 §23): a model-routed search is
+    # WHOLE_MESSAGE, so the model's DISTINCT queries no longer produce
+    # distinct searches; the limit check still runs BEFORE the identical-
+    # search dedup guard, so the bound is exercised at max_tool_calls=1.
     from meyar.search.planner_schemas import PlannerDraft
     from meyar.search.schemas import RequiredFilters
 
@@ -660,10 +660,48 @@ async def test_bounded_tool_call_loop_stops_at_configured_maximum(
         # Model-routed on purpose: this exercises the orchestration loop's
         # own bound, not the server-forced single search.
         message="NoMatch haqqında məlumat ver",
-        max_tool_calls=2,
+        max_tool_calls=1,
     )
     assert result.outcome == AgentTurnOutcome.TOOL_CALL_LIMIT_EXCEEDED
-    assert result.tool_call_count == 2
+    assert result.tool_call_count == 1
+    assert llm.agent_call_count == 2
+
+
+async def test_distinct_model_search_queries_cannot_drive_distinct_searches(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    """Issue #88 slice B: the model can no longer author search text, so ten
+    distinct model ``search_query`` values collapse into ONE WHOLE_MESSAGE
+    search; the second identical search finalizes on the first result."""
+    from meyar.search.planner_schemas import PlannerDraft
+    from meyar.search.schemas import RequiredFilters
+
+    tenant, user, _password, membership = tenant_and_user
+    await db_session.commit()
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
+    llm = FakeLLMProvider(
+        planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["NoMatch"])),
+        agent_decisions=[
+            AgentDecision(
+                action=AgentActionType.SEARCH_CANDIDATES,
+                search_query=f"NoMatch bilən namizədləri göstər #{i}",
+            )
+            for i in range(10)
+        ],
+    )
+    message = "NoMatch haqqında məlumat ver"
+    result = await _run(
+        db_session,
+        llm,
+        tenant_id=tenant.id,
+        conversation=conversation,
+        session_context=context,
+        message=message,
+        max_tool_calls=3,
+    )
+    assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
+    assert result.tool_call_count == 1
+    assert llm.planner_requests == [message]
 
 
 async def test_repeated_identical_search_finalizes_instead_of_looping(

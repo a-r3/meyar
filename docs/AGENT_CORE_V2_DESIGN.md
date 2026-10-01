@@ -1,8 +1,9 @@
 # Agent Core v2 — task, dialogue and capability architecture (issue #88)
 
 **Status: ACCEPTED DESIGN; slice A IMPLEMENTED, technically accepted and
-MERGED (PR #98); slices B and C not started (see "Current implementation
-status" below).**
+MERGED (PR #98); slice B IMPLEMENTED and independently technically accepted,
+owner merge pending (D-094);
+slice C not started (see "Current implementation status" below).**
 
 Historical status at design acceptance (kept as recorded then):
 - This design was independently reviewed and accepted, at design head
@@ -71,9 +72,14 @@ scope) is implemented by issue #88 Slice A; implementation record D-093.
 The corrected Slice-A code was technically accepted by independent review
 at `195387bddaf7f1f4b6d11aa3c2dd56e070478bf6` and merged through PR #98
 (accepted head `4b27e6a87cebed083fdeb0cfa4afbf8c99b5c2c6`, squash commit
-`a9b8ff39746aa5767f8ad2b3b95809db5b1b9bc4` on `main`). Slices B and C have
-not started. #88 remains OPEN; #50 remains OPEN and out of scope. The
-design text in this document is unchanged.
+`a9b8ff39746aa5767f8ad2b3b95809db5b1b9bc4` on `main`). Slice B (§23,
+capability registry + validator) is implemented on branch
+`feat/88b-capability-registry` (implementation record D-094), independently
+technically accepted at code head
+`76d3719bde0a5bfb8a8b1c8e7aab84832a8de198`; owner merge is pending.
+Slice C has not started.
+#88 remains OPEN; #50 remains OPEN and out of scope. The design text in
+this document is unchanged.
 ---
 
 ## 0. Product contract

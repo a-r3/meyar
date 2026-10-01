@@ -7895,3 +7895,127 @@ implementation choices the accepted design left open. #88 stays OPEN
 - **Test bootstrap.** `tests/conftest.py` drops the session-context table
   before `drop_all` so the deferred FK cannot break a reset of a test schema
   created by an earlier revision.
+
+## D-094 — Issue #88 slice B implementation record (capability registry + validator)
+
+**Status: IMPLEMENTED — slice B independently technically accepted at code head
+`76d3719bde0a5bfb8a8b1c8e7aab84832a8de198` (accepted code tree
+`0a89fd6a12f1d4ec23f5580d7a71b72f1a908282`; exact-head CI run
+`36909027654` SUCCESS: 3073 pytest passed, 10 hang diagnostics passed).
+Owner Squash-and-merge is pending on branch
+`feat/88b-capability-registry` from `main` @
+`1dc79eadf92bc433d0772a9ebd863385a1e90cf6`.** D-092 §8–§11/§23, A1,
+A2 and D-093 are unchanged; this
+entry records only the slice-B implementation choices. Slice C has NOT
+started; #88 stays OPEN; #50 stays OPEN and out of scope. No migration
+(Alembic head stays `b88a2c4d6e10`). The historical CI hang root cause
+remains NOT PROVEN.
+
+- **Package `meyar.agent.capabilities`.** `contracts` (closed enums, strict
+  `extra="forbid"` input schemas, plan/outcome types), `registry` (the seven
+  §9 definitions, built once at import), `executors` (module-level wrappers
+  of the unchanged `_dispatch_*` functions), `validator` (pure Layer 1),
+  `execution` (Layer 2 + atomic activation), `adapter` (transitional).
+- **Registry invariants** asserted at import and in tests: keys ==
+  `set(CapabilityName)`; every executor is a module-level coroutine function
+  in `meyar.agent.capabilities.*`; no IN_TURN capability with
+  BUSINESS_MUTATION or DERIVED_RECORDS; mutation ⇒ EXPLICIT_HUMAN_ROUTE;
+  identity never an input; every input schema forbids extra keys. The model
+  only ever yields a `CapabilityName` string; a module/function name is
+  UNKNOWN_CAPABILITY.
+- **Compatibility.** `REFINE_RESULTS` ↔ `REFINE_CANDIDATE_RESULTS` and
+  `ANALYZE_VACANCY` ↔ `DRAFT_JOB_CRITERIA` via `legacy_tool_name`;
+  `AgentToolResult.tool_name` and audit `tool_name` are unchanged.
+  `agent.tool.executed` / `agent.tool.failed` gain `capability` and
+  `capability_version`; no key is renamed. ANALYZE_VACANCY keeps today's
+  `candidates:read` scope (the §9 "+ jobs:write" proposal is not adopted
+  in this behaviour-preserving slice).
+- **Transitional adapter.** Each forced/resumed route becomes a SERVER-origin
+  one-step plan over its server-owned source (current message or bound
+  resume span); each model `AgentDecision` tool action a MODEL-origin
+  one-step plan. The `while True` loop, `AgentDecision`, `AgentActionType`,
+  `TOOL_ACTIONS` and `decide_agent_action` remain (slice C retires them).
+  The if/elif dispatch is replaced by `validate_plan` → `execute_plan` →
+  registry executor; per-capability outcome handling and sequencing are
+  unchanged.
+- **Grounding change (the one intended behaviour change).** A model-routed
+  SEARCH_CANDIDATES is WHOLE_MESSAGE: the planner receives the canonical
+  user message, never `AgentDecision.search_query`. Consequences, accepted
+  by §23: (a) a second model-routed search in the same turn resolves to the
+  same source and finalizes through the existing identical-search guard, so
+  the loop's `max_tool_calls` bound is reached through searches only at
+  `max_tool_calls=1`; (b) the planner's own validated input bound (4000)
+  applies to a model-routed search instead of the 2000-character model
+  field bound (the resume T4 rule is unchanged). Refine filter, limit,
+  ordinal and evidence topic stay transitional model fields until slice C.
+- **Layer 1 (pure).** Checks in §11.1 order: UNSUPPORTED_VERSION,
+  SHAPE_INVALID, UNKNOWN_CAPABILITY, NOT_MODEL_PROPOSABLE, INVALID_ARGUMENTS,
+  PLAN_TOO_LONG (`min(3, agent_max_tool_calls)`), DUPLICATE_STEP,
+  SCOPE_MISSING (live `UIContext.scopes`), TASK_TYPE_CONFLICT,
+  PROHIBITED_ATTRIBUTE, DEPENDENCY_INVALID, RESULT_CONTEXT_REQUIRED /
+  RESULT_SET_STALE / RESULT_SET_EXPIRED, CANDIDATE_REF_OUT_OF_RANGE,
+  CONFIRMATION_REQUIRED, CANDIDATE_CONTENT_POLICY. `SourceSelection` admits
+  only WHOLE_MESSAGE; the §10.2 SOURCE_* / REFERENCE_NOT_GROUNDED families
+  are slice C. PROHIBITED_ATTRIBUTE covers model text no frozen planner sees
+  (the transitional evidence topic); WHOLE_MESSAGE and the refine filter
+  keep the planner's prohibited refusal as the authority (§11.1). A
+  rejection audits `agent.plan.rejected(reason_code, schema_version)` and
+  shows fixed copy; a model DRAFT proposal is NOT_MODEL_PROPOSABLE and keeps
+  today's `agent.entry.action_rejected` clarification.
+- **Pre-existing ResultSet in the real ValidationContext (§11.1).** Before
+  every validation the server builds the context from read-only, audit-free
+  authority: `inspect_active_result_set` runs the same structural check as
+  the executors and the shared `validate_member_snapshots`, scoped to
+  exactly what the plan consumes (`pre_existing_result_set_requirements`):
+  the referenced ordinals of PROFILE/EVIDENCE, the whole snapshot for
+  REFINE. This is compatible with §11.1 and #86 without amendment: §11.1
+  names the statuses (none / valid with n / STALE / EXPIRED); #86 fixes
+  STALE's granularity — a reference is stale only if ITS member changed (an
+  unrelated changed member never invalidates it), a refinement if any member
+  of its source snapshot changed; set-level STALE is an unsupported snapshot
+  policy. A ResultSet-family Layer-1 rejection of a one-step plan keeps
+  today's truthful outward behaviour (§11.3): the same outcome, message,
+  not-found card and `agent.result_set.reference_rejected` /
+  `refine_rejected` audit, with ZERO executors run (no `agent.tool.executed`
+  — nothing executed). The executors' own checks are unchanged and still run
+  as Layer-2 / TOCTOU defense in depth.
+- **Plan provenance (§19.2).** Every successfully validated plan attempt
+  (server-built or model-adapted) emits `agent.plan.validated` with exactly
+  `plan_sha256`, `step_count`, `capabilities` (closed codes) and
+  `schema_version`. `plan_sha256` is SHA-256 over the canonical JSON of the
+  validated plan (schema/policy versions, origin, goal, capability codes,
+  bounded integers, affordance targets) in which every text value — the
+  resolved source and the transitional filter/topic — is replaced by its
+  SHA-256 and length; the canonical form is never persisted. A Layer-1
+  rejection emits `agent.plan.rejected` and no `agent.plan.validated`.
+- **Layer 2 + atomic activation.** Before a step consuming a ResultSet
+  produced earlier in the plan: exists, same tenant / BrowserSession /
+  conversation / context epoch, unexpired, non-empty, ordinal ≤ actual
+  count. A pre-existing set gets no extra check (the executor's #86 check
+  decides). A produced set is only the in-turn working pointer; a non-
+  completed plan restores the previous `active_result_set_id` exactly.
+  Multi-step failure is PLAN_INCOMPLETE (new closed outcome, fixed copy,
+  `agent.plan.incomplete(step_index, reason_code)`, no active result cards);
+  single-step failure stays the step's own outcome. No model multi-step
+  planning exists in slice B: multi-step execution is exercised by
+  server-built test plans only.
+- **HUMAN_ACTION_ONLY.** CREATE_JOB / RANK_JOB_CANDIDATES are registry
+  entries with `NoArgs`; with a live target they become id-free affordances,
+  without one CONFIRMATION_REQUIRED. Their executor fails closed
+  (`HumanActionOnlyError`), `execute_plan` refuses them, and no
+  AgentDecision can be adapted into them. Creation/ranking remain the
+  existing authenticated CSRF routes.
+- **Existing tests adapted to the accepted grounding change** (no assertion
+  weakened): the loop-bound test now uses `max_tool_calls=1` plus a new test
+  proving distinct model queries collapse to one WHOLE_MESSAGE search; the
+  rephrased-search presentation test asserts one audited search; the #85
+  hybrid-embedding tests post a real hybrid search message; the #85 orphan
+  ResultSet test plans the HR message through the gated local planner.
+- **Independent-review correction (PR #100, reviewed head `9746b84`).** The
+  first implementation passed a hard-coded transitional ResultSet status to
+  Layer 1 and did not emit `agent.plan.validated`; both were corrected as
+  recorded above (real read-only context; §19.2 provenance). Real
+  `execute_agent_turn` / `POST /ui/agent` regressions prove zero executor
+  calls for missing / expired / stale / out-of-range references and
+  refinements, the normal path for a valid set, and that a change after
+  Layer 1 is still rejected by the executor checks.
