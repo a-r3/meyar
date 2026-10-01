@@ -7086,6 +7086,9 @@ Decision:
      appends the (user, assistant) pair to the current transcript, sets
      the live pointers, applies the title transition, audits completion,
      and clears the reservation in one COMMIT.
+     *Superseded for final agent Phase-B transaction entry by D-093 /
+     D-092 §12.2 (issue #88 slice A): Phase B now always starts from a
+     fresh transaction via `TurnBoundary.enter_phase_b()`.*
    - Tool-phase DB writes that commit early are only append-only audit
      events and new `AgentResultSet` rows. Those rows stay inert until a
      committed live pointer references them, so an abandoned turn leaves
@@ -7093,6 +7096,9 @@ Decision:
    - A turn that makes no model call never leaves its Phase A transaction.
      Deterministic-only turns keep the short, simple locked path, and any
      path that may call a model cannot carry a lock into the call.
+     *Superseded by D-093 (issue #88 slice A): a no-inference turn now
+     commits its Phase A before the final Phase B, which starts fresh via
+     `TurnBoundary.enter_phase_b()`.*
    - `run_agent_turn` keeps its single-transaction contract for
      service-level callers (it now composes execute + apply).
    - `/ui/search` commits its read-only auth transaction before NL planning.
@@ -7124,6 +7130,9 @@ Decision:
      for global inference capacity, which is intentional.
    - Deterministic-only turns never release the row lock, so a concurrent
      request simply waits on that short lock (PostgreSQL lock order).
+     *Superseded by D-093 (issue #88 slice A): the concurrent request
+     waits only for the deterministic turn's Phase A, then sees the live
+     reservation and receives the 409 "still processing" outcome above.*
 4. **Bounded inference admission (`meyar.llm.concurrency.InferenceAdmission`).**
    One process-wide gate replaces the plain `asyncio.Semaphore`. It is
    shared by EVERY request-serving local-model execution:
@@ -7787,8 +7796,10 @@ PR #96 before slice A; corrected per review).**
 
 ## D-093 — Issue #88 slice A implementation record (D-092 + A1/A2)
 
-**Status: PROPOSED — slice A implemented on branch
-`feat/88a-resumable-clarification-a2`, pending independent acceptance.**
+**Status: slice A implemented on branch
+`feat/88a-resumable-clarification-a2` and technically accepted by
+independent review (code head `195387bddaf7f1f4b6d11aa3c2dd56e070478bf6`);
+pending owner merge of PR #98.**
 D-092, A1 and A2 semantics are unchanged; this entry records only the
 implementation choices the accepted design left open. #88 stays OPEN
 (slices B and C remain); #50 is out of scope.
@@ -7804,6 +7815,14 @@ implementation choices the accepted design left open. #88 stays OPEN
   leaves `active_pending_draft_id` intact.
 - **Turn ids.** Every new user/assistant entry gets a server uuid4
   `turn_id`; legacy entries get none and therefore never validate a chain.
+- **Relationship to D-089 (normative).** Slice A supersedes/narrows
+  D-089's deterministic-only Phase-B statements: for `POST /ui/agent` after
+  this slice, every final consequential Phase B starts from a fresh
+  transaction via `TurnBoundary.enter_phase_b()`, including no-inference
+  turns. D-089 remains the historical #85 decision for the pre-Slice-A
+  implementation; its no-DB-across-inference and reservation principles
+  remain authoritative. D-089 carries forward-reference notes at the
+  superseded statements; its text is otherwise unchanged.
 - **Phase B order.** The final consequential Phase B ALWAYS starts from a
   fresh transaction (`TurnBoundary.enter_phase_b`): whatever DB phase is
   still open is committed first — Phase A for a deterministic, no-inference

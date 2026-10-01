@@ -2,7 +2,9 @@
 
 ## Current phase
 
-**Issue #88 slice A — implemented on branch, NOT accepted:** branch
+**Issue #88 slice A — SLICE A IMPLEMENTED — TECHNICALLY ACCEPTED BY
+INDEPENDENT REVIEW — FINAL DOC-GOVERNANCE CORRECTION PENDING OWNER MERGE
+(not merged; PR #98):** branch
 `feat/88a-resumable-clarification-a2` from `main` @
 `dbe25dd4df16d27ea49267b169c91b038c4c9148` implements D-092 slice A under
 Amendments A1/A2 (implementation record D-093, PROPOSED): migration
@@ -14,9 +16,13 @@ correction (independent review): the final Phase B now always starts from a
 fresh transaction (principal locked first, also on no-inference turns), and
 the §22 language-matrix, replay, real-concurrency, cross-session,
 review-resolve and resumed busy/cancel/revoke regressions were added.
-Slices B and C have not started; #88 and #50 remain OPEN. The CI pytest hang root cause is
-still NOT PROVEN (diagnostics from PR #97 remain active). Independent
-acceptance and owner merge are pending.
+The independent review accepted the corrected code at
+`195387bddaf7f1f4b6d11aa3c2dd56e070478bf6` (full suite 2942 passed,
+exact-head CI green); D-093 now states explicitly that it supersedes
+D-089's deterministic-only Phase-B statements. Owner squash-and-merge is
+pending. Slices B and C have not started; #88 stays OPEN and #50 is out of
+scope and OPEN. The CI pytest hang root cause is still NOT PROVEN
+(diagnostics from PR #97 remain active).
 
 **Issue #88 — design accepted, implementation NOT started:** accepted `main`
 is `2445caaf8cfcb054078227d05a6d97a2f257d978` (#84–#87 closed; D-092 design
