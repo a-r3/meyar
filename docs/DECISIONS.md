@@ -7599,43 +7599,77 @@ IMPLEMENTATION NOT STARTED; owner selected "Variant 1", separate docs PR
 - No other architecture changes, and implementation has not started.
 
 **Amendment A2 — exchange-chain liveness for the UNCLEAR retry (PROPOSED,
-pending independent review; owner-specified rule, separate docs PR before
-slice A).**
+pending independent re-review; owner-specified rule, separate docs PR #96
+before slice A; corrected per review).**
 - *Finding.* A1's adjacency clause ("the entry immediately before the
   question is the source turn") cannot hold for attempt 2. The tail is then
   `[U1 source, Q1, U2 unclear answer, Q2]`, so every retry would be born
   stale. That contradicts the accepted 2-attempt retry (§6.4 step 5, T5).
 - *Rule.* For the current clarification C at attempt n:
-  1. C's `question_turn_id` is the last appended transcript entry.
-  2. C keeps the same original source binding (`source_turn_id`, hash and
-     offsets never move to an unclear answer).
-  3. Between the source and C's question only the server-recognized retry
-     chain may exist:
-     - attempt 1: `[U1, Q1]`;
-     - attempt 2: `[U1, Q1, U2, Q2]`.
-  4. For attempt 2, the chain is validated structurally from persisted rows:
+  1. C's `question_turn_id` is the latest appended transcript entry.
+  2. The original source binding never moves to an unclear answer. For
+     VACANCY_SOURCE_REQUIRED it stays NULL at every attempt.
+  3. Between the chain start and C's question only the server-recognized
+     retry chain may exist:
+     - SEARCH_OR_VACANCY: `[U1, Q1]`, then `[U1, Q1, U2, Q2]`;
+     - VACANCY_SOURCE_REQUIRED: `[U0, Q1]`, then `[U0, Q1, U2, Q2]`.
+  4. Attempt 2 is validated structurally from persisted rows:
      - the predecessor P has `superseded_by_id = C.id`, status SUPERSEDED,
        `superseded_reason = UNCLEAR`, and attempt 1 → 2;
-     - P and C share task, session context, type and source binding;
-     - Q1 = `P.question_turn_id`;
-     - U2 = `C.created_from_turn_id`, the user entry appended by
-       `C.created_by_submission_id`, which classified P's answer as UNCLEAR.
-  5. Any other appended turn in the chain makes C stale.
+     - P and C share task, session context and type;
+     - `T[-4]` = `P.created_from_turn_id`, `T[-3]` = `P.question_turn_id`,
+       `T[-2]` = `C.created_from_turn_id` (the UNCLEAR answer appended by
+       `C.created_by_submission_id`), `T[-1]` = `C.question_turn_id`;
+     - SEARCH_OR_VACANCY additionally requires the identical, valid source
+       binding on P and C.
+  5. Any foreign appended entry in the chain makes C stale.
   6. Bounded: at most four tail entries and one predecessor row; no
-     transcript walking or semantic history search.
-  7. VACANCY_SOURCE_REQUIRED (no source, no retry) keeps the A1
-     question-last rule.
-- *Schema.* `created_from_turn_id` NOT NULL. For SEARCH_OR_VACANCY attempt 1
-  it equals `source_turn_id`. `superseded_reason` is closed
-  (`UNCLEAR`, `NEW_TASK`, `NOT_ACTIVE_BUTTON`) and non-null ⇔ SUPERSEDED.
-- *Closed-value gap closed.* Resolution source `SOURCE_MESSAGE` covers
-  VACANCY_SOURCE_REQUIRED slot fill (`resolved_value = VACANCY_ANALYSIS`).
-  The original set (BUTTON/LABEL/MODEL) had no value for it.
-- *Classifier failure.* A local-classifier provider failure is handled as
-  UNCLEAR. BUSY abandons the turn without any clarification change.
+     backward scanning or semantic history search.
+  7. Max 2 attempts. Attempt 2 UNCLEAR → EXPIRED, task FAILED_SAFE, pointer
+     cleared.
+- *`created_from_turn_id` (NOT NULL).* The server-issued user turn whose
+  processing created this clarification attempt.
+  - SEARCH_OR_VACANCY attempt 1: equals `source_turn_id`.
+  - VACANCY_SOURCE_REQUIRED attempt 1: the trigger turn U0
+    (`source_turn_id` NULL).
+  - Attempt 2 of either type: the UNCLEAR answer U2.
+
+  It is sequencing provenance only, never source authority, and is server-
+  selected only. U0 and U2 are never JD/search sources. The
+  VACANCY_SOURCE_REQUIRED JD source is only the qualifying current message.
+- *VACANCY_SOURCE_REQUIRED keeps the 2-attempt policy.*
+  - Qualifying source (material requirement, useful multi-line structure,
+    or FORCE_JOB_DRAFT) → resolve via `SOURCE_MESSAGE`.
+  - FORCE_CANDIDATE_SEARCH or FORCE_RESULT_LIMIT → new task (supersede,
+    `NEW_TASK`).
+  - Otherwise → deterministic UNCLEAR. No model is called.
+- *`superseded_reason`* is closed: `UNCLEAR` or `NEW_TASK`, non-null ⇔
+  SUPERSEDED. Both are real persisted transitions of the clarification.
+- *`SOURCE_MESSAGE`* (accepted in review) is the deterministic server-side
+  resolution source used only when a VACANCY_SOURCE_REQUIRED clarification
+  is satisfied by the user's current qualifying source message. It is
+  distinct from BUTTON, LABEL and MODEL, and never implies model-authored
+  source text.
+- *Classifier infrastructure/contract failure is not UNCLEAR.* UNCLEAR is
+  only a valid closed UNCLEAR result. INFERENCE_BUSY, timeout,
+  transport/provider error, Ollama unavailable, malformed output after the
+  one repair, and any other classifier execution failure all use the
+  #85/#87 abandon semantics:
+  - nothing is appended, so the clarification is not staled;
+  - no supersession, no attempt increment, no attempt 2;
+  - no task change;
+  - the submission ends ABANDONED;
+  - the clarification stays live for the retry.
+- *A stale/foreign/mismatched button is a rejected request, not a
+  transition.*
+  - Nothing is appended.
+  - The live clarification, pointer and attempt are unchanged.
+  - No capability runs, and the submission ends ABANDONED.
+  - Bounded `agent.clarification.rejected` audit (`NOT_ACTIVE` /
+    `INVALID_CHOICE`).
 - *Unchanged.* `created_turn_version` stays provenance only, `turn_version`
   stays the #85/D-089 concurrency authority, and `question_turn_id` stays
-  the current-question append-order authority. Lane independence (A1) is
+  the current-question append-order authority. A1 lane independence is
   unchanged.
 - Implementation has not started. A2 is implemented in slice A only after
   this amendment is accepted and owner-merged.
