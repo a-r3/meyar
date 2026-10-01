@@ -1,8 +1,10 @@
-"""Capability executors (issue #88 slice B, D-092 §9).
+"""Capability executors (issue #88 slices B/C, D-092 §9).
 
 Each IN_TURN executor is a thin, module-level wrapper around today's
 ``meyar.agent.service._dispatch_*`` function: it adds NO search, ResultSet,
-evidence, JD or evaluation policy of its own. Domain authority stays in the
+evidence, JD or evaluation policy of its own. It reads ONLY the step's
+server-resolved values (exact source slices, server-parsed integers) —
+never a model-authored argument (slice C). Domain authority stays in the
 existing services (frozen planner, #86 ResultSet authority, current
 authorized profile, #84 canonicalization).
 
@@ -15,13 +17,9 @@ from __future__ import annotations
 from meyar.agent.capabilities.contracts import (
     CapabilityName,
     CapabilityOutcome,
-    EvidenceArgs,
     ExecutionContext,
-    ProfileArgs,
-    RefineArgs,
     ValidatedStep,
 )
-from meyar.agent.schemas import AgentActionType, AgentDecision
 
 
 class HumanActionOnlyError(RuntimeError):
@@ -31,9 +29,9 @@ class HumanActionOnlyError(RuntimeError):
 async def execute_search_candidates(
     ctx: ExecutionContext, step: ValidatedStep
 ) -> CapabilityOutcome:
-    """D-092 §23 grounding step: the planner receives the step's
-    SERVER-resolved source text (WHOLE_MESSAGE / bound resume source),
-    never a model-authored ``search_query``."""
+    """The planner receives the step's SERVER-resolved source text
+    (WHOLE_MESSAGE, exact grounded quotes joined by the server separator, or
+    a bound resume source) — never model-authored text (§10.2)."""
     from meyar.agent.service import _dispatch_search
 
     assert step.resolved_text is not None
@@ -59,18 +57,14 @@ async def execute_search_candidates(
 async def execute_refine_results(ctx: ExecutionContext, step: ValidatedStep) -> CapabilityOutcome:
     from meyar.agent.service import _dispatch_refine
 
-    args = step.args
-    assert isinstance(args, RefineArgs)
+    assert step.resolved_text is not None or step.limit is not None
     dispatch = await _dispatch_refine(
         ctx.db,
         ctx.llm,
         tenant_id=ctx.tenant_id,
         session_context=ctx.session_context,
-        decision=AgentDecision(
-            action=AgentActionType.REFINE_CANDIDATE_RESULTS,
-            filter_query=args.filter_query,
-            limit=args.limit,
-        ),
+        filter_query=step.resolved_text,
+        limit=step.limit,
         as_of_date=ctx.as_of_date,
         embedding_config=ctx.embedding_config,
     )
@@ -89,14 +83,11 @@ async def execute_get_candidate_profile(
 ) -> CapabilityOutcome:
     from meyar.agent.service import _dispatch_profile
 
-    args = step.args
-    assert isinstance(args, ProfileArgs)
+    assert step.candidate_ref is not None
     tool_result, profile, failure = await _dispatch_profile(
         ctx.db,
         tenant_id=ctx.tenant_id,
-        decision=AgentDecision(
-            action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=args.candidate_ref
-        ),
+        candidate_ref=step.candidate_ref,
         session_context=ctx.session_context,
     )
     assert tool_result.profile is not None
@@ -114,16 +105,12 @@ async def execute_get_candidate_evidence(
 ) -> CapabilityOutcome:
     from meyar.agent.service import _dispatch_evidence
 
-    args = step.args
-    assert isinstance(args, EvidenceArgs)
+    assert step.candidate_ref is not None
     tool_result, profile, failure = await _dispatch_evidence(
         ctx.db,
         tenant_id=ctx.tenant_id,
-        decision=AgentDecision(
-            action=AgentActionType.GET_CANDIDATE_EVIDENCE,
-            candidate_ref=args.candidate_ref,
-            evidence_topic=args.evidence_topic,
-        ),
+        candidate_ref=step.candidate_ref,
+        evidence_topic=step.topic,
         session_context=ctx.session_context,
     )
     assert tool_result.evidence is not None

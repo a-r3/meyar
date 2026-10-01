@@ -5,6 +5,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from agent_plans import converse, search_plan, vacancy_proposal
 from fakes import FakeLLMProvider
 from httpx import AsyncClient
 from search_helpers import seed_candidate_with_profile
@@ -12,9 +13,6 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.agent.schemas import (
-    AgentActionType,
-    AgentDecision,
-    AgentResponseCode,
     JDCriteriaDraft,
     JDDraftCriterionItem,
 )
@@ -128,10 +126,7 @@ async def test_crlf_4000_is_accepted(
 ) -> None:
     _, user, password, _ = tenant_and_user
     app.dependency_overrides[get_llm_provider] = lambda: FakeLLMProvider(
-        agent_decision=AgentDecision(
-            action=AgentActionType.FINAL_ANSWER,
-            response_code=AgentResponseCode.ACKNOWLEDGEMENT,
-        )
+        agent_plan=converse("ACKNOWLEDGEMENT")
     )
     await _login(client, user.username, password)
     page = await client.get("/ui/agent")
@@ -231,10 +226,7 @@ async def test_lf_and_crlf_agent_requests_have_same_hash_and_transcript_text(
     local_ui_settings: Settings,
 ) -> None:
     _, user, password, _ = tenant_and_user
-    fake = FakeLLMProvider(agent_decision=AgentDecision(
-        action=AgentActionType.FINAL_ANSWER,
-        response_code=AgentResponseCode.ACKNOWLEDGEMENT,
-    ))
+    fake = FakeLLMProvider(agent_plan=converse("ACKNOWLEDGEMENT"))
     app.dependency_overrides[get_llm_provider] = lambda: fake
     await _login(client, user.username, password)
     first_page = await client.get("/ui/agent")
@@ -276,10 +268,7 @@ async def test_completed_submission_replay_and_altered_bytes_fail_closed(
     local_ui_settings: Settings,
 ) -> None:
     _, user, password, _ = tenant_and_user
-    fake = FakeLLMProvider(agent_decision=AgentDecision(
-        action=AgentActionType.FINAL_ANSWER,
-        response_code=AgentResponseCode.ACKNOWLEDGEMENT,
-    ))
+    fake = FakeLLMProvider(agent_plan=converse("ACKNOWLEDGEMENT"))
     app.dependency_overrides[get_llm_provider] = lambda: fake
     await _login(client, user.username, password)
     page = await client.get("/ui/agent")
@@ -327,7 +316,7 @@ async def test_jd_draft_completed_replay_does_not_supersede_pending_pointer(
 ) -> None:
     _, user, password, _ = tenant_and_user
     fake = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        agent_plan=vacancy_proposal(),
         jd_draft=JDCriteriaDraft(
             title="Backend",
             must_have=[JDDraftCriterionItem(
@@ -396,15 +385,8 @@ async def test_search_submission_replay_does_not_create_second_result_set(
     await db_session.commit()
     fake = FakeLLMProvider(
         planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
-        agent_decisions=[
-            AgentDecision(
-                action=AgentActionType.SEARCH_CANDIDATES,
-                search_query="Python bilən namizədləri göstər",
-            ),
-            AgentDecision(
-                action=AgentActionType.FINAL_ANSWER,
-                response_code=AgentResponseCode.ACKNOWLEDGEMENT,
-            ),
+        agent_plans=[
+            search_plan(),
         ],
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake
@@ -432,10 +414,7 @@ async def test_invalid_csrf_does_not_consume_issued_submission(
     local_ui_settings: Settings,
 ) -> None:
     _, user, password, _ = tenant_and_user
-    fake = FakeLLMProvider(agent_decision=AgentDecision(
-        action=AgentActionType.FINAL_ANSWER,
-        response_code=AgentResponseCode.ACKNOWLEDGEMENT,
-    ))
+    fake = FakeLLMProvider(agent_plan=converse("ACKNOWLEDGEMENT"))
     app.dependency_overrides[get_llm_provider] = lambda: fake
     await _login(client, user.username, password)
     page = await client.get("/ui/agent")
@@ -483,10 +462,7 @@ async def test_busy_attempt_abandons_old_token_and_renders_safe_retry_token(
     )
     assert conversation is not None and conversation.turns == []
     app.dependency_overrides[get_llm_provider] = lambda: FakeLLMProvider(
-        agent_decision=AgentDecision(
-            action=AgentActionType.FINAL_ANSWER,
-            response_code=AgentResponseCode.ACKNOWLEDGEMENT,
-        )
+        agent_plan=converse("ACKNOWLEDGEMENT")
     )
     old = await client.post("/ui/agent", data=data, follow_redirects=False)
     assert old.status_code in {403, 404}
@@ -559,10 +535,7 @@ async def test_over_limit_agent_message_preserves_canonical_text_and_auth_chrome
     local_ui_settings: Settings,
 ) -> None:
     _, user, password, _ = tenant_and_user
-    fake = FakeLLMProvider(agent_decision=AgentDecision(
-        action=AgentActionType.FINAL_ANSWER,
-        response_code=AgentResponseCode.ACKNOWLEDGEMENT,
-    ))
+    fake = FakeLLMProvider(agent_plan=converse("ACKNOWLEDGEMENT"))
     app.dependency_overrides[get_llm_provider] = lambda: fake
     await _login(client, user.username, password)
     page = await client.get("/ui/agent")
@@ -591,9 +564,7 @@ async def test_empty_agent_message_uses_canonical_validation_and_fresh_composer(
     client: AsyncClient, tenant_and_user, local_ui_settings: Settings,
 ) -> None:
     _, user, password, _ = tenant_and_user
-    fake = FakeLLMProvider(agent_decision=AgentDecision(
-        action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT,
-    ))
+    fake = FakeLLMProvider(agent_plan=converse("ACKNOWLEDGEMENT"))
     app.dependency_overrides[get_llm_provider] = lambda: fake
     await _login(client, user.username, password)
     page = await client.get("/ui/agent")
@@ -735,9 +706,7 @@ async def test_token_cannot_select_another_owned_conversation(
     client: AsyncClient, tenant_and_user, local_ui_settings: Settings,
 ) -> None:
     _, user, password, _ = tenant_and_user
-    fake = FakeLLMProvider(agent_decision=AgentDecision(
-        action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT,
-    ))
+    fake = FakeLLMProvider(agent_plan=converse("ACKNOWLEDGEMENT"))
     app.dependency_overrides[get_llm_provider] = lambda: fake
     await _login(client, user.username, password)
     original = await client.get("/ui/agent")
@@ -799,9 +768,7 @@ async def test_crashed_uncommitted_submission_is_reclaimed_only_after_lease(
     local_ui_settings: Settings,
 ) -> None:
     _, user, password, _ = tenant_and_user
-    fake = FakeLLMProvider(agent_decision=AgentDecision(
-        action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT,
-    ))
+    fake = FakeLLMProvider(agent_plan=converse("ACKNOWLEDGEMENT"))
     app.dependency_overrides[get_llm_provider] = lambda: fake
     await _login(client, user.username, password)
     page = await client.get("/ui/agent")
@@ -839,9 +806,7 @@ async def test_submission_retirement_keeps_live_processing_and_completed_provena
     local_ui_settings: Settings,
 ) -> None:
     _, user, password, _ = tenant_and_user
-    fake = FakeLLMProvider(agent_decision=AgentDecision(
-        action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT,
-    ))
+    fake = FakeLLMProvider(agent_plan=converse("ACKNOWLEDGEMENT"))
     app.dependency_overrides[get_llm_provider] = lambda: fake
     await _login(client, user.username, password)
     page = await client.get("/ui/agent")

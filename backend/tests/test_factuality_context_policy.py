@@ -418,11 +418,11 @@ async def test_current_authority_all_consumers_and_immutable_history(
     from datetime import date
     from decimal import Decimal
 
+    from agent_plans import evidence_plan, profile_plan
     from fakes import FakeLLMProvider
     from search_helpers import open_test_conversation
     from test_candidate_factual_authority_backstop import _embedding_config
 
-    from meyar.agent.schemas import AgentDecision
     from meyar.agent.service import run_agent_turn
     from meyar.evaluation.policy import POLICY_ENGINE_VERSION
     from meyar.evaluation.service import evaluate_and_score_candidate
@@ -555,10 +555,10 @@ async def test_current_authority_all_consumers_and_immutable_history(
         session_context=context,
         candidate_ids=[seeded.candidate.id],
     )
-    for action in ("GET_CANDIDATE_PROFILE", "GET_CANDIDATE_EVIDENCE"):
+    for agent_plan in (profile_plan("Birinci"), evidence_plan("Birinci")):
         result = await run_agent_turn(
             db_session,
-            FakeLLMProvider(agent_decision=AgentDecision(action=action, candidate_ref=1)),
+            FakeLLMProvider(agent_plan=agent_plan),
             tenant_id=tenant.id,
             conversation=conversation,
             session_context=context,
@@ -668,11 +668,11 @@ async def test_legacy_identity_presentation_and_extraction(
 
 
 async def test_versioned_assistant_history_over_http(client, db_session, tenant_and_user):
+    from agent_plans import converse
     from fakes import FakeLLMProvider
     from sqlalchemy import select
     from test_ui_agent_routes import _login_and_csrf
 
-    from meyar.agent.schemas import AgentDecision
     from meyar.config import Settings, get_settings
     from meyar.llm.dependency import get_llm_provider
     from meyar.main import app
@@ -682,7 +682,7 @@ async def test_versioned_assistant_history_over_http(client, db_session, tenant_
     _, user, password, _ = tenant_and_user
     app.dependency_overrides[get_settings] = lambda: Settings(ui_cookie_secure=False)
     app.dependency_overrides[get_llm_provider] = lambda: FakeLLMProvider(
-        agent_decision=AgentDecision(action="FINAL_ANSWER", response_code="GREETING")
+        agent_plan=converse("GREETING")
     )
     csrf = await _login_and_csrf(client, user.username, password)
     response = await client.post("/ui/agent", data={"message": "Salam", "csrf_token": csrf})

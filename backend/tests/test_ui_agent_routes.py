@@ -7,13 +7,23 @@ import re
 import uuid
 
 import pytest
+from agent_plans import (
+    clarify,
+    converse,
+    evidence_plan,
+    profile_plan,
+    proposal,
+    refine_plan,
+    search_plan,
+    vacancy_proposal,
+)
 from conftest import BrowserTestClient as AsyncClient
 from fakes import FakeLLMProvider
 from pydantic import ValidationError
 from search_helpers import seed_candidate_with_profile
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meyar.agent.schemas import AgentActionType, AgentDecision, AgentResponseCode
+from meyar.agent.schemas import AgentActionType
 from meyar.config import Settings, get_settings
 from meyar.llm.dependency import get_llm_provider
 from meyar.main import app
@@ -124,7 +134,7 @@ async def _render_python_draft(
     from meyar.agent.schemas import JDCriteriaDraft, JDDraftCriterionItem
 
     fake = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        agent_plan=vacancy_proposal(),
         jd_draft=JDCriteriaDraft(
             title="Backend",
             must_have=[
@@ -231,14 +241,8 @@ async def test_search_candidates_turn_renders_grounded_results_not_model_text(
 
     fake = FakeLLMProvider(
         planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
-        agent_decisions=[
-            AgentDecision(
-                action=AgentActionType.SEARCH_CANDIDATES,
-                search_query="Python bilən namizədləri göstər",
-            ),
-            AgentDecision(
-                action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
-            ),
+        agent_plans=[
+            search_plan(),
         ],
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake
@@ -320,15 +324,8 @@ async def test_owner_duration_and_level_evidence_matches_direct_search_and_agent
         "və ya daha yüksək olan 5 namizəd göstər."
     )
     fake = FakeLLMProvider(
-        agent_decisions=[
-            AgentDecision(
-                action=AgentActionType.SEARCH_CANDIDATES,
-                search_query=query,
-            ),
-            AgentDecision(
-                action=AgentActionType.FINAL_ANSWER,
-                response_code=AgentResponseCode.ACKNOWLEDGEMENT,
-            ),
+        agent_plans=[
+            search_plan(),
         ]
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake
@@ -376,19 +373,9 @@ async def test_equivalent_zero_result_search_tools_render_one_empty_state(
     tenant, user, password, _membership = tenant_and_user
     fake = FakeLLMProvider(
         planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["NoMatch"])),
-        agent_decisions=[
-            AgentDecision(
-                action=AgentActionType.SEARCH_CANDIDATES,
-                search_query="NoMatch üzrə namizədləri göstər",
-            ),
-            AgentDecision(
-                action=AgentActionType.SEARCH_CANDIDATES,
-                search_query="NoMatch bacarığı olan namizədləri göstər",
-            ),
-            AgentDecision(
-                action=AgentActionType.FINAL_ANSWER,
-                response_code=AgentResponseCode.ACKNOWLEDGEMENT,
-            ),
+        agent_plans=[
+            search_plan(),
+            search_plan(),
         ],
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake
@@ -442,14 +429,8 @@ async def test_multi_turn_ordinal_reference_over_http(
 
     fake_search = FakeLLMProvider(
         planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
-        agent_decisions=[
-            AgentDecision(
-                action=AgentActionType.SEARCH_CANDIDATES,
-                search_query="Python bilən namizədləri göstər",
-            ),
-            AgentDecision(
-                action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
-            ),
+        agent_plans=[
+            search_plan(),
         ],
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake_search
@@ -460,7 +441,7 @@ async def test_multi_turn_ordinal_reference_over_http(
     assert first.status_code == 200
 
     fake_profile = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1)
+        agent_plan=profile_plan("birincinin")
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake_profile
     second = await client.post(
@@ -484,14 +465,8 @@ async def test_two_sessions_do_not_share_agent_conversation_state(
 
     fake_search = FakeLLMProvider(
         planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
-        agent_decisions=[
-            AgentDecision(
-                action=AgentActionType.SEARCH_CANDIDATES,
-                search_query="Python bilən namizədləri göstər",
-            ),
-            AgentDecision(
-                action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
-            ),
+        agent_plans=[
+            search_plan(),
         ],
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake_search
@@ -507,9 +482,7 @@ async def test_two_sessions_do_not_share_agent_conversation_state(
     async with AsyncClient(transport=transport, base_url="http://test") as second_client:
         csrf_b = await _login_and_csrf(second_client, user.username, password)
         fake_profile = FakeLLMProvider(
-            agent_decision=AgentDecision(
-                action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1
-            )
+            agent_plan=profile_plan("birincini")
         )
         app.dependency_overrides[get_llm_provider] = lambda: fake_profile
         response = await second_client.post(
@@ -527,12 +500,9 @@ async def test_user_message_and_model_message_are_html_escaped_in_render(
     _tenant, user, password, _membership = tenant_and_user
     payload = "<script>alert(1)</script>"
     with pytest.raises(ValidationError):
-        AgentDecision.model_validate({"action": "FINAL_ANSWER", "message": payload})
+        proposal(kind="CONVERSE", message=payload)
     fake = FakeLLMProvider(
-        agent_decision=AgentDecision(
-            action=AgentActionType.FINAL_ANSWER,
-            response_code=AgentResponseCode.GREETING,
-        )
+        agent_plan=converse("GREETING")
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake
     csrf = await _login_and_csrf(client, user.username, password)
@@ -550,13 +520,10 @@ async def test_zero_tool_model_candidate_claim_and_hiring_recommendation_never_r
     _tenant, user, password, _membership = tenant_and_user
     invented = "The first candidate has 20 years of Python experience and should be hired."
     with pytest.raises(ValidationError):
-        AgentDecision.model_validate({"action": "FINAL_ANSWER", "message": invented})
+        proposal(kind="CONVERSE", message=invented)
     fake = FakeLLMProvider(agent_fail_first_n_calls=99)
-    fake._agent_decisions = [
-        AgentDecision(
-            action=AgentActionType.FINAL_ANSWER,
-            response_code=AgentResponseCode.ACKNOWLEDGEMENT,
-        )
+    fake._agent_plans = [
+        converse("ACKNOWLEDGEMENT")
     ]
     app.dependency_overrides[get_llm_provider] = lambda: fake
     csrf = await _login_and_csrf(client, user.username, password)
@@ -600,7 +567,7 @@ async def test_existing_api_key_rest_search_unaffected_by_agent_slice(
 # and a misleading "Uyğunluq 0%" badge on an unscored discovery query). ---
 
 
-async def test_successful_search_with_failed_framing_renders_no_contradictory_error(
+async def test_successful_search_renders_no_contradictory_error(
     client: AsyncClient,
     db_session: AsyncSession,
     tenant_and_user,
@@ -614,16 +581,17 @@ async def test_successful_search_with_failed_framing_renders_no_contradictory_er
 
     fake = FakeLLMProvider(
         planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
-        agent_decision=AgentDecision(
-            action=AgentActionType.SEARCH_CANDIDATES, search_query="Python bilən namizədləri göstər"
-        ),
-        agent_fail_after_n_calls=1,
+        agent_plan=search_plan(),
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake
     csrf = await _login_and_csrf(client, user.username, password)
+    # Issue #88 slice C: a model-routed search makes ONE proposal and no
+    # post-tool framing call, so a grounded result can never be followed by
+    # a failing "what next" decision.
     response = await client.post(
-        "/ui/agent", data={"message": "Python bilən namizədləri göstər", "csrf_token": csrf}
+        "/ui/agent", data={"message": "Python haqqında məlumat ver", "csrf_token": csrf}
     )
+    assert fake.agent_call_count == 1
     assert response.status_code == 200
     # The grounded result is present...
     assert str(candidate.id) in response.text
@@ -654,14 +622,8 @@ async def test_unscored_structured_discovery_has_no_misleading_percentage(
 
     fake = FakeLLMProvider(
         planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
-        agent_decisions=[
-            AgentDecision(
-                action=AgentActionType.SEARCH_CANDIDATES,
-                search_query="Python bilən namizədləri göstər",
-            ),
-            AgentDecision(
-                action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
-            ),
+        agent_plans=[
+            search_plan(),
         ],
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake
@@ -689,14 +651,8 @@ async def test_get_candidate_profile_success_never_renders_empty_bubble(
 
     fake_search = FakeLLMProvider(
         planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
-        agent_decisions=[
-            AgentDecision(
-                action=AgentActionType.SEARCH_CANDIDATES,
-                search_query="Python bilən namizədləri göstər",
-            ),
-            AgentDecision(
-                action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
-            ),
+        agent_plans=[
+            search_plan(),
         ],
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake_search
@@ -706,7 +662,7 @@ async def test_get_candidate_profile_success_never_renders_empty_bubble(
     )
 
     fake_profile = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1)
+        agent_plan=profile_plan("birincini")
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake_profile
     response = await client.post("/ui/agent", data={"message": "birincini aç", "csrf_token": csrf})
@@ -759,14 +715,8 @@ async def test_grounded_explanation_renders_as_meaningful_answer_with_evidence(
 
     fake_search = FakeLLMProvider(
         planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
-        agent_decisions=[
-            AgentDecision(
-                action=AgentActionType.SEARCH_CANDIDATES,
-                search_query="Python bilən namizədləri göstər",
-            ),
-            AgentDecision(
-                action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
-            ),
+        agent_plans=[
+            search_plan(),
         ],
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake_search
@@ -777,7 +727,7 @@ async def test_grounded_explanation_renders_as_meaningful_answer_with_evidence(
 
     # facts: 0 = Python skill, 1 = Backend Developer employment (detail "2020 — hazırda davam edir")
     fake_profile = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1),
+        agent_plan=profile_plan("birincinin"),
         grounded_selection=GroundedSelection(used_facts=[1, 0]),
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake_profile
@@ -829,14 +779,8 @@ async def test_grounded_explanation_never_contains_unsupported_claim_over_http(
 
     fake_search = FakeLLMProvider(
         planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
-        agent_decisions=[
-            AgentDecision(
-                action=AgentActionType.SEARCH_CANDIDATES,
-                search_query="Python bilən namizədləri göstər",
-            ),
-            AgentDecision(
-                action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
-            ),
+        agent_plans=[
+            search_plan(),
         ],
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake_search
@@ -846,7 +790,7 @@ async def test_grounded_explanation_never_contains_unsupported_claim_over_http(
     )
 
     fake_profile = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1),
+        agent_plan=profile_plan("birincinin"),
         grounded_selection=GroundedSelection(used_facts=[1]),  # the employment fact
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake_profile
@@ -902,21 +846,15 @@ async def test_grounded_explanation_never_leaks_identity_to_model(
     from meyar.agent.schemas import GroundedSelection
 
     fake_profile = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1),
+        agent_plan=profile_plan("birincinin"),
         grounded_selection=GroundedSelection(used_facts=[0]),
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake_profile
     csrf = await _login_and_csrf(client, user.username, password)
     csrf_conv_setup = FakeLLMProvider(
         planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
-        agent_decisions=[
-            AgentDecision(
-                action=AgentActionType.SEARCH_CANDIDATES,
-                search_query="Python bilən namizədləri göstər",
-            ),
-            AgentDecision(
-                action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
-            ),
+        agent_plans=[
+            search_plan(),
         ],
     )
     app.dependency_overrides[get_llm_provider] = lambda: csrf_conv_setup
@@ -949,7 +887,7 @@ async def test_draft_job_criteria_renders_static_protected_review_rows(
 
     _tenant, user, password, _membership = tenant_and_user
     fake = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        agent_plan=vacancy_proposal(),
         jd_draft=JDCriteriaDraft(
             title="Baş Backend Mühəndisi",
             must_have=[
@@ -1005,7 +943,7 @@ async def test_draft_job_criteria_drops_prohibited_item_and_notes_it(
 
     _tenant, user, password, _membership = tenant_and_user
     fake = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        agent_plan=vacancy_proposal(),
         jd_draft=JDCriteriaDraft(
             title="Rol",
             must_have=[
@@ -1058,7 +996,7 @@ async def test_draft_job_criteria_preserves_named_experience_family_for_review(
 
     _tenant, user, password, _membership = tenant_and_user
     fake = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        agent_plan=vacancy_proposal(),
         jd_draft=JDCriteriaDraft(
             title="Rol",
             must_have=[
@@ -1112,15 +1050,8 @@ async def test_forged_legacy_intent_cannot_force_job_drafting(
     _tenant, user, password, _membership = tenant_and_user
     fake = FakeLLMProvider(
         planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
-        agent_decisions=[
-            AgentDecision(
-                action=AgentActionType.SEARCH_CANDIDATES,
-                search_query="Python bilən namizədləri göstər",
-            ),
-            AgentDecision(
-                action=AgentActionType.FINAL_ANSWER,
-                response_code=AgentResponseCode.ACKNOWLEDGEMENT,
-            ),
+        agent_plans=[
+            search_plan(),
         ],
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake
@@ -1152,9 +1083,7 @@ async def test_deterministic_jd_never_becomes_a_search_without_mode_field(
     _tenant, user, password, _membership = tenant_and_user
     jd_text = "Vakansiya: Backend Mühəndisi. Python bilməlidir."
     fake = FakeLLMProvider(
-        agent_decision=AgentDecision(
-            action=AgentActionType.SEARCH_CANDIDATES, search_query=jd_text
-        ),
+        agent_plan=search_plan(),
         jd_draft=JDCriteriaDraft(
             title="Backend Mühəndisi",
             must_have=[
@@ -1199,7 +1128,7 @@ async def test_confirming_agent_drafted_criteria_lands_on_ranking_not_jobs_list(
     await db_session.commit()
 
     fake = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        agent_plan=vacancy_proposal(),
         jd_draft=JDCriteriaDraft(
             title="Baş Backend Mühəndisi",
             must_have=[
@@ -1392,7 +1321,7 @@ async def test_agent_confirmation_rejects_browser_weakened_row_without_persisten
 
     _tenant, user, password, _membership = tenant_and_user
     fake = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        agent_plan=vacancy_proposal(),
         jd_draft=JDCriteriaDraft(
             title="Backend",
             must_have=[
@@ -1578,7 +1507,7 @@ async def test_agent_confirmation_rejects_unsupported_to_scorable_insertion(
 
     _tenant, user, password, _membership = tenant_and_user
     fake = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        agent_plan=vacancy_proposal(),
         jd_draft=JDCriteriaDraft(
             title="Backend",
             must_have=[
@@ -1638,7 +1567,7 @@ async def test_agent_confirmation_rejects_prohibited_to_scorable_insertion(
 
     _tenant, user, password, _membership = tenant_and_user
     fake = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        agent_plan=vacancy_proposal(),
         jd_draft=JDCriteriaDraft(
             title="Backend",
             must_have=[
@@ -1697,7 +1626,7 @@ async def test_draft_job_criteria_fabricated_requirement_never_rendered(
 
     _tenant, user, password, _membership = tenant_and_user
     fake = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        agent_plan=vacancy_proposal(),
         jd_draft=JDCriteriaDraft(
             title="Kredit Analitiki",
             must_have=[
@@ -1754,7 +1683,7 @@ async def test_draft_job_criteria_title_never_persists_as_trusted_assistant_text
     _tenant, user, password, _membership = tenant_and_user
     adversarial_title = "The first candidate has 20 years of Python experience and should be hired."
     fake = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        agent_plan=vacancy_proposal(),
         jd_draft=JDCriteriaDraft(
             title=adversarial_title,
             must_have=[
@@ -1814,15 +1743,8 @@ async def test_arbitrary_evidence_topic_never_renders_verbatim(
     await db_session.commit()
     fake_search = FakeLLMProvider(
         planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
-        agent_decisions=[
-            AgentDecision(
-                action=AgentActionType.SEARCH_CANDIDATES,
-                search_query="Python bilən namizədləri göstər",
-            ),
-            AgentDecision(
-                action=AgentActionType.FINAL_ANSWER,
-                response_code=AgentResponseCode.ACKNOWLEDGEMENT,
-            ),
+        agent_plans=[
+            search_plan(),
         ],
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake_search
@@ -1833,11 +1755,7 @@ async def test_arbitrary_evidence_topic_never_renders_verbatim(
     )
     raw_topic = "The first candidate should be hired immediately"
     fake = FakeLLMProvider(
-        agent_decision=AgentDecision(
-            action=AgentActionType.GET_CANDIDATE_EVIDENCE,
-            candidate_ref=1,
-            evidence_topic=raw_topic,
-        ),
+        agent_plan=evidence_plan("Birinci", raw_topic),
         grounded_selection=GroundedSelection(used_facts=[]),
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake
@@ -1849,7 +1767,11 @@ async def test_arbitrary_evidence_topic_never_renders_verbatim(
 
     assert response.status_code == 200
     assert raw_topic not in response.text
-    assert "profildə açıq sübut yoxdur" in response.text
+    # Issue #88 slice C (§10.2 rule 6): a topic that is not an exact slice
+    # of the user's message is SOURCE_NOT_GROUNDED — fixed safe copy, no
+    # evidence executor ran (stronger than "no matching fact").
+    assert "Bu sorğunu təhlükəsiz icra edə bilmədim" in response.text
+    assert fake.grounded_call_count == 0
 
 
 async def test_legitimate_evidence_topic_renders_server_resolved_label(
@@ -1876,15 +1798,8 @@ async def test_legitimate_evidence_topic_renders_server_resolved_label(
     await db_session.commit()
     fake_search = FakeLLMProvider(
         planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
-        agent_decisions=[
-            AgentDecision(
-                action=AgentActionType.SEARCH_CANDIDATES,
-                search_query="Python bilən namizədləri göstər",
-            ),
-            AgentDecision(
-                action=AgentActionType.FINAL_ANSWER,
-                response_code=AgentResponseCode.ACKNOWLEDGEMENT,
-            ),
+        agent_plans=[
+            search_plan(),
         ],
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake_search
@@ -1894,17 +1809,14 @@ async def test_legitimate_evidence_topic_renders_server_resolved_label(
         data={"message": "Python bilən namizədləri göstər", "csrf_token": csrf},
     )
     fake = FakeLLMProvider(
-        agent_decision=AgentDecision(
-            action=AgentActionType.GET_CANDIDATE_EVIDENCE,
-            candidate_ref=1,
-            evidence_topic="python",
-        )
+        # Slice C: exact (case-sensitive) topic quote + grounded reference.
+        agent_plan=evidence_plan("Birincinin", "Python")
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake
 
     response = await client.post(
         "/ui/agent",
-        data={"message": "Python sübutunu göstər", "csrf_token": csrf},
+        data={"message": "Birincinin Python sübutunu göstər", "csrf_token": csrf},
     )
 
     assert response.status_code == 200
@@ -1935,7 +1847,7 @@ async def test_unsupported_requirement_survives_confirmation_and_scores_nothing(
     await db_session.commit()
 
     fake = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        agent_plan=vacancy_proposal(),
         jd_draft=JDCriteriaDraft(
             title="Data Analitiki",
             must_have=[
@@ -2049,7 +1961,7 @@ async def test_omitted_source_requirement_survives_confirmation_without_scoring(
         "Data Analyst. Python required. Candidate must be willing to travel."
     )
     fake = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        agent_plan=vacancy_proposal(),
         jd_draft=JDCriteriaDraft(
             title="Data Analyst",
             must_have=[
@@ -2329,7 +2241,7 @@ async def test_skill_domain_and_language_draft_renders_complete_review_form(
         "Banking experience preferred. Show top 10 candidates."
     )
     fake = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        agent_plan=vacancy_proposal(),
         jd_draft=JDCriteriaDraft(
             title="Role",
             must_have=[
@@ -2631,7 +2543,7 @@ async def test_draft_job_criteria_provider_failure_preserves_grounded_requiremen
 
     _tenant, user, password, _membership = tenant_and_user
     fake = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        agent_plan=vacancy_proposal(),
         jd_draft_error=ModelUnavailableError("simulated outage"),
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake
@@ -2660,14 +2572,8 @@ async def test_agent_reset_clears_this_sessions_conversation_state(
 
     fake_search = FakeLLMProvider(
         planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
-        agent_decisions=[
-            AgentDecision(
-                action=AgentActionType.SEARCH_CANDIDATES,
-                search_query="Python bilən namizədləri göstər",
-            ),
-            AgentDecision(
-                action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
-            ),
+        agent_plans=[
+            search_plan(),
         ],
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake_search
@@ -2689,7 +2595,7 @@ async def test_agent_reset_clears_this_sessions_conversation_state(
     # stale ordinal reference from before the reset can no longer resolve
     # (issue #49).
     fake_profile = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1)
+        agent_plan=profile_plan("birincini")
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake_profile
     response = await client.post("/ui/agent", data={"message": "birincini aç", "csrf_token": csrf})
@@ -2714,9 +2620,7 @@ async def test_agent_reset_does_not_affect_another_sessions_conversation(
 
     tenant, user, password, _membership = tenant_and_user
     fake = FakeLLMProvider(
-        agent_decision=AgentDecision(
-            action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.GREETING
-        )
+        agent_plan=converse("GREETING")
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake
     csrf_a = await _login_and_csrf(client, user.username, password)
@@ -2828,17 +2732,8 @@ async def test_real_route_duration_search_executes_without_generic_service_failu
 
     _tenant, user, password, _membership = tenant_and_user
     app.dependency_overrides[get_llm_provider] = lambda: FakeLLMProvider(
-        agent_decisions=[
-            AgentDecision(
-                action=AgentActionType.SEARCH_CANDIDATES,
-                search_query=(
-                    "Java üzrə minimum 4 il təcrübəsi olan namizədlərdən 5 nəfər göstər."
-                ),
-            ),
-            AgentDecision(
-                action=AgentActionType.FINAL_ANSWER,
-                response_code=AgentResponseCode.ACKNOWLEDGEMENT,
-            ),
+        agent_plans=[
+            search_plan(),
         ]
     )
     csrf = await _login_and_csrf(client, user.username, password)
@@ -2872,12 +2767,8 @@ async def test_required_preferred_language_with_search_cues_stays_search_only(
     message = "Python required, SQL preferred olan namizədləri göstər"
     fake = FakeLLMProvider(
         planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
-        agent_decisions=[
-            AgentDecision(action=AgentActionType.SEARCH_CANDIDATES, search_query=message),
-            AgentDecision(
-                action=AgentActionType.FINAL_ANSWER,
-                response_code=AgentResponseCode.ACKNOWLEDGEMENT,
-            ),
+        agent_plans=[
+            search_plan(),
         ],
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake
@@ -2913,7 +2804,7 @@ async def test_model_proposed_jd_for_search_is_rejected_without_internal_code_co
     # and never consults the model), so the wrong model proposal is real.
     raw_message = "NoMatch haqqında məlumat ver"
     app.dependency_overrides[get_llm_provider] = lambda: FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA)
+        agent_plan=vacancy_proposal()
     )
     csrf = await _login_and_csrf(client, user.username, password)
     response = await client.post(
@@ -2924,8 +2815,13 @@ async def test_model_proposed_jd_for_search_is_rejected_without_internal_code_co
         },
     )
     assert response.status_code == 200
-    assert "Bu mətni namizəd axtarışı üçün istifadə etmək" in response.text
+    # D-092 §6.1: a model vacancy proposal for text that is NOT
+    # requirement-shaped gets the fixed NEED_MORE_DETAIL copy (a
+    # requirement-shaped one becomes the resumable SEARCH_OR_VACANCY
+    # clarification — see test_issue88_slice_c_*).
+    assert "Sorğunu bir qədər dəqiqləşdirin" in response.text
     assert "DRAFT_JOB_CRITERIA" not in response.text
+    assert "ANALYZE_VACANCY" not in response.text
     assert "SEARCH_CANDIDATES" not in response.text
     assert await db_session.scalar(select(func.count()).select_from(Job)) == 0
     assert await db_session.scalar(select(func.count()).select_from(JobCriteriaVersion)) == 0
@@ -3149,7 +3045,7 @@ async def test_ambiguous_result_count_draft_renders_no_confirm_control(
 
     _tenant, user, password, _membership = tenant_and_user
     fake = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        agent_plan=vacancy_proposal(),
         jd_draft=JDCriteriaDraft(
             title="Backend",
             must_have=[
@@ -3201,7 +3097,7 @@ async def test_ambiguous_result_count_direct_confirm_post_is_rejected_without_pe
 
     _tenant, user, password, _membership = tenant_and_user
     fake = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        agent_plan=vacancy_proposal(),
         jd_draft=JDCriteriaDraft(
             title="Backend",
             must_have=[
@@ -3265,7 +3161,7 @@ async def test_explicit_result_count_control_confirms_and_persists_normally(
 
     _tenant, user, password, _membership = tenant_and_user
     fake = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        agent_plan=vacancy_proposal(),
         jd_draft=JDCriteriaDraft(
             title="Backend",
             must_have=[
@@ -3369,21 +3265,9 @@ async def test_real_ui_agent_route_serializes_concurrent_same_session_turns(
             PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
             PlannerDraft(required_filters=RequiredFilters(skills=["Java"])),
         ],
-        agent_decisions=[
-            AgentDecision(
-                action=AgentActionType.SEARCH_CANDIDATES,
-                search_query="Python bilən namizədləri göstər",
-            ),
-            AgentDecision(
-                action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
-            ),
-            AgentDecision(
-                action=AgentActionType.SEARCH_CANDIDATES,
-                search_query="Java bilən namizədləri göstər",
-            ),
-            AgentDecision(
-                action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
-            ),
+        agent_plans=[
+            search_plan(),
+            search_plan(),
         ],
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake
@@ -3504,7 +3388,7 @@ async def test_real_ui_agent_route_serializes_concurrent_same_session_turns(
     # A subsequent ordinal follow-up must resolve only against the final
     # active result set.
     fake_profile = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1)
+        agent_plan=profile_plan("birincini")
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake_profile
     followup = await client.post(
@@ -3533,8 +3417,7 @@ async def test_real_ui_agent_route_serializes_concurrent_same_session_refinement
     independently from R0 with a lost/competing active pointer. Mirrors
     test_real_ui_agent_route_serializes_concurrent_same_session_turns
     (PR49-1) exactly, adapted for REFINE_CANDIDATE_RESULTS being
-    turn-terminal (exactly one decide_agent_action call per turn, not
-    two)."""
+    turn-terminal (exactly one propose_agent_plan call per turn)."""
     from conftest import TEST_DATABASE_URL
     from search_helpers import open_test_conversation, seed_active_result_set
     from sqlalchemy import func, select
@@ -3591,26 +3474,33 @@ async def test_real_ui_agent_route_serializes_concurrent_same_session_refinement
     )
     await db_session.commit()
 
-    class _DelayedOnFirstRefineLLM(FakeLLMProvider):
-        """See _DelayedOnFirstSearchLLM (PR49-1) — REFINE_CANDIDATE_RESULTS
-        is turn-terminal, so each turn makes exactly ONE
-        decide_agent_action call; the FIRST call of EACH of the two
-        concurrent turns (indices 0 and 1 on this shared instance) sleeps
-        while holding the row lock."""
+    plans_by_message = {
+        "bunlardan ilk 2": refine_plan(limit_quote="ilk 2"),
+        "bunlardan SQL bilənlər": refine_plan(whole_filter=True),
+    }
 
-        async def decide_agent_action(self, **kwargs):
-            if self.agent_call_count in (0, 1):
+    class _DelayedOnFirstRefineLLM(FakeLLMProvider):
+        """See _DelayedOnFirstSearchLLM (PR49-1) — each turn makes exactly
+        ONE propose_agent_plan call (issue #88 slice C); the FIRST call of
+        EACH of the two concurrent turns (indices 0 and 1 on this shared
+        instance) sleeps while holding the row lock. The plan is chosen by
+        the turn's own message, since its quotes must ground in it."""
+
+        async def propose_agent_plan(self, *, context, repair=False):  # noqa: ANN001,ANN201
+            from meyar.llm.provider import LLMResultProvenance
+
+            index = self.agent_call_count
+            self.agent_call_count += 1
+            if index in (0, 1):
                 await asyncio.sleep(0.15)
-            return await super().decide_agent_action(**kwargs)
+            plan = plans_by_message[context.recent_turns[-1].text]
+            return plan, LLMResultProvenance(provider="fake", model_name=self.model_name)
 
     fake = _DelayedOnFirstRefineLLM(
-        agent_decisions=[
-            AgentDecision(action=AgentActionType.REFINE_CANDIDATE_RESULTS, limit=2),
-            AgentDecision(
-                action=AgentActionType.REFINE_CANDIDATE_RESULTS,
-                filter_query="SQL bilən namizədləri göstər",
-            ),
-        ],
+        agent_plans=list(plans_by_message.values()),
+        # The grounded filter source reaches the frozen planner (planning
+        # only, never a fresh search): a deterministic SQL filter.
+        planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["SQL"])),
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake
 
@@ -3742,7 +3632,7 @@ async def test_real_ui_agent_route_does_not_serialize_across_different_browser_s
 
         # issue #80: deterministic overlap oracle (replaces a wall-clock
         # threshold that event-loop/render overhead could exceed without
-        # any real serialization). Each turn reaches decide_agent_action
+        # any real serialization). Each turn reaches propose_agent_plan
         # only while already holding its OWN conversation row lock, then
         # waits until BOTH turns are inside it simultaneously.
         # - correct row-level concurrency: both arrive, the barrier opens.
@@ -3755,25 +3645,21 @@ async def test_real_ui_agent_route_does_not_serialize_across_different_browser_s
         class _DelayedOnceLLM(FakeLLMProvider):
             """Each concurrent request below gets its OWN instance (never a
             shared counter), and each waits on the shared overlap barrier
-            exactly once on its only decide_agent_action call."""
+            exactly once on its only propose_agent_plan call."""
 
-            async def decide_agent_action(self, **kwargs):
+            async def propose_agent_plan(self, **kwargs):  # noqa: ANN003,ANN201
                 nonlocal inside_decision
                 inside_decision += 1
                 if inside_decision == 2:
                     both_inside.set()
                 await asyncio.wait_for(both_inside.wait(), timeout=5)
-                return await super().decide_agent_action(**kwargs)
+                return await super().propose_agent_plan(**kwargs)
 
         fake_a = _DelayedOnceLLM(
-            agent_decision=AgentDecision(
-                action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
-            )
+            agent_plan=converse("ACKNOWLEDGEMENT")
         )
         fake_b = _DelayedOnceLLM(
-            agent_decision=AgentDecision(
-                action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
-            )
+            agent_plan=converse("ACKNOWLEDGEMENT")
         )
         llm_assigned: list[str] = []
 
@@ -3824,12 +3710,12 @@ async def test_real_ui_agent_route_does_not_serialize_across_different_browser_s
 
     assert response_a.status_code == 200
     assert response_b.status_code == 200
-    # Real overlap proof: both turns were inside decide_agent_action at the
+    # Real overlap proof: both turns were inside propose_agent_plan at the
     # same time while each held its own conversation row lock.
     assert both_inside.is_set()
     assert elapsed < 5
     # Neither provider's turn was skipped or short-circuited — both really
-    # went through decide_agent_action once, so the timing evidence above
+    # went through propose_agent_plan once, so the timing evidence above
     # reflects two genuine turns, not one turn plus a no-op.
     assert fake_a.agent_call_count == 1
     assert fake_b.agent_call_count == 1
@@ -3916,9 +3802,7 @@ async def test_explicit_search_bypasses_wrong_orchestrator_then_ilk_3_refines(
     # The exact wrong proposal the real local model made in review.
     fake = FakeLLMProvider(
         planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
-        agent_decision=AgentDecision(
-            action=AgentActionType.REFINE_CANDIDATE_RESULTS, filter_query="ilk 3"
-        ),
+        agent_plan=refine_plan(whole_filter=True),
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake
     csrf = await _login_and_csrf(client, user.username, password)
@@ -3991,10 +3875,7 @@ async def test_forced_search_with_zero_matches_is_truthful_search_output(
     tenant, user, password, _membership = tenant_and_user
     fake = FakeLLMProvider(
         planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["NoMatch"])),
-        agent_decision=AgentDecision(
-            action=AgentActionType.CLARIFY,
-            response_code=AgentResponseCode.RESULT_CONTEXT_REQUIRED,
-        ),
+        agent_plan=clarify("RESULT_CONTEXT_REQUIRED"),
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake
     csrf = await _login_and_csrf(client, user.username, password)
@@ -4066,7 +3947,7 @@ async def test_job_analysis_command_without_source_asks_for_vacancy_text(
 
     tenant, user, password, _membership = tenant_and_user
     fake = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA)
+        agent_plan=vacancy_proposal()
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake
     csrf = await _login_and_csrf(client, user.username, password)
@@ -4140,9 +4021,7 @@ async def test_count_only_followup_without_result_set_is_truthful_context_requir
 
     tenant, user, password, _membership = tenant_and_user
     fake = FakeLLMProvider(
-        agent_decision=AgentDecision(
-            action=AgentActionType.SEARCH_CANDIDATES, search_query="ilk 3"
-        )
+        agent_plan=search_plan()
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake
     csrf = await _login_and_csrf(client, user.username, password)

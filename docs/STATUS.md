@@ -2,6 +2,26 @@
 
 ## Current phase
 
+**Issue #88 Slice C — IMPLEMENTED on branch `feat/88c-agent-plan-contract`
+(from `main` @ `9817711c73e9d2701c0385d2bbe0c1bd3fba153e`); pending
+independent acceptance; NOT merged.** Implements D-092 §23 slice C
+(implementation record D-095): the `agent-plan-v1` model plan contract via
+`LLMProvider.propose_agent_plan` (one proposal + at most one repair per
+model-routed turn, registry-derived per-call capability subset, typed
+allow-list projection), full §10.2 source grounding (unique exact quotes,
+per-coordinated-part requirement coverage, protected-content QUOTES
+prohibition, closed count/ordinal parsers, grounded evidence topic),
+bounded multi-step execution with no post-tool model re-decision, and the
+retirement of `decide_agent_action`, `AgentDecision`, `TOOL_ACTIONS`, the
+transitional adapter and the `while True` loop. ANALYZE_VACANCY model
+proposals become the SEARCH_OR_VACANCY clarification; CREATE_JOB/RANK stay
+HUMAN_ACTION_ONLY. Plan-proposal infrastructure failure abandons the turn
+(#85). `AGENT_PROMPT_VERSION = agent-plan-prompt-v1`. Real-Ollama smoke test
+RUN on the dev machine (qwen3:0.6b / qwen3:1.7b; see D-095); this is not the
+Target-Mac benchmark. No migration (Alembic head remains `b88a2c4d6e10`);
+no new dependency. #88 remains OPEN; #50 remains OPEN and out of scope. The
+historical CI pytest hang root cause remains NOT PROVEN.
+
 **Issue #88 Slice B — IMPLEMENTED, independently technically accepted, and
 MERGED through PR #100.** Squash commit on `main`:
 `2961365c961894cc0f6b61ac65619c9891e8cf4e` (single parent
@@ -21,8 +41,8 @@ Independent-review correction: Layer 1 now receives a real read-only
 ValidationContext (pre-existing ResultSet inspected member-scoped per #86,
 zero executors on a ResultSet-family rejection with today's outward
 outcome), and every validated plan emits privacy-safe `agent.plan.validated`.
-No migration (Alembic head remains `b88a2c4d6e10`). Slice C has NOT
-started; #88 remains OPEN; #50 remains OPEN and out of scope. The
+No migration (Alembic head remains `b88a2c4d6e10`). Slice C: see the block
+above; #88 remains OPEN; #50 remains OPEN and out of scope. The
 historical CI pytest hang root cause remains NOT PROVEN.
 
 **Issue #88 Slice A — IMPLEMENTED, independently technically accepted, and
@@ -38,7 +58,7 @@ Alembic single head: `b88a2c4d6e10`.
   order, A2 exchange-chain liveness, SOURCE_MESSAGE, and a final Phase B
   that always starts from a fresh transaction (principal locked first; D-093
   supersedes D-089's deterministic-only Phase-B statements).
-- Slice C has NOT started (slice B: see the block above). #88 remains
+- Slice C: see the first block above (slice B: see above). #88 remains
   OPEN. #50 remains OPEN and out of scope for Slice A.
 - The historical CI pytest hang root cause remains NOT PROVEN; the PR #97
   diagnostics remain relevant and active.

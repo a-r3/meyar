@@ -140,3 +140,78 @@ async def test_representative_extract_and_embed_workflow_stays_loopback_only() -
     # the workflow actually dispatched two real requests through the
     # guard (not a vacuous pass) and every one of them was loopback.
     assert allowed_hosts == ["127.0.0.1", "127.0.0.1"]
+
+
+async def test_agent_plan_proposal_and_repair_stay_loopback_only_and_identity_free() -> None:
+    """Issue #88 slice C (D-092 §15/§16, §22 item 19): the new
+    ``propose_agent_plan`` call AND its one repair go only to loopback
+    Ollama, and the typed projection built by the real service carries no
+    CandidateIdentity, UUID, scope or token — even when a persisted
+    assistant headline names a candidate (D-045 stores rendered text)."""
+    from meyar.agent.capabilities import CapabilityName
+    from meyar.agent.service import _propose_agent_plan, build_plan_context
+
+    synthetic_name = "Aysel Synthetic-Identity"
+    synthetic_email = "aysel.synthetic@example.invalid"
+    tenant_uuid = str(uuid.uuid4())
+    turns = [
+        {"role": "user", "text": "Python bilən namizədləri göstər"},
+        {
+            "role": "assistant",
+            "outcome": "ANSWERED_FROM_TOOL_RESULT",
+            "text": f"{synthetic_name} üçün profil məlumatları aşağıdadır. {synthetic_email}",
+            "turn_id": tenant_uuid,
+        },
+        {"role": "user", "text": "birincinin profilini aç"},
+    ]
+    context = build_plan_context(
+        turns=turns,
+        max_context_turns=8,
+        offered=(CapabilityName.SEARCH_CANDIDATES, CapabilityName.GET_CANDIDATE_PROFILE),
+        max_plan_steps=3,
+        active_result_context_present=True,
+        available_ref_count=2,
+        pending_vacancy_confirmation=False,
+    )
+    requests: list[dict] = []
+    replies = iter(
+        [
+            "not json at all",  # schema-invalid -> the one bounded repair
+            json.dumps(
+                {
+                    "schema_version": "agent-plan-v1",
+                    "kind": "PLAN",
+                    "goal": "RESULT_FOLLOWUP",
+                    "steps": [
+                        {
+                            "capability": "GET_CANDIDATE_PROFILE",
+                            "args": {"ref_quote": {"quote": "birincinin"}},
+                        }
+                    ],
+                }
+            ),
+        ]
+    )
+
+    def chat_handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200, json={"model": "qwen3:0.6b", "message": {"content": next(replies)}}
+        )
+
+    llm = OllamaLLMProvider(
+        base_url="http://127.0.0.1:11434",
+        model="qwen3:0.6b",
+        timeout_seconds=5.0,
+        transport=httpx.MockTransport(chat_handler),
+    )
+    async with loopback_only_network_guard() as allowed_hosts:
+        proposal, _provenance = await _propose_agent_plan(llm, context)
+
+    assert proposal is not None and proposal.steps[0].capability == "GET_CANDIDATE_PROFILE"
+    assert allowed_hosts == ["127.0.0.1", "127.0.0.1"]  # proposal + one repair
+    assert "REPAIR REQUIRED" in requests[1]["messages"][1]["content"]
+    for request in requests:
+        serialized = json.dumps(request, ensure_ascii=False)
+        for forbidden in (synthetic_name, synthetic_email, tenant_uuid, "tenant", "scope"):
+            assert forbidden not in serialized

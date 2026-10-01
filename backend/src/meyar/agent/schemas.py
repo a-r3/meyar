@@ -1,17 +1,17 @@
-"""Slice 2 — strict contracts for the bounded read-only local-AI agent.
+"""Strict contracts for the bounded read-only local-AI agent.
 
-``AgentDecision`` is the ONLY shape the local model may produce, mirroring
-the discipline ``meyar.search.planner_schemas.PlannerDraft`` already
-established (D-016/D-031): ``extra="forbid"``, no trusted-runtime fields
-(tenant, candidate identity, database access), and a strict per-action
-shape enforced by a validator so the model cannot mix an action with
-arguments that do not belong to it. Every ``AgentDecision`` the LLM
-produces is untrusted input — see meyar.agent.service for the same
-tenant/schema/prohibited-attribute/evidence discipline applied to it as to
-any other LLM-produced tool argument (docs/DECISIONS.md D-031 point 4).
-``FINAL_ANSWER``/``CLARIFY`` carry only a closed ``AgentResponseCode``;
-the model has no free-text response field. The server owns every rendered
-sentence for those outcomes.
+Issue #88 slice C (D-092 §10.1, D-095): the ONLY orchestration shape the
+local model may produce is ``meyar.agent.capabilities.contracts.
+AgentPlanProposal`` (``agent-plan-v1``) — a closed PLAN / CLARIFY / CONVERSE
+contract whose step arguments are exact quotations of the user's own
+message, resolved and parsed by the server. The retired ``AgentDecision``
+(model-authored search_query/filter_query/limit/candidate_ref/evidence_topic)
+no longer exists. ``AgentActionType`` below survives ONLY as the stable,
+persisted ``AgentToolResult.tool_name`` / audit ``tool_name`` identifier of
+server-executed tool results (transcripts and audit history store these
+strings); it is not part of any model output schema. CONVERSE/CLARIFY carry
+only a closed ``AgentResponseCode``; the server owns every rendered
+sentence.
 
 Tool RESULT schemas below are never LLM-authored — they are the
 deterministic, already-tenant-scoped output of existing services
@@ -47,7 +47,6 @@ from meyar.schemas.criteria import CriterionIn, CriterionType
 from meyar.search.planner_schemas import PlannedCandidateSearchResponse
 from meyar.search.schemas import CandidateSearchResponse
 
-AGENT_SCHEMA_VERSION = "agent-decision-schema-v1"
 AGENT_POLICY_VERSION = "agent-policy-v1"
 
 # Bound on how many ordinal candidate references a single search result
@@ -70,30 +69,30 @@ MAX_AGENT_SEARCH_QUERY_LENGTH = 2000
 
 
 class AgentActionType(StrEnum):
+    """Stable tool-result / audit identifier of a server-executed capability
+    (persisted in transcripts and audit metadata). Not model authority: the
+    model proposes ``CapabilityName`` values in ``agent-plan-v1`` only."""
+
     SEARCH_CANDIDATES = "SEARCH_CANDIDATES"
     GET_CANDIDATE_PROFILE = "GET_CANDIDATE_PROFILE"
     GET_CANDIDATE_EVIDENCE = "GET_CANDIDATE_EVIDENCE"
     # issue #49 PR49-2: a follow-up that operates on the conversation's own
     # CURRENT active AgentResultSet ("ilk üçü", "bunlardan SQL bilənlər",
     # "5 nəfərə endir") rather than naming a new, independent search. The
-    # model may only express bounded intent (filter_query/limit below) —
-    # it never supplies a result_set_id/candidate_id/ordinal membership
-    # list; the server alone resolves the active result set and computes
-    # the derived membership/order (see
+    # server alone resolves the active result set and computes the derived
+    # membership/order (see
     # meyar.services.agent_result_set_repo.create_result_set_from_refinement).
     REFINE_CANDIDATE_RESULTS = "REFINE_CANDIDATE_RESULTS"
-    # Slice 4's typed draft action remains the internal service/tool result
-    # identity, but issue #79 makes its execution authority server-owned.
-    # Confirmed JDs are routed before model orchestration; a model-produced
-    # value by itself is rejected. Nothing is persisted by this action — see
+    # Slice 4's typed draft tool-result identity; issue #79 makes its
+    # execution authority server-owned (ANALYZE_VACANCY is never
+    # model-proposable). Nothing is persisted by this action — see
     # AgentJobDraftToolResult.
     DRAFT_JOB_CRITERIA = "DRAFT_JOB_CRITERIA"
-    FINAL_ANSWER = "FINAL_ANSWER"
-    CLARIFY = "CLARIFY"
 
 
 class AgentResponseCode(StrEnum):
-    """Closed, non-factual conversational intents for FINAL_ANSWER/CLARIFY."""
+    """Closed, non-factual conversational intents (agent-plan-v1 CONVERSE /
+    CLARIFY codes and server-chosen fixed copy)."""
 
     GREETING = "GREETING"
     ACKNOWLEDGEMENT = "ACKNOWLEDGEMENT"
@@ -109,163 +108,6 @@ class AgentResponseCode(StrEnum):
     # those get their own truthful AgentTurnOutcome (RESULT_SET_STALE/
     # RESULT_SET_EXPIRED), same as candidate_ref resolution.
     RESULT_CONTEXT_REQUIRED = "RESULT_CONTEXT_REQUIRED"
-
-
-_FINAL_RESPONSE_CODES = frozenset({AgentResponseCode.GREETING, AgentResponseCode.ACKNOWLEDGEMENT})
-_CLARIFICATION_RESPONSE_CODES = frozenset(
-    {
-        AgentResponseCode.NEED_MORE_DETAIL,
-        AgentResponseCode.CANDIDATE_REFERENCE_REQUIRED,
-        AgentResponseCode.UNSUPPORTED_REQUEST,
-        AgentResponseCode.HIRING_DECISION_REQUIRES_HUMAN,
-        AgentResponseCode.RESULT_CONTEXT_REQUIRED,
-    }
-)
-
-
-TOOL_ACTIONS = frozenset(
-    {
-        AgentActionType.SEARCH_CANDIDATES,
-        AgentActionType.GET_CANDIDATE_PROFILE,
-        AgentActionType.GET_CANDIDATE_EVIDENCE,
-        AgentActionType.DRAFT_JOB_CRITERIA,
-        AgentActionType.REFINE_CANDIDATE_RESULTS,
-    }
-)
-
-
-class AgentDecision(BaseModel):
-    """Strict model output for one orchestration step. No mode, no tenant,
-    no candidate_id/identity, no database access — only a next action and
-    the minimum typed argument that action needs. See module docstring."""
-
-    model_config = {"extra": "forbid"}
-
-    action: AgentActionType
-    # SEARCH_CANDIDATES only: forwarded, unmodified, into the existing
-    # frozen NL search-planner pipeline (D-031) — this module never
-    # re-implements filter extraction.
-    search_query: str | None = Field(
-        default=None, min_length=1, max_length=MAX_AGENT_SEARCH_QUERY_LENGTH
-    )
-    # GET_CANDIDATE_PROFILE / GET_CANDIDATE_EVIDENCE only: an ORDINAL
-    # position (1 = first result) into the conversation's own
-    # server-held last-search-result list — never a raw candidate_id.
-    # See meyar.agent.service._resolve_candidate_ref.
-    candidate_ref: int | None = Field(default=None, ge=1, le=MAX_CANDIDATE_REF)
-    # GET_CANDIDATE_EVIDENCE only, optional: a skill/fact name to narrow
-    # which evidence items are returned (e.g. "Python"). Free text, but
-    # never treated as instructions — matched as a case/diacritic-
-    # insensitive substring against existing stored facts only.
-    evidence_topic: str | None = Field(default=None, max_length=200)
-    # REFINE_CANDIDATE_RESULTS only, optional: the user's own natural-
-    # language refinement criterion (e.g. "SQL bilənlər"), forwarded
-    # UNMODIFIED into the existing frozen NL search-planner pipeline
-    # (D-031) — exactly like SEARCH_CANDIDATES.search_query — to derive a
-    # validated deterministic RequiredFilters shape. Never itself executed
-    # as a tenant-wide search: meyar.agent.service._dispatch_refine
-    # evaluates the resulting filters ONLY against the active
-    # AgentResultSet's own current members. See AgentActionType.
-    # REFINE_CANDIDATE_RESULTS.
-    filter_query: str | None = Field(
-        default=None, min_length=1, max_length=MAX_AGENT_SEARCH_QUERY_LENGTH
-    )
-    # REFINE_CANDIDATE_RESULTS only, optional: "ilk N" / "N nəfərə endir" —
-    # applied server-side, after any filter, against the active result
-    # set's OWN preserved order. Bounded to the same MAX_CANDIDATE_REF a
-    # candidate_ref itself is bounded to (never a limit the search policy
-    # itself could not have produced).
-    limit: int | None = Field(default=None, ge=1, le=MAX_CANDIDATE_REF)
-    # FINAL_ANSWER / CLARIFY only: a closed conversational intent. The
-    # server maps this to fixed copy; no model-authored prose can reach HR.
-    response_code: AgentResponseCode | None = None
-
-    @model_validator(mode="after")
-    def _validate_shape(self) -> "AgentDecision":
-        if self.action == AgentActionType.SEARCH_CANDIDATES:
-            if self.search_query is None:
-                raise ValueError("SEARCH_CANDIDATES requires search_query.")
-            if self.candidate_ref is not None or self.response_code is not None:
-                raise ValueError("SEARCH_CANDIDATES must not set candidate_ref or response_code.")
-            if self.evidence_topic is not None:
-                raise ValueError("SEARCH_CANDIDATES must not set evidence_topic.")
-            if self.filter_query is not None or self.limit is not None:
-                raise ValueError("SEARCH_CANDIDATES must not set filter_query or limit.")
-        elif self.action in (
-            AgentActionType.GET_CANDIDATE_PROFILE,
-            AgentActionType.GET_CANDIDATE_EVIDENCE,
-        ):
-            if self.candidate_ref is None:
-                raise ValueError(f"{self.action} requires candidate_ref.")
-            if self.search_query is not None or self.response_code is not None:
-                raise ValueError(f"{self.action} must not set search_query or response_code.")
-            if self.filter_query is not None or self.limit is not None:
-                raise ValueError(f"{self.action} must not set filter_query or limit.")
-            if (
-                self.action == AgentActionType.GET_CANDIDATE_PROFILE
-                and self.evidence_topic is not None
-            ):
-                raise ValueError("GET_CANDIDATE_PROFILE must not set evidence_topic.")
-        elif self.action == AgentActionType.REFINE_CANDIDATE_RESULTS:
-            # The model may express ONLY bounded intent — see
-            # AgentActionType.REFINE_CANDIDATE_RESULTS and the filter_query/
-            # limit field docstrings. At least one refinement operation
-            # must be present: a bare "bunlardan"-shaped decision with
-            # neither set is never accepted as this action (small-model
-            # safety — see docs/DECISIONS.md D-084); the model must use
-            # CLARIFY(NEED_MORE_DETAIL) instead.
-            if self.search_query is not None or self.candidate_ref is not None:
-                raise ValueError(
-                    "REFINE_CANDIDATE_RESULTS must not set search_query or candidate_ref."
-                )
-            if self.evidence_topic is not None or self.response_code is not None:
-                raise ValueError(
-                    "REFINE_CANDIDATE_RESULTS must not set evidence_topic or response_code."
-                )
-            if self.filter_query is None and self.limit is None:
-                raise ValueError(
-                    "REFINE_CANDIDATE_RESULTS requires filter_query and/or limit."
-                )
-        elif self.action == AgentActionType.DRAFT_JOB_CRITERIA:
-            # Bare action, no argument — see AgentActionType.DRAFT_JOB_CRITERIA
-            # docstring for why the JD text itself is never round-tripped
-            # through the model's own output.
-            if (
-                self.search_query is not None
-                or self.candidate_ref is not None
-                or self.evidence_topic is not None
-                or self.response_code is not None
-                or self.filter_query is not None
-                or self.limit is not None
-            ):
-                raise ValueError(
-                    "DRAFT_JOB_CRITERIA must not set search_query, candidate_ref, "
-                    "evidence_topic, filter_query, limit, or response_code."
-                )
-        else:  # FINAL_ANSWER / CLARIFY
-            if self.response_code is None:
-                raise ValueError(f"{self.action} requires response_code.")
-            if (
-                self.search_query is not None
-                or self.candidate_ref is not None
-                or self.evidence_topic is not None
-                or self.filter_query is not None
-                or self.limit is not None
-            ):
-                raise ValueError(
-                    f"{self.action} must not set search_query, candidate_ref, evidence_topic, "
-                    "filter_query, or limit."
-                )
-            allowed = (
-                _FINAL_RESPONSE_CODES
-                if self.action == AgentActionType.FINAL_ANSWER
-                else _CLARIFICATION_RESPONSE_CODES
-            )
-            if self.response_code not in allowed:
-                raise ValueError(
-                    f"{self.action} does not allow response_code={self.response_code}."
-                )
-        return self
 
 
 class AgentSearchToolResult(BaseModel):
@@ -286,8 +128,7 @@ class AgentRefineToolResult(BaseModel):
     ``response.result_count``) is the derived set's size. ``has_filter``/
     ``requested_limit``/``limit_truncated`` are safe, non-identity summary
     flags the presentation layer uses to build one deterministic HR-facing
-    sentence — never a raw filter_query/limit echo of untrusted model
-    input."""
+    sentence — never a raw echo of the filter text or count."""
 
     model_config = {"extra": "forbid"}
 
@@ -944,7 +785,7 @@ class ConfirmedAgentJobDraft(BaseModel):
 class AgentToolResult(BaseModel):
     """One executed tool call's typed result, tagged by which tool
     produced it. Exactly one of the payload fields is set, matching
-    ``tool_name`` — enforced below, mirroring AgentDecision's discipline."""
+    ``tool_name`` — enforced below."""
 
     model_config = {"extra": "forbid"}
 
@@ -979,14 +820,9 @@ class AgentToolResult(BaseModel):
 
 class AgentTurnOutcome(StrEnum):
     ANSWERED = "ANSWERED"
-    # A tool (always SEARCH_CANDIDATES — the only tool that loops back for
-    # another decision) already produced a real, grounded result, but the
-    # SUBSEQUENT "what next" decision step failed (timeout/unavailable/
-    # repeated schema-invalid output). This is never treated as a fatal
-    # turn failure — the grounded tool_results are real and safe to show;
-    # only the optional closing framing is missing. Distinct from
-    # MALFORMED_MODEL_OUTPUT/AGENT_PROVIDER_FAILURE, which apply only when
-    # tool_results is empty. See D-036.
+    # The validated capability results (deterministic, server-rendered) are
+    # the answer. Since issue #88 slice C there is no post-tool "what next"
+    # model call, so this is simply every successful tool-result turn.
     ANSWERED_FROM_TOOL_RESULT = "ANSWERED_FROM_TOOL_RESULT"
     CLARIFICATION_REQUESTED = "CLARIFICATION_REQUESTED"
     CANDIDATE_REF_NOT_FOUND = "CANDIDATE_REF_NOT_FOUND"
@@ -1008,8 +844,13 @@ class AgentTurnOutcome(StrEnum):
     # tool_results is always empty for this outcome, same as
     # AGENT_PROVIDER_FAILURE/MALFORMED_MODEL_OUTPUT below.
     JOB_DRAFT_FAILED = "JOB_DRAFT_FAILED"
+    # Historical outcomes, kept so persisted transcripts still render. Since
+    # issue #88 slice C a plan longer than the effective bound is a Layer-1
+    # PLAN_TOO_LONG rejection and a plan-proposal provider failure abandons
+    # the turn (#85) — neither is committed as a new turn any more.
     TOOL_CALL_LIMIT_EXCEEDED = "TOOL_CALL_LIMIT_EXCEEDED"
     AGENT_PROVIDER_FAILURE = "AGENT_PROVIDER_FAILURE"
+    # agent-plan-v1 output still schema-invalid after the one repair.
     MALFORMED_MODEL_OUTPUT = "MALFORMED_MODEL_OUTPUT"
     # Issue #88 slice B (D-092 §11.3): a multi-step capability plan whose
     # later step failed its Layer-2 precondition or returned a non-success
@@ -1067,7 +908,7 @@ class GroundedSelection(BaseModel):
 
 class AgentTurnResult(BaseModel):
     """The full, safe result of one bounded orchestration turn. ``message``
-    is fixed server-owned copy for FINAL_ANSWER/CLARIFY, or a server-built
+    is fixed server-owned copy for a closed response code, or a server-built
     grounded-answer sentence assembled entirely from GroundedFact values
     the model only selected/ordered (D-038) — never model-authored prose.
     Every factual claim also always lives in ``tool_results`` itself

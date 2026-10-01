@@ -5,7 +5,7 @@ dev hardware — enough to blow past the 60s request timeout on a cold model
 load and turn a real agent turn into an outright AGENT_PROVIDER_FAILURE
 (found via real-Ollama Slice 2 acceptance testing, PR #40). Both agent
 prompts (meyar.agent.prompts) already forbid chain-of-thought output, so
-thinking is pure waste there — decide_agent_action/select_grounded_facts
+thinking is pure waste there — propose_agent_plan/select_grounded_facts
 disable it explicitly.
 
 D-039 originally disabled thinking for every OllamaLLMProvider._chat call.
@@ -39,19 +39,28 @@ def test_request_serving_settings_reject_fake_llm_provider() -> None:
         Settings(llm_provider="fake")  # type: ignore[arg-type]
 
 
-async def test_agent_decision_request_disables_thinking() -> None:
+async def test_agent_plan_request_disables_thinking() -> None:
+    from meyar.agent.capabilities.contracts import (
+        AgentPlanContext,
+        CapabilityName,
+        ContextTurn,
+        OfferedCapability,
+    )
+
     captured: dict = {}
 
     async def handler(request: httpx.Request) -> httpx.Response:
         captured.update(json.loads(request.content))
+        plan = {
+            "schema_version": "agent-plan-v1",
+            "kind": "PLAN",
+            "goal": "CANDIDATE_SEARCH",
+            "steps": [
+                {"capability": "SEARCH_CANDIDATES", "args": {"source": {"mode": "WHOLE_MESSAGE"}}}
+            ],
+        }
         return httpx.Response(
-            200,
-            json={
-                "model": "qwen3:1.7b",
-                "message": {
-                    "content": json.dumps({"action": "SEARCH_CANDIDATES", "search_query": "Java"})
-                },
-            },
+            200, json={"model": "qwen3:1.7b", "message": {"content": json.dumps(plan)}}
         )
 
     provider = OllamaLLMProvider(
@@ -61,14 +70,28 @@ async def test_agent_decision_request_disables_thinking() -> None:
         transport=httpx.MockTransport(handler),
     )
 
-    await provider.decide_agent_action(
-        recent_turns=[("user", "Java bilən namizədləri göstər")],
-        last_tool_result_summary=None,
-        active_result_context_present=False,
-        available_candidate_refs=[],
+    proposal, _provenance = await provider.propose_agent_plan(
+        context=AgentPlanContext(
+            recent_turns=[ContextTurn(role="user", text="Java bilən namizədləri göstər")],
+            available_capabilities=[
+                OfferedCapability(name=CapabilityName.SEARCH_CANDIDATES, description="Search.")
+            ],
+            max_plan_steps=3,
+            active_result_context_present=False,
+            available_candidate_refs=[],
+            pending_vacancy_confirmation=False,
+        )
     )
 
     assert captured["think"] is False
+    assert proposal.steps[0].capability == CapabilityName.SEARCH_CANDIDATES
+    # Per-call subset (D-092 §8.1): the constrained schema offers ONLY the
+    # offered capability.
+    schema = json.dumps(captured["format"])
+    assert "SEARCH_CANDIDATES" in schema
+    for name in CapabilityName:
+        if name != CapabilityName.SEARCH_CANDIDATES:
+            assert name.value not in schema
 
 
 async def test_grounded_selection_request_disables_thinking() -> None:

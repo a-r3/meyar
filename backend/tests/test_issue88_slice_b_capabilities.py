@@ -1,11 +1,15 @@
-"""Issue #88 slice B — capability registry, pure Layer-1 validator, Layer-2
-preconditions, atomic activation and the WHOLE_MESSAGE search grounding
-(D-092 §8–§11, §22 items 1–8 and 16–20, §23; D-094).
+"""Issue #88 slice B (ported to the slice-C ``agent-plan-v1`` contract) —
+capability registry, pure Layer-1 validator, Layer-2 preconditions, atomic
+activation and source grounding (D-092 §8–§11, §22 items 1–8 and 16–20,
+§23; D-094 / D-095).
 
 Pure validator/registry tests need no database. Execution tests use the real
-executors over synthetic DB fixtures and the deterministic FakeLLMProvider;
-no multi-step MODEL planning exists in slice B, so multi-step plans are built
-by the server-side test fixture only. Synthetic data only."""
+executors over synthetic DB fixtures and the deterministic FakeLLMProvider.
+Slice C replaced the transitional AgentDecision fields with grounded quotes:
+every assertion below that used a model-authored ``candidate_ref`` /
+``limit`` / ``filter_query`` / ``evidence_topic`` now uses the exact quote of
+the user's own message the server parses, which is at least as strict.
+Synthetic data only."""
 
 import hashlib
 import inspect
@@ -15,6 +19,7 @@ from dataclasses import replace
 from types import MappingProxyType
 
 import pytest
+from agent_plans import evidence_plan, refine_plan, search_plan, vacancy_proposal
 from fakes import FakeLLMProvider
 from search_helpers import seed_active_result_set, seed_candidate_with_profile
 from sqlalchemy import func, select
@@ -29,6 +34,7 @@ from test_agent_service import (
 from meyar.agent import capabilities as capabilities_pkg
 from meyar.agent import service as agent_service
 from meyar.agent.capabilities import (
+    AGENT_PLAN_SCHEMA_VERSION,
     CAPABILITY_PLAN_SCHEMA_VERSION,
     CAPABILITY_REGISTRY,
     CapabilityName,
@@ -47,12 +53,6 @@ from meyar.agent.capabilities import (
     validate_plan,
 )
 from meyar.agent.capabilities import executors as capability_executors
-from meyar.agent.capabilities.adapter import (
-    plan_for_model_decision,
-    result_limit_plan,
-    search_plan,
-    vacancy_plan,
-)
 from meyar.agent.capabilities.contracts import (
     ConfirmationPolicy,
     ExecutionMode,
@@ -62,10 +62,9 @@ from meyar.agent.capabilities.contracts import (
 )
 from meyar.agent.capabilities.executors import HumanActionOnlyError
 from meyar.agent.capabilities.registry import RegistryInvariantError
+from meyar.agent.capabilities.server_plans import result_limit_plan, vacancy_plan
 from meyar.agent.schemas import (
     AgentActionType,
-    AgentDecision,
-    AgentResponseCode,
     AgentTurnOutcome,
 )
 from meyar.agent.turn_boundary import ConversationSnapshot, TurnSessionState
@@ -85,7 +84,15 @@ ALL_SCOPES = frozenset(
         "evaluations:read", "evaluations:write",
     }
 )
+ALL_OFFERED = frozenset(
+    name for name, definition in CAPABILITY_REGISTRY.items() if definition.model_proposable
+)
+# A search message (one material requirement, covered by WHOLE_MESSAGE).
 MESSAGE = "Python bilən namizədlər"
+# A follow-up message with NO material requirement: ordinals and a count.
+REF_MESSAGE = "1-ci, 2-ci, 3-cü və 5-ci namizədi aç; ilk 2 nəfər"
+# Both: a WHOLE_MESSAGE search covers the requirement, refs follow it.
+COMBO_MESSAGE = "Python bilən namizədlər; 1-ci, 2-ci, 3-cü və 5-ci namizəd; ilk 2"
 PYTHON_PROFILE = {
     "skills": [
         {
@@ -111,7 +118,15 @@ def _ctx(**overrides) -> ValidationContext:  # noqa: ANN003
     return ValidationContext(**values)
 
 
-def _plan(goal: str, *steps: dict) -> dict:
+def _plan(goal: str | None, *steps: dict, kind: str = "PLAN") -> dict:
+    """A MODEL ``agent-plan-v1`` proposal as Layer 1 receives it."""
+    return {
+        "schema_version": AGENT_PLAN_SCHEMA_VERSION, "kind": kind, "goal": goal,
+        "steps": list(steps), "clarification_code": None, "response_code": None,
+    }
+
+
+def _server(goal: str, *steps: dict) -> dict:
     return {"schema_version": CAPABILITY_PLAN_SCHEMA_VERSION, "goal": goal, "steps": list(steps)}
 
 
@@ -119,7 +134,25 @@ def _step(capability: str, **args) -> dict:  # noqa: ANN003
     return {"capability": capability, "args": args}
 
 
+def _q(text: str) -> dict:
+    return {"quote": text}
+
+
 SEARCH = _step("SEARCH_CANDIDATES", source={"mode": "WHOLE_MESSAGE"})
+
+
+def _profile(ref: str) -> dict:
+    return _step("GET_CANDIDATE_PROFILE", ref_quote=_q(ref))
+
+
+def _evidence(ref: str, topic: str | None = None) -> dict:
+    args: dict = {"ref_quote": _q(ref)}
+    if topic is not None:
+        args["topic_quote"] = _q(topic)
+    return _step("GET_CANDIDATE_EVIDENCE", **args)
+
+
+LIMIT_2 = _step("REFINE_RESULTS", limit_quote=_q("ilk 2"))
 
 
 class _SpyExecutors:
@@ -139,8 +172,13 @@ class _SpyExecutors:
         self.registry = MappingProxyType(definitions)
 
 
-def _validate(proposal: object, *, origin=PlanOrigin.MODEL, source=MESSAGE, **ctx):  # noqa: ANN001, ANN003, ANN202
-    return validate_plan(proposal, origin=origin, source_text=source, ctx=_ctx(**ctx))
+def _validate(  # noqa: ANN202
+    proposal: object, *, origin=PlanOrigin.MODEL, source=REF_MESSAGE, offered=ALL_OFFERED,  # noqa: ANN001
+    **ctx,  # noqa: ANN003
+):
+    return validate_plan(
+        proposal, origin=origin, source_text=source, ctx=_ctx(**ctx), offered=offered
+    )
 
 
 def _rejected(result: object, code: PlanRejectionCode) -> None:
@@ -257,9 +295,10 @@ def test_validator_is_pure_and_synchronous() -> None:
     assert not inspect.iscoroutinefunction(validate_plan)
     parameters = inspect.signature(validate_plan).parameters
     assert "db" not in parameters and "llm" not in parameters
-    source = inspect.getsource(capabilities_pkg.validator)
-    for forbidden in ("AsyncSession", "await ", "record_event", "executor("):
-        assert forbidden not in source
+    for module in (capabilities_pkg.validator, capabilities_pkg.grounding):
+        source = inspect.getsource(module)
+        for forbidden in ("AsyncSession", "await ", "record_event", "executor("):
+            assert forbidden not in source
 
 
 @pytest.mark.parametrize(
@@ -273,106 +312,149 @@ def test_unknown_capability_or_python_name_is_rejected_with_zero_execution(
     spy = _SpyExecutors()
     result = validate_plan(
         _plan("CANDIDATE_SEARCH", {"capability": capability, "args": {}}),
-        origin=PlanOrigin.MODEL, source_text=MESSAGE, ctx=_ctx(), registry=spy.registry,
+        origin=PlanOrigin.MODEL, source_text=MESSAGE, ctx=_ctx(), offered=ALL_OFFERED,
+        registry=spy.registry,
     )
     _rejected(result, PlanRejectionCode.UNKNOWN_CAPABILITY)
     assert spy.calls == []
 
 
+def test_registered_capability_outside_the_per_call_subset_is_unknown() -> None:
+    """D-092 §8.1 / scenario H: a registered name that was not OFFERED in
+    this call fails closed exactly like an unknown one."""
+    offered = frozenset({CapabilityName.SEARCH_CANDIDATES})
+    _rejected(
+        _validate(_plan("RESULT_FOLLOWUP", _profile("1-ci")), offered=offered),
+        PlanRejectionCode.UNKNOWN_CAPABILITY,
+    )
+    _rejected(
+        _validate(_plan("CANDIDATE_SEARCH", SEARCH), source=MESSAGE, offered=frozenset()),
+        PlanRejectionCode.UNKNOWN_CAPABILITY,
+    )
+    assert isinstance(
+        _validate(_plan("CANDIDATE_SEARCH", SEARCH), source=MESSAGE, offered=offered),
+        ExecutablePlan,
+    )
+
+
 @pytest.mark.parametrize(
     "step",
     [
-        _step("GET_CANDIDATE_PROFILE", candidate_ref="1"),
-        _step("GET_CANDIDATE_PROFILE", candidate_ref=1.0),
-        _step("GET_CANDIDATE_PROFILE", candidate_ref=0),
-        _step("GET_CANDIDATE_PROFILE", candidate_ref=51),
+        # The retired model-authored fields are not accepted any more.
+        _step("GET_CANDIDATE_PROFILE", candidate_ref=1),
+        _step("GET_CANDIDATE_EVIDENCE", ref_quote=_q("1-ci"), evidence_topic="Python"),
+        _step("REFINE_RESULTS", filter_query="SQL"),
+        _step("REFINE_RESULTS", limit=2),
+        _step("SEARCH_CANDIDATES", search_query="Python"),
+        # Wrong types / missing / over-long.
+        _step("GET_CANDIDATE_PROFILE", ref_quote="1-ci"),
+        _step("GET_CANDIDATE_PROFILE", ref_quote={"quote": 1}),
+        _step("GET_CANDIDATE_PROFILE", ref_quote={"quote": ""}),
         _step("GET_CANDIDATE_PROFILE"),
-        _step("GET_CANDIDATE_EVIDENCE", candidate_ref=1, evidence_topic="x" * 201),
+        _step("GET_CANDIDATE_EVIDENCE", ref_quote=_q("1-ci"), topic_quote=_q("x" * 501)),
         _step("REFINE_RESULTS"),
-        _step("REFINE_RESULTS", filter_query=7),
-        _step("REFINE_RESULTS", filter_query="x" * 2001),
-        _step("REFINE_RESULTS", limit=0),
-        _step("SEARCH_CANDIDATES", source={"mode": "QUOTES", "quotes": [{"quote": "Python"}]}),
+        _step("REFINE_RESULTS", limit_quote=_q("x" * 501)),
+        _step("SEARCH_CANDIDATES", source={"mode": "QUOTES"}),
+        _step("SEARCH_CANDIDATES", source={"mode": "QUOTES", "quotes": [_q("1-ci")] * 5}),
+        _step("SEARCH_CANDIDATES", source={"mode": "WHOLE_MESSAGE", "quotes": [_q("1-ci")]}),
         _step("SEARCH_CANDIDATES", source={"mode": "whole_message"}),
         _step("SEARCH_CANDIDATES"),
+        # A model plan can never use a SERVER-only argument shape.
+        _step("REFINE_RESULTS", limit=3),
     ],
     ids=lambda step: json.dumps(step["args"])[:40],
 )
 def test_invalid_arguments_reject_the_whole_plan(step: dict) -> None:
     spy = _SpyExecutors()
-    goal = "CANDIDATE_SEARCH"
     result = validate_plan(
-        _plan(goal, step), origin=PlanOrigin.MODEL, source_text=MESSAGE, ctx=_ctx(),
-        registry=spy.registry,
+        _plan("CANDIDATE_SEARCH", step), origin=PlanOrigin.MODEL, source_text=REF_MESSAGE,
+        ctx=_ctx(), offered=ALL_OFFERED, registry=spy.registry,
     )
     _rejected(result, PlanRejectionCode.INVALID_ARGUMENTS)
     assert spy.calls == []
 
 
 FORBIDDEN_AUTHORITY_KEYS = [
-    "tenant_id", "browser_session_id", "session_id", "result_set_id", "active_result_set_id",
-    "candidate_id", "draft_id", "job_id", "job_criteria_version_id", "scope", "scopes",
-    "confirmed", "score", "weight", "as_of_date", "evaluation_date", "search_query",
-    "candidate_name", "email", "phone",
+    "tenant_id", "browser_session_id", "session_id", "conversation_id", "result_set_id",
+    "active_result_set_id", "candidate_id", "candidate_ref", "draft_id", "task_id",
+    "clarification_id", "job_id", "job_criteria_version_id", "scope", "scopes", "confirmed",
+    "score", "weight", "as_of_date", "evaluation_date", "search_query", "filter_query",
+    "limit", "evidence_topic", "module", "function", "candidate_name", "email", "phone",
 ]
 
 
 @pytest.mark.parametrize("key", FORBIDDEN_AUTHORITY_KEYS)
 def test_authority_or_identity_fields_fail_closed_at_every_level(key: str) -> None:
     value = str(uuid.uuid4())
-    in_args = _step("GET_CANDIDATE_PROFILE", candidate_ref=1, **{key: value})
+    in_args = _step("GET_CANDIDATE_PROFILE", ref_quote=_q("1-ci"), **{key: value})
     _rejected(_validate(_plan("RESULT_FOLLOWUP", in_args)), PlanRejectionCode.INVALID_ARGUMENTS)
-    in_step = {**_step("GET_CANDIDATE_PROFILE", candidate_ref=1), key: value}
+    in_step = {**_profile("1-ci"), key: value}
     _rejected(_validate(_plan("RESULT_FOLLOWUP", in_step)), PlanRejectionCode.SHAPE_INVALID)
-    top = {**_plan("RESULT_FOLLOWUP", _step("GET_CANDIDATE_PROFILE", candidate_ref=1)),
-           key: value}
+    top = {**_plan("RESULT_FOLLOWUP", _profile("1-ci")), key: value}
     _rejected(_validate(top), PlanRejectionCode.SHAPE_INVALID)
 
 
-def test_uuid_shaped_candidate_reference_is_rejected() -> None:
-    forged = _step("GET_CANDIDATE_PROFILE", candidate_ref=str(uuid.uuid4()))
-    _rejected(_validate(_plan("RESULT_FOLLOWUP", forged)), PlanRejectionCode.INVALID_ARGUMENTS)
+def test_uuid_shaped_candidate_reference_is_never_an_ordinal() -> None:
+    forged = str(uuid.uuid4())
+    # Not in the message -> not grounded at all.
+    _rejected(
+        _validate(_plan("RESULT_FOLLOWUP", _profile(forged))),
+        PlanRejectionCode.SOURCE_NOT_GROUNDED,
+    )
+    # Even typed by HR, a UUID is outside the closed ordinal vocabulary.
+    message = f"{forged} namizədini aç"
+    _rejected(
+        _validate(_plan("RESULT_FOLLOWUP", _profile(forged)), source=message),
+        PlanRejectionCode.REFERENCE_NOT_GROUNDED,
+    )
 
 
 def test_over_long_plan_is_rejected_whole_and_step_one_never_runs() -> None:
     spy = _SpyExecutors()
-    steps = [_step("GET_CANDIDATE_PROFILE", candidate_ref=i) for i in (1, 2, 3)]
+    steps = [_profile(ref) for ref in ("1-ci", "2-ci", "3-cü")]
     four = _plan("CANDIDATE_SEARCH", SEARCH, *steps)
     result = validate_plan(
-        four, origin=PlanOrigin.MODEL, source_text=MESSAGE, ctx=_ctx(), registry=spy.registry
+        four, origin=PlanOrigin.MODEL, source_text=COMBO_MESSAGE, ctx=_ctx(),
+        offered=ALL_OFFERED, registry=spy.registry,
     )
     _rejected(result, PlanRejectionCode.PLAN_TOO_LONG)
     assert spy.calls == []
     # Effective bound is min(MAX_PLAN_STEPS, agent_max_tool_calls).
     two = _plan("CANDIDATE_SEARCH", SEARCH, steps[0])
-    _rejected(_validate(two, max_tool_calls=1), PlanRejectionCode.PLAN_TOO_LONG)
+    _rejected(
+        _validate(two, source=COMBO_MESSAGE, max_tool_calls=1), PlanRejectionCode.PLAN_TOO_LONG
+    )
 
 
 def test_duplicate_step_is_rejected() -> None:
-    profile = _step("GET_CANDIDATE_PROFILE", candidate_ref=1)
+    profile = _profile("1-ci")
     _rejected(
         _validate(_plan("RESULT_FOLLOWUP", profile, profile)), PlanRejectionCode.DUPLICATE_STEP
     )
 
 
 @pytest.mark.parametrize(
-    ("scopes", "proposal"),
+    ("scopes", "proposal", "source"),
     [
-        (frozenset(), _plan("CANDIDATE_SEARCH", SEARCH)),  # unknown role -> zero scopes
-        (frozenset({"candidates:read"}), _plan("VACANCY_ANALYSIS", _step("CREATE_JOB"))),
+        (frozenset(), _plan("CANDIDATE_SEARCH", SEARCH), MESSAGE),  # unknown role -> no scopes
+        (frozenset({"candidates:read"}), _plan("VACANCY_ANALYSIS", _step("CREATE_JOB")), "x"),
         (frozenset({"jobs:read", "candidates:read"}),
-         _plan("VACANCY_ANALYSIS", _step("RANK_JOB_CANDIDATES"))),
+         _plan("VACANCY_ANALYSIS", _step("RANK_JOB_CANDIDATES")), "x"),
     ],
 )
-def test_missing_scope_is_rejected(scopes: frozenset[str], proposal: dict) -> None:
+def test_missing_scope_is_rejected(scopes: frozenset[str], proposal: dict, source: str) -> None:
     result = _validate(
-        proposal, principal_scopes=scopes, pending_draft_live=True, confirmed_job_in_session=True
+        proposal, source=source, principal_scopes=scopes, pending_draft_live=True,
+        confirmed_job_in_session=True,
     )
     _rejected(result, PlanRejectionCode.SCOPE_MISSING)
 
 
 def test_task_type_conflict_is_rejected() -> None:
-    _rejected(_validate(_plan("RESULT_FOLLOWUP", SEARCH)), PlanRejectionCode.TASK_TYPE_CONFLICT)
+    _rejected(
+        _validate(_plan("RESULT_FOLLOWUP", SEARCH), source=MESSAGE),
+        PlanRejectionCode.TASK_TYPE_CONFLICT,
+    )
     _rejected(
         _validate(_plan("CANDIDATE_SEARCH", _step("CREATE_JOB")), pending_draft_live=True),
         PlanRejectionCode.TASK_TYPE_CONFLICT,
@@ -380,30 +462,42 @@ def test_task_type_conflict_is_rejected() -> None:
 
 
 def test_analyze_vacancy_is_server_only() -> None:
+    model = _plan("VACANCY_ANALYSIS", _step("ANALYZE_VACANCY"))
+    _rejected(_validate(model, source=MESSAGE), PlanRejectionCode.NOT_MODEL_PROPOSABLE)
     proposal = vacancy_plan(start=0, end=len(MESSAGE))
-    _rejected(_validate(proposal), PlanRejectionCode.NOT_MODEL_PROPOSABLE)
-    server = _validate(proposal, origin=PlanOrigin.SERVER)
+    # A server-shaped plan can never be submitted as a MODEL plan.
+    _rejected(_validate(proposal, source=MESSAGE), PlanRejectionCode.UNSUPPORTED_VERSION)
+    server = _validate(proposal, source=MESSAGE, origin=PlanOrigin.SERVER)
     assert isinstance(server, ExecutablePlan)
     assert server.steps[0].resolved_text == MESSAGE
     # Out-of-range or blank server spans never resolve.
     _rejected(
-        _validate(vacancy_plan(start=0, end=len(MESSAGE) + 1), origin=PlanOrigin.SERVER),
+        _validate(
+            vacancy_plan(start=0, end=len(MESSAGE) + 1), source=MESSAGE,
+            origin=PlanOrigin.SERVER,
+        ),
         PlanRejectionCode.INVALID_ARGUMENTS,
     )
 
 
+def test_server_limit_is_the_routers_parsed_count() -> None:
+    plan = _validate(result_limit_plan(3), source="ilk 3", origin=PlanOrigin.SERVER)
+    assert isinstance(plan, ExecutablePlan)
+    assert (plan.steps[0].limit, plan.steps[0].resolved_text) == (3, None)
+
+
 @pytest.mark.parametrize("topic", ["gender", "cins", "din", "marital status"])
 def test_protected_attribute_evidence_topic_is_rejected(topic: str) -> None:
-    step = _step("GET_CANDIDATE_EVIDENCE", candidate_ref=1, evidence_topic=topic)
+    message = f"1-ci namizəd üzrə {topic} sübutunu göstər"
     _rejected(
-        _validate(_plan("RESULT_FOLLOWUP", step)), PlanRejectionCode.PROHIBITED_ATTRIBUTE
+        _validate(_plan("RESULT_FOLLOWUP", _evidence("1-ci", topic)), source=message),
+        PlanRejectionCode.PROHIBITED_ATTRIBUTE,
     )
 
 
 def test_dependency_on_a_later_step_is_rejected() -> None:
-    profile = _step("GET_CANDIDATE_PROFILE", candidate_ref=1)
     _rejected(
-        _validate(_plan("CANDIDATE_SEARCH", profile, SEARCH)),
+        _validate(_plan("CANDIDATE_SEARCH", _profile("1-ci"), SEARCH), source=COMBO_MESSAGE),
         PlanRejectionCode.DEPENDENCY_INVALID,
     )
 
@@ -418,11 +512,7 @@ def test_dependency_on_a_later_step_is_rejected() -> None:
 )
 @pytest.mark.parametrize(
     "step",
-    [
-        _step("REFINE_RESULTS", limit=2),
-        _step("GET_CANDIDATE_PROFILE", candidate_ref=1),
-        _step("GET_CANDIDATE_EVIDENCE", candidate_ref=1),
-    ],
+    [LIMIT_2, _profile("1-ci"), _evidence("1-ci")],
     ids=["refine", "profile", "evidence"],
 )
 def test_missing_stale_or_expired_result_set_fails_closed(
@@ -430,14 +520,16 @@ def test_missing_stale_or_expired_result_set_fails_closed(
 ) -> None:
     spy = _SpyExecutors()
     result = validate_plan(
-        _plan("RESULT_FOLLOWUP", step), origin=PlanOrigin.MODEL, source_text=MESSAGE,
-        ctx=_ctx(pre_existing_result_set=ResultSetContext(status)), registry=spy.registry,
+        _plan("RESULT_FOLLOWUP", step), origin=PlanOrigin.MODEL, source_text=REF_MESSAGE,
+        ctx=_ctx(pre_existing_result_set=ResultSetContext(status)), offered=ALL_OFFERED,
+        registry=spy.registry,
     )
     _rejected(result, code)
     assert spy.calls == []
     # An earlier producer in the plan satisfies the dependency statically.
     produced = _validate(
         _plan("CANDIDATE_SEARCH", SEARCH, step),
+        source=COMBO_MESSAGE,
         pre_existing_result_set=ResultSetContext(status),
     )
     assert isinstance(produced, ExecutablePlan)
@@ -445,14 +537,16 @@ def test_missing_stale_or_expired_result_set_fails_closed(
 
 def test_candidate_ref_out_of_range_only_where_statically_knowable() -> None:
     known = ResultSetContext(ResultSetStatus.VALID, member_count=2)
-    beyond = _step("GET_CANDIDATE_PROFILE", candidate_ref=3)
-    _rejected(
-        _validate(_plan("RESULT_FOLLOWUP", beyond), pre_existing_result_set=known),
-        PlanRejectionCode.CANDIDATE_REF_OUT_OF_RANGE,
-    )
+    beyond = _profile("3-cü")
+    rejection = _validate(_plan("RESULT_FOLLOWUP", beyond), pre_existing_result_set=known)
+    _rejected(rejection, PlanRejectionCode.CANDIDATE_REF_OUT_OF_RANGE)
+    assert rejection.candidate_ref == 3  # the SERVER-parsed ordinal
     # Against a set produced by an earlier step: Layer 2's job, not Layer 1.
     assert isinstance(
-        _validate(_plan("CANDIDATE_SEARCH", SEARCH, beyond), pre_existing_result_set=known),
+        _validate(
+            _plan("CANDIDATE_SEARCH", SEARCH, beyond),
+            source=COMBO_MESSAGE, pre_existing_result_set=known,
+        ),
         ExecutablePlan,
     )
 
@@ -463,24 +557,23 @@ def test_member_scoped_staleness_follows_issue_86() -> None:
     one_changed = ResultSetContext(
         ResultSetStatus.VALID, member_count=3, stale_ordinals=frozenset({2})
     )
-    fine = _step("GET_CANDIDATE_PROFILE", candidate_ref=1)
-    changed = _step("GET_CANDIDATE_EVIDENCE", candidate_ref=2)
     assert isinstance(
-        _validate(_plan("RESULT_FOLLOWUP", fine), pre_existing_result_set=one_changed),
-        ExecutablePlan,
-    )
-    _rejected(
-        _validate(_plan("RESULT_FOLLOWUP", changed), pre_existing_result_set=one_changed),
-        PlanRejectionCode.RESULT_SET_STALE,
-    )
-    refine = _step("REFINE_RESULTS", limit=2)
-    assert isinstance(
-        _validate(_plan("RESULT_FOLLOWUP", refine), pre_existing_result_set=one_changed),
+        _validate(_plan("RESULT_FOLLOWUP", _profile("1-ci")), pre_existing_result_set=one_changed),
         ExecutablePlan,
     )
     _rejected(
         _validate(
-            _plan("RESULT_FOLLOWUP", refine),
+            _plan("RESULT_FOLLOWUP", _evidence("2-ci")), pre_existing_result_set=one_changed
+        ),
+        PlanRejectionCode.RESULT_SET_STALE,
+    )
+    assert isinstance(
+        _validate(_plan("RESULT_FOLLOWUP", LIMIT_2), pre_existing_result_set=one_changed),
+        ExecutablePlan,
+    )
+    _rejected(
+        _validate(
+            _plan("RESULT_FOLLOWUP", LIMIT_2),
             pre_existing_result_set=ResultSetContext(
                 ResultSetStatus.VALID, member_count=3, snapshot_stale=True
             ),
@@ -492,27 +585,22 @@ def test_member_scoped_staleness_follows_issue_86() -> None:
 def test_server_inspects_exactly_what_the_plan_consumes() -> None:
     from meyar.agent.capabilities.validator import pre_existing_result_set_requirements
 
-    profile = _step("GET_CANDIDATE_PROFILE", candidate_ref=2)
-    evidence = _step("GET_CANDIDATE_EVIDENCE", candidate_ref=5)
-    refine = _step("REFINE_RESULTS", limit=1)
-    assert pre_existing_result_set_requirements(
-        _plan("RESULT_FOLLOWUP", profile, evidence)
-    ) == (frozenset({2, 5}), False)
-    assert pre_existing_result_set_requirements(_plan("RESULT_FOLLOWUP", refine)) == (
-        frozenset(), True,
+    def needs(proposal: object, source: str = REF_MESSAGE) -> tuple[frozenset[int], bool]:
+        return pre_existing_result_set_requirements(proposal, source_text=source)
+
+    assert needs(_plan("RESULT_FOLLOWUP", _profile("2-ci"), _evidence("5-ci"))) == (
+        frozenset({2, 5}), False,
     )
+    assert needs(_plan("RESULT_FOLLOWUP", LIMIT_2)) == (frozenset(), True)
     # A step after an in-plan producer consumes THAT set, not the old one.
-    assert pre_existing_result_set_requirements(
-        _plan("CANDIDATE_SEARCH", SEARCH, profile)
-    ) == (frozenset(), False)
-    assert pre_existing_result_set_requirements(_plan("CANDIDATE_SEARCH", SEARCH)) == (
+    assert needs(_plan("CANDIDATE_SEARCH", SEARCH, _profile("2-ci")), COMBO_MESSAGE) == (
         frozenset(), False,
     )
-    # Malformed / forged input only narrows reads; never raises.
-    for junk in ("x", None, {"steps": "x"}, _plan("RESULT_FOLLOWUP", _step(
-        "GET_CANDIDATE_PROFILE", candidate_ref=str(uuid.uuid4())
-    ))):
-        assert pre_existing_result_set_requirements(junk) == (frozenset(), False)
+    assert needs(_plan("CANDIDATE_SEARCH", SEARCH), MESSAGE) == (frozenset(), False)
+    # Malformed / forged / ungrounded input only narrows reads; never raises.
+    for junk in ("x", None, {"steps": "x"}, _plan("RESULT_FOLLOWUP", _profile("9-cu")),
+                 _plan("RESULT_FOLLOWUP", _profile(str(uuid.uuid4())))):
+        assert needs(junk) == (frozenset(), False)
 
 
 @pytest.mark.parametrize(
@@ -534,21 +622,30 @@ def test_human_action_only_needs_live_target_and_becomes_an_affordance(
 
 def test_candidate_content_policy_requires_local_inference() -> None:
     _rejected(
-        _validate(_plan("CANDIDATE_SEARCH", SEARCH), candidate_content_local_only=False),
+        _validate(
+            _plan("CANDIDATE_SEARCH", SEARCH), source=MESSAGE, candidate_content_local_only=False
+        ),
         PlanRejectionCode.CANDIDATE_CONTENT_POLICY,
     )
 
 
 @pytest.mark.parametrize(
-    "proposal",
+    ("proposal", "origin"),
     [
-        {**_plan("CANDIDATE_SEARCH", SEARCH), "schema_version": "agent-plan-v1"},
-        {**_plan("CANDIDATE_SEARCH", SEARCH), "schema_version": None},
-        _plan("CANDIDATE_SEARCH", {**SEARCH, "policy_version": "cap-search-v0"}),
+        ({**_plan("CANDIDATE_SEARCH", SEARCH), "schema_version": "agent-plan-v0"},
+         PlanOrigin.MODEL),
+        ({**_plan("CANDIDATE_SEARCH", SEARCH), "schema_version": None}, PlanOrigin.MODEL),
+        (_server("CANDIDATE_SEARCH", SEARCH), PlanOrigin.MODEL),
+        ({**_server("CANDIDATE_SEARCH", SEARCH), "schema_version": AGENT_PLAN_SCHEMA_VERSION},
+         PlanOrigin.SERVER),
+        (_server("CANDIDATE_SEARCH", {**SEARCH, "policy_version": "cap-search-v0"}),
+         PlanOrigin.SERVER),
     ],
 )
-def test_unsupported_versions_are_rejected(proposal: dict) -> None:
-    _rejected(_validate(proposal), PlanRejectionCode.UNSUPPORTED_VERSION)
+def test_unsupported_versions_are_rejected(proposal: dict, origin: PlanOrigin) -> None:
+    _rejected(
+        _validate(proposal, source=MESSAGE, origin=origin), PlanRejectionCode.UNSUPPORTED_VERSION
+    )
 
 
 @pytest.mark.parametrize(
@@ -559,82 +656,78 @@ def test_unsupported_versions_are_rejected(proposal: dict) -> None:
         _plan("CANDIDATE_SEARCH"),
         _plan("UNDETERMINED", SEARCH),
         _plan("HIRE", SEARCH),
+        _plan(None, SEARCH),
         {**_plan("CANDIDATE_SEARCH"), "steps": "SEARCH_CANDIDATES"},
         _plan("CANDIDATE_SEARCH", {"capability": "SEARCH_CANDIDATES"}),
         _plan("CANDIDATE_SEARCH", {"capability": "SEARCH_CANDIDATES", "args": []}),
+        # A model may not pin a policy version, and kind/field combos are closed.
+        _plan("CANDIDATE_SEARCH", {**SEARCH, "policy_version": "cap-search-v1"}),
+        _plan("CANDIDATE_SEARCH", SEARCH, kind="CLARIFY"),
+        _plan("CANDIDATE_SEARCH", SEARCH, kind="CONVERSE"),
+        {**_plan("CANDIDATE_SEARCH", SEARCH), "clarification_code": "NEED_MORE_DETAIL"},
+        {**_plan("CANDIDATE_SEARCH", SEARCH), "response_code": "GREETING"},
     ],
 )
 def test_invalid_plan_shape_is_rejected(proposal: object) -> None:
-    _rejected(_validate(proposal), PlanRejectionCode.SHAPE_INVALID)
+    _rejected(_validate(proposal, source=MESSAGE), PlanRejectionCode.SHAPE_INVALID)
 
 
 # ---------------------------------------------------------------------------
-# Transitional adapter
+# Grounded inputs (the slice-B transitional adapter is retired in slice C)
 # ---------------------------------------------------------------------------
 
 
-def test_model_search_query_never_enters_the_adapted_plan() -> None:
-    decision = AgentDecision(
-        action=AgentActionType.SEARCH_CANDIDATES, search_query="Java bilən namizədlər"
-    )
-    proposal = plan_for_model_decision(decision, message=MESSAGE)
-    assert "Java" not in json.dumps(proposal)
-    assert proposal == search_plan()
-    plan = _validate(proposal)
-    assert isinstance(plan, ExecutablePlan)
-    assert plan.steps[0].resolved_text == MESSAGE
-
-
-def test_adapter_keeps_transitional_refine_profile_evidence_fields() -> None:
-    refine = plan_for_model_decision(
-        AgentDecision(
-            action=AgentActionType.REFINE_CANDIDATE_RESULTS, filter_query="SQL bilənlər", limit=2
+def test_validated_steps_carry_only_server_resolved_values() -> None:
+    plan = _validate(
+        _plan(
+            "CANDIDATE_SEARCH",
+            _step("SEARCH_CANDIDATES", source={"mode": "QUOTES", "quotes": [_q("Python bilən")]}),
+            _evidence("1-ci", "SQL"),
         ),
-        message=MESSAGE,
+        source="Python bilən namizədlər tap, 1-ci namizədin SQL sübutunu göstər",
     )
-    assert refine["steps"][0] == _step("REFINE_RESULTS", filter_query="SQL bilənlər", limit=2)
-    evidence = plan_for_model_decision(
-        AgentDecision(
-            action=AgentActionType.GET_CANDIDATE_EVIDENCE, candidate_ref=2, evidence_topic="SQL"
-        ),
-        message=MESSAGE,
-    )
-    assert evidence["steps"][0] == _step(
-        "GET_CANDIDATE_EVIDENCE", candidate_ref=2, evidence_topic="SQL"
-    )
-    assert result_limit_plan(3)["steps"][0] == _step("REFINE_RESULTS", limit=3)
-    # No AgentDecision can ever be adapted into CREATE_JOB or RANK.
-    produced = set()
-    for action in AgentActionType:
-        if action in (AgentActionType.FINAL_ANSWER, AgentActionType.CLARIFY):
-            continue
-        decision = {
-            AgentActionType.SEARCH_CANDIDATES: {"search_query": "x"},
-            AgentActionType.GET_CANDIDATE_PROFILE: {"candidate_ref": 1},
-            AgentActionType.GET_CANDIDATE_EVIDENCE: {"candidate_ref": 1},
-            AgentActionType.REFINE_CANDIDATE_RESULTS: {"limit": 1},
-            AgentActionType.DRAFT_JOB_CRITERIA: {},
-        }[action]
-        proposal = plan_for_model_decision(
-            AgentDecision(action=action, **decision), message=MESSAGE
-        )
-        produced.add(proposal["steps"][0]["capability"])
-    assert produced.isdisjoint({"CREATE_JOB", "RANK_JOB_CANDIDATES"})
+    assert isinstance(plan, ExecutablePlan), plan
+    search, evidence = plan.steps
+    assert search.resolved_text == "Python bilən"
+    assert (evidence.candidate_ref, evidence.topic) == (1, "SQL")
+    assert not hasattr(search, "args")
+    # The transitional AgentDecision adapter no longer exists.
+    with pytest.raises(ModuleNotFoundError):
+        __import__("meyar.agent.capabilities.adapter")
 
 
-def test_capability_inputs_carry_no_identity_fields() -> None:
+def _walk_fields(model: type) -> set[str]:  # noqa: ANN001
+    import typing
+
+    names: set[str] = set()
+    for name, info in getattr(model, "model_fields", {}).items():
+        names.add(name)
+        for arg in (info.annotation, *typing.get_args(info.annotation)):
+            for inner in (arg, *typing.get_args(arg)):
+                if hasattr(inner, "model_fields"):
+                    names |= _walk_fields(inner)
+    return names
+
+
+def test_capability_inputs_carry_no_identity_or_authority_fields() -> None:
     import re
 
-    for definition in CAPABILITY_REGISTRY.values():
-        fields = set(definition.input_schema.model_fields)
-        for nested in definition.input_schema.model_fields.values():
-            annotation = getattr(nested.annotation, "model_fields", None)
-            if annotation:
-                fields |= set(annotation)
+    from meyar.agent.capabilities.contracts import AgentPlanContext, AgentPlanProposal
+
+    for model in (
+        *(d.input_schema for d in CAPABILITY_REGISTRY.values()),
+        AgentPlanProposal,
+        AgentPlanContext,
+    ):
+        fields = _walk_fields(model)
         assert not {
             name for name in fields
-            if re.search(r"(name|email|phone|identity|_id$|tenant|session|score)", name)
-        }, (definition.name, fields)
+            if re.search(
+                r"(full_name|candidate_name|email|phone|identity|_id$|tenant|session_|score|"
+                r"weight|_date$|scope|token)",
+                name,
+            )
+        }, (model, fields)
 
 
 def test_capabilities_package_has_no_network_or_ranking_authority() -> None:
@@ -683,10 +776,10 @@ def _execution_ctx(db_session, tenant, context, llm) -> ExecutionContext:  # noq
 def _server_plan(source: str, *steps: dict, goal: str = "CANDIDATE_SEARCH") -> ExecutablePlan:
     # Fixture plans consume only what an earlier step of the plan produces.
     plan = validate_plan(
-        _plan(goal, *steps), origin=PlanOrigin.SERVER, source_text=source,
+        _server(goal, *steps), origin=PlanOrigin.SERVER, source_text=source,
         ctx=_ctx(pre_existing_result_set=ResultSetContext(ResultSetStatus.NONE)),
     )
-    assert isinstance(plan, ExecutablePlan)
+    assert isinstance(plan, ExecutablePlan), plan
     return plan
 
 
@@ -712,9 +805,7 @@ async def test_completed_multi_step_plan_activates_the_produced_result_set(
 ) -> None:
     tenant, _conversation, context, (candidate,) = await _seeded(db_session, tenant_and_user)
     ctx = _execution_ctx(db_session, tenant, context, _python_llm())
-    plan = _server_plan(
-        "Python haqqında məlumat ver", SEARCH, _step("GET_CANDIDATE_PROFILE", candidate_ref=1)
-    )
+    plan = _server_plan("Python haqqında məlumat ver, 1-ci namizəd", SEARCH, _profile("1-ci"))
     execution = await execute_plan(plan, ctx)
     assert execution.status == PlanStatus.COMPLETED
     search, profile = execution.outcomes
@@ -730,7 +821,9 @@ async def test_completed_multi_step_plan_activates_the_produced_result_set(
     ("profiles", "ref", "reason"),
     [
         ((PYTHON_PROFILE,), 5, StepFailureReason.CANDIDATE_REF_OUT_OF_RANGE),
-        ((), 1, StepFailureReason.RESULT_SET_EMPTY),
+        # D-092 scenario M: an ordinal against a zero-member produced set is
+        # out of range (slice C names it; the dependent step never runs).
+        ((), 1, StepFailureReason.CANDIDATE_REF_OUT_OF_RANGE),
     ],
     ids=["ordinal-beyond-actual-count", "zero-result-producer"],
 )
@@ -760,8 +853,9 @@ async def test_layer2_failure_keeps_produced_set_inert_and_previous_pointer_exac
         profile_calls.append(1)
         return await real_profile(*args, **kwargs)
 
-    source = "Python haqqında məlumat ver" if profiles else "NoMatch haqqında məlumat ver"
-    plan = _server_plan(source, SEARCH, _step("GET_CANDIDATE_PROFILE", candidate_ref=ref))
+    topic = "Python" if profiles else "NoMatch"
+    source = f"{topic} haqqında məlumat ver, {ref}-ci namizəd"
+    plan = _server_plan(source, SEARCH, _profile(f"{ref}-ci"))
     sets_before = await db_session.scalar(select(func.count()).select_from(AgentResultSet))
     import meyar.agent.service as service_module
 
@@ -862,8 +956,7 @@ async def test_human_action_only_never_executes_or_mutates(
             goal=next(iter(definition.allowed_task_types)),
             steps=(
                 ValidatedStep(
-                    index=0, capability=capability, policy_version=definition.policy_version,
-                    args=definition.input_schema(),
+                    index=0, capability=capability, policy_version=definition.policy_version
                 ),
             ),
         )
@@ -895,20 +988,29 @@ def _planner_spy(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     return received
 
 
-async def test_adversarial_model_search_query_never_reaches_the_planner(
+async def test_adversarial_model_search_quote_never_reaches_the_planner(
     db_session: AsyncSession, tenant_and_user, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Exact §23 example at the adapter -> validator -> executor boundary:
-    HR wrote Python, the model proposed Java."""
+    """§22 item 24 at the validator -> executor boundary: HR wrote Python, the
+    model quoted Java — SOURCE_NOT_GROUNDED, zero executions; the planner
+    never receives "Java". A WHOLE_MESSAGE plan stays bound to Python."""
     received = _planner_spy(monkeypatch)
     tenant, _conversation, context, _ = await _seeded(db_session, tenant_and_user)
-    decision = AgentDecision(
-        action=AgentActionType.SEARCH_CANDIDATES, search_query="Java bilən namizədlər"
+    spy = _SpyExecutors()
+    injected = _plan(
+        "CANDIDATE_SEARCH",
+        _step("SEARCH_CANDIDATES", source={"mode": "QUOTES", "quotes": [_q("Java bilən")]}),
     )
-    plan = validate_plan(
-        plan_for_model_decision(decision, message=MESSAGE), origin=PlanOrigin.MODEL,
-        source_text=MESSAGE,
+    rejection = validate_plan(
+        injected, origin=PlanOrigin.MODEL, source_text=MESSAGE, offered=ALL_OFFERED,
         ctx=_ctx(pre_existing_result_set=ResultSetContext(ResultSetStatus.NONE)),
+        registry=spy.registry,
+    )
+    _rejected(rejection, PlanRejectionCode.SOURCE_NOT_GROUNDED)
+    assert spy.calls == [] and received == []
+    plan = _validate(
+        _plan("CANDIDATE_SEARCH", SEARCH), source=MESSAGE,
+        pre_existing_result_set=ResultSetContext(ResultSetStatus.NONE),
     )
     assert isinstance(plan, ExecutablePlan)
     llm = _python_llm()
@@ -947,28 +1049,20 @@ async def test_model_routed_turn_searches_the_whole_message_end_to_end(
     message = "Python haqqında məlumat ver"
     llm = FakeLLMProvider(
         planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
-        agent_decisions=[
-            AgentDecision(
-                action=AgentActionType.SEARCH_CANDIDATES, search_query="Java bilən namizədlər"
-            ),
-            AgentDecision(
-                action=AgentActionType.FINAL_ANSWER,
-                response_code=AgentResponseCode.ACKNOWLEDGEMENT,
-            ),
-        ],
+        agent_plan=search_plan(),
     )
     result = await _run(
         db_session, llm, tenant_id=tenant.id, conversation=conversation,
         session_context=context, message=message,
     )
-    assert llm.agent_call_count == 2  # genuinely model-routed
+    # Genuinely model-routed, and exactly ONE proposal: no post-tool
+    # "what next" call (slice C replaced the closing FINAL_ANSWER decision).
+    assert llm.agent_call_count == 1
     assert received == [message] and dispatched == [message]
-    assert "Java" not in json.dumps([received, llm.planner_requests])
     assert [(p.origin, p.steps[0].capability) for p in plans] == [
         (PlanOrigin.MODEL, CapabilityName.SEARCH_CANDIDATES)
     ]
-    # The model closed the turn with ACKNOWLEDGEMENT after the tool, as today.
-    assert result.outcome == AgentTurnOutcome.ANSWERED
+    assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
     (tool,) = result.tool_results
     assert tool.tool_name == AgentActionType.SEARCH_CANDIDATES  # unchanged tag
     assert tool.search is not None
@@ -1008,11 +1102,12 @@ async def test_forced_search_is_unchanged(
     assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
 
 
-async def test_refine_keeps_the_transitional_model_filter_and_audits_capability(
+async def test_refine_filter_is_a_grounded_source_slice_and_audits_capability(
     db_session: AsyncSession, tenant_and_user, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Slice-C residual by design (§23): the refine filter is still today's
-    model-supplied field; only SEARCH is WHOLE_MESSAGE in slice B."""
+    """Slice C closes the slice-B residual: the refine filter is the exact
+    quoted slice of HR's message (never model text); a fabricated filter is
+    SOURCE_NOT_GROUNDED before the planner is ever called."""
     received = _planner_spy(monkeypatch)
     tenant, conversation, context, (candidate,) = await _seeded(db_session, tenant_and_user)
     await seed_active_result_set(
@@ -1020,15 +1115,21 @@ async def test_refine_keeps_the_transitional_model_filter_and_audits_capability(
         session_context=context, candidate_ids=[candidate.id],
     )
     await db_session.commit()
+    fabricated = FakeLLMProvider(agent_plan=refine_plan("Java bilənlər"))
+    rejected = await _run(
+        db_session, fabricated, tenant_id=tenant.id, conversation=conversation,
+        session_context=context, message="bunlardan Python bilənlər",
+    )
+    assert rejected.outcome == AgentTurnOutcome.CLARIFICATION_REQUESTED
+    assert received == [] and rejected.tool_results == []
+
     llm = FakeLLMProvider(
         planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
-        agent_decision=AgentDecision(
-            action=AgentActionType.REFINE_CANDIDATE_RESULTS, filter_query="Python bilənlər"
-        ),
+        agent_plan=refine_plan("Python bilənlər"),
     )
     result = await _run(
         db_session, llm, tenant_id=tenant.id, conversation=conversation,
-        session_context=context, message="bunlardan hansılar uyğundur",
+        session_context=context, message="bunlardan Python bilənlər",
     )
     assert received == ["Python bilənlər"]
     (tool,) = result.tool_results
@@ -1055,7 +1156,7 @@ async def test_model_draft_proposal_stays_rejected_and_audited(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
     tenant, conversation, context, _ = await _seeded(db_session, tenant_and_user)
-    llm = FakeLLMProvider(agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA))
+    llm = FakeLLMProvider(agent_plan=vacancy_proposal())
     result = await _run(
         db_session, llm, tenant_id=tenant.id, conversation=conversation,
         session_context=context, message="salam, necəsən?",
@@ -1074,7 +1175,7 @@ async def test_model_draft_proposal_stays_rejected_and_audited(
     ).all()
     by_type = {e.event_type: dict(e.event_metadata) for e in events}
     assert by_type["agent.plan.rejected"] == {
-        "reason_code": "NOT_MODEL_PROPOSABLE", "schema_version": CAPABILITY_PLAN_SCHEMA_VERSION,
+        "reason_code": "NOT_MODEL_PROPOSABLE", "schema_version": AGENT_PLAN_SCHEMA_VERSION,
     }
     assert "agent.entry.action_rejected" in by_type and "agent.tool.executed" not in by_type
 
@@ -1088,14 +1189,10 @@ async def test_protected_evidence_topic_is_rejected_in_turn_with_fixed_copy(
         session_context=context, candidate_ids=[candidate.id],
     )
     await db_session.commit()
-    llm = FakeLLMProvider(
-        agent_decision=AgentDecision(
-            action=AgentActionType.GET_CANDIDATE_EVIDENCE, candidate_ref=1, evidence_topic="cins"
-        )
-    )
+    llm = FakeLLMProvider(agent_plan=evidence_plan("birincinin", "cins"))
     result = await _run(
         db_session, llm, tenant_id=tenant.id, conversation=conversation,
-        session_context=context, message="birincinin sübutlarını göstər",
+        session_context=context, message="birincinin cins sübutlarını göstər",
     )
     assert result.outcome == AgentTurnOutcome.CLARIFICATION_REQUESTED
     assert result.message == agent_service.PLAN_REJECTED_COPY

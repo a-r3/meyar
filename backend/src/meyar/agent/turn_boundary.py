@@ -56,15 +56,15 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import Protocol
 
 import anyio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meyar.agent.capabilities.contracts import AgentPlanContext, AgentPlanProposal
 from meyar.agent.clarification_schemas import ClarificationAnswerProposal
 from meyar.agent.schemas import (
-    AgentDecision,
     GroundedFact,
     GroundedSelection,
     JDCriteriaDraft,
@@ -510,23 +510,13 @@ class BoundaryLLM:
             lambda: self._inner.plan_candidate_search(natural_language_request, repair=repair)
         )
 
-    async def decide_agent_action(
-        self,
-        *,
-        recent_turns: list[tuple[str, str]],
-        last_tool_result_summary: dict[str, Any] | None,
-        active_result_context_present: bool,
-        available_candidate_refs: list[int],
-        repair: bool = False,
-    ) -> tuple[AgentDecision, LLMResultProvenance]:
+    async def propose_agent_plan(
+        self, *, context: AgentPlanContext, repair: bool = False
+    ) -> tuple[AgentPlanProposal, LLMResultProvenance]:
+        # Issue #88 slice C: the plan proposal (and its one repair) runs
+        # outside any DB transaction under the shared #85 admission gate.
         return await self._boundary.around_inference(
-            lambda: self._inner.decide_agent_action(
-                recent_turns=recent_turns,
-                last_tool_result_summary=last_tool_result_summary,
-                active_result_context_present=active_result_context_present,
-                available_candidate_refs=available_candidate_refs,
-                repair=repair,
-            )
+            lambda: self._inner.propose_agent_plan(context=context, repair=repair)
         )
 
     async def select_grounded_facts(

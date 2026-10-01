@@ -8,6 +8,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from agent_plans import converse
 from conftest import BrowserTestClient as AsyncClient
 from fakes import FakeLLMProvider
 from httpx import ASGITransport
@@ -24,9 +25,6 @@ from test_ui_agent_routes import (
 
 from meyar.agent.clarification_schemas import ClarificationProposalValue
 from meyar.agent.schemas import (
-    AgentActionType,
-    AgentDecision,
-    AgentResponseCode,
     JDCriteriaDraft,
     JDDraftCriterionItem,
 )
@@ -59,9 +57,7 @@ REJECTED_COPY = "Bu sual artıq aktiv deyil."
 
 def _fake(**overrides) -> FakeLLMProvider:  # noqa: ANN003
     options: dict = {
-        "agent_decision": AgentDecision(
-            action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.GREETING
-        ),
+        "agent_plan": converse("GREETING"),
         "planner_draft": PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
         "jd_draft": JDCriteriaDraft(
             title="Backend",

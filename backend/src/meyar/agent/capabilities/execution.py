@@ -1,13 +1,14 @@
 """Layer 2 — per-step dynamic preconditions — and v1 atomic activation
-(issue #88 slice B, D-092 §11.2 / §11.3).
+(issue #88 slices B/C, D-092 §11.2 / §11.3).
 
 ``execute_plan`` runs a Layer-1-validated ``ExecutablePlan`` step by step
 through the registry executors (never a hard-coded dispatch):
 
 * before a step that consumes a ResultSet produced by an EARLIER step of
   this plan, that set must exist, belong to this tenant / BrowserSession /
-  conversation / context epoch, be unexpired and non-empty, and any ordinal
-  must fit its actual member count;
+  conversation / context epoch, be unexpired and non-empty, and any
+  server-parsed ordinal must fit its actual member count (a zero-member
+  producer means the dependent step never runs);
 * a step consuming the PRE-EXISTING active ResultSet gets no extra check
   here: the executor's own authoritative #86 validation runs exactly as
   today (Layer 2 never replaces it);
@@ -33,14 +34,12 @@ from sqlalchemy import select
 
 from meyar.agent.capabilities.contracts import (
     CapabilityName,
-    EvidenceArgs,
     ExecutablePlan,
     ExecutionContext,
     ExecutionMode,
     LiveContextReq,
     PlanExecution,
     PlanStatus,
-    ProfileArgs,
     StepFailureReason,
 )
 from meyar.agent.capabilities.executors import HumanActionOnlyError
@@ -71,7 +70,12 @@ async def check_plan_produced_result_set(
     if result_set.expires_at <= datetime.now(UTC):
         return StepFailureReason.RESULT_SET_EXPIRED
     if result_set.result_count == 0:
-        return StepFailureReason.RESULT_SET_EMPTY
+        # Scenario M: an ordinal against zero members is out of range.
+        return (
+            StepFailureReason.RESULT_SET_EMPTY
+            if candidate_ref is None
+            else StepFailureReason.CANDIDATE_REF_OUT_OF_RANGE
+        )
     if candidate_ref is not None and candidate_ref > result_set.result_count:
         return StepFailureReason.CANDIDATE_REF_OUT_OF_RANGE
     return None
@@ -114,13 +118,8 @@ async def execute_plan(
             LiveContextReq.ACTIVE_RESULT_SET in definition.live_context
             and plan_result_set_id is not None
         ):
-            args = step.args
             reason = await check_plan_produced_result_set(
-                ctx,
-                result_set_id=plan_result_set_id,
-                candidate_ref=(
-                    args.candidate_ref if isinstance(args, ProfileArgs | EvidenceArgs) else None
-                ),
+                ctx, result_set_id=plan_result_set_id, candidate_ref=step.candidate_ref
             )
             if reason is not None:
                 return await stop(position, reason)

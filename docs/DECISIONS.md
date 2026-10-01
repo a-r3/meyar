@@ -8023,3 +8023,153 @@ remains NOT PROVEN.
   calls for missing / expired / stale / out-of-range references and
   refinements, the normal path for a valid set, and that a change after
   Layer 1 is still rejected by the executor checks.
+
+## D-095 — Issue #88 slice C implementation record (agent-plan-v1 + source grounding + loop retirement)
+
+**Status: IMPLEMENTED on branch `feat/88c-agent-plan-contract` from `main` @
+`9817711c73e9d2701c0385d2bbe0c1bd3fba153e`; pending independent acceptance;
+not merged.** D-092 (§5, §8–§12, §15–§16, §19, §22 items 24–31, §23 slice C,
+§24), A1, A2, D-093 and D-094 are unchanged; this entry records only the
+slice-C implementation choices. #88 stays OPEN; #50 stays OPEN and out of
+scope. No migration (Alembic head stays `b88a2c4d6e10`); no new dependency.
+The historical CI hang root cause remains NOT PROVEN.
+
+- **Model contract `agent-plan-v1`** (`meyar.agent.capabilities.contracts`):
+  strict (`extra="forbid"`, strict JSON parsing) `AgentPlanProposal` with
+  `kind` PLAN / CLARIFY / CONVERSE, `goal`, ≤`MAX_PLAN_STEPS`=3 steps
+  (discriminated on `capability`), closed `clarification_code` (incl.
+  SEARCH_OR_VACANCY) and `response_code`. Step arguments are grounding
+  primitives only: `SourceSelection` (WHOLE_MESSAGE | 1..4 QUOTES),
+  `limit_quote`, `ref_quote`, `topic_quote`. No field exists for any id,
+  scope, token, score, weight, date, module/function name, free text, or
+  model-authored search/filter/topic/number. The kind/field combination is
+  Layer-1 SHAPE_INVALID (`validate_model_reply` for CLARIFY/CONVERSE).
+- **Provider.** `LLMProvider.propose_agent_plan(context, repair)` replaces
+  `decide_agent_action` (Ollama, BoundaryLLM, fakes, demo provider). The
+  constrained-decoding schema is per call (`agent_plan_json_schema`), built
+  from the registry-derived subset (`offered_capabilities`: model-proposable
+  ∧ scopes ⊆ principal ∧ live context satisfiable, where a result-set
+  consumer is offered when a result context exists or an offered capability
+  can produce one, and a HUMAN_ACTION_ONLY capability only with its live
+  target). It is kind- and mode-specific (PLAN needs a goal and 1..n offered
+  steps; WHOLE_MESSAGE takes no quotes). The response is still parsed
+  against the full `AgentPlanProposal`; a registered-but-not-offered name is
+  Layer-1 UNKNOWN_CAPABILITY, ANALYZE_VACANCY is NOT_MODEL_PROPOSABLE.
+  Exactly one proposal per MODEL_ROUTED turn plus at most one repair
+  (`MAX_PLAN_PROPOSAL_ATTEMPTS`=2). Still schema-invalid after the repair →
+  MALFORMED_MODEL_OUTPUT (scenario H). Infrastructure failure (timeout,
+  unavailable, transport) → `AgentPlanProviderError`: the route abandons the
+  turn (#85: no transcript, no execution, no pointer/task/clarification
+  change, no consumed clarification attempt; audit `agent.turn.abandoned`
+  `AGENT_PLAN_PROVIDER_FAILURE`, 503 not-run copy). Busy stays
+  AgentInferenceBusyError. The model call goes through `BoundaryLLM` (no DB
+  connection held; pool-probe test covers proposal + repair).
+- **Projection (§15).** `AgentPlanContext` is the entire model input: last
+  `agent_max_context_turns` (role, text), offered capability names + one-line
+  server descriptions, `max_plan_steps`, `active_result_context_present`,
+  `available_candidate_refs` (ordinals), `waiting_clarification` (always
+  null: a model plan exists only when lane A is absent or just superseded,
+  §11.1), `pending_vacancy_confirmation`. **Implementation fact:** assistant
+  entries are projected as their closed outcome code only
+  (`[assistant outcome: <code>]`), because D-045 stores the rendered headline,
+  which can name a candidate; this keeps CandidateIdentity structurally
+  absent from the model input. No conversation RAG/embeddings.
+- **Grounding (§10.2, pure `capabilities.grounding`).** Quotes resolve to
+  exactly one byte-exact occurrence of the canonical LF message (overlapping
+  occurrences count; no case/diacritic folding); offsets + SHA-256 are server
+  computed; spans are non-blank, ≤500 chars, non-overlapping, source-ordered,
+  joined by a server `"\n"`. Coverage runs `analyze_hr_text(M)`; every
+  SCORABLE / NEEDS_HUMAN_REVIEW subject (or its requirement span when no
+  subject) must overlap a grounded span of some step (search/refine source,
+  ref, limit or topic quote). **Implementation fact:** the analyzer reports
+  a coordinated subject ("Python və Java") as ONE occurrence, so the overlap
+  rule is applied to each coordinated part (closed coordinators: `, / & ;`,
+  və, and, or, ya, yaxud, həmçinin, habelə). This is strictly stronger than
+  whole-occurrence overlap (scenario E still passes) and is what makes §22
+  item 25 achievable. A PROHIBITED requirement, a PROTECTED_CUE role or a
+  denylist term anywhere in M forbids QUOTES for SEARCH/REFINE
+  (SOURCE_SELECTION_FORBIDDEN); WHOLE_MESSAGE keeps the frozen planner's
+  refusal authoritative. A grounded evidence topic that hits the denylist or
+  a protected range is PROHIBITED_ATTRIBUTE.
+- **Closed numeric parsers.** Counts reuse `count_token_value` with
+  FORCE_RESULT_LIMIT's suffixes plus `N-<case>`; exactly one count token,
+  1..`MAX_CANDIDATE_REF`, not followed by a duration unit (`3 il`, `5 years`)
+  or `neçə` (`bir neçə`). Ordinals: digits, `#N`, `N-ci/-cu` (+ case
+  endings), English `Nth` with the correct suffix, English first…tenth, and
+  Azerbaijani birinci…onuncu with a closed list of case/possessive endings;
+  exactly one ordinal token in 1..50. Everything else (`sonuncu`, `last`,
+  pronouns such as `onun`, two ordinals, 0, 51, UUIDs) is
+  REFERENCE_NOT_GROUNDED and HR gets the existing CANDIDATE_REFERENCE_REQUIRED
+  (ref) / RESULT_CONTEXT_REQUIRED (count) copy. Behaviour change by design:
+  a pronoun reference the former model resolved now fails closed (D-092 §26
+  question 4).
+- **Validation order.** As §11.1; within the §10.2 row the families run
+  SOURCE_SELECTION_FORBIDDEN → SOURCE_NOT_GROUNDED → REFERENCE_NOT_GROUNDED
+  → SOURCE_COVERAGE_INCOMPLETE (whole plan), then PROHIBITED_ATTRIBUTE.
+  DUPLICATE_STEP compares the resolved grounded values. Coverage and the
+  QUOTES prohibition apply to MODEL plans; SERVER plans
+  (`capability-plan-v1`, `capability.server_plans`: WHOLE_MESSAGE search,
+  router vacancy span, router-parsed `ServerLimitArgs`) are grounded by
+  construction. `ValidatedStep` now carries only server-resolved values
+  (`resolved_text`, `candidate_ref`, `limit`, `topic`, grounding records) —
+  executors never see model arguments. `PlanRejection` additionally carries
+  the grounded field code and the parsed ordinal (for today's not-found
+  card). `pre_existing_result_set_requirements` reads the server-parsed
+  ordinals.
+- **Execution.** One validated plan, `for step in plan.steps` (Layer 2 +
+  executor + atomic activation, unchanged from D-094). No post-tool model
+  call; the D-038 grounded synthesis still runs once for a final found
+  profile/evidence step (a rendering aid). A completed multi-step plan
+  activates only the final produced pointer; a zero-member producer before an
+  ordinal consumer is now reported as CANDIDATE_REF_OUT_OF_RANGE (scenario M;
+  `step_index` stays 0-based as in D-094). Single-step failures keep today's
+  outcomes. An affordance-only plan (CREATE_JOB with a live pending draft)
+  returns ANSWERED with fixed copy pointing at the existing CSRF form; no
+  lane-B change. RANK_JOB_CANDIDATES is never offered (no session-confirmed
+  job lookup in the turn; `confirmed_job_in_session=False`), so it fails
+  closed. A model ANALYZE_VACANCY step or CLARIFY(SEARCH_OR_VACANCY) becomes
+  the resumable SEARCH_OR_VACANCY clarification when the message is
+  requirement-shaped, else fixed NEED_MORE_DETAIL copy (§6.1); never a draft.
+- **Retired:** `decide_agent_action`, `AgentDecision`, `TOOL_ACTIONS`, the
+  transitional adapter module, the MODEL_ROUTED `while True` loop,
+  `searched_queries`, `_summarize_tool_result`, and the FINAL_ANSWER /
+  CLARIFY members of `AgentActionType`. `AgentActionType` remains only as the
+  persisted `AgentToolResult.tool_name` / audit `tool_name` identifier
+  (transcripts and audit history store these strings); it is in no model
+  output schema. TOOL_CALL_LIMIT_EXCEEDED / AGENT_PROVIDER_FAILURE stay as
+  outcome values so persisted history renders; neither is produced as a new
+  committed turn by the agent service any more.
+- **Audit.** `agent.plan.validated` keeps its four closed keys;
+  `schema_version` is `agent-plan-v1` for model plans and
+  `capability-plan-v1` for server plans; `plan_sha256` is over origin, goal,
+  capabilities, policy versions, parsed integers and grounding records
+  (field, mode, span offsets, span SHA-256) — no text, quote, id or identity.
+  `agent.plan.rejected` / `agent.plan.incomplete` unchanged in shape.
+- **Prompt.** `AGENT_PROMPT_VERSION = agent-plan-prompt-v1`: closed schema,
+  offered capabilities, quotation mechanics, step bound, no ids/scores/hiring
+  decisions, compact closed examples; no chain-of-thought, no free-text
+  answer.
+- **Tests.** New `tests/test_issue88_slice_c_plan_contract.py` (§22 items
+  24–31, prompt injection, per-call subset, projection, provenance), plus
+  no-exfiltration and pool-probe extensions. Existing suites that scripted
+  model-authored `AgentDecision` values were rewritten to `agent-plan-v1`:
+  each scripted ordinal/count/filter/topic is now an exact quote of the
+  test's own message that the server parses (messages that named no ordinal
+  were given one, since inventing it is exactly what slice C forbids); tests
+  of the retired post-tool loop (loop bound, identical-search dedup, D-036
+  follow-up-framing failures) now assert the stronger replacements
+  (PLAN_TOO_LONG / DUPLICATE_STEP with zero executors, exactly one proposal
+  per turn, provider failure abandons the turn).
+- **Real-Ollama smoke (not the Target-Mac benchmark).** Dev machine,
+  synthetic HR text, loopback-only guard, `propose_agent_plan` + Layer 1:
+  `qwen3:0.6b` (the configured default) and `qwen3:1.7b`. Before the
+  kind/mode-specific per-call schema both models produced only fail-closed
+  rejections (SHAPE_INVALID / MALFORMED). After it: `qwen3:1.7b` 7/7 strict
+  parses, 6/7 Layer-1-valid and semantically right (greeting, search,
+  refine quote, profile ref, evidence ref+topic, hiring CLARIFY); the
+  two-step search+profile request was mis-planned as a refinement and
+  failed closed (RESULT_CONTEXT_REQUIRED).
+  `qwen3:0.6b` 7/7 strict parses, 3/7 valid; the rest fail closed. Every
+  proposal used only offered capabilities, no output contained a UUID, and
+  zero non-loopback requests were attempted. Model quality/selection remains
+  #36; no fake production AI mode exists.

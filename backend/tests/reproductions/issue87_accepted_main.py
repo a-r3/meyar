@@ -4,14 +4,12 @@ import re
 import uuid
 
 import pytest
+from agent_plans import converse, vacancy_proposal
 from fakes import FakeLLMProvider
 from sqlalchemy import select
 from test_demo_human_login_e2e import _seed
 
 from meyar.agent.schemas import (
-    AgentActionType,
-    AgentDecision,
-    AgentResponseCode,
     JDCriteriaDraft,
     JDDraftCriterionItem,
 )
@@ -104,11 +102,9 @@ async def test_f_crlf_browser_valid_4000_rejected(client, tenant_and_user, local
 async def test_gh_completed_post_reexecutes(client, db_session, tenant_and_user, local_ui, jd):
     _, user, password, _ = tenant_and_user
     fake = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA)
+        agent_plan=vacancy_proposal()
         if jd
-        else AgentDecision(
-            action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
-        ),
+        else converse("ACKNOWLEDGEMENT"),
         jd_draft=JDCriteriaDraft(
             title="Backend",
             must_have=[

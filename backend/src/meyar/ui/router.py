@@ -838,6 +838,7 @@ async def agent_turn(
         ClarificationRejectedError,
     )
     from meyar.agent.service import (
+        AgentPlanProviderError,
         ClarificationButton,
         apply_agent_turn_commit,
         execute_agent_turn,
@@ -1102,6 +1103,19 @@ async def agent_turn(
         await abandon_reserved_turn(db, reservation, submission_id=submission_id)
         await _audit_agent_turn_not_committed(
             db, ctx, "agent.turn.abandoned", "CLARIFICATION_CLASSIFIER_FAILURE"
+        )
+        failure = (
+            "AGENT_PROVIDER_FAILURE",
+            "MEYAR AI xidməti hazırda əlçatan deyil. Bir qədər sonra yenidən cəhd edin.",
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    except AgentPlanProviderError:
+        # Issue #88 slice C (#85): the one plan-proposal call (or its
+        # repair) failed on infrastructure — the turn is abandoned: no
+        # transcript, no plan execution, no task/pointer/clarification change.
+        await abandon_reserved_turn(db, reservation, submission_id=submission_id)
+        await _audit_agent_turn_not_committed(
+            db, ctx, "agent.turn.abandoned", "AGENT_PLAN_PROVIDER_FAILURE"
         )
         failure = (
             "AGENT_PROVIDER_FAILURE",
