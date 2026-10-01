@@ -1,6 +1,9 @@
 # Agent Core v2 — task, dialogue and capability architecture (issue #88)
 
-**Status: ACCEPTED DESIGN / IMPLEMENTATION NOT STARTED.**
+**Status: ACCEPTED DESIGN; slice A IMPLEMENTED and technically accepted,
+owner merge pending (see "Current implementation status" below).**
+
+Historical status at design acceptance (kept as recorded then):
 - This design was independently reviewed and accepted, at design head
   `dfc7636b1c0b788024c28d17f2b913784b5a897c`.
 - **Implementation has NOT started.** Nothing in this document exists in
@@ -13,8 +16,9 @@ Decision record: D-092 (`docs/DECISIONS.md`). Audited baseline: `main` @
 `fb03477a4b4c3ec4698b7294f2589fbbbeafa4e7` (#84, #85, #86, #87 closed).
 Alembic head at audit time: `a87d4c6e2b19`.
 
-**Amendment A1 (ACCEPTED AMENDMENT / IMPLEMENTATION NOT STARTED; owner-selected
-"Variant 1"):**
+**Amendment A1 (ACCEPTED AMENDMENT; owner-selected "Variant 1"; implemented
+by slice A — see "Current implementation status" below). Status at
+acceptance (historical):**
 - A1 was independently reviewed and accepted.
 - Slice A implementation has NOT started. #88 remains OPEN, and #50 remains
   OPEN and out of scope.
@@ -33,8 +37,9 @@ reviewing D1 would stale an open lane-A clarification. That contradicts
 §4.4 rule 4. No other part of the accepted architecture changes.
 
 
-**Amendment A2 (ACCEPTED AMENDMENT / IMPLEMENTATION NOT STARTED;
-owner-specified exchange-chain rule):**
+**Amendment A2 (ACCEPTED AMENDMENT; owner-specified exchange-chain rule;
+implemented by slice A — see "Current implementation status" below). Status
+at acceptance (historical):**
 - A2 was independently reviewed and accepted.
 - Slice A implementation remains PAUSED. #88 remains OPEN, and #50 remains
   OPEN and out of scope.
@@ -60,9 +65,13 @@ A2 also separates three cases (§6.4):
 - classifier infrastructure failure abandons the turn and consumes nothing;
 - a stale or foreign button is a rejected request, not a state transition.
 
-A2 is not implemented yet (see its status above).
-
-**Slice A implementation status:** implemented on branch `feat/88a-resumable-clarification-a2` (D-093, PROPOSED), pending independent acceptance and owner merge. This design text is unchanged.
+**Current implementation status.** A2 (with A1 and the D-092 slice A
+scope) is implemented by issue #88 Slice A; implementation record D-093.
+The corrected Slice-A code was technically accepted by independent review
+at `195387bddaf7f1f4b6d11aa3c2dd56e070478bf6`. PR #98 is not merged yet;
+owner Squash-and-merge is pending. Slices B and C have not started. #88
+remains OPEN; #50 remains OPEN and out of scope. The design text in this
+document is unchanged.
 ---
 
 ## 0. Product contract
