@@ -455,14 +455,64 @@ def test_candidate_ref_out_of_range_only_where_statically_knowable() -> None:
         _validate(_plan("CANDIDATE_SEARCH", SEARCH, beyond), pre_existing_result_set=known),
         ExecutablePlan,
     )
-    # UNVALIDATED (slice-B transitional adapter): the executor decides.
+
+
+def test_member_scoped_staleness_follows_issue_86() -> None:
+    """Only the REFERENCED member's staleness rejects a reference; a whole-
+    snapshot consumer (refinement) is stale if any member changed."""
+    one_changed = ResultSetContext(
+        ResultSetStatus.VALID, member_count=3, stale_ordinals=frozenset({2})
+    )
+    fine = _step("GET_CANDIDATE_PROFILE", candidate_ref=1)
+    changed = _step("GET_CANDIDATE_EVIDENCE", candidate_ref=2)
     assert isinstance(
-        _validate(
-            _plan("RESULT_FOLLOWUP", beyond),
-            pre_existing_result_set=ResultSetContext(ResultSetStatus.UNVALIDATED),
-        ),
+        _validate(_plan("RESULT_FOLLOWUP", fine), pre_existing_result_set=one_changed),
         ExecutablePlan,
     )
+    _rejected(
+        _validate(_plan("RESULT_FOLLOWUP", changed), pre_existing_result_set=one_changed),
+        PlanRejectionCode.RESULT_SET_STALE,
+    )
+    refine = _step("REFINE_RESULTS", limit=2)
+    assert isinstance(
+        _validate(_plan("RESULT_FOLLOWUP", refine), pre_existing_result_set=one_changed),
+        ExecutablePlan,
+    )
+    _rejected(
+        _validate(
+            _plan("RESULT_FOLLOWUP", refine),
+            pre_existing_result_set=ResultSetContext(
+                ResultSetStatus.VALID, member_count=3, snapshot_stale=True
+            ),
+        ),
+        PlanRejectionCode.RESULT_SET_STALE,
+    )
+
+
+def test_server_inspects_exactly_what_the_plan_consumes() -> None:
+    from meyar.agent.capabilities.validator import pre_existing_result_set_requirements
+
+    profile = _step("GET_CANDIDATE_PROFILE", candidate_ref=2)
+    evidence = _step("GET_CANDIDATE_EVIDENCE", candidate_ref=5)
+    refine = _step("REFINE_RESULTS", limit=1)
+    assert pre_existing_result_set_requirements(
+        _plan("RESULT_FOLLOWUP", profile, evidence)
+    ) == (frozenset({2, 5}), False)
+    assert pre_existing_result_set_requirements(_plan("RESULT_FOLLOWUP", refine)) == (
+        frozenset(), True,
+    )
+    # A step after an in-plan producer consumes THAT set, not the old one.
+    assert pre_existing_result_set_requirements(
+        _plan("CANDIDATE_SEARCH", SEARCH, profile)
+    ) == (frozenset(), False)
+    assert pre_existing_result_set_requirements(_plan("CANDIDATE_SEARCH", SEARCH)) == (
+        frozenset(), False,
+    )
+    # Malformed / forged input only narrows reads; never raises.
+    for junk in ("x", None, {"steps": "x"}, _plan("RESULT_FOLLOWUP", _step(
+        "GET_CANDIDATE_PROFILE", candidate_ref=str(uuid.uuid4())
+    ))):
+        assert pre_existing_result_set_requirements(junk) == (frozenset(), False)
 
 
 @pytest.mark.parametrize(
@@ -631,9 +681,10 @@ def _execution_ctx(db_session, tenant, context, llm) -> ExecutionContext:  # noq
 
 
 def _server_plan(source: str, *steps: dict, goal: str = "CANDIDATE_SEARCH") -> ExecutablePlan:
+    # Fixture plans consume only what an earlier step of the plan produces.
     plan = validate_plan(
         _plan(goal, *steps), origin=PlanOrigin.SERVER, source_text=source,
-        ctx=_ctx(pre_existing_result_set=ResultSetContext(ResultSetStatus.UNVALIDATED)),
+        ctx=_ctx(pre_existing_result_set=ResultSetContext(ResultSetStatus.NONE)),
     )
     assert isinstance(plan, ExecutablePlan)
     return plan
@@ -786,10 +837,12 @@ async def test_single_step_failure_is_its_own_truthful_outcome(
         session_context=context, candidate_ids=[candidate.id],
     )
     await db_session.commit()
-    ctx = _execution_ctx(db_session, tenant, context, _python_llm())
-    plan = _server_plan(
-        MESSAGE, _step("GET_CANDIDATE_PROFILE", candidate_ref=9), goal="RESULT_FOLLOWUP"
+    # An ungrounded planner draft makes the single search non-executable.
+    llm = FakeLLMProvider(
+        planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Kotlin"]))
     )
+    ctx = _execution_ctx(db_session, tenant, context, llm)
+    plan = _server_plan("Python haqqında məlumat ver", SEARCH)
     execution = await execute_plan(plan, ctx)
     assert execution.status == PlanStatus.STEP_FAILED
     assert ctx.session_context.active_result_set_id == previous.id
@@ -855,7 +908,7 @@ async def test_adversarial_model_search_query_never_reaches_the_planner(
     plan = validate_plan(
         plan_for_model_decision(decision, message=MESSAGE), origin=PlanOrigin.MODEL,
         source_text=MESSAGE,
-        ctx=_ctx(pre_existing_result_set=ResultSetContext(ResultSetStatus.UNVALIDATED)),
+        ctx=_ctx(pre_existing_result_set=ResultSetContext(ResultSetStatus.NONE)),
     )
     assert isinstance(plan, ExecutablePlan)
     llm = _python_llm()

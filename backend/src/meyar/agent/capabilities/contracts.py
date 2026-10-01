@@ -197,20 +197,29 @@ class HumanActionAffordance(BaseModel):
 
 
 class ResultSetStatus(StrEnum):
+    """D-092 §11.1: the pre-existing active ResultSet as read (read-only) by
+    the server just before validation."""
+
     NONE = "NONE"
     VALID = "VALID"
     STALE = "STALE"
     EXPIRED = "EXPIRED"
-    # Not read for this plan: the executor's own authoritative check (#86)
-    # decides, as today. Used by slice B's one-step transitional adapter so
-    # each single step keeps its exact truthful outcome (§11.3); see D-094.
-    UNVALIDATED = "UNVALIDATED"
 
 
 @dataclass(frozen=True)
 class ResultSetContext:
+    """Issue #86 makes staleness MEMBER-scoped, so STALE is judged for what
+    a step consumes: ``stale_ordinals`` are the referenced members whose own
+    snapshot is no longer authoritative (an unrelated changed member never
+    affects a reference), and ``snapshot_stale`` covers a whole-snapshot
+    consumer (refinement). Set-level ``STALE`` is an unsupported snapshot
+    policy. The server inspects exactly the consumed ordinals / snapshot
+    (``pre_existing_result_set_requirements``)."""
+
     status: ResultSetStatus
     member_count: int | None = None
+    stale_ordinals: frozenset[int] = frozenset()
+    snapshot_stale: bool = False
 
 
 @dataclass(frozen=True)

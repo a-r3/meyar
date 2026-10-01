@@ -10,6 +10,10 @@ seven registry definitions wrapping the unchanged `_dispatch_*` functions,
 the pure Layer-1 `validate_plan`, the Layer-2 hook with atomic activation
 (PLAN_INCOMPLETE), CREATE_JOB/RANK as HUMAN_ACTION_ONLY, the transitional
 one-step adapter, and the WHOLE_MESSAGE grounding of model-routed searches.
+Independent-review correction: Layer 1 now receives a real read-only
+ValidationContext (pre-existing ResultSet inspected member-scoped per #86,
+zero executors on a ResultSet-family rejection with today's outward
+outcome), and every validated plan emits privacy-safe `agent.plan.validated`.
 No migration (head `b88a2c4d6e10`). Slice C has NOT started; #88 remains
 OPEN; #50 remains OPEN and out of scope. Independent acceptance and owner
 merge are pending. The historical CI hang root cause remains NOT PROVEN.

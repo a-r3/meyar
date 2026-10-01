@@ -44,6 +44,7 @@ from meyar.agent.capabilities.contracts import (
 )
 from meyar.agent.capabilities.registry import CAPABILITY_REGISTRY, CapabilityDefinition
 from meyar.agent.clarification_schemas import TaskType
+from meyar.agent.schemas import MAX_CANDIDATE_REF
 from meyar.schemas.criteria import find_prohibited_term
 
 _PROPOSAL_KEYS = frozenset({"schema_version", "goal", "steps"})
@@ -74,6 +75,45 @@ def _resolve_text(args: BaseModel, source_text: str) -> str | None:
         span = source_text[start:end]
         return span if span.strip() else ""
     return None
+
+
+def pre_existing_result_set_requirements(
+    proposal: object,
+    *,
+    registry: Mapping[CapabilityName, CapabilityDefinition] = CAPABILITY_REGISTRY,
+) -> tuple[frozenset[int], bool]:
+    """Which parts of the PRE-EXISTING ResultSet a (still unvalidated) plan
+    would consume — the ordinals of member-scoped references and whether a
+    whole-snapshot consumer (refinement) is present — so the server's
+    read-only Layer-1 inspection checks exactly those (#86). Tolerant of a
+    malformed proposal: it only narrows bounded DB reads; ``validate_plan``
+    still rejects the proposal itself."""
+    ordinals: set[int] = set()
+    whole = False
+    steps = proposal.get("steps") if isinstance(proposal, Mapping) else None
+    if not isinstance(steps, Sequence) or isinstance(steps, str | bytes):
+        return frozenset(), False
+    produced = False
+    for raw in steps:
+        if not isinstance(raw, Mapping):
+            continue
+        name = raw.get("capability")
+        if not isinstance(name, str) or name not in CapabilityName.__members__:
+            continue
+        definition = registry.get(CapabilityName(name))
+        if definition is None:
+            continue
+        if LiveContextReq.ACTIVE_RESULT_SET in definition.live_context and not produced:
+            args = raw.get("args")
+            if "candidate_ref" in definition.input_schema.model_fields:
+                ref = args.get("candidate_ref") if isinstance(args, Mapping) else None
+                if type(ref) is int and 1 <= ref <= MAX_CANDIDATE_REF:
+                    ordinals.add(ref)
+            else:
+                whole = True
+        if LiveContextReq.ACTIVE_RESULT_SET in definition.produces:
+            produced = True
+    return frozenset(ordinals), whole
 
 
 def validate_plan(
@@ -201,24 +241,36 @@ def validate_plan(
         )
 
     # -- RESULT_CONTEXT_REQUIRED / RESULT_SET_STALE / RESULT_SET_EXPIRED -----
+    # Member-scoped (#86): a reference is stale only if ITS member changed;
+    # a refinement only if any member of its whole source snapshot changed.
     pre_existing = ctx.pre_existing_result_set
-    for index, definition in enumerate(definitions):
-        if consumes_pre_existing(index, definition):
-            code = _PRE_EXISTING_REJECTION.get(pre_existing.status)
-            if code is not None:
-                return _reject(code, index)
+    for index, (definition, (step_args, _resolved)) in enumerate(
+        zip(definitions, parsed, strict=True)
+    ):
+        if not consumes_pre_existing(index, definition):
+            continue
+        code = _PRE_EXISTING_REJECTION.get(pre_existing.status)
+        if code is not None:
+            return _reject(code, index)
+        stale = (
+            step_args.candidate_ref in pre_existing.stale_ordinals
+            if isinstance(step_args, ProfileArgs | EvidenceArgs)
+            else pre_existing.snapshot_stale
+        )
+        if stale:
+            return _reject(PlanRejectionCode.RESULT_SET_STALE, index)
 
     # -- CANDIDATE_REF_OUT_OF_RANGE (pre-existing set of known size only) ----
-    if pre_existing.status == ResultSetStatus.VALID and pre_existing.member_count is not None:
-        for index, (definition, (step_args, _resolved)) in enumerate(
-            zip(definitions, parsed, strict=True)
+    for index, (definition, (step_args, _resolved)) in enumerate(
+        zip(definitions, parsed, strict=True)
+    ):
+        if (
+            consumes_pre_existing(index, definition)
+            and isinstance(step_args, ProfileArgs | EvidenceArgs)
+            and pre_existing.member_count is not None
+            and step_args.candidate_ref > pre_existing.member_count
         ):
-            if (
-                consumes_pre_existing(index, definition)
-                and isinstance(step_args, ProfileArgs | EvidenceArgs)
-                and step_args.candidate_ref > pre_existing.member_count
-            ):
-                return _reject(PlanRejectionCode.CANDIDATE_REF_OUT_OF_RANGE, index)
+            return _reject(PlanRejectionCode.CANDIDATE_REF_OUT_OF_RANGE, index)
 
     # -- CONFIRMATION_REQUIRED (HUMAN_ACTION_ONLY -> affordance, never run) --
     live_targets = {

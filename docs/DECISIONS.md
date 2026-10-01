@@ -7957,11 +7957,32 @@ started; #88 stays OPEN; #50 stays OPEN and out of scope. No migration
   rejection audits `agent.plan.rejected(reason_code, schema_version)` and
   shows fixed copy; a model DRAFT proposal is NOT_MODEL_PROPOSABLE and keeps
   today's `agent.entry.action_rejected` clarification.
-- **Pre-existing ResultSet status for adapted plans.** The transitional
-  one-step plans pass `UNVALIDATED`, so each step keeps its exact truthful
-  #86 executor outcome (RESULT_SET_STALE etc., found=False card, audit) as
-  §11.3 requires for single-step plans. The Layer-1 ResultSet family is
-  fully implemented and tested for populated contexts (slice C model plans).
+- **Pre-existing ResultSet in the real ValidationContext (§11.1).** Before
+  every validation the server builds the context from read-only, audit-free
+  authority: `inspect_active_result_set` runs the same structural check as
+  the executors and the shared `validate_member_snapshots`, scoped to
+  exactly what the plan consumes (`pre_existing_result_set_requirements`):
+  the referenced ordinals of PROFILE/EVIDENCE, the whole snapshot for
+  REFINE. This is compatible with §11.1 and #86 without amendment: §11.1
+  names the statuses (none / valid with n / STALE / EXPIRED); #86 fixes
+  STALE's granularity — a reference is stale only if ITS member changed (an
+  unrelated changed member never invalidates it), a refinement if any member
+  of its source snapshot changed; set-level STALE is an unsupported snapshot
+  policy. A ResultSet-family Layer-1 rejection of a one-step plan keeps
+  today's truthful outward behaviour (§11.3): the same outcome, message,
+  not-found card and `agent.result_set.reference_rejected` /
+  `refine_rejected` audit, with ZERO executors run (no `agent.tool.executed`
+  — nothing executed). The executors' own checks are unchanged and still run
+  as Layer-2 / TOCTOU defense in depth.
+- **Plan provenance (§19.2).** Every successfully validated plan attempt
+  (server-built or model-adapted) emits `agent.plan.validated` with exactly
+  `plan_sha256`, `step_count`, `capabilities` (closed codes) and
+  `schema_version`. `plan_sha256` is SHA-256 over the canonical JSON of the
+  validated plan (schema/policy versions, origin, goal, capability codes,
+  bounded integers, affordance targets) in which every text value — the
+  resolved source and the transitional filter/topic — is replaced by its
+  SHA-256 and length; the canonical form is never persisted. A Layer-1
+  rejection emits `agent.plan.rejected` and no `agent.plan.validated`.
 - **Layer 2 + atomic activation.** Before a step consuming a ResultSet
   produced earlier in the plan: exists, same tenant / BrowserSession /
   conversation / context epoch, unexpired, non-empty, ordinal ≤ actual
@@ -7972,8 +7993,7 @@ started; #88 stays OPEN; #50 stays OPEN and out of scope. No migration
   `agent.plan.incomplete(step_index, reason_code)`, no active result cards);
   single-step failure stays the step's own outcome. No model multi-step
   planning exists in slice B: multi-step execution is exercised by
-  server-built test plans only. `agent.plan.validated` is not emitted in
-  slice B (one-step adapted plans are already audited per execution).
+  server-built test plans only.
 - **HUMAN_ACTION_ONLY.** CREATE_JOB / RANK_JOB_CANDIDATES are registry
   entries with `NoArgs`; with a live target they become id-free affordances,
   without one CONFIRMATION_REQUIRED. Their executor fails closed
@@ -7986,3 +8006,11 @@ started; #88 stays OPEN; #50 stays OPEN and out of scope. No migration
   rephrased-search presentation test asserts one audited search; the #85
   hybrid-embedding tests post a real hybrid search message; the #85 orphan
   ResultSet test plans the HR message through the gated local planner.
+- **Independent-review correction (PR #100, reviewed head `9746b84`).** The
+  first implementation passed a hard-coded transitional ResultSet status to
+  Layer 1 and did not emit `agent.plan.validated`; both were corrected as
+  recorded above (real read-only context; §19.2 provenance). Real
+  `execute_agent_turn` / `POST /ui/agent` regressions prove zero executor
+  calls for missing / expired / stale / out-of-range references and
+  refinements, the normal path for a valid set, and that a change after
+  Layer 1 is still rejected by the executor checks.

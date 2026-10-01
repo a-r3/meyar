@@ -21,6 +21,7 @@ which candidate a tool call touches."""
 import hashlib
 import re
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 
@@ -59,6 +60,8 @@ from meyar.agent.capabilities.adapter import (
     search_plan,
     vacancy_plan,
 )
+from meyar.agent.capabilities.provenance import plan_validated_metadata
+from meyar.agent.capabilities.validator import pre_existing_result_set_requirements
 from meyar.agent.clarification_schemas import (
     ALLOWED_ANSWERS,
     MAX_CLARIFICATION_ATTEMPTS,
@@ -194,10 +197,14 @@ from meyar.services.agent_conversation_repo import (
 )
 from meyar.services.agent_result_set_repo import (
     RefinementResult,
+    ResultSetInspection,
     ResultSetResolutionFailure,
     active_result_set_size,
     create_result_set_from_refinement,
     create_result_set_from_search,
+    inspect_active_result_set,
+    record_reference_rejection,
+    record_refinement_rejection,
     resolve_active_candidate_ref,
     validate_active_result_set_for_refinement,
 )
@@ -2373,6 +2380,128 @@ async def _resolve_dialogue_state(
     return unclear()
 
 
+_STATUS_BY_STRUCTURAL_FAILURE = {
+    ResultSetResolutionFailure.EXPIRED: ResultSetStatus.EXPIRED,
+    ResultSetResolutionFailure.UNSUPPORTED_SNAPSHOT_POLICY: ResultSetStatus.STALE,
+}
+_RESULT_SET_REJECTIONS = frozenset(
+    {
+        PlanRejectionCode.RESULT_CONTEXT_REQUIRED,
+        PlanRejectionCode.RESULT_SET_STALE,
+        PlanRejectionCode.RESULT_SET_EXPIRED,
+        PlanRejectionCode.CANDIDATE_REF_OUT_OF_RANGE,
+    }
+)
+
+
+async def _build_validation_context(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    session_context: TurnSessionState,
+    proposal: object,
+    principal_scopes: frozenset[str],
+    max_tool_calls: int,
+) -> tuple[ValidationContext, ResultSetInspection]:
+    """Issue #88 slice B: the Layer-1 ValidationContext from read-only,
+    audit-free server authority. The pre-existing ResultSet is inspected for
+    exactly the ordinals / whole snapshot the plan consumes (#86)."""
+    ordinals, whole_snapshot = pre_existing_result_set_requirements(proposal)
+    inspection = await inspect_active_result_set(
+        db,
+        tenant_id=tenant_id,
+        browser_session_id=session_context.browser_session_id,
+        session_context=session_context,
+        ordinals=ordinals,
+        whole_snapshot=whole_snapshot,
+    )
+    if inspection.failure is None:
+        result_set = ResultSetContext(
+            ResultSetStatus.VALID,
+            member_count=inspection.member_count,
+            stale_ordinals=inspection.stale_ordinals,
+            snapshot_stale=inspection.snapshot_stale,
+        )
+    else:
+        result_set = ResultSetContext(
+            _STATUS_BY_STRUCTURAL_FAILURE.get(inspection.failure, ResultSetStatus.NONE)
+        )
+    return (
+        ValidationContext(
+            principal_scopes=principal_scopes,
+            pre_existing_result_set=result_set,
+            pending_draft_live=session_context.active_pending_draft_id is not None,
+            # No in-turn capability consumes it in slice B: RANK proposals
+            # (none can be adapted) fail closed as CONFIRMATION_REQUIRED.
+            confirmed_job_in_session=False,
+            max_tool_calls=max_tool_calls,
+        ),
+        inspection,
+    )
+
+
+async def _result_set_rejection_result(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    session_context: TurnSessionState,
+    proposal: object,
+    rejection: PlanRejection,
+    inspection: ResultSetInspection,
+    tool_results: list[AgentToolResult],
+    tool_call_count: int,
+    provenance: LLMResultProvenance,
+) -> AgentTurnResult | None:
+    """A Layer-1 ResultSet-family rejection of a one-step plan keeps TODAY's
+    truthful outward behaviour — the same outcome, message, not-found card
+    and ``agent.result_set.reference_rejected``/``refine_rejected`` audit the
+    executor's own check produced — while ZERO executors run. ``None`` for
+    any other rejection."""
+    if rejection.code not in _RESULT_SET_REJECTIONS or rejection.step_index is None:
+        return None
+    assert isinstance(proposal, Mapping)
+    raw_step = proposal["steps"][rejection.step_index]
+    capability = CapabilityName(raw_step["capability"])
+    if rejection.code == PlanRejectionCode.CANDIDATE_REF_OUT_OF_RANGE:
+        failure = ResultSetResolutionFailure.ORDINAL_OUT_OF_RANGE
+    elif inspection.failure is not None:
+        failure = inspection.failure
+    else:
+        failure = ResultSetResolutionFailure.STALE
+    if capability == CapabilityName.REFINE_RESULTS:
+        await record_refinement_rejection(
+            db, tenant_id=tenant_id, session_context=session_context, failure=failure
+        )
+        outcome, message = _outcome_and_message_for_refinement_failure(failure)
+        return _build_result(
+            outcome=outcome, message=message, tool_results=tool_results,
+            tool_call_count=tool_call_count, provenance=provenance,
+        )
+    candidate_ref = raw_step["args"]["candidate_ref"]
+    await record_reference_rejection(
+        db, tenant_id=tenant_id, session_context=session_context, failure=failure,
+        candidate_ref=candidate_ref,
+    )
+    card = (
+        AgentToolResult(
+            tool_name=AgentActionType.GET_CANDIDATE_PROFILE,
+            profile=AgentProfileToolResult(candidate_ref=candidate_ref, found=False),
+        )
+        if capability == CapabilityName.GET_CANDIDATE_PROFILE
+        else AgentToolResult(
+            tool_name=AgentActionType.GET_CANDIDATE_EVIDENCE,
+            evidence=AgentEvidenceToolResult(candidate_ref=candidate_ref, found=False),
+        )
+    )
+    return _build_result(
+        outcome=_outcome_for_resolution_failure(failure),
+        message=None,
+        tool_results=[*tool_results, card],
+        tool_call_count=tool_call_count,
+        provenance=provenance,
+    )
+
+
 async def execute_agent_turn(
     db: AsyncSession,
     llm: LLMProvider,
@@ -2692,19 +2821,20 @@ async def execute_agent_turn(
             source_text = user_message
             origin = PlanOrigin.MODEL
 
+        # D-092 §11.1: the ValidationContext comes from READ-ONLY server
+        # authority immediately before validation — including the
+        # pre-existing ResultSet, inspected (audit-free) for exactly what
+        # this plan consumes (#86 member-scoped authority).
+        validation_context, inspection = await _build_validation_context(
+            db,
+            tenant_id=tenant_id,
+            session_context=session_context,
+            proposal=proposal,
+            principal_scopes=principal_scopes,
+            max_tool_calls=max_tool_calls,
+        )
         validated = validate_plan(
-            proposal,
-            origin=origin,
-            source_text=source_text,
-            ctx=ValidationContext(
-                principal_scopes=principal_scopes,
-                # Single-step transitional plans keep each executor's own
-                # authoritative #86 outcome (§11.3); see D-094.
-                pre_existing_result_set=ResultSetContext(ResultSetStatus.UNVALIDATED),
-                pending_draft_live=session_context.active_pending_draft_id is not None,
-                confirmed_job_in_session=False,
-                max_tool_calls=max_tool_calls,
-            ),
+            proposal, origin=origin, source_text=source_text, ctx=validation_context
         )
         if isinstance(validated, PlanRejection):
             # Layer 1: zero capabilities executed.
@@ -2717,6 +2847,19 @@ async def execute_agent_turn(
                     "schema_version": CAPABILITY_PLAN_SCHEMA_VERSION,
                 },
             )
+            result_set_rejection = await _result_set_rejection_result(
+                db,
+                tenant_id=tenant_id,
+                session_context=session_context,
+                proposal=proposal,
+                rejection=validated,
+                inspection=inspection,
+                tool_results=tool_results,
+                tool_call_count=tool_calls_made,
+                provenance=provenance,
+            )
+            if result_set_rejection is not None:
+                return finish(result_set_rejection)
             if validated.code == PlanRejectionCode.NOT_MODEL_PROPOSABLE:
                 # The deterministic entry route is the only authority that
                 # can reach drafting. A model DRAFT_JOB_CRITERIA proposal is
@@ -2744,6 +2887,13 @@ async def execute_agent_turn(
             )
             return finish(result)
 
+        # D-092 §19.2 attempt provenance: closed keys only, no text/ids.
+        await record_event(
+            db,
+            tenant_id=tenant_id,
+            event_type="agent.plan.validated",
+            metadata=plan_validated_metadata(validated),
+        )
         (step,) = validated.steps
         definition = CAPABILITY_REGISTRY[step.capability]
         action = definition.legacy_tool_name
