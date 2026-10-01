@@ -80,6 +80,11 @@ jobs:
           MEYAR_TEST_HANG_DIAGNOSTICS: "1"
         run: uv run pytest -v
 
+      - name: pytest hang diagnostic regressions
+        env:
+          MEYAR_TEST_HANG_DIAGNOSTICS: "1"
+        run: uv run pytest -q tests/hang_diagnostics_regression.py
+
       - name: local demo wrapper tests
         run: |
           bash -n ../scripts/demo-up.sh

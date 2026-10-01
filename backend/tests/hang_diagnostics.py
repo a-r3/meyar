@@ -5,14 +5,18 @@ No SQL text, parameters, frame locals, exception messages or task-name payloads.
 """
 
 import asyncio
+import hashlib
 import json
 import os
+import queue
 import re
-import sys
+import stat
 import threading
 import time
 import traceback
 import weakref
+from collections import deque
+from pathlib import Path
 
 import asyncpg
 import pytest
@@ -27,22 +31,95 @@ _phase = ("", "IDLE", 0.0)
 _loops = weakref.WeakSet()
 _pools = weakref.WeakSet()
 _checked_out = {}
+_recent_events = deque(maxlen=256)
 _thread = None
 _output_fd = None
+_output_queue = None
+_writer_thread = None
+_dropped_records = 0
+_repo_root = Path(__file__).resolve().parents[2]
 THRESHOLD_SECONDS = 120
+MAX_RECORD_BYTES = 4096
+
+
+def _safe_nodeid(nodeid):
+    """Keep only code-owned collection identity; hash arbitrary parameter IDs."""
+    base, bracket, parameter = nodeid.partition("[")
+    if (
+        len(base) > 180
+        or not re.fullmatch(r"tests/[A-Za-z0-9_./-]+\.py(?:::[A-Za-z_][A-Za-z0-9_]*)+", base)
+        or ".." in Path(base.split("::", 1)[0]).parts
+    ):
+        return "nodeid-sha256=" + hashlib.sha256(nodeid.encode()).hexdigest()[:12]
+    if not bracket:
+        return base
+    return base + "[param-sha256=" + hashlib.sha256(parameter.encode()).hexdigest()[:12] + "]"
+
+
+def _safe_path(filename):
+    if filename.startswith("<") and filename.endswith(">"):
+        return "generated"
+    path = Path(filename)
+    if path.is_absolute():
+        try:
+            relative = path.relative_to(_repo_root)
+        except ValueError:
+            relative = None
+    else:
+        relative = None
+    if (relative is not None and ".." not in relative.parts
+            and re.fullmatch(r"[A-Za-z0-9_./-]{1,180}", str(relative))):
+        return str(relative)
+    if "/site-packages/" in filename:
+        package = filename.split("/site-packages/", 1)[1].split("/", 1)[0]
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", package):
+            return "site-packages/" + package
+    if filename.startswith(("/usr/lib/python", "/usr/local/lib/python")):
+        if re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", path.name):
+            return "stdlib/" + path.name
+        return "stdlib"
+    return "external-sha256=" + hashlib.sha256(filename.encode()).hexdigest()[:12]
 
 
 def _emit(kind, **fields):
+    global _dropped_records
     with _lock:
-        line = "MEYAR_HANG " + json.dumps({"kind": kind, **fields}) + "\n"
-        if _output_fd is not None:
-            os.write(_output_fd, line.encode())
-        else:
-            print(line, end="", file=sys.__stderr__, flush=True)
+        fd = _output_fd
+        output_queue = _output_queue
+    if fd is None:
+        with _lock:
+            _dropped_records += 1
+        return
+    try:
+        line = ("MEYAR_HANG " + json.dumps({"kind": kind, **fields}) + "\n").encode()
+        if len(line) > MAX_RECORD_BYTES:
+            with _lock:
+                _dropped_records += 1
+        elif output_queue is not None:
+            output_queue.put_nowait(line)
+        elif os.write(fd, line) != len(line):
+            with _lock:
+                _dropped_records += 1
+    except (BlockingIOError, OSError, TypeError, ValueError, queue.Full):
+        with _lock:
+            _dropped_records += 1
+
+
+def _write_regular_file(stop, output_queue, fd):
+    """Only this daemon worker may wait on regular-file I/O; tests never do."""
+    while not stop.is_set() or not output_queue.empty():
+        try:
+            line = output_queue.get(timeout=0.1)
+        except queue.Empty:
+            continue
+        try:
+            os.write(fd, line)
+        except OSError:
+            pass
 
 
 def _frames():
-    return [{"file": f.filename, "line": f.lineno, "function": f.name}
+    return [{"file": _safe_path(f.filename), "line": f.lineno, "function": f.name}
             for f in traceback.extract_stack(limit=16)[:-1]]
 
 
@@ -53,7 +130,7 @@ def _await_stack(coro):
         seen.add(id(coro))
         frame = getattr(coro, "cr_frame", getattr(coro, "gi_frame", None))
         if frame is not None:
-            frames.append({"file": frame.f_code.co_filename, "line": frame.f_lineno,
+            frames.append({"file": _safe_path(frame.f_code.co_filename), "line": frame.f_lineno,
                            "function": frame.f_code.co_qualname})
         coro = getattr(coro, "cr_await", getattr(coro, "gi_yieldfrom", None))
     return frames
@@ -78,14 +155,16 @@ def _checkout(connection, record, proxy):
                  "nodeid": _phase[0], "phase": _phase[1], "task": id(task) if task else None,
                  "stack": _await_stack(task.get_coro()) if task else _frames()}
         _checked_out[id(record)] = owner
-    _emit("CHECKOUT", **owner)
+        _recent_events.append({"kind": "CHECKOUT", "connection": id(record),
+                               "pid": owner["pid"], "nodeid": owner["nodeid"]})
 
 
 def _checkin(connection, record):
     with _lock:
         owner = _checked_out.pop(id(record), None)
-    _emit("CHECKIN", connection=id(record), pid=record.info.get("hang_pid"),
-          checkout_owner=owner)
+        _recent_events.append({"kind": "CHECKIN", "connection": id(record),
+                               "pid": record.info.get("hang_pid"),
+                               "checkout_nodeid": owner["nodeid"] if owner else None})
 
 
 def _engine_connect(connection):
@@ -97,17 +176,23 @@ def _session_begin(session, transaction, connection):
     driver = connection.connection.driver_connection
     get_pid = getattr(driver, "get_server_pid", None)
     pid = get_pid() if callable(get_pid) else None
-    _emit("SESSION_BEGIN", session=id(session), transaction=id(transaction), pid=pid,
-          engine=id(connection.engine), pool=id(connection.engine.pool),
-          nodeid=_phase[0], phase=_phase[1])
+    with _lock:
+        _recent_events.append({"kind": "SESSION_BEGIN", "session": id(session),
+                               "transaction": id(transaction), "pid": pid,
+                               "engine": id(connection.engine), "pool": id(connection.engine.pool),
+                               "nodeid": _phase[0], "phase": _phase[1]})
 
 
 def _pool_snapshot():
     with _lock:
         pools = list(_pools)
         owners = list(_checked_out.values())
-    _emit("POOLS", pools=[{"pool": id(p), "status": p.status()} for p in pools],
-          checked_out=owners)
+    for pool in pools[:100]:
+        _emit("POOL", pool=id(pool), status=pool.status())
+    for owner in owners[:100]:
+        _emit("CHECKED_OUT", **owner)
+    _emit("POOL_SNAPSHOT_END", pools=len(pools), checked_out=len(owners),
+          truncated=len(pools) > 100 or len(owners) > 100)
 
 
 def _tasks(loop, source="event_loop"):
@@ -141,8 +226,8 @@ async def _postgres():
                        extract(epoch FROM clock_timestamp()-xact_start)::float AS transaction_age,
                        extract(epoch FROM clock_timestamp()-query_start)::float AS query_age,
                        pg_blocking_pids(pid) AS blockers,
-                       CASE WHEN application_name LIKE 'meyar%'
-                            THEN application_name ELSE '<redacted>' END AS application_name
+                       CASE WHEN application_name = 'meyar-hang-observer'
+                            THEN 'OBSERVER' ELSE 'OTHER' END AS application_class
                 FROM pg_stat_activity
                 WHERE datname=current_database() AND pid<>pg_backend_pid()
                 ORDER BY pid LIMIT 100
@@ -150,8 +235,9 @@ async def _postgres():
             for row in rows:
                 _emit("PG_ACTIVITY", **dict(row))
             locks = await conn.fetch("""
-                SELECT l.pid, l.locktype, l.mode, l.granted, c.relname AS relation
-                FROM pg_locks l LEFT JOIN pg_class c ON c.oid=l.relation
+                SELECT l.pid, l.locktype, l.mode, l.granted,
+                       l.relation::bigint AS relation_oid
+                FROM pg_locks l
                 WHERE l.pid IN (SELECT pid FROM pg_stat_activity
                     WHERE datname=current_database() AND pid<>pg_backend_pid())
                 ORDER BY l.pid, l.granted, l.locktype LIMIT 300
@@ -163,9 +249,9 @@ async def _postgres():
         await conn.close(timeout=2)
 
 
-def _watch():
+def _watch(stop):
     reported = None
-    while not _stop.wait(1):
+    while not stop.wait(1):
         with _lock:
             current = _phase
             loops = list(_loops)
@@ -175,8 +261,12 @@ def _watch():
             continue
         reported = current
         _emit("WATCHDOG", nodeid=current[0], phase=current[1],
-              elapsed=time.monotonic()-current[2])
+              elapsed=time.monotonic()-current[2], dropped_records=_dropped_records)
         _pool_snapshot()
+        with _lock:
+            recent = list(_recent_events)
+        for record in recent:
+            _emit("RECENT_EVENT", **record)
         for loop in loops:
             _emit("LOOP", loop=id(loop), running=loop.is_running(), closed=loop.is_closed())
             if loop.is_running() and not loop.is_closed():
@@ -205,32 +295,80 @@ def _watch():
 
 
 def pytest_configure(config):
-    global _thread, _output_fd
-    # pytest's fd capture redirects even sys.__stderr__. Duplicate its saved
-    # original stderr so markers/watchdog remain visible before a test ends.
+    global _thread, _output_fd, _output_queue, _writer_thread
+    global _stop, _phase, _loops, _pools, _dropped_records
+    # A new pytest.main() in this interpreter must not inherit old state.
+    with _lock:
+        _stop.set()
+        previous_thread = _thread
+        previous_writer = _writer_thread
+        previous_fd = _output_fd
+        _output_fd = None
+    if previous_thread is not None:
+        previous_thread.join(timeout=21)
+    if previous_writer is not None:
+        previous_writer.join(timeout=1)
+    if previous_fd is not None:
+        try:
+            os.close(previous_fd)
+        except OSError:
+            pass
+    with _lock:
+        _stop = threading.Event()
+        _phase = ("", "IDLE", 0.0)
+        _loops = weakref.WeakSet()
+        _pools = weakref.WeakSet()
+        _checked_out.clear()
+        _recent_events.clear()
+        _dropped_records = 0
+        _output_queue = None
+        _writer_thread = None
+    # A separate open-file description keeps O_NONBLOCK off pytest's own pipe.
+    # A regular file instead shares its offset with pytest via dup and writes
+    # on a bounded-queue daemon: independent offsets can overwrite output.
     capture = config.pluginmanager.getplugin("capturemanager")
     global_capture = getattr(capture, "_global_capturing", None)
     stderr_capture = getattr(global_capture, "err", None)
     original_fd = getattr(stderr_capture, "targetfd_save", 2)
-    _output_fd = os.dup(original_fd)
+    try:
+        duplicate = os.dup(original_fd)
+        if stat.S_ISREG(os.fstat(duplicate).st_mode):
+            _output_fd = duplicate
+            _output_queue = queue.Queue(maxsize=1024)
+            _writer_thread = threading.Thread(
+                target=_write_regular_file, args=(_stop, _output_queue, duplicate),
+                name="meyar-hang-output", daemon=True,
+            )
+            _writer_thread.start()
+        else:
+            try:
+                _output_fd = os.open(f"/proc/self/fd/{duplicate}",
+                                     os.O_WRONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+            finally:
+                os.close(duplicate)
+    except OSError:
+        _output_fd = None
     event.listen(Pool, "connect", _connect)
     event.listen(Pool, "checkout", _checkout)
     event.listen(Pool, "checkin", _checkin)
     event.listen(Engine, "engine_connect", _engine_connect)
     event.listen(Session, "after_begin", _session_begin)
     event.listen(Pool, "reset", _reset)
-    _thread = threading.Thread(target=_watch, name="meyar-hang-watchdog", daemon=True)
+    _thread = threading.Thread(target=_watch, args=(_stop,),
+                               name="meyar-hang-watchdog", daemon=True)
     _thread.start()
 
 
 def _reset(connection, record, reset_state):
-    _emit("RESET", connection=id(record), pid=record.info.get("hang_pid"),
-          transaction_was_reset=reset_state.transaction_was_reset,
-          terminate_only=reset_state.terminate_only)
+    with _lock:
+        _recent_events.append({"kind": "RESET", "connection": id(record),
+                               "pid": record.info.get("hang_pid"),
+                               "transaction_was_reset": reset_state.transaction_was_reset,
+                               "terminate_only": reset_state.terminate_only})
 
 
 def pytest_unconfigure(config):
-    global _output_fd
+    global _output_fd, _output_queue
     _stop.set()
     for name, callback in [("connect", _connect), ("checkout", _checkout),
                            ("checkin", _checkin), ("reset", _reset)]:
@@ -239,20 +377,29 @@ def pytest_unconfigure(config):
     event.remove(Session, "after_begin", _session_begin)
     if _thread is not None:
         _thread.join(timeout=21)
-    if _output_fd is not None and (_thread is None or not _thread.is_alive()):
-        os.close(_output_fd)
+    if _writer_thread is not None:
+        _writer_thread.join(timeout=1)
+    with _lock:
+        fd = _output_fd
         _output_fd = None
+        _output_queue = None
+    if fd is not None:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 def _mark(item, phase, boundary):
     global _phase
     with _lock:
-        _phase = (item.nodeid, phase if boundary == "START" else "BETWEEN", time.monotonic())
+        _phase = (_safe_nodeid(item.nodeid),
+                  phase if boundary == "START" else "BETWEEN", time.monotonic())
         if boundary == "START":
             for value in item.funcargs.values():
                 if isinstance(value, asyncio.Runner):
                     _loops.add(value.get_loop())
-    _emit("PHASE", nodeid=item.nodeid, phase=phase, boundary=boundary)
+    _emit("PHASE", nodeid=_phase[0], phase=phase, boundary=boundary)
     _pool_snapshot()
 
 
