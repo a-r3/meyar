@@ -7598,6 +7598,48 @@ IMPLEMENTATION NOT STARTED; owner selected "Variant 1", separate docs PR
     breaks lane independence.
 - No other architecture changes, and implementation has not started.
 
+**Amendment A2 — exchange-chain liveness for the UNCLEAR retry (PROPOSED,
+pending independent review; owner-specified rule, separate docs PR before
+slice A).**
+- *Finding.* A1's adjacency clause ("the entry immediately before the
+  question is the source turn") cannot hold for attempt 2. The tail is then
+  `[U1 source, Q1, U2 unclear answer, Q2]`, so every retry would be born
+  stale. That contradicts the accepted 2-attempt retry (§6.4 step 5, T5).
+- *Rule.* For the current clarification C at attempt n:
+  1. C's `question_turn_id` is the last appended transcript entry.
+  2. C keeps the same original source binding (`source_turn_id`, hash and
+     offsets never move to an unclear answer).
+  3. Between the source and C's question only the server-recognized retry
+     chain may exist:
+     - attempt 1: `[U1, Q1]`;
+     - attempt 2: `[U1, Q1, U2, Q2]`.
+  4. For attempt 2, the chain is validated structurally from persisted rows:
+     - the predecessor P has `superseded_by_id = C.id`, status SUPERSEDED,
+       `superseded_reason = UNCLEAR`, and attempt 1 → 2;
+     - P and C share task, session context, type and source binding;
+     - Q1 = `P.question_turn_id`;
+     - U2 = `C.created_from_turn_id`, the user entry appended by
+       `C.created_by_submission_id`, which classified P's answer as UNCLEAR.
+  5. Any other appended turn in the chain makes C stale.
+  6. Bounded: at most four tail entries and one predecessor row; no
+     transcript walking or semantic history search.
+  7. VACANCY_SOURCE_REQUIRED (no source, no retry) keeps the A1
+     question-last rule.
+- *Schema.* `created_from_turn_id` NOT NULL. For SEARCH_OR_VACANCY attempt 1
+  it equals `source_turn_id`. `superseded_reason` is closed
+  (`UNCLEAR`, `NEW_TASK`, `NOT_ACTIVE_BUTTON`) and non-null ⇔ SUPERSEDED.
+- *Closed-value gap closed.* Resolution source `SOURCE_MESSAGE` covers
+  VACANCY_SOURCE_REQUIRED slot fill (`resolved_value = VACANCY_ANALYSIS`).
+  The original set (BUTTON/LABEL/MODEL) had no value for it.
+- *Classifier failure.* A local-classifier provider failure is handled as
+  UNCLEAR. BUSY abandons the turn without any clarification change.
+- *Unchanged.* `created_turn_version` stays provenance only, `turn_version`
+  stays the #85/D-089 concurrency authority, and `question_turn_id` stays
+  the current-question append-order authority. Lane independence (A1) is
+  unchanged.
+- Implementation has not started. A2 is implemented in slice A only after
+  this amendment is accepted and owner-merged.
+
 1. **Authority.** The hierarchy (DB ownership > live BrowserSession/ResultSet
    /mutation authority > deterministic services > capability execution >
    evidence > structured task state > transcript/model context > model) is

@@ -3,8 +3,8 @@
 ## Current phase
 
 **Issue #88 — design accepted, implementation NOT started:** accepted `main`
-is `3ac42a531f34651ac25fc1eab0e880fb05ca01f0` (#84–#87 closed; D-092 design
-merged via PR #93).
+is `2445caaf8cfcb054078227d05a6d97a2f257d978` (#84–#87 closed; D-092 design
+merged via PR #93, Amendment A1 via PR #94).
 - The Agent Core v2 design (D-092, `docs/AGENT_CORE_V2_DESIGN.md`) was
   independently reviewed and **accepted**. It covers task/dialogue/
   clarification state, the two waiting lanes, resumable M-8 clarification,
@@ -20,9 +20,14 @@ merged via PR #93).
 - The owner chose **D-092 Amendment A1**: the append-position binding via
   `question_turn_id`. A1 was independently reviewed and **accepted** (docs PR
   #94, awaiting owner merge).
-- **Slice A implementation has NOT started.** It (typed clarification/task
-  persistence plus resumable clarification) may begin only after the OWNER
-  manually merges PR #94 and post-merge verification succeeds.
+- PR #94 (A1) merged as `d6fd53f`; CI hang diagnostics PR #95 merged as
+  `2445caa`. The hang root cause is still open.
+- The slice A pre-implementation review found that A1's adjacency rule cannot
+  hold for the attempt-2 UNCLEAR retry. The owner specified the
+  **exchange-chain rule (D-092 Amendment A2)**. It is proposed in a separate
+  docs PR and pending independent review.
+- **Slice A implementation has NOT started** (no slice A code is committed).
+  It restarts from the post-A2 `main` only after A2 is accepted and merged.
 
 **Issue #87 working branch (not accepted):** accepted `main` is
 `ac9a249359c9a5dcf417b4e3f269a2c0b92b3ab0` (#84, #85, #86 closed).
