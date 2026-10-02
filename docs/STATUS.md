@@ -2,16 +2,21 @@
 
 ## Current phase
 
+**D-092 Amendment A3 — ACCEPTED and MERGED through PR #103.** Squash
+commit on `main`: `d9e96c06169d9ebf25ab6f276eb63bab4c5d4828` (single parent
+`9817711c73e9d2701c0385d2bbe0c1bd3fba153e`); accepted PR head
+`7ab7056794f4f693d9b974cba7f6a01f7abd908e`, whose tree equals the squash
+tree exactly (`78ce6e29634aa370f3bdabc0f22d7862bb378558`); accepted
+exact-head CI run `36965800982` SUCCESS (3073 pytest passed; 10 hang
+diagnostics passed). A3 reconciles assistant-history privacy (§15),
+coordinated/limit coverage precision (§10.2) and RANK chat authority.
+
 **Issue #88 Slice C — implemented in PR #102 (head
-`4e0daf2191b563c49315139ad7a01536dbe41f56`), under independent review, NOT
-accepted, NOT merged.** Independent review found three normative
-reconciliation issues in D-092 itself (assistant-history privacy vs. §15,
-coordinated/limit coverage precision in §10.2, and RANK chat authority).
-**D-092 Amendment A3 is PROPOSED** in a separate docs-only PR and is pending
-independent acceptance; PR #102 is blocked on A3 and must be corrected to
-it afterwards. D-095 (in PR #102) is not accepted authority. No migration
-(Alembic head remains `b88a2c4d6e10`). #88 remains OPEN; #50 remains OPEN
-and out of scope. The historical CI pytest hang root cause remains NOT
+`4e0daf2191b563c49315139ad7a01536dbe41f56`), OPEN, NOT accepted, NOT
+merged.** PR #102 must now be corrected to the accepted A3. D-095 (in PR
+#102) is not accepted authority. No migration (Alembic head remains
+`b88a2c4d6e10`). #88 stays OPEN until slice C is accepted and merged; #50
+remains OPEN and out of scope. The historical CI pytest hang root cause remains NOT
 PROVEN.
 
 **Issue #88 Slice B — IMPLEMENTED, independently technically accepted, and

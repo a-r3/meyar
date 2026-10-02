@@ -4,8 +4,8 @@
 MERGED (PR #98); slice B IMPLEMENTED, independently technically accepted
 and MERGED (PR #100, D-094);
 slice C implemented in PR #102 but NOT accepted and NOT merged; Amendment
-A3 PROPOSED, pending independent acceptance (see "Current implementation
-status" below).**
+A3 ACCEPTED and MERGED (PR #103) (see "Current implementation status"
+below).**
 
 Historical status at design acceptance (kept as recorded then):
 - This design was independently reviewed and accepted, at design head
@@ -69,8 +69,9 @@ A2 also separates three cases (§6.4):
 - classifier infrastructure failure abandons the turn and consumes nothing;
 - a stale or foreign button is a rejected request, not a state transition.
 
-**Amendment A3 (PROPOSED AMENDMENT; pending independent acceptance; NOT
-accepted).** Full text: D-092 Amendment A3 in `docs/DECISIONS.md`. Summary:
+**Amendment A3 (ACCEPTED AMENDMENT; independently reviewed and accepted;
+MERGED through PR #103, squash `d9e96c06169d9ebf25ab6f276eb63bab4c5d4828`).**
+Full text: D-092 Amendment A3 in `docs/DECISIONS.md`. Summary:
 - A3.1 (§15, assistant turns only): `propose_agent_plan` never receives
   persisted HR-facing assistant display text (it can carry
   CandidateIdentity); assistant turns are projected as the closed
@@ -90,7 +91,7 @@ accepted).** Full text: D-092 Amendment A3 in `docs/DECISIONS.md`. Summary:
   confirmation" choice, no transcript scanning, no migration or pointer in
   A3. Direct ranking routes and deterministic scoring are unchanged.
   CREATE_JOB is unchanged.
-- Slice-C PR #102 must be corrected after A3 is accepted and merged (keep
+- Slice-C PR #102 must now be corrected to accepted A3 (keep
   the outcome-code projection and coordinated-part coverage; exclude LIMIT
   from coverage; make RANK proposability consistent with A3.3; keep the
   direct ranking routes).
@@ -108,9 +109,10 @@ D-094), was independently technically accepted at code head
 `2961365c961894cc0f6b61ac65619c9891e8cf4e` on `main`).
 Slice C is implemented in PR #102 (head
 `4e0daf2191b563c49315139ad7a01536dbe41f56`), under independent review, NOT
-accepted and NOT merged; it is blocked on acceptance of the proposed
-Amendment A3 and must then be corrected to A3.
-#88 remains OPEN; #50 remains OPEN and out of scope. The design text in
+accepted and NOT merged; it is now blocked on correction to the accepted
+Amendment A3 (merged through PR #103).
+#88 stays OPEN until slice C is accepted and merged; #50 remains OPEN and
+out of scope. The design text in
 this document is unchanged.
 ---
 
@@ -1030,7 +1032,7 @@ LF current message `M`):
    - Spans must be non-overlapping and non-blank. The planner input is the
      spans in source order, joined by a server-owned `"\n"`. No model
      character enters the query.
-3. **Requirement coverage.** *(Clarified by proposed Amendment A3.2:
+3. **Requirement coverage.** *(Clarified by accepted Amendment A3.2:
    per coordinated part; `limit_quote` is not a coverage source.)*
    - Run `analyze_hr_text(M)` (policy-versioned, deterministic).
    - Every material requirement (state SCORABLE or NEEDS_HUMAN_REVIEW)
@@ -1153,7 +1155,7 @@ capabilities execute**:
 - Lane B is consulted **only** by capabilities whose `live_context` or
   `produces` includes PENDING_DRAFT or CONFIRMED_JOB_IN_SESSION:
   - CREATE_JOB needs the lane-B target to become an affordance;
-  - RANK needs the session-confirmed job; *(proposed Amendment A3.3:
+  - RANK needs the session-confirmed job; *(accepted Amendment A3.3:
     RANK is not model-proposable/offered in chat until an explicit
     server-owned current-confirmed-job selector exists)*
   - a producer of PENDING_DRAFT (server-built only) triggers T11.
@@ -1360,7 +1362,7 @@ history (separate future scope). The full conversation is never sent.
 
 Projection for `propose_agent_plan`:
 - the last `agent_max_context_turns` `(role, text)` pairs (unchanged);
-  *(proposed Amendment A3.1: assistant turns project only the closed
+  *(accepted Amendment A3.1: assistant turns project only the closed
   `AgentTurnOutcome` code, never persisted display text)*
 - `available_capabilities`: the per-call enum subset, as names plus
   one-line server descriptions;
