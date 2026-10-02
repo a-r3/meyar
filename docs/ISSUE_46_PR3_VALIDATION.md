@@ -1,8 +1,41 @@
 # Issue #46 PR-3 — ordered DOCX tables and safe provenance
 
-Implementation proposal, awaiting independent acceptance review. Refs #46 under
-M9 — Deployment, Benchmark & Integration Readiness. Do not merge or close #46
-on this record alone. No Target-Mac execution or model-acceptance claim.
+PR-3 is independently ACCEPTED and MERGED through PR #110, and COMPLETE.
+Issue #46 remains OPEN under M9 — Deployment, Benchmark & Integration Readiness:
+PR-3 completes only its approved M-4/table subset, not the full issue.
+The final delivery record below supersedes pre-merge delivery/status wording;
+historical pre-merge/review evidence and test numbers are preserved below.
+
+## Final acceptance and post-merge delivery
+
+- Independent re-review accepted exact head
+  `e189dd0dc0bab0cc079e9c049d2572aa10d495af` (owner-confirmed acceptance).
+- [Accepted exact-head CI run 37076863211](https://github.com/a-r3/meyar/actions/runs/37076863211)
+  completed SUCCESS for that exact head.
+- The owner manually Squash and merged
+  [PR #110](https://github.com/a-r3/meyar/pull/110). The squash commit and
+  verified main are `0ce55489c28697ccfac23d3591bfc17f61d8d59b`.
+- Live post-merge verification confirmed PR #110 is MERGED and main points to
+  that squash. Its sole parent is previous main
+  `9cc2cf9623b263ba4a2dd92217fce23c566ba0a7`; the squash is exactly one commit
+  ahead (`git rev-list --count previous-main..squash` = 1).
+- Accepted head and squash have identical complete trees/content, tree SHA
+  `74cecde0a625eab9f9ef1c68cde0e2602469e0cb` on both commits. The full-tree
+  comparison returned no differences, including production code and tests.
+- GitHub automatically closed #46 on merge; the owner reopened it. Issue events
+  confirm closure at `2026-10-02T23:39:36Z` and reopening at
+  `2026-10-02T23:42:46Z`. Its verified final state is OPEN. PR-3 completes only
+  M-4/table work; M-5, M-9 and other unresolved #46 hardening/acceptance items
+  remain pending. Those remaining scopes are not marked complete.
+- #35 remains OPEN with substantial existing `meyar-ops` implementation.
+  #36 and #50 remain OPEN. PR-3 and this documentation-only follow-up do not
+  advance or modify #35/#36/#50 and start no next implementation slice.
+- The real Target-Mac benchmark has NOT been completed. No Target-Mac execution,
+  model acceptance or benchmark acceptance is claimed by this delivery record.
+- This follow-up changes governance documentation only: no production code,
+  tests, migrations, dependencies or lockfiles are changed.
+
+Historical pre-merge implementation/review evidence follows unchanged.
 
 ## Baseline and scope
 

@@ -1,9 +1,19 @@
 # MEYAR — Status
 
 
-**Issue #46 PR-3 — implementation proposal, awaiting independent acceptance
-review.** Branch `feat/46-docx-ordered-tables`, verified base main
-`9cc2cf9623b263ba4a2dd92217fce23c566ba0a7`. Parser **1.2.0** adds ordered
+**Issue #46 PR-3 — independently ACCEPTED and MERGED through PR #110;
+PR-3 is COMPLETE, but #46 remains OPEN.** Owner-confirmed accepted exact head:
+`e189dd0dc0bab0cc079e9c049d2572aa10d495af`; accepted exact-head CI run
+`37076863211` completed SUCCESS. The owner manually Squash and merged PR #110.
+Verified main/squash: `0ce55489c28697ccfac23d3591bfc17f61d8d59b`, whose sole
+parent is previous main `9cc2cf9623b263ba4a2dd92217fce23c566ba0a7`: exactly
+one commit ahead. The accepted head and merged squash have identical complete
+trees/content, tree SHA `74cecde0a625eab9f9ef1c68cde0e2602469e0cb`.
+GitHub closed #46 on merge; the owner reopened it, and its verified final state
+is OPEN. PR-3 completes only its approved M-4/table subset. M-5, M-9 and other
+remaining #46 hardening/acceptance work are still pending.
+
+Parser **1.2.0** adds ordered
 DOCX body/table/cell paragraphs and bounded nested physical-source tables,
 closed internal provenance, conservative table-row evidence vetoes, durable
 partial-extraction disclosure and terminal unsupported-text-only handling.
@@ -16,15 +26,16 @@ PR-3. #35 remains OPEN with substantial existing `meyar-ops` implementation;
 PR-3 does not advance or modify #35. #36 and #50 remain OPEN and are not
 advanced by PR-3. The real Target-Mac benchmark has not been completed;
 no Target-Mac acceptance is claimed.
-D-098 and `docs/ISSUE_46_PR3_VALIDATION.md` record the proposal and verification.
+D-098 and `docs/ISSUE_46_PR3_VALIDATION.md` record acceptance and verification.
 PR #110 independent review corrections add strict row-local omitted-context
 completeness and a four-label reference/emergency-contact identity veto. Current
 profile/identity authority uses these same rules; historical TABLE completeness
 without metadata is unknown, with no historical rewrite/reparse. Other complete
 rows and BODY rules remain eligible. Focused corrections: 185 passed in 43.18s;
 full correction gate: 3458 passed in 522.31s, Ruff/mypy(src) clean, unchanged
-single Alembic head. Details are recorded in the PR-3 validation document. PR-3 awaits
-independent re-review and is not accepted merely because implementation/CI is green.
+single Alembic head. Details and final acceptance/post-merge evidence are recorded
+in the PR-3 validation document. This documentation-only follow-up starts no next
+implementation slice and does not advance #35/#36/#50.
 
 ## Current phase
 

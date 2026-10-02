@@ -8521,11 +8521,20 @@ dependency or lockfile change.
 Implementation, measured rationale, closed failure table, verification and
 precise deferrals: `docs/ISSUE_46_PR2_VALIDATION.md`.
 
-## D-098 — Issue #46 PR-3 proposal: ordered DOCX tables with bounded source authority
+## D-098 — Issue #46 PR-3: ordered DOCX tables with bounded source authority
 
-**Status:** IMPLEMENTATION PROPOSAL, awaiting independent acceptance review.
-Refs #46 under M9. Base `9cc2cf9623b263ba4a2dd92217fce23c566ba0a7`;
-branch `feat/46-docx-ordered-tables`. #46 remains OPEN. No Target-Mac claim.
+**Status:** independently ACCEPTED and MERGED through PR #110; PR-3 COMPLETE.
+Owner-confirmed independent acceptance at exact head
+`e189dd0dc0bab0cc079e9c049d2572aa10d495af`; accepted exact-head CI run
+`37076863211` completed SUCCESS. The owner manually Squash and merged PR #110
+as `0ce55489c28697ccfac23d3591bfc17f61d8d59b`. Its sole parent is previous
+main `9cc2cf9623b263ba4a2dd92217fce23c566ba0a7`, exactly one commit behind.
+Accepted head and squash have identical complete trees/content:
+`74cecde0a625eab9f9ef1c68cde0e2602469e0cb`.
+Refs #46 under M9: PR-3 completes only its approved M-4/table subset, not the
+issue. #46 remains OPEN; M-5, M-9 and other remaining hardening/acceptance work
+are pending. Implementation branch: `feat/46-docx-ordered-tables`.
+No Target-Mac acceptance claim.
 
 Parser 1.2.0 supports direct body paragraphs/tables, physical source cells,
 ordered cell paragraphs and at most eight nested table levels. All private
