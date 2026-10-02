@@ -8121,17 +8121,25 @@ remains NOT PROVEN.
 
 ## D-095 — Issue #88 slice C implementation record (agent-plan-v1 + source grounding + loop retirement)
 
-**Status: IMPLEMENTED in PR #102 (branch `feat/88c-agent-plan-contract`,
+**Status: ACCEPTED and MERGED — the accepted Slice-C implementation
+record.** Implemented in PR #102 (branch `feat/88c-agent-plan-contract`,
 originally from `main` @ `9817711c73e9d2701c0385d2bbe0c1bd3fba153e`) and
-CORRECTED to the ACCEPTED D-092 Amendment A3 (merged through PR #103; status
+corrected to the ACCEPTED D-092 Amendment A3 (merged through PR #103; status
 recorded by PR #104) after a normal merge of `main` @
-`32f1a0e5411f0445f3bc794451e5288561ae5cd1`; pending independent acceptance;
-NOT accepted; not merged.** D-092 (§5, §8–§12, §15–§16, §19, §22 items
-24–31, §23 slice C, §24) as amended by A1, A2 and the accepted A3, D-093 and
-D-094 are the authority; this entry records only the slice-C implementation
-choices and is not itself accepted authority. #88 stays OPEN; #50 stays OPEN and out of
-scope. No migration (Alembic head stays `b88a2c4d6e10`); no new dependency.
-The historical CI hang root cause remains NOT PROVEN.
+`32f1a0e5411f0445f3bc794451e5288561ae5cd1`. Independently accepted at head
+`117d0abbad4f012911e0cd96794604eaa9f474ba`; exact-head CI run
+`36995144617` SUCCESS (3229 pytest passed; 10 hang diagnostics passed).
+Merged through PR #102 as squash commit
+`82d6f7b4a6e4e51b02442b62dc7a556519b66e5c` (single parent
+`32f1a0e5411f0445f3bc794451e5288561ae5cd1`); the accepted-head tree equals
+the squash tree exactly (`d259e06fe73b11d33aca751bf4f444924d09bace`).
+D-092 (§5, §8–§12, §15–§16, §19, §22 items 24–31, §23 slice C, §24) as
+amended by A1, A2 and the accepted A3, D-093 and D-094 are the authority;
+this entry records the slice-C implementation choices. Issue #88 is
+CLOSED/completed; #50 stays OPEN and was out of scope. No migration
+(Alembic head stays `b88a2c4d6e10`); no new dependency. The target-Mac
+benchmark remains separate; model quality/selection remains #36. The
+historical CI hang root cause remains NOT PROVEN.
 
 - **Model contract `agent-plan-v1`** (`meyar.agent.capabilities.contracts`):
   strict (`extra="forbid"`, strict JSON parsing) `AgentPlanProposal` with
