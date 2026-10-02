@@ -2,12 +2,22 @@
 
 ## Current phase
 
-**Issue #46 PR-1 (bounded ingestion intake) — implemented on
-`fix/46-bounded-ingestion-intake`, PR pending owner review/merge; #46 stays
-OPEN.** Request-envelope bound for candidate-document upload, DOCX archive
-expansion/member/ratio bounds, and bounded, stability-checked folder-scanner
-reads (D-096). No migration, dependency or `uv.lock` change; the M-5 general
-phantom-candidate fix, parser limits, #35, #36 and #50 are not started.
+**Issue #46 PR-1 (bounded ingestion intake) — independently ACCEPTED and
+MERGED through PR #106; #46 remains OPEN.** Squash commit on `main`:
+`26e2fa39da728c4a89291ac20d1ef39e4993a405` (single parent
+`f3497c09eed5f1ef6e488699b84f5806fa94274a`). Accepted PR head:
+`7edc69fe352736f3a64eed5252c41aa54376561a`; the accepted-head tree equals
+the squash tree exactly (`fb585940fa04fe340187d6b05c97e53ed29f7cdc`).
+Exact-head CI run `37017300528` SUCCESS (ruff clean; mypy clean on 219
+source files; 3273 pytest passed; 10 hang diagnostics passed). D-096 is the
+accepted implementation record: candidate-document request-envelope bound,
+DOCX archive member/expansion/ratio bounds with counted streaming
+verification, and bounded, stability-checked folder-scanner reads that never
+block on special files (FIFO/device/socket). No migration (Alembic head
+remains `b88a2c4d6e10`), no dependency and no `uv.lock` change. #46 stays
+OPEN because further hardening slices remain (including the M-5 general
+phantom-candidate fix, parser limits, M-4, M-9 and the other items of the
+issue). #35, #36 and #50 were not started by PR-1 and remain OPEN.
 
 **D-092 Amendment A3 — ACCEPTED and MERGED through PR #103.** Squash
 commit on `main`: `d9e96c06169d9ebf25ab6f276eb63bab4c5d4828` (single parent

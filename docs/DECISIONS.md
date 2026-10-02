@@ -8336,8 +8336,14 @@ historical CI hang root cause remains NOT PROVEN.
 
 ## D-096 — Issue #46 PR-1 implementation record: bounded ingestion intake
 
-**Status:** implemented on `fix/46-bounded-ingestion-intake` (Refs #46; #46
-stays OPEN). No migration, no new dependency, no `uv.lock` change. This is
+**Status:** ACCEPTED and MERGED through PR #106 (squash
+`26e2fa39da728c4a89291ac20d1ef39e4993a405`, parent
+`f3497c09eed5f1ef6e488699b84f5806fa94274a`; accepted head
+`7edc69fe352736f3a64eed5252c41aa54376561a`, tree equal to the squash tree
+`fb585940fa04fe340187d6b05c97e53ed29f7cdc`; exact-head CI `37017300528`
+SUCCESS, 3273 pytest passed). Refs #46; #46 stays OPEN. The special-file
+(FIFO) handling below was added during independent review before
+acceptance. No migration, no new dependency, no `uv.lock` change. This is
 availability/security hardening only; tenant isolation, auth/scopes, CSRF,
 original-CV authorization, local-only processing and provenance are
 untouched.
