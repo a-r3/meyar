@@ -11,11 +11,18 @@ exact-head CI run `36965800982` SUCCESS (3073 pytest passed; 10 hang
 diagnostics passed). A3 reconciles assistant-history privacy (§15),
 coordinated/limit coverage precision (§10.2) and RANK chat authority.
 
-**Issue #88 Slice C — implemented in PR #102, corrected to the accepted
-A3; OPEN, pending independent acceptance, NOT accepted, NOT merged.** The
-branch `feat/88c-agent-plan-contract` merged current `main` @
+**Issue #88 Slice C — independently accepted and MERGED through PR #102;
+Issue #88 is CLOSED/completed.** Accepted PR head:
+`117d0abbad4f012911e0cd96794604eaa9f474ba`; accepted exact-head CI run
+`36995144617` SUCCESS (ruff and mypy clean on 217 source files; 3229 pytest
+passed; 10 hang diagnostics passed). Squash commit on `main`:
+`82d6f7b4a6e4e51b02442b62dc7a556519b66e5c` (single parent
+`32f1a0e5411f0445f3bc794451e5288561ae5cd1`); the accepted-head tree equals
+the squash tree exactly (`d259e06fe73b11d33aca751bf4f444924d09bace`). D-095
+is the accepted Slice-C implementation record. The branch
+`feat/88c-agent-plan-contract` had merged `main` @
 `32f1a0e5411f0445f3bc794451e5288561ae5cd1` (normal merge, no history
-rewrite). Implements D-092 §23 slice C as amended by A3 (implementation
+rewrite). The slice implements D-092 §23 slice C as amended by A3 (implementation
 record D-095): the `agent-plan-v1` model plan contract via
 `LLMProvider.propose_agent_plan` (one proposal + at most one repair,
 registry-derived per-call capability subset, typed allow-list projection
@@ -30,8 +37,9 @@ adapter and the `while True` loop. RANK_JOB_CANDIDATES stays a registered
 HUMAN_ACTION_ONLY capability but is NOT model-proposable or offered in chat
 (A3.3); direct ranking routes are unchanged. CREATE_JOB is unchanged.
 No migration (Alembic head remains `b88a2c4d6e10`); no new dependency.
-#88 stays OPEN until slice C is accepted and merged; #50 remains OPEN and
-out of scope. The historical CI pytest hang root cause remains NOT PROVEN.
+Issue #50 remains OPEN and was out of scope for #88. The target-Mac
+benchmark remains a separate pending gate; model quality/selection remains
+#36. The historical CI pytest hang root cause remains NOT PROVEN.
 
 **Issue #88 Slice B — IMPLEMENTED, independently technically accepted, and
 MERGED through PR #100.** Squash commit on `main`:
@@ -53,7 +61,8 @@ ValidationContext (pre-existing ResultSet inspected member-scoped per #86,
 zero executors on a ResultSet-family rejection with today's outward
 outcome), and every validated plan emits privacy-safe `agent.plan.validated`.
 No migration (Alembic head remains `b88a2c4d6e10`). Slice C: see the block
-above; #88 remains OPEN; #50 remains OPEN and out of scope. The
+above (merged through PR #102); #88 is CLOSED/completed; #50 remains OPEN
+and out of scope. The
 historical CI pytest hang root cause remains NOT PROVEN.
 
 **Issue #88 Slice A — IMPLEMENTED, independently technically accepted, and
@@ -69,8 +78,8 @@ Alembic single head: `b88a2c4d6e10`.
   order, A2 exchange-chain liveness, SOURCE_MESSAGE, and a final Phase B
   that always starts from a fresh transaction (principal locked first; D-093
   supersedes D-089's deterministic-only Phase-B statements).
-- Slice C: see the first block above (slice B: see above). #88 remains
-  OPEN. #50 remains OPEN and out of scope for Slice A.
+- Slice C: see the first block above (slice B: see above). #88 is
+  CLOSED/completed. #50 remains OPEN and out of scope for Slice A.
 - The historical CI pytest hang root cause remains NOT PROVEN; the PR #97
   diagnostics remain relevant and active.
 

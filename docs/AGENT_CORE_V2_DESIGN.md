@@ -2,11 +2,9 @@
 
 **Status: ACCEPTED DESIGN; slice A IMPLEMENTED, technically accepted and
 MERGED (PR #98); slice B IMPLEMENTED, independently technically accepted
-and MERGED (PR #100, D-094);
-slice C implemented in PR #102 and corrected to the accepted A3, pending
-independent acceptance, NOT accepted and NOT merged (D-095); Amendment A3
-ACCEPTED and MERGED (PR #103) (see "Current implementation status"
-below).**
+and MERGED (PR #100, D-094); slice C independently accepted and MERGED
+(PR #102, D-095); Amendment A3 ACCEPTED and MERGED (PR #103); Issue #88
+CLOSED/completed (see "Current implementation status" below).**
 
 Historical status at design acceptance (kept as recorded then):
 - This design was independently reviewed and accepted, at design head
@@ -108,12 +106,18 @@ D-094), was independently technically accepted at code head
 `76d3719bde0a5bfb8a8b1c8e7aab84832a8de198`, and merged through PR #100
 (accepted head `4b3a2260922f1dc1c19ba753a3c990b44d0c8d2f`, squash commit
 `2961365c961894cc0f6b61ac65619c9891e8cf4e` on `main`).
-Slice C is implemented in PR #102 and corrected to the accepted Amendment
-A3 (merged through PR #103; implementation record D-095); it is under
-independent review, NOT accepted and NOT merged.
-#88 stays OPEN until slice C is accepted and merged; #50 remains OPEN and
-out of scope. The design text in
-this document is unchanged.
+Slice C (implementation record D-095), corrected to the accepted Amendment
+A3 (merged through PR #103), was independently accepted at PR #102 head
+`117d0abbad4f012911e0cd96794604eaa9f474ba` (exact-head CI run
+`36995144617` SUCCESS: 3229 pytest passed, 10 hang diagnostics passed) and
+merged through PR #102 as squash commit
+`82d6f7b4a6e4e51b02442b62dc7a556519b66e5c` on `main` (single parent
+`32f1a0e5411f0445f3bc794451e5288561ae5cd1`); the accepted-head tree equals
+the squash tree exactly (`d259e06fe73b11d33aca751bf4f444924d09bace`).
+Issue #88 is CLOSED/completed. #50 remains OPEN and was out of scope for
+#88. No migration (Alembic head stays `b88a2c4d6e10`); no new dependency.
+The target-Mac benchmark remains separate; model quality/selection remains
+#36. The design text in this document is unchanged.
 ---
 
 ## 0. Product contract
