@@ -8333,3 +8333,94 @@ historical CI hang root cause remains NOT PROVEN.
   contained a UUID; 14 requests, all loopback, zero non-loopback attempts;
   synthetic text only, no candidate content or PII. Model selection and
   quality remain #36; the prompt was not tuned for this smoke.
+
+## D-096 — Issue #46 PR-1 implementation record: bounded ingestion intake
+
+**Status:** implemented on `fix/46-bounded-ingestion-intake` (Refs #46; #46
+stays OPEN). No migration, no new dependency, no `uv.lock` change. This is
+availability/security hardening only; tenant isolation, auth/scopes, CSRF,
+original-CV authorization, local-only processing and provenance are
+untouched.
+
+**Problem (verified on `main` @ `f3497c0`).** (1) The upload handler did
+`await file.read()` after Starlette had already parsed and spooled the whole
+multipart body; (2) the folder scanner did `read_bytes()` before any size
+check; (3) DOCX detection only called `namelist()`, so no member-count,
+expansion or ratio bound existed before python-docx loaded the archive.
+
+**Request envelope (HTTP).** `meyar.api.body_limit.DocumentUploadBodyLimitMiddleware`
+is pure ASGI (not `BaseHTTPMiddleware`, which buffers) and is the outermost
+layer. It applies only to `POST /api/v1/candidates/{id}/documents`. The
+request bound is `max_upload_bytes + MAX_MULTIPART_OVERHEAD_BYTES`, where
+`MAX_MULTIPART_OVERHEAD_BYTES = 64 KiB`: one `file` part needs two boundary
+lines (<= 74 B each), a Content-Disposition header with the filename, a
+Content-Type header and CRLFs — a few hundred bytes for real clients — so
+64 KiB leaves orders of magnitude of headroom (plus a few small form fields)
+while capping non-document bytes at a constant. A valid `Content-Length`
+above the bound is rejected with 413 before the handler runs and before any
+body is read. Otherwise (absent/invalid/understated length, chunked) the
+`receive` channel is wrapped and actual bytes are counted; on crossing the
+bound the downstream parser is shown a disconnect, reading stops, its own
+response is discarded and the middleware answers 413. `Content-Length` is an
+early rejection only; the counted bytes are the authority. The 413 body is
+`{"detail": too_large_message(max_bytes)}` — the same copy the application
+validator uses. `max_upload_bytes` is resolved per request through the app's
+`dependency_overrides` for `get_settings`, so overrides apply here too. The
+handler additionally reads via `meyar.ingestion.bounded_read.read_bounded`
+(<= `max_upload_bytes + 1` bytes, chunked); the validator stays the final
+size authority. An oversized unauthenticated request now gets 413 rather
+than 401 (the bound runs before auth, as any body limit does).
+
+**DOCX archive safety** (`meyar.ingestion.validation`, before python-docx
+sees the data; nothing extracted to disk; outward errors are the generic
+`UnsupportedDocumentError` and never carry member names/paths/sizes).
+Constants (module-level safety floor, not operator settings): members <=
+1000 (real CVs: tens; a few hundred with many images); per member <= 32
+MiB; total <= 128 MiB (python-docx holds every part in memory); compression
+ratio <= 100x (real XML deflates ~3-20x; a deflate bomb is ~1000x), applied
+only above a 1 MiB floor because tiny empty parts legitimately exceed it;
+central directory <= 1 KiB x members. Also rejected: encrypted members,
+unsupported compression methods, duplicate normalized names (case-folded,
+`\`->`/`, leading `./` stripped), zip64 sentinels, malformed archives.
+*Actual expansion is bounded, not trusted:* the central directory is bounded
+from the EOCD record (located the way `zipfile` locates it) before
+`zipfile` builds a `ZipInfo` per entry; declared sizes are checked, then
+every member is decompressed in 64 KiB chunks and the bytes actually
+produced are counted against the same per-member/total/ratio limits. A
+forged small header is truncated by `zipfile` and fails its CRC (rejected as
+malformed); a forged huge header fails the declared check.
+
+**Scanner result contract.** `scan_source_root(root, *, max_bytes)` now
+yields the closed union `ScanEntry = DiscoveredFile | OversizedFile |
+UnstableFile`. `DiscoveredFile` is unchanged (bytes + SHA-256 + mtime).
+`OversizedFile(relative_path, byte_size, mtime)` is decided from `fstat` of
+the opened descriptor and carries no bytes and no hash — no sentinel
+values, and the file is never read or hashed. `UnstableFile(relative_path)`
+covers a file that vanished, stopped being regular, was swapped for a
+symlink (`O_NOFOLLOW`), or changed during the read. A within-limit file is
+opened once, read at most `max_bytes + 1` bytes, then re-`fstat`ed; if size,
+mtime, ctime, inode/device or the byte count differ from the first `fstat`
+it is `UnstableFile` — not imported, not a permanent failure; the next pass
+observes it again. The SHA-256 is computed only from a stable snapshot. All
+symlink/root-escape protections are unchanged.
+
+**Indexer behavior and the M-5 boundary.** `FolderIndexedFile.sha256_hash`
+is NOT NULL, so an oversized file cannot be given an index row without a
+fabricated or read-everything hash; creating a Candidate to hold it would
+add another M-5 phantom. Therefore an `OversizedFile` creates **no
+Candidate and no index row**. It is recorded as a tenant-scoped audit event
+`FOLDER_FILE_OVERSIZED_SKIPPED` (folder source id, byte size, cap, SHA-256 of
+the relative path — never the path), counted in `FolderScanSummary.skipped_oversized`
+and the `FOLDER_INDEXING_COMPLETED` event, and an existing row for that path
+is left untouched (not tombstoned MISSING). The CLI prints the count and
+exits 1 (completed with problems), matching the old FAILED-row behavior for
+the operator. Behavior change: an oversized folder file previously produced a
+FAILED row plus a phantom Candidate; it no longer does. The audit event
+recurs on every scan while the file stays oversized (retention is L-6).
+
+**Explicitly NOT changed / deferred.** The general M-5 phantom-candidate and
+transactional-ingestion fix, PDF/parser resource limits and timeouts, DOCX
+table/header/footer extraction (M-4), reconciliation single-flight locking,
+same-content concurrency, tenant-active enforcement, API cache headers,
+logging privacy, readiness, Alembic drift, and all ops/deployment tooling
+remain later #46/#35 slices. #36 and #50 untouched.

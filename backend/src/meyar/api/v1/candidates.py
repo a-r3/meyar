@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meyar.config import Settings, get_settings
 from meyar.core.auth import TenantContext, require_scope
 from meyar.db import get_db
+from meyar.ingestion.bounded_read import read_bounded
 from meyar.ingestion.dependency import get_document_parser
 from meyar.ingestion.parser import DocumentParser
 from meyar.ingestion.validation import DocumentTooLargeError, UnsupportedDocumentError
@@ -163,7 +164,7 @@ async def post_candidate_document(
 ) -> CandidateDocumentOut:
     await _get_candidate_or_404(db, ctx.tenant_id, candidate_id)
 
-    data = await file.read()
+    data = await read_bounded(file, max_bytes=settings.max_upload_bytes)
     try:
         document = await ingest_candidate_document(
             db,

@@ -429,7 +429,8 @@ async def _index_folder(tenant_id: str, root: str) -> None:
     print(f"Failed: {summary.failed}")
     print(f"Missing: {summary.missing}")
     print(f"Skipped (unstable): {summary.skipped_unstable}")
-    if summary.failed > 0:
+    print(f"Skipped (oversized): {summary.skipped_oversized}")
+    if summary.failed > 0 or summary.skipped_oversized > 0:
         raise SystemExit(1)
 
 
@@ -486,6 +487,7 @@ async def _reconcile_folder(tenant_id: str, root: str, limit: int | None) -> Non
     print(f"Ingestion failed: {scan_summary.failed}")
     print(f"Missing: {scan_summary.missing}")
     print(f"Skipped (unstable): {scan_summary.skipped_unstable}")
+    print(f"Skipped (oversized): {scan_summary.skipped_oversized}")
     print(f"Candidates considered: {reconciliation_summary.candidates_considered}")
     print(f"Already ready: {reconciliation_summary.already_ready}")
     print(f"Processed this run: {reconciliation_summary.processed}")
@@ -495,6 +497,7 @@ async def _reconcile_folder(tenant_id: str, root: str, limit: int | None) -> Non
     print(f"Deferred (local inference busy, retry later): {reconciliation_summary.deferred}")
     if (
         scan_summary.failed > 0
+        or scan_summary.skipped_oversized > 0
         or reconciliation_summary.failed > 0
         or reconciliation_summary.deferred > 0
     ):

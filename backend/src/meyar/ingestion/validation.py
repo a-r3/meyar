@@ -1,7 +1,10 @@
 import io
+import struct
 import zipfile
+import zlib
 from dataclasses import dataclass
 from pathlib import PurePosixPath
+from typing import Protocol
 
 PDF_MIME = "application/pdf"
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -21,6 +24,40 @@ class DocumentTooLargeError(ValueError):
     pass
 
 
+def too_large_message(max_bytes: int) -> str:
+    """The one outward copy for an over-limit document, shared by the
+    application validator and the HTTP request-envelope guard so both
+    layers answer identically."""
+    return f"File exceeds the maximum allowed size of {max_bytes} bytes."
+
+
+# --- DOCX archive safety (issue #46 PR-1, docs/DECISIONS.md) -------------
+# A DOCX is a ZIP that python-docx loads fully into memory, so the bounds
+# below limit what a hostile archive can make this process materialize.
+# Real CV DOCX files have tens of members (a few hundred at the very most
+# with many embedded images), XML parts of well under a megabyte and
+# deflate ratios of roughly 3-20x; every bound leaves an order of
+# magnitude of headroom over that and sits far below the 1 GiB+ that a
+# 10 MiB deflate bomb can expand to. They are module constants (not
+# settings): they are a safety floor, not an operator tuning knob.
+DOCX_MAX_MEMBERS = 1000
+DOCX_MAX_MEMBER_UNCOMPRESSED_BYTES = 32 * 1024 * 1024
+DOCX_MAX_TOTAL_UNCOMPRESSED_BYTES = 128 * 1024 * 1024
+DOCX_MAX_COMPRESSION_RATIO = 100
+# Tiny parts (empty rels/props files) legitimately compress >100x; the
+# ratio test only applies once a member or the archive expands past this.
+DOCX_RATIO_FLOOR_BYTES = 1024 * 1024
+# zipfile materializes one ZipInfo per central-directory entry before any
+# check could run, so the directory itself is bounded from the
+# end-of-central-directory record first (<= 1 KiB per allowed member).
+DOCX_MAX_CENTRAL_DIRECTORY_BYTES = DOCX_MAX_MEMBERS * 1024
+_STREAM_CHUNK_BYTES = 64 * 1024
+_EOCD_SIGNATURE = b"PK\x05\x06"
+_EOCD_MAX_TAIL_BYTES = 22 + 65535
+_ZIP_ENCRYPTED_FLAG = 0x1
+_SUPPORTED_COMPRESSION = (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED)
+
+
 @dataclass(frozen=True)
 class DetectedDocument:
     document_type: str  # "PDF" | "DOCX"
@@ -37,9 +74,7 @@ def validate_upload(
     if not data:
         raise UnsupportedDocumentError("Empty file.")
     if len(data) > max_bytes:
-        raise DocumentTooLargeError(
-            f"File exceeds the maximum allowed size of {max_bytes} bytes."
-        )
+        raise DocumentTooLargeError(too_large_message(max_bytes))
 
     detected = _detect_signature(data)
 
@@ -76,9 +111,10 @@ def _detect_signature(data: bytes) -> DetectedDocument:
         return DetectedDocument(document_type="PDF", mime_type=PDF_MIME)
     if data[:2] == b"PK":
         try:
+            _verify_docx_archive(data)
             with zipfile.ZipFile(io.BytesIO(data)) as archive:
                 names = archive.namelist()
-        except zipfile.BadZipFile as exc:
+        except (zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError, RuntimeError) as exc:
             raise UnsupportedDocumentError("Malformed zip-based document.") from exc
         # DOCX is OOXML-in-zip; a bare zip or another OOXML format (xlsx,
         # pptx) must not be accepted as a document.
@@ -86,3 +122,103 @@ def _detect_signature(data: bytes) -> DetectedDocument:
             return DetectedDocument(document_type="DOCX", mime_type=DOCX_MIME)
         raise UnsupportedDocumentError("Zip-based file is not a supported Office document.")
     raise UnsupportedDocumentError("Unrecognized file signature.")
+
+
+_UNSAFE_ARCHIVE_MESSAGE = "Zip-based document exceeds safe structural limits."
+
+
+def _normalized_member_name(name: str) -> str:
+    return name.replace("\\", "/").lstrip("./").strip("/").casefold()
+
+
+def _check_central_directory_bounds(data: bytes) -> None:
+    """Bound the central directory from the EOCD record, found exactly the
+    way zipfile finds it (last signature in the tail), before zipfile
+    builds a ZipInfo per entry."""
+    tail = data[-_EOCD_MAX_TAIL_BYTES:]
+    position = tail.rfind(_EOCD_SIGNATURE)
+    if position < 0 or len(tail) - position < 22:
+        raise zipfile.BadZipFile("no end-of-central-directory record")
+    fields = struct.unpack("<4sHHHHLLH", tail[position : position + 22])
+    entries_total, directory_size = fields[4], fields[5]
+    if (
+        entries_total > DOCX_MAX_MEMBERS
+        or entries_total == 0xFFFF  # zip64 sentinel: never legitimate for a CV
+        or directory_size == 0xFFFFFFFF
+        or directory_size > DOCX_MAX_CENTRAL_DIRECTORY_BYTES
+    ):
+        raise UnsupportedDocumentError(_UNSAFE_ARCHIVE_MESSAGE)
+
+
+class _Readable(Protocol):
+    def read(self, size: int = -1, /) -> bytes: ...
+
+
+def _stream_bounded(stream: _Readable, *, member_cap: int, total_remaining: int) -> int:
+    """Actually decompress a member in bounded chunks and return the real
+    byte count. The count read here, not the ZIP header, is the authority:
+    it raises as soon as either cap is crossed."""
+    count = 0
+    while chunk := stream.read(_STREAM_CHUNK_BYTES):
+        count += len(chunk)
+        if count > member_cap or count > total_remaining:
+            raise UnsupportedDocumentError(_UNSAFE_ARCHIVE_MESSAGE)
+    return count
+
+
+def _ratio_exceeded(uncompressed: int, compressed: int) -> bool:
+    return uncompressed > DOCX_RATIO_FLOOR_BYTES and (
+        uncompressed > max(compressed, 1) * DOCX_MAX_COMPRESSION_RATIO
+    )
+
+
+def _verify_docx_archive(data: bytes) -> None:
+    """Structural and expansion safety for a zip-based upload, run before
+    python-docx or any parser sees it. Nothing is extracted to disk;
+    nothing about the archive (member names, paths, sizes) is ever placed
+    in an outward error."""
+    _check_central_directory_bounds(data)
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        infos = archive.infolist()
+        if len(infos) > DOCX_MAX_MEMBERS:
+            raise UnsupportedDocumentError(_UNSAFE_ARCHIVE_MESSAGE)
+        seen: set[str] = set()
+        declared_total = 0
+        for info in infos:
+            normalized = _normalized_member_name(info.filename)
+            if normalized in seen:
+                raise UnsupportedDocumentError(_UNSAFE_ARCHIVE_MESSAGE)
+            seen.add(normalized)
+            if info.flag_bits & _ZIP_ENCRYPTED_FLAG:
+                raise UnsupportedDocumentError(_UNSAFE_ARCHIVE_MESSAGE)
+            if info.is_dir():
+                continue
+            if info.compress_type not in _SUPPORTED_COMPRESSION:
+                raise UnsupportedDocumentError(_UNSAFE_ARCHIVE_MESSAGE)
+            if info.file_size > DOCX_MAX_MEMBER_UNCOMPRESSED_BYTES or _ratio_exceeded(
+                info.file_size, info.compress_size
+            ):
+                raise UnsupportedDocumentError(_UNSAFE_ARCHIVE_MESSAGE)
+            declared_total += info.file_size
+        if declared_total > DOCX_MAX_TOTAL_UNCOMPRESSED_BYTES or _ratio_exceeded(
+            declared_total, len(data)
+        ):
+            raise UnsupportedDocumentError(_UNSAFE_ARCHIVE_MESSAGE)
+
+        # Headers are attacker-controlled: enforce the same bounds on bytes
+        # actually produced by decompression.
+        actual_total = 0
+        for info in infos:
+            if info.is_dir():
+                continue
+            with archive.open(info) as stream:
+                actual = _stream_bounded(
+                    stream,
+                    member_cap=DOCX_MAX_MEMBER_UNCOMPRESSED_BYTES,
+                    total_remaining=DOCX_MAX_TOTAL_UNCOMPRESSED_BYTES - actual_total,
+                )
+            if _ratio_exceeded(actual, info.compress_size):
+                raise UnsupportedDocumentError(_UNSAFE_ARCHIVE_MESSAGE)
+            actual_total += actual
+        if _ratio_exceeded(actual_total, len(data)):
+            raise UnsupportedDocumentError(_UNSAFE_ARCHIVE_MESSAGE)
