@@ -2,6 +2,18 @@
 
 ## Current phase
 
+**Issue #88 Slice C — implemented in PR #102 (head
+`4e0daf2191b563c49315139ad7a01536dbe41f56`), under independent review, NOT
+accepted, NOT merged.** Independent review found three normative
+reconciliation issues in D-092 itself (assistant-history privacy vs. §15,
+coordinated/limit coverage precision in §10.2, and RANK chat authority).
+**D-092 Amendment A3 is PROPOSED** in a separate docs-only PR and is pending
+independent acceptance; PR #102 is blocked on A3 and must be corrected to
+it afterwards. D-095 (in PR #102) is not accepted authority. No migration
+(Alembic head remains `b88a2c4d6e10`). #88 remains OPEN; #50 remains OPEN
+and out of scope. The historical CI pytest hang root cause remains NOT
+PROVEN.
+
 **Issue #88 Slice B — IMPLEMENTED, independently technically accepted, and
 MERGED through PR #100.** Squash commit on `main`:
 `2961365c961894cc0f6b61ac65619c9891e8cf4e` (single parent
@@ -21,8 +33,8 @@ Independent-review correction: Layer 1 now receives a real read-only
 ValidationContext (pre-existing ResultSet inspected member-scoped per #86,
 zero executors on a ResultSet-family rejection with today's outward
 outcome), and every validated plan emits privacy-safe `agent.plan.validated`.
-No migration (Alembic head remains `b88a2c4d6e10`). Slice C has NOT
-started; #88 remains OPEN; #50 remains OPEN and out of scope. The
+No migration (Alembic head remains `b88a2c4d6e10`). Slice C: see the block
+above; #88 remains OPEN; #50 remains OPEN and out of scope. The
 historical CI pytest hang root cause remains NOT PROVEN.
 
 **Issue #88 Slice A — IMPLEMENTED, independently technically accepted, and
@@ -38,7 +50,7 @@ Alembic single head: `b88a2c4d6e10`.
   order, A2 exchange-chain liveness, SOURCE_MESSAGE, and a final Phase B
   that always starts from a fresh transaction (principal locked first; D-093
   supersedes D-089's deterministic-only Phase-B statements).
-- Slice C has NOT started (slice B: see the block above). #88 remains
+- Slice C: see the first block above (slice B: see above). #88 remains
   OPEN. #50 remains OPEN and out of scope for Slice A.
 - The historical CI pytest hang root cause remains NOT PROVEN; the PR #97
   diagnostics remain relevant and active.

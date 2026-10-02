@@ -3,7 +3,9 @@
 **Status: ACCEPTED DESIGN; slice A IMPLEMENTED, technically accepted and
 MERGED (PR #98); slice B IMPLEMENTED, independently technically accepted
 and MERGED (PR #100, D-094);
-slice C not started (see "Current implementation status" below).**
+slice C implemented in PR #102 but NOT accepted and NOT merged; Amendment
+A3 PROPOSED, pending independent acceptance (see "Current implementation
+status" below).**
 
 Historical status at design acceptance (kept as recorded then):
 - This design was independently reviewed and accepted, at design head
@@ -67,6 +69,32 @@ A2 also separates three cases (§6.4):
 - classifier infrastructure failure abandons the turn and consumes nothing;
 - a stale or foreign button is a rejected request, not a state transition.
 
+**Amendment A3 (PROPOSED AMENDMENT; pending independent acceptance; NOT
+accepted).** Full text: D-092 Amendment A3 in `docs/DECISIONS.md`. Summary:
+- A3.1 (§15, assistant turns only): `propose_agent_plan` never receives
+  persisted HR-facing assistant display text (it can carry
+  CandidateIdentity); assistant turns are projected as the closed
+  `AgentTurnOutcome` code. User turns, the turn limit and human-visible
+  transcript storage/display are unchanged. No heuristic name redaction, no
+  conversation RAG.
+- A3.2 (§10.2 rule 3): a coordinated material subject analyzed as one
+  occurrence ("Python və Java") needs coverage for EACH deterministic
+  coordinated part. Coverage sources are SEARCH/REFINE source spans, the
+  grounded reference span and the grounded topic span; a `limit_quote` is
+  numeric workflow grounding, NOT requirement coverage. WHOLE_MESSAGE still
+  covers everything; anti-laundering is unchanged.
+- A3.3 (RANK): RANK_JOB_CANDIDATES stays a registered HUMAN_ACTION_ONLY
+  capability that never executes in a turn, but it is NOT model-proposable
+  or offered in chat until an explicit server-owned, unambiguous "current
+  confirmed job" selector exists (own reviewed decision). No "latest
+  confirmation" choice, no transcript scanning, no migration or pointer in
+  A3. Direct ranking routes and deterministic scoring are unchanged.
+  CREATE_JOB is unchanged.
+- Slice-C PR #102 must be corrected after A3 is accepted and merged (keep
+  the outcome-code projection and coordinated-part coverage; exclude LIMIT
+  from coverage; make RANK proposability consistent with A3.3; keep the
+  direct ranking routes).
+
 **Current implementation status.** A2 (with A1 and the D-092 slice A
 scope) is implemented by issue #88 Slice A; implementation record D-093.
 The corrected Slice-A code was technically accepted by independent review
@@ -78,7 +106,10 @@ D-094), was independently technically accepted at code head
 `76d3719bde0a5bfb8a8b1c8e7aab84832a8de198`, and merged through PR #100
 (accepted head `4b3a2260922f1dc1c19ba753a3c990b44d0c8d2f`, squash commit
 `2961365c961894cc0f6b61ac65619c9891e8cf4e` on `main`).
-Slice C has not started.
+Slice C is implemented in PR #102 (head
+`4e0daf2191b563c49315139ad7a01536dbe41f56`), under independent review, NOT
+accepted and NOT merged; it is blocked on acceptance of the proposed
+Amendment A3 and must then be corrected to A3.
 #88 remains OPEN; #50 remains OPEN and out of scope. The design text in
 this document is unchanged.
 ---
@@ -999,7 +1030,8 @@ LF current message `M`):
    - Spans must be non-overlapping and non-blank. The planner input is the
      spans in source order, joined by a server-owned `"\n"`. No model
      character enters the query.
-3. **Requirement coverage.**
+3. **Requirement coverage.** *(Clarified by proposed Amendment A3.2:
+   per coordinated part; `limit_quote` is not a coverage source.)*
    - Run `analyze_hr_text(M)` (policy-versioned, deterministic).
    - Every material requirement (state SCORABLE or NEEDS_HUMAN_REVIEW)
      must have its `subject` occurrence overlap **some** grounding span of
@@ -1121,7 +1153,9 @@ capabilities execute**:
 - Lane B is consulted **only** by capabilities whose `live_context` or
   `produces` includes PENDING_DRAFT or CONFIRMED_JOB_IN_SESSION:
   - CREATE_JOB needs the lane-B target to become an affordance;
-  - RANK needs the session-confirmed job;
+  - RANK needs the session-confirmed job; *(proposed Amendment A3.3:
+    RANK is not model-proposable/offered in chat until an explicit
+    server-owned current-confirmed-job selector exists)*
   - a producer of PENDING_DRAFT (server-built only) triggers T11.
 - Search, refine, profile and evidence neither read nor modify lane B.
 
@@ -1326,6 +1360,8 @@ history (separate future scope). The full conversation is never sent.
 
 Projection for `propose_agent_plan`:
 - the last `agent_max_context_turns` `(role, text)` pairs (unchanged);
+  *(proposed Amendment A3.1: assistant turns project only the closed
+  `AgentTurnOutcome` code, never persisted display text)*
 - `available_capabilities`: the per-call enum subset, as names plus
   one-line server descriptions;
 - `active_result_context_present: bool`,
