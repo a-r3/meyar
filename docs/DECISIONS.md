@@ -8570,6 +8570,10 @@ invalidated just by parser version. No unchanged-file reprocessing, terminal
 failure backfill or automatic recovery. Headers/footers/text boxes, revision/
 content-control/SmartArt/notes/comments/AlternateContent/object interpretation
 and page-break fusion changes remain deferred. No migration, SQLAlchemy change,
-dependency or lockfile change; no general M-5/M-9 or #35/#36/#50 work started.
+dependency or lockfile change. General remaining #46 M-5/M-9 work is outside
+PR-3. #35 remains OPEN with substantial existing `meyar-ops` implementation;
+PR-3 does not advance or modify #35. #36 and #50 remain OPEN and are not
+advanced by PR-3. The real Target-Mac benchmark has not been completed;
+no Target-Mac acceptance is claimed.
 Implementation contract, limits/rationale and verification:
 `docs/ISSUE_46_PR3_VALIDATION.md`.

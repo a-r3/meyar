@@ -11,7 +11,11 @@ Header/footer/text-box text is detected for safe omission disclosure, never
 extracted. DOCX evidence no longer claims a physical page. Historical canonical
 rows/evidence remain immutable; no parser-version-only reprocessing or old
 failure backfill. No migration, dependency/lockfile change or Target-Mac claim.
-#46 remains OPEN under M9; general M-5/M-9 and #35/#36/#50 remain deferred.
+#46 remains OPEN under M9. General remaining #46 M-5/M-9 work is outside
+PR-3. #35 remains OPEN with substantial existing `meyar-ops` implementation;
+PR-3 does not advance or modify #35. #36 and #50 remain OPEN and are not
+advanced by PR-3. The real Target-Mac benchmark has not been completed;
+no Target-Mac acceptance is claimed.
 D-098 and `docs/ISSUE_46_PR3_VALIDATION.md` record the proposal and verification.
 PR #110 independent review corrections add strict row-local omitted-context
 completeness and a four-label reference/emergency-contact identity veto. Current

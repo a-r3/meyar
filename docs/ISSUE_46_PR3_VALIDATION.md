@@ -11,8 +11,12 @@ Live origin/main was fetched and verified as
 PR #109 status correction. Tracked worktree was clean; hooksPath `.githooks`
 was verified. Implementation branch: `feat/46-docx-ordered-tables`.
 
-Only the approved M-4/PR-3 table subset is implemented. General M-5/M-9,
-#35, #36, #50, full Word fidelity, OCR, recovery and backfill remain deferred.
+Only the approved M-4/PR-3 table subset is implemented. Full Word fidelity,
+OCR, recovery and backfill remain deferred. General remaining #46 M-5/M-9
+work is outside PR-3. #35 remains OPEN with substantial existing `meyar-ops`
+implementation; PR-3 does not advance or modify #35. #36 and #50 remain OPEN
+and are not advanced by PR-3. The real Target-Mac benchmark has not been
+completed; no Target-Mac acceptance is claimed.
 No migration, SQLAlchemy model, dependency, or uv.lock change.
 
 ## Ordered extraction and source coordinates
