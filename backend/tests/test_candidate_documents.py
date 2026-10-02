@@ -176,7 +176,7 @@ async def test_upload_malformed_pdf_uploads_but_parse_fails(
     assert resp.status_code == 201
     body = resp.json()
     assert body["parser_status"] == "PARSE_FAILED"
-    assert body["parse_error_code"] == "PARSE_FAILED"
+    assert body["parse_error_code"] == "INVALID_DOCUMENT"
     assert body["canonical"] is None
 
 
@@ -206,7 +206,7 @@ async def test_upload_pdf_exceeding_max_pages_rejected_safely(
     assert resp.status_code == 201
     body = resp.json()
     assert body["parser_status"] == "PARSE_FAILED"
-    assert body["parse_error_code"] == "PARSE_FAILED"
+    assert body["parse_error_code"] == "PARSER_OUTPUT_LIMIT"
     assert body["canonical"] is None
 
 

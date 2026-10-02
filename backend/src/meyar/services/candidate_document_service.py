@@ -1,11 +1,12 @@
 import hashlib
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meyar.ingestion.parser import DocumentParser, ParseError
-from meyar.ingestion.validation import validate_upload
+from meyar.ingestion.parser import DocumentParser, ParseError, ParseResult
+from meyar.ingestion.validation import DetectedDocument, validate_upload_async
 from meyar.models.candidate_document import (
     PARSER_STATUS_PARSE_FAILED,
     PARSER_STATUS_PARSED,
@@ -17,6 +18,35 @@ from meyar.services.candidate_document_repo import (
     create_canonical_document,
 )
 from meyar.storage.base import DocumentStorage
+
+
+@dataclass(frozen=True)
+class PreparedDocument:
+    data: bytes
+    detected: DetectedDocument
+    sha256_hash: str
+    outcome: ParseResult | ParseError
+
+
+async def prepare_candidate_document(
+    parser: DocumentParser, *, filename: str, content_type: str, data: bytes, max_bytes: int
+) -> PreparedDocument:
+    """No DB or storage access: validation/admission/parsing before persistence.
+
+    Operational failures propagate without creating document authority. Only
+    terminal content/output-policy failures are retained for durable ingestion.
+    """
+    detected = await validate_upload_async(
+        filename=filename, content_type=content_type, data=data, max_bytes=max_bytes
+    )
+    outcome: ParseResult | ParseError
+    try:
+        outcome = await parser.parse(data=data, document_type=detected.document_type)
+    except ParseError as exc:
+        if not exc.is_terminal:
+            raise
+        outcome = exc
+    return PreparedDocument(data, detected, hashlib.sha256(data).hexdigest(), outcome)
 
 
 async def ingest_candidate_document(
@@ -31,20 +61,37 @@ async def ingest_candidate_document(
     data: bytes,
     max_bytes: int,
 ) -> CandidateDocument:
-    """The single secure document-ingestion pipeline: validate (MIME
-    sniffing + size cap) -> hash -> store (opaque storage key) -> persist
-    CandidateDocument -> parse -> persist CanonicalDocument, with an audit
-    event at each stage. Shared by the direct-upload API route and the
-    local-folder indexer so there is exactly one ingestion code path.
-    Raises DocumentTooLargeError/UnsupportedDocumentError from validation
-    — the caller decides how to surface that (HTTP 4xx, or a per-file
-    failure record for folder indexing). Never commits; the caller
-    controls the transaction boundary."""
-    detected = validate_upload(
-        filename=filename, content_type=content_type, data=data, max_bytes=max_bytes
+    """Shared folder/service entry point; caller owns its transaction.
+
+    Direct uploads call prepare/persist separately to release the request DB
+    connection during validation and parsing. Folder transaction architecture
+    remains unchanged; operational failures follow its existing FAILED retry path.
+    """
+    prepared = await prepare_candidate_document(
+        parser, filename=filename, content_type=content_type, data=data, max_bytes=max_bytes
+    )
+    return await persist_candidate_document(
+        db, storage, prepared, tenant_id=tenant_id, candidate_id=candidate_id, filename=filename
     )
 
-    sha256_hash = hashlib.sha256(data).hexdigest()
+
+async def persist_candidate_document(
+    db: AsyncSession,
+    storage: DocumentStorage,
+    prepared: PreparedDocument,
+    *,
+    tenant_id: uuid.UUID,
+    candidate_id: uuid.UUID,
+    filename: str,
+) -> CandidateDocument:
+    """Persist a prepared success/terminal outcome; never commits or parses.
+
+    Request callers revalidate and lock live authority first. Operational
+    failures never reach storage.save or CandidateDocument creation.
+    """
+    detected, data, outcome = prepared.detected, prepared.data, prepared.outcome
+    if isinstance(outcome, ParseError) and not outcome.is_terminal:
+        raise outcome
     storage_key = await storage.save(tenant_id=tenant_id, content=data)
 
     # original_filename is retained for display only — truncated, never
@@ -58,7 +105,7 @@ async def ingest_candidate_document(
         original_filename=safe_original_filename,
         mime_type=detected.mime_type,
         byte_size=len(data),
-        sha256_hash=sha256_hash,
+        sha256_hash=prepared.sha256_hash,
         storage_key=storage_key,
     )
     await record_event(
@@ -73,12 +120,11 @@ async def ingest_candidate_document(
         },
     )
 
-    try:
-        result = await parser.parse(data=data, document_type=detected.document_type)
-    except ParseError as exc:
+    if isinstance(outcome, ParseError):
+        exc = outcome
         document.parser_status = PARSER_STATUS_PARSE_FAILED
-        document.parse_error_code = "PARSE_FAILED"
-        document.parse_error_message = str(exc)[:500]
+        document.parse_error_code = exc.code.value
+        document.parse_error_message = exc.public_message
         await record_event(
             db,
             tenant_id=tenant_id,
@@ -86,10 +132,11 @@ async def ingest_candidate_document(
             metadata={
                 "candidate_id": str(candidate_id),
                 "document_id": str(document.id),
-                "error_code": "PARSE_FAILED",
+                "error_code": exc.code.value,
             },
         )
     else:
+        result = outcome
         document.parser_status = PARSER_STATUS_PARSED
         document.parser_name = result.parser_name
         document.parser_version = result.parser_version
