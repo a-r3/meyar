@@ -7687,6 +7687,101 @@ PR #96 before slice A; corrected per review).**
   unchanged.
 - Implementation has not started (see *Status* above).
 
+**Amendment A3 — Slice-C authority reconciliation (ACCEPTED AMENDMENT;
+MERGED through docs PR #103, before any correction of slice-C PR #102).**
+- *Status.* ACCEPTED — independently reviewed and accepted, and MERGED
+  through PR #103. Accepted PR head
+  `7ab7056794f4f693d9b974cba7f6a01f7abd908e` (tree
+  `78ce6e29634aa370f3bdabc0f22d7862bb378558`); squash commit on `main`
+  `d9e96c06169d9ebf25ab6f276eb63bab4c5d4828` (single parent
+  `9817711c73e9d2701c0385d2bbe0c1bd3fba153e`); the squash tree equals the
+  accepted-head tree exactly. Accepted exact-head CI run `36965800982`
+  SUCCESS (3073 pytest passed; 10 hang diagnostics passed). Docs only: no
+  source, test, migration or dependency change; Alembic head stays
+  `b88a2c4d6e10`. Slice C is implemented in PR #102 (head
+  `4e0daf2191b563c49315139ad7a01536dbe41f56`) but is NOT accepted and NOT
+  merged; D-095 belongs to that unaccepted PR and is NOT accepted authority.
+  #88 stays OPEN until slice C is accepted and merged; #50 remains OPEN and
+  out of scope.
+- *Finding.* Independent review of the slice-C implementation found three
+  normative reconciliation issues in D-092 itself:
+  1. §15 sends the bounded `(role, text)` history "unchanged" AND requires
+     CandidateIdentity to be structurally absent from the projection. D-045
+     overwrites the persisted assistant text with the rendered HR-facing
+     headline, which can name a candidate, and no identity-free original
+     assistant text is retained. Both literal requirements cannot always
+     hold together.
+  2. §10.2 rule 3 requires each material requirement's subject occurrence to
+     overlap a grounded span, but deterministic analysis represents a
+     coordinated subject ("Python və Java") as ONE occurrence, so the
+     normative §22 item 25 case (quote only "Python" →
+     SOURCE_COVERAGE_INCOMPLETE) is not enforceable by plain overlap. The
+     coverage-source set also needs to be stated precisely.
+  3. RANK_JOB_CANDIDATES is model-proposable with live context
+     CONFIRMED_JOB_IN_SESSION, but the durable model permits several
+     `AgentDraftConfirmation` rows per BrowserSession and has no
+     authoritative single "current confirmed job" pointer. Choosing "latest
+     confirmation" or scanning transcript/history would be a NEW selection
+     authority D-092 never accepted.
+- *A3.1 Privacy-safe bounded model history (supersedes §15 for assistant
+  turns only).* For `propose_agent_plan`:
+  - USER turns: the canonical bounded user-authored text, as today, within
+    the existing `agent_max_context_turns` limit.
+  - ASSISTANT turns: persisted HR-facing display text is NOT sent, because
+    it can carry CandidateIdentity. Only a closed privacy-safe server value
+    sufficient for dialogue continuity is projected — in v1, the turn's
+    `AgentTurnOutcome` code.
+  - CandidateIdentity, candidate UUIDs, and names/contact fields derived
+    from candidate records remain structurally absent.
+  - No identity redaction by heuristic name matching. No conversation RAG.
+  - This intentionally supersedes §15's literal "unchanged `(role, text)`
+    pairs" for assistant turns only. Human-visible transcript storage and
+    display (D-045) are unchanged.
+- *A3.2 Coordinated requirement coverage precision (clarifies §10.2 rule
+  3).*
+  - When deterministic semantic analysis represents a coordinated material
+    subject as one occurrence (e.g. "Python və Java"), coverage is required
+    for EACH deterministic coordinated part. The closed coordinator set may
+    be implementation-policy-versioned and must stay deterministic and
+    bounded. This is what makes §22 item 25 ("Python və Java bilən" →
+    quote only "Python" → SOURCE_COVERAGE_INCOMPLETE) enforceable.
+  - Material-requirement coverage sources are exactly: SEARCH/REFINE
+    grounded semantic source spans; the grounded candidate reference span;
+    the grounded evidence topic span.
+  - A result-count `limit_quote` is NOT a material-requirement coverage
+    source; it is numeric workflow grounding only.
+  - WHOLE_MESSAGE still trivially covers the message. Protected-attribute
+    anti-laundering (§10.2 rule 4) is not weakened.
+- *A3.3 RANK_JOB_CANDIDATES chat affordance deferral (supersedes only the
+  statements that RANK is model-proposable from CONFIRMED_JOB_IN_SESSION:
+  §8.1/§9 RANK row, §11.1 lane selection, §21, §22 item 8 as it applies to
+  RANK, §27 answer 6).*
+  - RANK_JOB_CANDIDATES remains a registered HUMAN_ACTION_ONLY capability.
+    It never executes in an agent turn. The model supplies no job id.
+  - Existing authenticated CSRF ranking routes and deterministic scoring
+    are unchanged; the direct Job/ranking UI remains fully available.
+  - Until MEYAR has an explicit server-owned, unambiguous "current confirmed
+    job in this BrowserSession/conversation" selector or pointer,
+    RANK_JOB_CANDIDATES is NOT model-proposable and NOT offered in Agent
+    Core v2 chat.
+  - Do NOT choose the "latest `AgentDraftConfirmation`" implicitly. Do NOT
+    scan the transcript to manufacture ranking authority. A3 adds no
+    migration and no pointer.
+  - A future chat ranking affordance needs its own reviewed authority
+    decision before RANK becomes model-proposable.
+  - CREATE_JOB is unchanged: HUMAN_ACTION_ONLY, offered only with the live
+    PENDING_DRAFT authority.
+- *Consequence for slice C.* A3 is accepted and merged; the slice-C
+  implementation (PR #102) must now be corrected to:
+  - keep the privacy-safe assistant outcome-code projection (A3.1);
+  - keep coordinated-part coverage (A3.2);
+  - exclude LIMIT grounding from requirement coverage (A3.2);
+  - make RANK registry model-proposability consistent with A3.3 instead of
+    a `model_proposable=True` capability that production permanently hard
+    codes away;
+  - preserve all existing direct ranking routes.
+- No other part of D-092, A1 or A2 changes.
+
 1. **Authority.** The hierarchy (DB ownership > live BrowserSession/ResultSet
    /mutation authority > deterministic services > capability execution >
    evidence > structured task state > transcript/model context > model) is
