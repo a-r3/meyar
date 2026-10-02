@@ -2,9 +2,16 @@
 
 ## Current phase
 
-**Issue #46 PR-2 — IMPLEMENTATION PROPOSAL, not accepted or merged.**
-Based on verified `main` @ `d5a06a2342abe4acfb9d072c22bf8f956497801e`
-(PR #107 governance correction merged after PR #106). D-097 adds bounded
+**Issue #46 PR-2 — independently ACCEPTED and MERGED through PR #108;
+PR-2 is COMPLETE, but #46 remains OPEN.** Accepted head:
+`270260339e12e55fae6338797ca5c100828a36a2`; exact-head CI run
+`37043386062` completed SUCCESS. The owner manually Squash and merged
+PR #108. Verified current `main` and squash commit:
+`080e1f98788943e21c3664806f00579d85b61710`, exactly one commit ahead of
+previous main `d5a06a2342abe4acfb9d072c22bf8f956497801e` (PR #107).
+Post-merge verification independently compared all 19 changed file contents
+at the accepted head and squash result: all matched; the complete trees also
+match. #46, #35, #36 and #50 are OPEN. D-097 adds bounded
 validation offload and process-isolated parsing with killable deadlines,
 fail-closed Linux/Darwin resource-limit setup, output/IPC bounds and closed safe
 failure metadata. No-text documents create no canonical authority; no OCR.
@@ -24,10 +31,14 @@ The 20s execution deadline does not bound indefinitely stuck OS spawn resolution
 or cleanup; orphan-safe spawn/reap behavior is retained. Corrected local gate:
 Ruff clean; mypy clean on 225 source files; **3366 pytest passed in 512.04s**;
 Alembic single head `b88a2c4d6e10`; **242 focused regressions passed in 68.99s**.
-Exact correction head and post-commit CI are recorded in PR #108 and the final
-operational report. Historical results remain identified in the validation report.
+Final acceptance and delivery evidence is recorded in
+`docs/ISSUE_46_PR2_VALIDATION.md`; historical pre-merge results remain identified.
 No migration, dependency or `uv.lock` change.
-Independent re-review is required; do not merge or close #46.
+Remaining #46 work includes M-4/PR-3, general M-5, M-9 and the other
+unresolved hardening items; these remain deferred/open. No real Apple-Silicon
+execution or #36 Target-Mac acceptance has occurred. This docs-only status
+correction starts no next implementation slice and does not change or advance
+#35/#36/#50. Do not close #46.
 
 **Issue #46 PR-1 (bounded ingestion intake) — independently ACCEPTED and
 MERGED through PR #106; #46 remains OPEN.** Squash commit on `main`:
