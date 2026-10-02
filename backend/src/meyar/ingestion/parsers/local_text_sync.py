@@ -1,0 +1,51 @@
+"""Synchronous library calls: import/run only within the isolated worker."""
+
+import io
+
+import docx
+import pypdf
+
+from meyar.ingestion.parser import (
+    CanonicalBlock,
+    CanonicalDocumentContent,
+    CanonicalPage,
+    ParseError,
+    ParseFailureCode,
+    ParseResult,
+)
+from meyar.ingestion.parser_output import TextBudget, validate_result
+from meyar.ingestion.parser_policy import PARSER_NAME, PARSER_VERSION, OutputLimits
+
+
+def parse_sync(data: bytes, kind: str, limits: OutputLimits) -> ParseResult:
+    budget = TextBudget(limits)
+    pages: list[CanonicalPage] = []
+    if kind == "PDF":
+        reader = pypdf.PdfReader(io.BytesIO(data))
+        if len(reader.pages) > limits.pages:
+            raise ParseError(ParseFailureCode.PARSER_OUTPUT_LIMIT)
+        for number, page in enumerate(reader.pages, 1):
+            text = (page.extract_text() or "").strip()
+            blocks = []
+            if text:
+                budget.add(text)
+                blocks.append(CanonicalBlock(index=0, text=text))
+            pages.append(CanonicalPage(page=number, blocks=blocks))
+    elif kind == "DOCX":
+        document = docx.Document(io.BytesIO(data))
+        blocks = []
+        for index, paragraph in enumerate(document.paragraphs):
+            text = paragraph.text.strip()
+            if text:
+                budget.add(text)
+                blocks.append(CanonicalBlock(index=index, text=text))
+        pages.append(CanonicalPage(page=1, blocks=blocks))
+    else:
+        raise ParseError(ParseFailureCode.INVALID_DOCUMENT)
+    result = ParseResult(
+        content=CanonicalDocumentContent(pages=pages),
+        parser_name=PARSER_NAME,
+        parser_version=PARSER_VERSION,
+    )
+    validate_result(result, kind, limits)
+    return result

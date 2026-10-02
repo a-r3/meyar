@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.ingestion.parser import DocumentParser, ParseError
-from meyar.ingestion.validation import validate_upload
+from meyar.ingestion.validation import validate_upload_async
 from meyar.models.candidate_document import (
     PARSER_STATUS_PARSE_FAILED,
     PARSER_STATUS_PARSED,
@@ -40,7 +40,7 @@ async def ingest_candidate_document(
     — the caller decides how to surface that (HTTP 4xx, or a per-file
     failure record for folder indexing). Never commits; the caller
     controls the transaction boundary."""
-    detected = validate_upload(
+    detected = await validate_upload_async(
         filename=filename, content_type=content_type, data=data, max_bytes=max_bytes
     )
 
@@ -77,8 +77,8 @@ async def ingest_candidate_document(
         result = await parser.parse(data=data, document_type=detected.document_type)
     except ParseError as exc:
         document.parser_status = PARSER_STATUS_PARSE_FAILED
-        document.parse_error_code = "PARSE_FAILED"
-        document.parse_error_message = str(exc)[:500]
+        document.parse_error_code = exc.code.value
+        document.parse_error_message = exc.public_message
         await record_event(
             db,
             tenant_id=tenant_id,
@@ -86,7 +86,7 @@ async def ingest_candidate_document(
             metadata={
                 "candidate_id": str(candidate_id),
                 "document_id": str(document.id),
-                "error_code": "PARSE_FAILED",
+                "error_code": exc.code.value,
             },
         )
     else:

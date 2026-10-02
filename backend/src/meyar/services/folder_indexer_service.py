@@ -13,7 +13,7 @@ from meyar.ingestion.folder_scanner import (
     resolve_source_root,
     scan_source_root,
 )
-from meyar.ingestion.parser import DocumentParser
+from meyar.ingestion.parser import DocumentParser, ParseError
 from meyar.ingestion.validation import DocumentTooLargeError, UnsupportedDocumentError
 from meyar.models.folder_indexed_file import (
     INDEX_STATUS_FAILED,
@@ -295,7 +295,7 @@ async def _handle_new_file(
             data=entry.data,
             max_bytes=max_bytes,
         )
-    except (UnsupportedDocumentError, DocumentTooLargeError) as exc:
+    except (UnsupportedDocumentError, DocumentTooLargeError, ParseError) as exc:
         await create_folder_indexed_file(
             db,
             tenant_id=tenant_id,
@@ -307,7 +307,7 @@ async def _handle_new_file(
             index_status=INDEX_STATUS_FAILED,
             candidate_id=candidate.id,
             candidate_document_id=None,
-            failure_code=type(exc).__name__,
+            failure_code=exc.code.value if isinstance(exc, ParseError) else type(exc).__name__,
             failure_message=str(exc)[:500],
         )
         await record_event(
@@ -362,14 +362,14 @@ async def _handle_changed_or_retry(
             data=entry.data,
             max_bytes=max_bytes,
         )
-    except (UnsupportedDocumentError, DocumentTooLargeError) as exc:
+    except (UnsupportedDocumentError, DocumentTooLargeError, ParseError) as exc:
         await update_folder_indexed_file(
             db,
             row,
             byte_size=entry.byte_size,
             sha256_hash=entry.sha256_hash,
             index_status=INDEX_STATUS_FAILED,
-            failure_code=type(exc).__name__,
+            failure_code=exc.code.value if isinstance(exc, ParseError) else type(exc).__name__,
             failure_message=str(exc)[:500],
         )
         await record_event(

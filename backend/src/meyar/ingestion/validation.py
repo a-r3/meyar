@@ -1,3 +1,4 @@
+import asyncio
 import io
 import struct
 import zipfile
@@ -5,6 +6,8 @@ import zlib
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Protocol
+
+from meyar.ingestion.admission import gate
 
 PDF_MIME = "application/pdf"
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -93,9 +96,7 @@ def validate_upload(
 
     normalized_content_type = (content_type or "").split(";")[0].strip().lower()
     if normalized_content_type not in _ALLOWED_CONTENT_TYPES:
-        raise UnsupportedDocumentError(
-            "Declared content type is not a supported document type."
-        )
+        raise UnsupportedDocumentError("Declared content type is not a supported document type.")
     if normalized_content_type in (PDF_MIME, DOCX_MIME) and (
         normalized_content_type != detected.mime_type
     ):
@@ -104,6 +105,35 @@ def validate_upload(
         )
 
     return detected
+
+
+async def validate_upload_async(
+    *, filename: str, content_type: str, data: bytes, max_bytes: int
+) -> DetectedDocument:
+    """Bounded offload before storage/DB mutation; retain slot on cancellation.
+
+    PR-1 hard archive caps bound decompression work. Admission limits active
+    validation threads and waiters, including clients that cancel their request.
+    """
+    admission = gate(validation=True)
+    await admission.acquire()
+
+    async def work() -> DetectedDocument:
+        try:
+            return await asyncio.to_thread(
+                validate_upload,
+                filename=filename,
+                content_type=content_type,
+                data=data,
+                max_bytes=max_bytes,
+            )
+        finally:
+            admission.release()
+
+    task = asyncio.create_task(work())
+    # Observe abandoned task failures; the thread retains its admission until done.
+    task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+    return await asyncio.shield(task)
 
 
 def _detect_signature(data: bytes) -> DetectedDocument:

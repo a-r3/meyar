@@ -9,7 +9,7 @@ from meyar.core.auth import TenantContext, require_scope
 from meyar.db import get_db
 from meyar.ingestion.bounded_read import read_bounded
 from meyar.ingestion.dependency import get_document_parser
-from meyar.ingestion.parser import DocumentParser
+from meyar.ingestion.parser import DocumentParser, ParseError
 from meyar.ingestion.validation import DocumentTooLargeError, UnsupportedDocumentError
 from meyar.models.candidate_document import PARSER_STATUS_PARSED, CandidateDocument
 from meyar.models.canonical_document import CanonicalDocument
@@ -185,6 +185,12 @@ async def post_candidate_document(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc
+
+    except ParseError as exc:
+        # Pre-validation admission fails before storage/document mutation.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=exc.public_message
+        ) from None
 
     await db.commit()
     document_id = document.id

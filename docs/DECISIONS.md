@@ -8436,3 +8436,49 @@ table/header/footer extraction (M-4), reconciliation single-flight locking,
 same-content concurrency, tenant-active enforcement, API cache headers,
 logging privacy, readiness, Alembic drift, and all ops/deployment tooling
 remain later #46/#35 slices. #36 and #50 untouched.
+
+
+## D-097 — Issue #46 PR-2: bounded parsing and truthful failure authority
+
+**Status:** IMPLEMENTATION PROPOSAL; independent review and owner merge pending.
+Verified base main: `d5a06a2342abe4acfb9d072c22bf8f956497801e` (PR #107,
+following accepted PR-1/#106). Refs #46 under M9; does not close #46.
+
+**Problem:** The async parser performed synchronous untrusted library work on
+the event loop, had no killable elapsed-time/memory boundary or output budget,
+accepted empty PDFs as parsed canonical authority, and persisted raw parser
+exception text. PR-1's substantial bounded DOCX structural verification also
+ran on the event loop before storage.
+
+**Decision:** Preserve PR-1 validation before storage/document creation, with
+one admitted thread and four finite-wait callers, retaining the thread slot
+after caller cancellation. Keep the DocumentParser async contract; adapt the
+accepted photo subprocess/stdin architecture with bounded parser admission,
+bounded incremental IPC, cancellation-safe startup/terminate/kill/reap,
+feature-detected and allocation-probed RLIMIT_AS on Linux/Darwin, and inclusive
+page/block/character/UTF-8/serialized-output budgets. One active parser child,
+four waiters, 3s admission, 20s worker deadline, 0.5s termination grace, 768 MiB
+address space; output: 300 PDF pages, 10,000 blocks, 1,000,000 characters,
+4 MiB UTF-8 text, 8 MiB serialized response. These are safety limits supported
+by small synthetic development reproductions, never production throughput or
+Mac benchmark claims. Setup fails closed if the memory cap cannot be verified.
+
+**Authority:** Fixed typed failure codes/messages replace raw parser exception
+metadata for new failures. Entirely no-text PDF/DOCX produces no canonical row
+and cannot reach profile/identity inference. Mixed PDF pages retain numbering;
+short text succeeds; DOCX remains body paragraphs only with original index
+gaps. No OCR and no certainty that a no-text document is scanned.
+
+**Version and scope:** Local parser 1.1.0 records changed acceptance/resource/
+failure policy while successful block semantics remain unchanged. Historical
+canonical JSON, references, profiles and identity are not rewritten or
+invalidated; unchanged folder files are not backfilled solely by parser
+version. Existing folder INDEXED semantics for post-validation parse failure
+are intentionally preserved. M-4 extraction completeness is PR-3. General
+M-5/M-9, other #46 slices, #35/#36/#50 remain deferred. Real Apple-Silicon
+resource and lifecycle execution remains later agentless rehearsal; Linux CI
+and injected Darwin unit paths do not establish Mac acceptance. No migration,
+dependency or lockfile change.
+
+Implementation, measured rationale, closed failure table, verification and
+precise deferrals: `docs/ISSUE_46_PR2_VALIDATION.md`.
