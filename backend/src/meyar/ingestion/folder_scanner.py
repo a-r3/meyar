@@ -71,13 +71,35 @@ def _read_bounded_stable(path: Path, relative_path: str, max_bytes: int) -> Scan
     ``max_bytes + 1`` bytes, then re-check the same descriptor. Never an
     unbounded read; the hash is computed only from bytes accepted as a
     stable snapshot."""
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    # A FIFO named like a CV would block a plain open() until a writer
+    # appears. Defense in depth, none of it sufficient alone:
+    #   1. non-following lstat() rejects an entry that is already special;
+    #   2. O_NONBLOCK means an entry swapped to a FIFO after step 1 cannot
+    #      block open() (nor, being checked next, be read);
+    #   3. O_NOFOLLOW refuses a symlink swapped in after the walk;
+    #   4. fstat() of the descriptor actually opened is the authority and
+    #      accepts only a regular file.
+    # Only these expected "changed under us" outcomes are unstable; other
+    # failures (permissions, I/O errors) still propagate.
+    try:
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            return UnstableFile(relative_path=relative_path)
+    except FileNotFoundError:
+        return UnstableFile(relative_path=relative_path)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
     try:
         fd = os.open(path, flags)
     except FileNotFoundError:
         return UnstableFile(relative_path=relative_path)
     except OSError as exc:
-        if exc.errno == errno.ELOOP:  # a symlink replaced the file after the walk
+        # ELOOP: symlink swapped in; ENXIO: became a socket/device with no
+        # peer (non-blocking open refuses it).
+        if exc.errno in (errno.ELOOP, errno.ENXIO):
             return UnstableFile(relative_path=relative_path)
         raise
     try:

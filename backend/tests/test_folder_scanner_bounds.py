@@ -1,8 +1,12 @@
 """Issue #46 PR-1 — bounded, stable folder-scanner reads. Synthetic bytes
 only; nothing large is written."""
 
+import errno
 import hashlib
 import os
+import stat
+import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -165,3 +169,84 @@ def test_symlink_swapped_in_after_walk_is_not_followed(
     monkeypatch.setattr(folder_scanner.os, "open", swap_then_open)
     (entry,) = scan_source_root(str(root), max_bytes=1000)
     assert entry == UnstableFile(relative_path="swap.pdf")
+
+
+# --- special files (FIFO) must never block a scan ------------------------
+
+_needs_fifo = pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="os.mkfifo unavailable")
+
+
+@_needs_fifo
+def test_fifo_with_supported_extension_is_unstable_and_never_blocks(tmp_path: Path) -> None:
+    _write(tmp_path / "a_before.pdf", 50, b"a")
+    os.mkfifo(tmp_path / "pipe.pdf")  # no writer: a plain open() would hang
+    os.mkfifo(tmp_path / "pipe2.DOCX")
+    _write(tmp_path / "z_after.pdf", 60, b"z")
+
+    result: list[Any] = []
+    worker = threading.Thread(
+        target=lambda: result.extend(scan_source_root(str(tmp_path), max_bytes=1000)),
+        daemon=True,
+    )
+    worker.start()
+    worker.join(timeout=10)
+    assert not worker.is_alive(), "scanning blocked on a FIFO"
+
+    assert [(type(e).__name__, e.relative_path) for e in result] == [
+        ("DiscoveredFile", "a_before.pdf"),
+        ("UnstableFile", "pipe.pdf"),
+        ("UnstableFile", "pipe2.DOCX"),
+        ("DiscoveredFile", "z_after.pdf"),
+    ]
+
+
+@_needs_fifo
+def test_regular_file_swapped_for_fifo_after_precheck_cannot_block_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lstat pre-check alone is not enough: replace the regular file
+    with a FIFO between the pre-check and the open."""
+    target = tmp_path / "swap.pdf"
+    _write(target, 10)
+    real_lstat = os.lstat
+    swapped = {"value": False}
+
+    def lstat_then_swap(path: Any, *a: Any, **k: Any) -> os.stat_result:
+        result = real_lstat(path, *a, **k)
+        # Only the scanner's own pre-check (not the directory walk's
+        # symlink probes) is followed by the swap to a FIFO.
+        caller = sys._getframe(1).f_code.co_name
+        if caller == "_read_bounded_stable" and not swapped["value"]:
+            swapped["value"] = True
+            assert stat.S_ISREG(result.st_mode)  # pre-check sees a regular file ...
+            Path(path).unlink()
+            os.mkfifo(path)  # ... which is a FIFO by the time open() runs
+        return result
+
+    monkeypatch.setattr(folder_scanner.os, "lstat", lstat_then_swap)
+    outcome: list[Any] = []
+    worker = threading.Thread(
+        target=lambda: outcome.extend(scan_source_root(str(tmp_path), max_bytes=1000)),
+        daemon=True,
+    )
+    worker.start()
+    worker.join(timeout=10)
+    assert not worker.is_alive(), "open() blocked on a FIFO swapped in after the pre-check"
+    assert swapped["value"] is True
+    assert outcome == [UnstableFile(relative_path="swap.pdf")]
+
+
+def test_permission_error_still_propagates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(tmp_path / "locked.pdf", 10)
+    real_open = os.open
+
+    def deny(path: Any, flags: int, *a: Any, **k: Any) -> int:
+        if str(path).endswith("locked.pdf"):
+            raise PermissionError(errno.EACCES, "denied")
+        return real_open(path, flags, *a, **k)
+
+    monkeypatch.setattr(folder_scanner.os, "open", deny)
+    with pytest.raises(PermissionError):
+        list(scan_source_root(str(tmp_path), max_bytes=1000))

@@ -948,6 +948,36 @@ async def test_file_changed_during_read_is_skipped_unstable_not_failed(
     assert later.successful == 1 and later.skipped_unstable == 0
 
 
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="os.mkfifo unavailable")
+async def test_fifo_named_like_a_cv_is_skipped_and_scan_continues(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    """A FIFO (no writer) with a supported extension must neither block
+    reconciliation nor create a Candidate/index row; a normal file in the
+    same scan still imports."""
+    import asyncio
+
+    tenant = await create_tenant(db_session, name="T-folder-fifo")
+    await db_session.commit()
+    root = tmp_path / "cvs"
+    _copy_fixture("valid_cv.pdf", root / "good.pdf")
+    os.mkfifo(root / "pipe.pdf")
+
+    summary = await asyncio.wait_for(
+        index_folder(
+            db_session, _storage(tmp_path), _parser(), tenant_id=tenant.id,
+            root_path=str(root), max_bytes=MAX_BYTES,
+        ),
+        timeout=30,
+    )
+    await db_session.commit()
+
+    assert summary.successful == 1 and summary.skipped_unstable == 1 and summary.failed == 0
+    rows = await _rows(db_session, tenant.id, summary.folder_source_id)
+    assert [r.relative_path for r in rows] == ["good.pdf"]
+    assert await count_candidates_for_tenant(db_session, tenant_id=tenant.id) == 1
+
+
 async def test_folder_path_pdf_exceeding_max_pages(
     db_session: AsyncSession, tmp_path: Path
 ) -> None:

@@ -8396,8 +8396,14 @@ UnstableFile`. `DiscoveredFile` is unchanged (bytes + SHA-256 + mtime).
 `OversizedFile(relative_path, byte_size, mtime)` is decided from `fstat` of
 the opened descriptor and carries no bytes and no hash — no sentinel
 values, and the file is never read or hashed. `UnstableFile(relative_path)`
-covers a file that vanished, stopped being regular, was swapped for a
-symlink (`O_NOFOLLOW`), or changed during the read. A within-limit file is
+covers a file that vanished, is or became a non-regular entry (FIFO,
+socket, device), was swapped for a symlink, or changed during the read.
+Special files must never block a scan: a non-following `lstat()` pre-check
+rejects an already-special entry; the open uses `O_NOFOLLOW | O_NONBLOCK |
+O_CLOEXEC` so a regular file swapped for a FIFO after the pre-check cannot
+block `open()`; and `fstat()` of the descriptor actually opened is the
+authority (`S_ISREG` only). Only `ENOENT`, `ELOOP` and `ENXIO` at open are
+classified unstable; permission and I/O errors still propagate. A within-limit file is
 opened once, read at most `max_bytes + 1` bytes, then re-`fstat`ed; if size,
 mtime, ctime, inode/device or the byte count differ from the first `fstat`
 it is `UnstableFile` — not imported, not a permanent failure; the next pass
