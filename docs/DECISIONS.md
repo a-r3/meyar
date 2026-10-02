@@ -8279,7 +8279,9 @@ The historical CI hang root cause remains NOT PROVEN.
   launder the request into a "clean" truncation that never reached the
   planner's refusal. A3.1 projection unchanged. New regressions in
   `test_issue88_slice_c_plan_contract.py` (A3 section) and the slice-B suite.
-- **Real-Ollama smoke (not the Target-Mac benchmark).** Dev machine,
+- **Real-Ollama smoke (not the Target-Mac benchmark).**
+  *Historical, pre-A3-correction evidence (head `4e0daf2`, prompt still
+  listing RANK):* dev machine,
   synthetic HR text, loopback-only guard, `propose_agent_plan` + Layer 1:
   `qwen3:0.6b` (the configured default) and `qwen3:1.7b`. Before the
   kind/mode-specific per-call schema both models produced only fail-closed
@@ -8292,3 +8294,34 @@ The historical CI hang root cause remains NOT PROVEN.
   proposal used only offered capabilities, no output contained a UUID, and
   zero non-loopback requests were attempted. Model quality/selection remains
   #36; no fake production AI mode exists.
+- **Final real-Ollama smoke at the corrected head
+  `2f11f1bba7d6102be3d3f732883e7f4b4dfcf051` (dev machine; NOT the
+  Target-Mac benchmark).** Same seven synthetic scenarios, the final
+  unmodified `AGENT_SYSTEM_PROMPT` / `build_agent_user_prompt`
+  (`agent-plan-prompt-v1`, no RANK mention), the per-call subset (computed
+  with full HR scopes and `confirmed_job_in_session=True` to probe A3.3),
+  strict `agent-plan-v1` parsing and Layer 1; real `OllamaLLMProvider`
+  under a loopback-only `httpx` guard. Results (parse / Layer 1 / proposed
+  capabilities / semantically right):
+
+  | Scenario | `qwen3:1.7b` | `qwen3:0.6b` |
+  |---|---|---|
+  | greeting | OK / valid CONVERSE GREETING / right | OK / SOURCE_NOT_GROUNDED (EVIDENCE) / wrong, failed closed |
+  | candidate search | OK / VALID SEARCH (whole message) / right | OK / REFERENCE_NOT_GROUNDED (EVIDENCE) / wrong, failed closed |
+  | refinement quote | OK / VALID REFINE "SQL bilənləri" / right | OK / VALID REFINE "SQL bilənləri" / right |
+  | profile reference | OK / REFERENCE_NOT_GROUNDED (REFINE) / wrong, failed closed | OK / VALID PROFILE ref 1 / right |
+  | evidence ref + topic | OK / VALID EVIDENCE ref 2, topic "Python" / right | OK / VALID EVIDENCE ref 2, topic "Python" / right |
+  | hiring clarification | OK / valid CLARIFY HIRING_DECISION_REQUIRES_HUMAN / right | OK / SOURCE_NOT_GROUNDED (PROFILE) / wrong, failed closed |
+  | two-step search + profile | OK / VALID SEARCH only (whole message) / incomplete | OK / REFERENCE_NOT_GROUNDED (PROFILE) / wrong, failed closed |
+
+  Totals: strict parses 7/7 and 7/7 (no repair needed); Layer-1-valid
+  6/7 (`qwen3:1.7b`) and 3/7 (`qwen3:0.6b`); semantically right 5/7 and
+  3/7. Every rejected proposal failed closed (Layer 1, zero execution). The
+  one valid-but-incomplete result (`qwen3:1.7b`, two-step) omits the
+  profile step and would execute only a WHOLE_MESSAGE search of HR's own
+  text — a safe under-execution (no authority, grounding or privacy
+  breach), not a contract defect. RANK_JOB_CANDIDATES was never offered,
+  never present in any request schema and never emitted; no proposal
+  contained a UUID; 14 requests, all loopback, zero non-loopback attempts;
+  synthetic text only, no candidate content or PII. Model selection and
+  quality remain #36; the prompt was not tuned for this smoke.
