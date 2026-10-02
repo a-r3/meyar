@@ -2,6 +2,13 @@
 
 ## Current phase
 
+**Issue #46 PR-1 (bounded ingestion intake) — implemented on
+`fix/46-bounded-ingestion-intake`, PR pending owner review/merge; #46 stays
+OPEN.** Request-envelope bound for candidate-document upload, DOCX archive
+expansion/member/ratio bounds, and bounded, stability-checked folder-scanner
+reads (D-096). No migration, dependency or `uv.lock` change; the M-5 general
+phantom-candidate fix, parser limits, #35, #36 and #50 are not started.
+
 **D-092 Amendment A3 — ACCEPTED and MERGED through PR #103.** Squash
 commit on `main`: `d9e96c06169d9ebf25ab6f276eb63bab4c5d4828` (single parent
 `9817711c73e9d2701c0385d2bbe0c1bd3fba153e`); accepted PR head

@@ -20,6 +20,7 @@ from meyar.models.folder_indexed_file import (
     INDEX_STATUS_INDEXED,
     INDEX_STATUS_MISSING,
 )
+from meyar.services.candidate_repo import count_candidates_for_tenant
 from meyar.services.folder_indexed_file_repo import list_folder_indexed_files
 from meyar.services.folder_indexer_service import index_folder
 from meyar.services.tenant_repo import create_tenant
@@ -836,14 +837,19 @@ async def test_different_content_different_path_no_dedup(
     assert len({r.candidate_document_id for r in rows}) == 2
 
 
-async def test_folder_path_oversized_file_rejected(
+async def test_folder_path_oversized_file_skipped_without_candidate_or_row(
     db_session: AsyncSession, tmp_path: Path
 ) -> None:
-    """Folder-path files follow the same size cap as direct upload."""
+    """Issue #46 PR-1: a file over the size cap is rejected from filesystem
+    metadata before being read. It creates no Candidate and no index row
+    (a row needs a content hash, which would require reading it), is
+    reported in the summary and the audit trail, and never aborts the
+    rest of the scan. General rejected-file/orphan handling is M-5."""
     tenant = await create_tenant(db_session, name="T-folder-oversized")
     await db_session.commit()
     root = tmp_path / "cvs"
-    _copy_fixture("valid_cv.pdf", root / "candidate.pdf")
+    _copy_fixture("valid_cv.pdf", root / "small.pdf")  # 1094 bytes: within cap
+    _copy_fixture("valid_cv.docx", root / "big.docx")  # 36681 bytes: over cap
 
     summary = await index_folder(
         db_session,
@@ -851,15 +857,125 @@ async def test_folder_path_oversized_file_rejected(
         _parser(),
         tenant_id=tenant.id,
         root_path=str(root),
-        max_bytes=10,  # smaller than any real fixture
+        max_bytes=5000,
     )
     await db_session.commit()
 
-    assert summary.discovered == 1
-    assert summary.failed == 1
+    assert summary.skipped_oversized == 1
+    assert summary.discovered == 1 and summary.successful == 1 and summary.failed == 0
     rows = await _rows(db_session, tenant.id, summary.folder_source_id)
-    assert rows[0].index_status == INDEX_STATUS_FAILED
-    assert rows[0].failure_code == "DocumentTooLargeError"
+    assert [r.relative_path for r in rows] == ["small.pdf"]
+    # No Candidate was minted for the oversized path.
+    assert await count_candidates_for_tenant(db_session, tenant_id=tenant.id) == 1
+
+    events = (
+        await db_session.scalars(
+            select(AuditEvent).where(
+                AuditEvent.tenant_id == tenant.id,
+                AuditEvent.event_type == "FOLDER_FILE_OVERSIZED_SKIPPED",
+            )
+        )
+    ).all()
+    assert len(events) == 1
+    assert events[0].event_metadata["byte_size"] == 36681
+    assert "big.docx" not in str(events[0].event_metadata)  # path digest only
+
+
+async def test_oversized_existing_file_is_not_tombstoned_missing(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    tenant = await create_tenant(db_session, name="T-folder-oversize-existing")
+    await db_session.commit()
+    root = tmp_path / "cvs"
+    _copy_fixture("valid_cv.pdf", root / "cv.pdf")
+    first = await index_folder(
+        db_session, _storage(tmp_path), _parser(), tenant_id=tenant.id,
+        root_path=str(root), max_bytes=MAX_BYTES,
+    )
+    await db_session.commit()
+
+    second = await index_folder(
+        db_session, _storage(tmp_path), _parser(), tenant_id=tenant.id,
+        root_path=str(root), max_bytes=10,  # the cap shrank below the file
+    )
+    await db_session.commit()
+
+    assert second.skipped_oversized == 1 and second.missing == 0
+    rows = await _rows(db_session, tenant.id, first.folder_source_id)
+    assert rows[0].index_status == INDEX_STATUS_INDEXED  # untouched, not MISSING
+
+
+async def test_file_changed_during_read_is_skipped_unstable_not_failed(
+    db_session: AsyncSession, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from meyar.ingestion import folder_scanner
+
+    tenant = await create_tenant(db_session, name="T-folder-race")
+    await db_session.commit()
+    root = tmp_path / "cvs"
+    _copy_fixture("valid_cv.pdf", root / "racy.pdf")
+    racy = root / "racy.pdf"
+    real_read = folder_scanner.os.read
+    inode = racy.stat().st_ino
+    fired = {"value": False}
+
+    def append_once_while_reading(fd: int, size: int) -> bytes:
+        chunk = real_read(fd, size)
+        if not fired["value"] and os.fstat(fd).st_ino == inode:
+            fired["value"] = True
+            with racy.open("ab") as handle:
+                handle.write(b"\n%%padding")
+        return chunk
+
+    monkeypatch.setattr(folder_scanner.os, "read", append_once_while_reading)
+    summary = await index_folder(
+        db_session, _storage(tmp_path), _parser(), tenant_id=tenant.id,
+        root_path=str(root), max_bytes=MAX_BYTES,
+    )
+    await db_session.commit()
+    monkeypatch.undo()
+
+    assert summary.skipped_unstable == 1 and summary.failed == 0 and summary.discovered == 0
+    assert await _rows(db_session, tenant.id, summary.folder_source_id) == []
+    assert await count_candidates_for_tenant(db_session, tenant_id=tenant.id) == 0
+
+    # Preserved retry behavior: the next pass observes the settled file.
+    later = await index_folder(
+        db_session, _storage(tmp_path), _parser(), tenant_id=tenant.id,
+        root_path=str(root), max_bytes=MAX_BYTES,
+    )
+    await db_session.commit()
+    assert later.successful == 1 and later.skipped_unstable == 0
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="os.mkfifo unavailable")
+async def test_fifo_named_like_a_cv_is_skipped_and_scan_continues(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    """A FIFO (no writer) with a supported extension must neither block
+    reconciliation nor create a Candidate/index row; a normal file in the
+    same scan still imports."""
+    import asyncio
+
+    tenant = await create_tenant(db_session, name="T-folder-fifo")
+    await db_session.commit()
+    root = tmp_path / "cvs"
+    _copy_fixture("valid_cv.pdf", root / "good.pdf")
+    os.mkfifo(root / "pipe.pdf")
+
+    summary = await asyncio.wait_for(
+        index_folder(
+            db_session, _storage(tmp_path), _parser(), tenant_id=tenant.id,
+            root_path=str(root), max_bytes=MAX_BYTES,
+        ),
+        timeout=30,
+    )
+    await db_session.commit()
+
+    assert summary.successful == 1 and summary.skipped_unstable == 1 and summary.failed == 0
+    rows = await _rows(db_session, tenant.id, summary.folder_source_id)
+    assert [r.relative_path for r in rows] == ["good.pdf"]
+    assert await count_candidates_for_tenant(db_session, tenant_id=tenant.id) == 1
 
 
 async def test_folder_path_pdf_exceeding_max_pages(

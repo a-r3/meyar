@@ -1,3 +1,4 @@
+import hashlib
 import time
 import uuid
 from dataclasses import dataclass
@@ -6,7 +7,12 @@ from pathlib import PurePosixPath
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meyar.ingestion.folder_scanner import DiscoveredFile, resolve_source_root, scan_source_root
+from meyar.ingestion.folder_scanner import (
+    DiscoveredFile,
+    OversizedFile,
+    resolve_source_root,
+    scan_source_root,
+)
 from meyar.ingestion.parser import DocumentParser
 from meyar.ingestion.validation import DocumentTooLargeError, UnsupportedDocumentError
 from meyar.models.folder_indexed_file import (
@@ -40,6 +46,7 @@ class FolderScanSummary:
     failed: int
     missing: int
     skipped_unstable: int = 0
+    skipped_oversized: int = 0
 
 
 async def index_folder(
@@ -85,11 +92,33 @@ async def index_folder(
     remaining: dict[str, FolderIndexedFile] = {row.relative_path: row for row in existing_rows}
 
     discovered = new_count = changed_count = retried_count = unchanged_count = 0
-    successful_count = failed_count = skipped_unstable_count = 0
+    successful_count = failed_count = skipped_unstable_count = skipped_oversized_count = 0
     now = time.time()
 
-    for entry in scan_source_root(root_path):
-        if now - entry.mtime < stability_window_seconds:
+    for entry in scan_source_root(root_path, max_bytes=max_bytes):
+        if isinstance(entry, OversizedFile):
+            # Too large to read: never imported, no Candidate, no index
+            # row (the row requires a content hash, which would need a full
+            # read). The path is present, so an existing row is not
+            # tombstoned. Reported via audit + summary; general
+            # rejected-file/orphan handling remains M-5 (#46).
+            remaining.pop(entry.relative_path, None)
+            skipped_oversized_count += 1
+            await record_event(
+                db,
+                tenant_id=tenant_id,
+                event_type="FOLDER_FILE_OVERSIZED_SKIPPED",
+                metadata={
+                    "folder_source_id": str(source.id),
+                    "byte_size": entry.byte_size,
+                    "max_bytes": max_bytes,
+                    "path_sha256": hashlib.sha256(entry.relative_path.encode()).hexdigest(),
+                },
+            )
+            continue
+        if not isinstance(entry, DiscoveredFile) or (
+            now - entry.mtime < stability_window_seconds
+        ):
             # Too recently modified to trust: pop it from `remaining` (so
             # it is not later swept into the missing-tombstone loop —
             # the path IS still present on disk, just not observed this
@@ -180,6 +209,7 @@ async def index_folder(
         failed=failed_count,
         missing=missing_count,
         skipped_unstable=skipped_unstable_count,
+        skipped_oversized=skipped_oversized_count,
     )
     await record_event(
         db,
@@ -196,6 +226,7 @@ async def index_folder(
             "failed": failed_count,
             "missing": missing_count,
             "skipped_unstable": skipped_unstable_count,
+            "skipped_oversized": skipped_oversized_count,
         },
     )
     return summary

@@ -4,6 +4,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 
+from meyar.api.body_limit import DocumentUploadBodyLimitMiddleware
 from meyar.api.docs import mount_docs_assets
 from meyar.api.v1.router import api_router
 from meyar.config import get_settings
@@ -72,3 +73,6 @@ app = FastAPI(
 app.include_router(api_router)
 mount_docs_assets(app)
 install_ui(app)
+# Added last so it is the outermost layer: the document-upload request body
+# is bounded before any other middleware or multipart parsing consumes it.
+app.add_middleware(DocumentUploadBodyLimitMiddleware)
