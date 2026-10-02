@@ -2601,6 +2601,16 @@ def _vacancy_proposal_clarification(
     )
 
 
+def _rejected_capability(proposal: object, rejection: PlanRejection) -> CapabilityName | None:
+    if not isinstance(proposal, Mapping) or rejection.step_index is None:
+        return None
+    raw = proposal["steps"][rejection.step_index]
+    name = raw.get("capability") if isinstance(raw, Mapping) else None
+    if not isinstance(name, str) or name not in CapabilityName.__members__:
+        return None
+    return CapabilityName(name)
+
+
 async def _plan_rejection_result(
     db: AsyncSession,
     llm: LLMProvider,
@@ -2623,9 +2633,12 @@ async def _plan_rejection_result(
     )
     if result_set_rejection is not None:
         return result_set_rejection
-    if rejection.code == PlanRejectionCode.NOT_MODEL_PROPOSABLE:
+    if rejection.code == PlanRejectionCode.NOT_MODEL_PROPOSABLE and _rejected_capability(
+        proposal, rejection
+    ) == CapabilityName.ANALYZE_VACANCY:
         # The deterministic entry route is the only authority that can reach
-        # drafting (#79).
+        # drafting (#79). Any other non-proposable capability (RANK under
+        # A3.3) falls through to the fixed rejection copy below.
         await record_event(
             db,
             tenant_id=tenant_id,

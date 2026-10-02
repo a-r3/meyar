@@ -24,6 +24,7 @@ from agent_plans import (
     profile_step,
     proposal,
     refine_plan,
+    refine_step,
     search_plan,
     search_step,
     vacancy_proposal,
@@ -739,14 +740,20 @@ def test_per_call_capability_subset_is_registry_derived() -> None:
         pending_draft_live=True, confirmed_job_in_session=False,
     )
     assert CapabilityName.CREATE_JOB in hr
-    assert CapabilityName.RANK_JOB_CANDIDATES not in hr  # no live confirmed job
+    assert CapabilityName.RANK_JOB_CANDIDATES not in hr
+    import itertools
+
     for scopes in (frozenset({"candidates:read"}), ALL_SCOPES):
-        for flags in ((True, True, True), (False, False, False)):
+        for flags in itertools.product((True, False), repeat=3):
             offered = offered_capabilities(
                 principal_scopes=scopes, result_context_present=flags[0],
                 pending_draft_live=flags[1], confirmed_job_in_session=flags[2],
             )
             assert CapabilityName.ANALYZE_VACANCY not in offered  # never model-proposable
+            # Accepted A3.3: never offered, even with a confirmed job.
+            assert CapabilityName.RANK_JOB_CANDIDATES not in offered
+            schema = json.dumps(agent_plan_json_schema(offered))
+            assert "RANK_JOB_CANDIDATES" not in schema
     schema = json.dumps(agent_plan_json_schema(reader))
     for name in CapabilityName:
         assert (name.value in schema) == (name in reader), name
@@ -891,9 +898,17 @@ async def test_create_job_proposal_is_only_an_affordance(
     assert llm.agent_plan_contexts[0].pending_vacancy_confirmation is True
 
 
-@pytest.mark.parametrize("capability", ["CREATE_JOB", "RANK_JOB_CANDIDATES"])
+@pytest.mark.parametrize(
+    ("capability", "reason"),
+    [
+        # Not offered without a live target -> fails closed as unknown.
+        ("CREATE_JOB", "UNKNOWN_CAPABILITY"),
+        # Accepted A3.3: RANK is not model-proposable at all.
+        ("RANK_JOB_CANDIDATES", "NOT_MODEL_PROPOSABLE"),
+    ],
+)
 async def test_human_action_only_without_a_live_target_never_runs(
-    db_session: AsyncSession, tenant_and_user, capability: str
+    db_session: AsyncSession, tenant_and_user, capability: str, reason: str
 ) -> None:
     tenant, user, _password, membership = tenant_and_user
     conversation, context = await _new_conversation(db_session, tenant, user, membership)
@@ -904,8 +919,10 @@ async def test_human_action_only_without_a_live_target_never_runs(
     assert result.outcome == AgentTurnOutcome.CLARIFICATION_REQUESTED
     assert result.message == agent_service.PLAN_REJECTED_COPY
     (rejected,) = await _events(db_session, tenant.id, "agent.plan.rejected")
-    # Not offered without a live target -> fails closed as unknown.
-    assert rejected["reason_code"] == "UNKNOWN_CAPABILITY"
+    assert rejected["reason_code"] == reason
+    # A rejected RANK is never reinterpreted as the vacancy clarification.
+    assert context.active_clarification_id is None
+    assert await _events(db_session, tenant.id, "agent.entry.action_rejected") == []
     for model in (Job, JobCriteriaVersion, Evaluation):
         assert await db_session.scalar(select(func.count()).select_from(model)) == 0
 
@@ -1016,3 +1033,153 @@ async def test_rejected_and_validated_audits_carry_no_text_quotes_or_ids(
     for forbidden in ("Kotlin", "Java", "birincinin", "namizəd", str(conversation.id),
                       str(context.id)):
         assert forbidden not in blob
+
+
+# ---------------------------------------------------------------------------
+# Accepted D-092 Amendment A3 (PR #103)
+# ---------------------------------------------------------------------------
+
+
+def test_a3_2_limit_quote_alone_never_satisfies_requirement_coverage() -> None:
+    """A3.2: a result-count quote is numeric workflow grounding only. Even
+    when the grounded count span overlaps the material subject, it covers
+    nothing."""
+    message = "Python bilən 10 namizəd"
+    limit_only = _validate(refine_plan(limit_quote="Python bilən 10"), message)
+    assert _code(limit_only) == PlanRejectionCode.SOURCE_COVERAGE_INCOMPLETE
+    plain_count = _validate(refine_plan(limit_quote="10 namizəd"), message)
+    assert _code(plain_count) == PlanRejectionCode.SOURCE_COVERAGE_INCOMPLETE
+    # A reference-free, requirement-free count request is still fine.
+    assert isinstance(_validate(refine_plan(limit_quote="ilk 3"), "bunlardan ilk 3"),
+                      ExecutablePlan)
+
+
+def test_a3_2_semantic_source_plus_count_still_succeeds() -> None:
+    message = "bunlardan Python bilən 10 nəfər"
+    plan_ = _validate(refine_plan("Python bilən", limit_quote="10 nəfər"), message)
+    assert isinstance(plan_, ExecutablePlan)
+    (step,) = plan_.steps
+    assert (step.resolved_text, step.limit) == ("Python bilən", 10)
+    whole = _validate(refine_plan(whole_filter=True, limit_quote="10 nəfər"), message)
+    assert isinstance(whole, ExecutablePlan) and whole.steps[0].limit == 10
+    search_then_count = _validate(
+        plan(search_step("Python bilən"), refine_step(limit_quote="10 namizəd"),
+             goal="CANDIDATE_SEARCH"),
+        "Python bilən 10 namizəd",
+    )
+    assert isinstance(search_then_count, ExecutablePlan)
+
+
+def test_a3_2_coordinated_parts_cannot_be_covered_by_a_count_span() -> None:
+    message = "bunlardan Python və Java bilən 3 nəfər"
+    python_plus_count = _validate(
+        refine_plan("Python", limit_quote="Python və Java bilən 3"), message
+    )
+    assert _code(python_plus_count) == PlanRejectionCode.SOURCE_COVERAGE_INCOMPLETE
+    both = _validate(refine_plan("Python və Java bilən", limit_quote="3 nəfər"), message)
+    assert isinstance(both, ExecutablePlan) and both.steps[0].limit == 3
+
+
+def test_a3_2_protected_content_rules_do_not_regress_with_counts() -> None:
+    message = "bunlardan qadın Python bilən 3 nəfər"
+    assert has_protected_content(analyze_hr_text(message), message)
+    laundered = _validate(refine_plan("Python bilən", limit_quote="3 nəfər"), message)
+    assert _code(laundered) == PlanRejectionCode.SOURCE_SELECTION_FORBIDDEN
+    # A count alone can neither launder nor cover the request.
+    count_only = _validate(refine_plan(limit_quote="3 nəfər"), message)
+    assert _code(count_only) == PlanRejectionCode.SOURCE_SELECTION_FORBIDDEN
+    whole = _validate(refine_plan(whole_filter=True, limit_quote="3 nəfər"), message)
+    assert isinstance(whole, ExecutablePlan)
+    assert whole.steps[0].resolved_text == message  # the planner refuses it whole
+
+
+async def test_a3_2_limit_only_refinement_is_rejected_in_a_real_turn(
+    db_session: AsyncSession, tenant_and_user, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tenant, user, _password, membership = tenant_and_user
+    candidate, _ = await seed_candidate_with_profile(
+        db_session, tenant_id=tenant.id, profile_content=PYTHON_PROFILE
+    )
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
+    previous = await seed_active_result_set(
+        db_session, tenant_id=tenant.id, browser_session_id=context.browser_session_id,
+        session_context=context, candidate_ids=[candidate.id],
+    )
+    await db_session.commit()
+    refined: list[object] = []
+    real = agent_service._dispatch_refine
+
+    async def spy(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        refined.append(kwargs.get("limit"))
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(agent_service, "_dispatch_refine", spy)
+    llm = FakeLLMProvider(agent_plan=refine_plan(limit_quote="Python bilən 10"))
+    result = await _run(
+        db_session, llm, tenant_id=tenant.id, conversation=conversation,
+        session_context=context, message="bunlardan Python bilən 10 nəfər",
+    )
+    await db_session.commit()
+    await db_session.refresh(context)
+    assert result.outcome == AgentTurnOutcome.CLARIFICATION_REQUESTED
+    assert result.message == agent_service.PLAN_REJECTED_COPY
+    assert refined == []  # zero executors
+    assert context.active_result_set_id == previous.id
+    (rejected,) = await _events(db_session, tenant.id, "agent.plan.rejected")
+    assert rejected["reason_code"] == "SOURCE_COVERAGE_INCOMPLETE"
+
+
+def test_a3_3_rank_is_registered_human_action_only_but_not_model_proposable() -> None:
+    from meyar.agent.capabilities.contracts import (
+        ConfirmationPolicy,
+        ExecutionMode,
+        LiveContextReq,
+        SideEffect,
+    )
+
+    rank = CAPABILITY_REGISTRY[CapabilityName.RANK_JOB_CANDIDATES]
+    assert rank.model_proposable is False
+    assert rank.execution == ExecutionMode.HUMAN_ACTION_ONLY
+    assert rank.side_effect == SideEffect.DERIVED_RECORDS
+    assert rank.confirmation == ConfirmationPolicy.EXPLICIT_HUMAN_ROUTE
+    assert rank.live_context == frozenset({LiveContextReq.CONFIRMED_JOB_IN_SESSION})
+    create = CAPABILITY_REGISTRY[CapabilityName.CREATE_JOB]
+    assert (create.model_proposable, create.execution) == (
+        True, ExecutionMode.HUMAN_ACTION_ONLY,
+    )
+    # No current-job authority was introduced into the turn.
+    source = inspect.getsource(agent_service)
+    assert "confirmed_job_in_session=False" in source
+    for forbidden in ("AgentDraftConfirmation", "latest_confirmation", "current_job"):
+        assert forbidden not in source
+
+
+@pytest.mark.parametrize("pending_draft", [False, True])
+async def test_a3_3_model_rank_attempt_cannot_execute_or_render_an_affordance(
+    db_session: AsyncSession, tenant_and_user, pending_draft: bool
+) -> None:
+    tenant, user, _password, membership = tenant_and_user
+    if pending_draft:
+        conversation, context = await _pending_draft(db_session, tenant, user, membership)
+    else:
+        conversation, context = await _new_conversation(db_session, tenant, user, membership)
+        await db_session.commit()
+    draft_id = context.active_pending_draft_id
+    llm = FakeLLMProvider(
+        agent_plan=plan(bare_step("RANK_JOB_CANDIDATES"), goal="VACANCY_ANALYSIS")
+    )
+    result = await _turn_as_hr(db_session, llm, tenant, conversation, context,
+                               "bu vakansiya üçün reytinq ver")
+    await db_session.commit()
+    await db_session.refresh(context)
+    assert result.outcome == AgentTurnOutcome.CLARIFICATION_REQUESTED
+    assert result.message == agent_service.PLAN_REJECTED_COPY
+    assert result.tool_results == []
+    offered = [o.name for o in llm.agent_plan_contexts[0].available_capabilities]
+    assert CapabilityName.RANK_JOB_CANDIDATES not in offered
+    rejected = await _events(db_session, tenant.id, "agent.plan.rejected")
+    assert rejected[-1]["reason_code"] == "NOT_MODEL_PROPOSABLE"
+    assert context.active_pending_draft_id == draft_id
+    assert context.active_clarification_id is None
+    for model in (Job, JobCriteriaVersion, Evaluation):
+        assert await db_session.scalar(select(func.count()).select_from(model)) == 0

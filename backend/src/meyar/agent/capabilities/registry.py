@@ -251,7 +251,13 @@ def _definitions() -> tuple[CapabilityDefinition, ...]:
             # Writes Evaluation rows: NOT read-only (§9).
             side_effect=SideEffect.DERIVED_RECORDS,
             execution=ExecutionMode.HUMAN_ACTION_ONLY,
-            model_proposable=True,
+            # Accepted D-092 Amendment A3.3: NOT model-proposable/offered in
+            # chat until a separately reviewed, server-owned, unambiguous
+            # "current confirmed job" selector exists (none does: several
+            # AgentDraftConfirmation rows may exist per BrowserSession). No
+            # "latest confirmation" choice, no transcript scan. The direct
+            # authenticated CSRF ranking routes are unchanged.
+            model_proposable=False,
             live_context=frozenset({LiveContextReq.CONFIRMED_JOB_IN_SESSION}),
             produces=frozenset(),
             confirmation=ConfirmationPolicy.EXPLICIT_HUMAN_ROUTE,
@@ -260,10 +266,7 @@ def _definitions() -> tuple[CapabilityDefinition, ...]:
             allowed_task_types=frozenset({TaskType.VACANCY_ANALYSIS}),
             executor=executors.refuse_human_action_only,
             audit=_HUMAN_ROUTE_AUDIT,
-            description=(
-                "Point HR to the existing ranking form of the job confirmed in this "
-                "session (never ranks in chat)."
-            ),
+            description="Not offered in chat (A3.3); ranking uses its own human route.",
         ),
     )
 

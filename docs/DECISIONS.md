@@ -8121,11 +8121,15 @@ remains NOT PROVEN.
 
 ## D-095 — Issue #88 slice C implementation record (agent-plan-v1 + source grounding + loop retirement)
 
-**Status: IMPLEMENTED on branch `feat/88c-agent-plan-contract` from `main` @
-`9817711c73e9d2701c0385d2bbe0c1bd3fba153e`; pending independent acceptance;
-not merged.** D-092 (§5, §8–§12, §15–§16, §19, §22 items 24–31, §23 slice C,
-§24), A1, A2, D-093 and D-094 are unchanged; this entry records only the
-slice-C implementation choices. #88 stays OPEN; #50 stays OPEN and out of
+**Status: IMPLEMENTED in PR #102 (branch `feat/88c-agent-plan-contract`,
+originally from `main` @ `9817711c73e9d2701c0385d2bbe0c1bd3fba153e`) and
+CORRECTED to the ACCEPTED D-092 Amendment A3 (merged through PR #103; status
+recorded by PR #104) after a normal merge of `main` @
+`32f1a0e5411f0445f3bc794451e5288561ae5cd1`; pending independent acceptance;
+NOT accepted; not merged.** D-092 (§5, §8–§12, §15–§16, §19, §22 items
+24–31, §23 slice C, §24) as amended by A1, A2 and the accepted A3, D-093 and
+D-094 are the authority; this entry records only the slice-C implementation
+choices and is not itself accepted authority. #88 stays OPEN; #50 stays OPEN and out of
 scope. No migration (Alembic head stays `b88a2c4d6e10`); no new dependency.
 The historical CI hang root cause remains NOT PROVEN.
 
@@ -8164,21 +8168,26 @@ The historical CI hang root cause remains NOT PROVEN.
   server descriptions, `max_plan_steps`, `active_result_context_present`,
   `available_candidate_refs` (ordinals), `waiting_clarification` (always
   null: a model plan exists only when lane A is absent or just superseded,
-  §11.1), `pending_vacancy_confirmation`. **Implementation fact:** assistant
-  entries are projected as their closed outcome code only
-  (`[assistant outcome: <code>]`), because D-045 stores the rendered headline,
-  which can name a candidate; this keeps CandidateIdentity structurally
-  absent from the model input. No conversation RAG/embeddings.
+  §11.1), `pending_vacancy_confirmation`. Per accepted Amendment A3.1,
+  assistant entries are projected as their closed `AgentTurnOutcome` code
+  only (`[assistant outcome: <code>]`), never the persisted HR-facing display
+  text (D-045 stores the rendered headline, which can name a candidate);
+  CandidateIdentity stays structurally absent from the model input. No
+  heuristic name redaction; no conversation RAG/embeddings.
 - **Grounding (§10.2, pure `capabilities.grounding`).** Quotes resolve to
   exactly one byte-exact occurrence of the canonical LF message (overlapping
   occurrences count; no case/diacritic folding); offsets + SHA-256 are server
   computed; spans are non-blank, ≤500 chars, non-overlapping, source-ordered,
   joined by a server `"\n"`. Coverage runs `analyze_hr_text(M)`; every
   SCORABLE / NEEDS_HUMAN_REVIEW subject (or its requirement span when no
-  subject) must overlap a grounded span of some step (search/refine source,
-  ref, limit or topic quote). **Implementation fact:** the analyzer reports
-  a coordinated subject ("Python və Java") as ONE occurrence, so the overlap
-  rule is applied to each coordinated part (closed coordinators: `, / & ;`,
+  subject) must overlap a COVERAGE span of some step. Per accepted Amendment
+  A3.2 the coverage sources are only search/refine semantic source spans,
+  the grounded reference span and the grounded topic span; a result-count
+  `limit_quote` is numeric workflow grounding and never satisfies coverage
+  (validator `_COVERAGE_FIELDS` excludes LIMIT). WHOLE_MESSAGE still covers
+  everything. The analyzer reports a coordinated subject ("Python və Java")
+  as ONE occurrence, so the overlap rule is applied to each coordinated part
+  (A3.2; closed coordinators: `, / & ;`,
   və, and, or, ya, yaxud, həmçinin, habelə). This is strictly stronger than
   whole-occurrence overlap (scenario E still passes) and is what makes §22
   item 25 achievable. A PROHIBITED requirement, a PROTECTED_CUE role or a
@@ -8220,9 +8229,13 @@ The historical CI hang root cause remains NOT PROVEN.
   `step_index` stays 0-based as in D-094). Single-step failures keep today's
   outcomes. An affordance-only plan (CREATE_JOB with a live pending draft)
   returns ANSWERED with fixed copy pointing at the existing CSRF form; no
-  lane-B change. RANK_JOB_CANDIDATES is never offered (no session-confirmed
-  job lookup in the turn; `confirmed_job_in_session=False`), so it fails
-  closed. A model ANALYZE_VACANCY step or CLARIFY(SEARCH_OR_VACANCY) becomes
+  lane-B change. Per accepted Amendment A3.3, RANK_JOB_CANDIDATES remains a
+  registered HUMAN_ACTION_ONLY capability with `model_proposable=False`: it
+  is never offered, and a model plan naming it is NOT_MODEL_PROPOSABLE (fixed
+  rejection copy; never the vacancy clarification) with zero execution. No
+  current-job pointer, "latest AgentDraftConfirmation" selector, transcript
+  scan or migration exists; the direct authenticated CSRF ranking routes and
+  deterministic scoring are unchanged. A model ANALYZE_VACANCY step or CLARIFY(SEARCH_OR_VACANCY) becomes
   the resumable SEARCH_OR_VACANCY clarification when the message is
   requirement-shaped, else fixed NEED_MORE_DETAIL copy (§6.1); never a draft.
 - **Retired:** `decide_agent_action`, `AgentDecision`, `TOOL_ACTIONS`, the
@@ -8255,6 +8268,17 @@ The historical CI hang root cause remains NOT PROVEN.
   follow-up-framing failures) now assert the stronger replacements
   (PLAN_TOO_LONG / DUPLICATE_STEP with zero executors, exactly one proposal
   per turn, provider failure abandons the turn).
+- **Correction to accepted A3 (PR #102 follow-up commit).** (1) A3.2:
+  `limit_quote` grounding no longer contributes to requirement coverage. (2)
+  A3.3: RANK `model_proposable` False (was True with production hard-coding
+  `confirmed_job_in_session=False`); only an ANALYZE_VACANCY NOT_MODEL_
+  PROPOSABLE rejection becomes the SEARCH_OR_VACANCY clarification; the
+  prompt no longer describes RANK. (3) §10.2 rule 4 applied literally: with
+  protected content in M, a REFINE without a WHOLE_MESSAGE filter source (a
+  count-only refinement) is SOURCE_SELECTION_FORBIDDEN — previously it could
+  launder the request into a "clean" truncation that never reached the
+  planner's refusal. A3.1 projection unchanged. New regressions in
+  `test_issue88_slice_c_plan_contract.py` (A3 section) and the slice-B suite.
 - **Real-Ollama smoke (not the Target-Mac benchmark).** Dev machine,
   synthetic HR text, loopback-only guard, `propose_agent_plan` + Layer 1:
   `qwen3:0.6b` (the configured default) and `qwen3:1.7b`. Before the

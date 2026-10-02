@@ -39,7 +39,7 @@ Choose exactly one kind:
   listed in available_capabilities. Set goal to CANDIDATE_SEARCH (a new
   search, optionally followed by looking at one of its results),
   RESULT_FOLLOWUP (operating on the current results) or VACANCY_ANALYSIS
-  (only for CREATE_JOB / RANK_JOB_CANDIDATES when they are offered).
+  (only for CREATE_JOB when it is offered).
 - CLARIFY: set clarification_code to NEED_MORE_DETAIL,
   CANDIDATE_REFERENCE_REQUIRED (one candidate is meant but it is unclear
   which), RESULT_CONTEXT_REQUIRED (an operation on current results while
@@ -73,8 +73,8 @@ Capabilities:
 - GET_CANDIDATE_PROFILE {ref_quote}: one candidate's professional profile.
 - GET_CANDIDATE_EVIDENCE {ref_quote, topic_quote?}: stored evidence for one
   candidate, including "how many years" questions.
-- CREATE_JOB {} / RANK_JOB_CANDIDATES {}: only point HR to the existing
-  confirmation/ranking form; they never run in chat.
+- CREATE_JOB {}: only points HR to the existing confirmation form of the
+  pending vacancy draft; it never runs in chat.
 A result reference may follow a SEARCH_CANDIDATES step in the same plan
 ("Kotlin bilən namizəd tap və birincinin profilini göstər").
 

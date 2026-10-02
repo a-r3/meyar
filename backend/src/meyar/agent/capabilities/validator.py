@@ -96,6 +96,12 @@ _PRE_EXISTING_REJECTION = {
     ResultSetStatus.STALE: PlanRejectionCode.RESULT_SET_STALE,
     ResultSetStatus.EXPIRED: PlanRejectionCode.RESULT_SET_EXPIRED,
 }
+# D-092 §10.2 rule 3 as clarified by accepted Amendment A3.2: the ONLY
+# material-requirement coverage sources. A LIMIT (result-count) quote is
+# numeric workflow grounding and never satisfies requirement coverage.
+_COVERAGE_FIELDS = frozenset(
+    {GroundedField.SOURCE, GroundedField.FILTER, GroundedField.REFERENCE, GroundedField.TOPIC}
+)
 # Capabilities whose text source the frozen planner receives (§10.2 rule 4).
 _PLANNER_SOURCE_CAPABILITIES = frozenset(
     {CapabilityName.SEARCH_CANDIDATES, CapabilityName.REFINE_RESULTS}
@@ -136,8 +142,14 @@ class _Resolution:
             self.reference_not_grounded is not None
         )
 
-    def spans(self) -> list[GroundedSpan]:
-        return [span for record in self.grounding for span in record.spans]
+    def coverage_spans(self) -> list[GroundedSpan]:
+        """Spans that may satisfy material-requirement coverage (A3.2)."""
+        return [
+            span
+            for record in self.grounding
+            if record.field in _COVERAGE_FIELDS
+            for span in record.spans
+        ]
 
 
 def _resolve_selection(
@@ -198,6 +210,12 @@ def _resolve_model_args(args: BaseModel, *, source: str, protected: bool) -> _Re
             resolution.resolved_text, record = selected
             records.append(record)
     elif isinstance(args, RefineArgs):
+        if protected and args.filter_source is None:
+            # §10.2 rule 4: with protected content in M, a SEARCH/REFINE is
+            # accepted ONLY as WHOLE_MESSAGE. A count-only refinement would
+            # otherwise launder the request into a "clean" truncation that
+            # never reaches the frozen planner's refusal.
+            resolution.forbidden = True
         if args.filter_source is not None:
             selected = _resolve_selection(
                 args.filter_source, field_name=GroundedField.FILTER, source=source,
@@ -529,8 +547,8 @@ def validate_plan(
             )
     if origin == PlanOrigin.MODEL:
         assert analysis is not None
-        all_spans = [span for resolution in resolutions for span in resolution.spans()]
-        if uncovered_requirement(analysis, all_spans, source_text):
+        coverage = [span for resolution in resolutions for span in resolution.coverage_spans()]
+        if uncovered_requirement(analysis, coverage, source_text):
             return _reject(PlanRejectionCode.SOURCE_COVERAGE_INCOMPLETE)
 
     # -- PROHIBITED_ATTRIBUTE -------------------------------------------------

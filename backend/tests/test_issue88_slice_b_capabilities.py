@@ -215,6 +215,9 @@ def test_registry_is_complete_and_matches_the_accepted_mapping() -> None:
     assert create.live_context == frozenset({LiveContextReq.PENDING_DRAFT})
     assert rank.live_context == frozenset({LiveContextReq.CONFIRMED_JOB_IN_SESSION})
     assert CAPABILITY_REGISTRY[CapabilityName.ANALYZE_VACANCY].model_proposable is False
+    # Accepted D-092 Amendment A3.3: RANK is registered but not proposable.
+    assert rank.model_proposable is False
+    assert create.model_proposable is True
     assert CAPABILITY_REGISTRY[CapabilityName.SEARCH_CANDIDATES].produces == frozenset(
         {LiveContextReq.ACTIVE_RESULT_SET}
     )
@@ -434,18 +437,23 @@ def test_duplicate_step_is_rejected() -> None:
 
 
 @pytest.mark.parametrize(
-    ("scopes", "proposal", "source"),
+    ("scopes", "proposal", "source", "origin"),
     [
-        (frozenset(), _plan("CANDIDATE_SEARCH", SEARCH), MESSAGE),  # unknown role -> no scopes
-        (frozenset({"candidates:read"}), _plan("VACANCY_ANALYSIS", _step("CREATE_JOB")), "x"),
+        # unknown role -> no scopes
+        (frozenset(), _plan("CANDIDATE_SEARCH", SEARCH), MESSAGE, PlanOrigin.MODEL),
+        (frozenset({"candidates:read"}), _plan("VACANCY_ANALYSIS", _step("CREATE_JOB")), "x",
+         PlanOrigin.MODEL),
+        # RANK is not model-proposable (A3.3); its registry scopes still hold.
         (frozenset({"jobs:read", "candidates:read"}),
-         _plan("VACANCY_ANALYSIS", _step("RANK_JOB_CANDIDATES")), "x"),
+         _server("VACANCY_ANALYSIS", _step("RANK_JOB_CANDIDATES")), "x", PlanOrigin.SERVER),
     ],
 )
-def test_missing_scope_is_rejected(scopes: frozenset[str], proposal: dict, source: str) -> None:
+def test_missing_scope_is_rejected(
+    scopes: frozenset[str], proposal: dict, source: str, origin: PlanOrigin
+) -> None:
     result = _validate(
-        proposal, source=source, principal_scopes=scopes, pending_draft_live=True,
-        confirmed_job_in_session=True,
+        proposal, source=source, origin=origin, principal_scopes=scopes,
+        pending_draft_live=True, confirmed_job_in_session=True,
     )
     _rejected(result, PlanRejectionCode.SCOPE_MISSING)
 
@@ -604,20 +612,42 @@ def test_server_inspects_exactly_what_the_plan_consumes() -> None:
 
 
 @pytest.mark.parametrize(
-    ("capability", "target"),
-    [("CREATE_JOB", "pending_draft_live"), ("RANK_JOB_CANDIDATES", "confirmed_job_in_session")],
+    ("capability", "target", "origin"),
+    [
+        ("CREATE_JOB", "pending_draft_live", PlanOrigin.MODEL),
+        # A3.3: RANK keeps its registry/affordance concept, but only a
+        # SERVER plan could carry it — never a model plan (below).
+        ("RANK_JOB_CANDIDATES", "confirmed_job_in_session", PlanOrigin.SERVER),
+    ],
 )
 def test_human_action_only_needs_live_target_and_becomes_an_affordance(
-    capability: str, target: str
+    capability: str, target: str, origin: PlanOrigin
 ) -> None:
-    proposal = _plan("VACANCY_ANALYSIS", _step(capability))
-    _rejected(_validate(proposal), PlanRejectionCode.CONFIRMATION_REQUIRED)
-    plan = _validate(proposal, **{target: True})
+    build = _plan if origin == PlanOrigin.MODEL else _server
+    proposal = build("VACANCY_ANALYSIS", _step(capability))
+    _rejected(_validate(proposal, origin=origin), PlanRejectionCode.CONFIRMATION_REQUIRED)
+    plan = _validate(proposal, origin=origin, **{target: True})
     assert isinstance(plan, ExecutablePlan)
     assert plan.steps == ()  # never an executable step
     (affordance,) = plan.affordances
     assert affordance.capability == CapabilityName(capability)
     assert set(affordance.model_dump()) == {"capability", "live_target"}  # no ids
+
+
+@pytest.mark.parametrize("confirmed", [False, True])
+def test_model_rank_proposal_is_never_proposable_even_with_a_confirmed_job(
+    confirmed: bool,
+) -> None:
+    """Accepted A3.3: whatever the session holds, a MODEL plan naming RANK is
+    NOT_MODEL_PROPOSABLE with zero execution (no affordance, no ranking)."""
+    spy = _SpyExecutors()
+    result = validate_plan(
+        _plan("VACANCY_ANALYSIS", _step("RANK_JOB_CANDIDATES")), origin=PlanOrigin.MODEL,
+        source_text="namizədləri sırala", ctx=_ctx(confirmed_job_in_session=confirmed),
+        offered=ALL_OFFERED | {CapabilityName.RANK_JOB_CANDIDATES}, registry=spy.registry,
+    )
+    _rejected(result, PlanRejectionCode.NOT_MODEL_PROPOSABLE)
+    assert spy.calls == []
 
 
 def test_candidate_content_policy_requires_local_inference() -> None:

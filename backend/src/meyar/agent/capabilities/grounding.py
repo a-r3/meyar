@@ -13,8 +13,11 @@ reaches an executor is resolved here by the server:
   server-owned ``"\\n"``, so no model character enters the planner input.
 * ``uncovered_requirement`` — every material requirement of
   ``analyze_hr_text(M)`` (SCORABLE / NEEDS_HUMAN_REVIEW) must overlap some
-  grounded span of the plan, per coordinated part of its subject
-  (SOURCE_COVERAGE_INCOMPLETE).
+  COVERAGE span of the plan, per coordinated part of its subject
+  (SOURCE_COVERAGE_INCOMPLETE). Coverage spans are only search/refine
+  semantic source spans, the grounded reference span and the grounded topic
+  span — never a result-count ``limit_quote`` (accepted A3.2; the caller
+  selects them).
 * ``has_protected_content`` — PROHIBITED requirement / PROTECTED_CUE /
   denylist term anywhere in ``M`` forbids QUOTES for search/refine
   (SOURCE_SELECTION_FORBIDDEN), so a clean fragment can never launder a
