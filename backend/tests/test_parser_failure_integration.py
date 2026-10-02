@@ -31,7 +31,7 @@ from meyar.storage.local import LocalFilesystemStorage
 
 @pytest.mark.parametrize("mode", ["timeout", "resource", "blank", "malformed", "legacy_raw"])
 async def test_upload_closed_failures_no_canonical_inference_or_lost_original(
-    client, db_session, tenant_key_and_user, monkeypatch, mode
+    client, db_session, tenant_key_and_user, monkeypatch, tmp_path, mode
 ):
     tenant, _, key, user, password, _ = tenant_key_and_user
     headers = {"Authorization": f"Bearer {key}"}
@@ -88,6 +88,19 @@ async def test_upload_closed_failures_no_canonical_inference_or_lost_original(
             headers=headers,
             files={"file": ("synthetic.pdf", data, "application/pdf")},
         )
+    if mode in ("timeout", "resource"):
+        assert upload.status_code == 503
+        assert upload.json()["detail"] == PARSE_FAILURE_MESSAGES[code]
+        assert await db_session.scalar(select(CandidateDocument)) is None
+        assert await db_session.scalar(select(CanonicalDocument)) is None
+        assert not [p for p in (tmp_path / "storage").rglob("*") if p.is_file()]
+        retry = await client.post(
+            f"/api/v1/candidates/{candidate}/documents",
+            headers=headers,
+            files={"file": ("synthetic.pdf", VALID, "application/pdf")},
+        )
+        assert retry.status_code == 201 and retry.json()["parser_status"] == "PARSED"
+        return
     assert upload.status_code == 201
     body = upload.json()
     assert body["canonical"] is None and body["parser_status"] == "PARSE_FAILED"
@@ -163,14 +176,21 @@ async def test_folder_parse_failure_indexed_continues_and_no_version_backfill(
     rows = await list_folder_indexed_files(
         db_session, tenant_id=tenant.id, folder_source_id=summary.folder_source_id
     )
-    assert summary.successful == 2 and summary.failed == 0
-    assert all(row.index_status == "INDEXED" for row in rows)
+    if mode in ("timeout", "resource"):
+        assert summary.successful == 1 and summary.failed == 1
+        assert {row.index_status for row in rows} == {"INDEXED", "FAILED"}
+        monkeypatch.setattr(parser, "parse", actual_parse)
+    else:
+        assert summary.successful == 2 and summary.failed == 0
+        assert all(row.index_status == "INDEXED" for row in rows)
     docs = (
         await db_session.scalars(
             select(CandidateDocument).order_by(CandidateDocument.original_filename)
         )
     ).all()
-    assert {d.parser_status for d in docs} == {"PARSED", "PARSE_FAILED"}
+    assert {d.parser_status for d in docs} == (
+        {"PARSED"} if mode in ("timeout", "resource") else {"PARSED", "PARSE_FAILED"}
+    )
     canonical = (await db_session.scalars(select(CanonicalDocument))).all()
     assert len(canonical) == 1
     # Historical rows are immutable and unchanged files are not reparsed on version drift.
@@ -178,7 +198,10 @@ async def test_folder_parse_failure_indexed_continues_and_no_version_backfill(
     await db_session.flush()
     previous = canonical[0].content.copy()
     again = await index_folder(db_session, storage, parser, **kwargs)
-    assert again.unchanged == 2 and again.successful == 0
+    if mode in ("timeout", "resource"):
+        assert again.unchanged == 1 and again.retried == 1 and again.successful == 1
+    else:
+        assert again.unchanged == 2 and again.successful == 0
     assert canonical[0].parser_version == "1.0.0" and canonical[0].content == previous
     assert len((await db_session.scalars(select(CanonicalDocument))).all()) == 1
 

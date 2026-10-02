@@ -30,8 +30,13 @@ The supervisor shields process creation so cancellation cannot lose a child
 handle, cancels and joins IPC tasks, drains stdout without accumulating it,
 terminates, escalates to kill after 0.5 seconds, and reaps before releasing
 admission. Repeat cancellation cannot interrupt cleanup. The worker deadline
-covers startup, input transfer, parsing and response transfer; cleanup occurs
-outside that deadline so it cannot overwrite an earlier typed failure. Parent
+covers normally resolving startup, input transfer, parsing and response transfer.
+Cleanup occurs outside that deadline so it cannot overwrite an earlier typed
+failure. It intentionally awaits shielded OS spawn resolution to obtain and
+reap any late-created child. An indefinitely hung OS spawn primitive can delay
+timeout delivery indefinitely: 20s is **not** a strict total wall-clock bound.
+Document-input-controlled work remains bounded once the supervisor has the
+child handle. Parent
 IPC accumulates at most the result cap plus one byte, with a 64 KiB reader
 high-water limit (asyncio transport buffering can overshoot by a finite read).
 The parent rejects duplicate keys, unknown fields/codes, coercion, wrong parser
@@ -58,7 +63,7 @@ never silently truncates evidence.
 | Active parser children | 1 per application loop | Serializes the potential 768 MiB allocation alongside the local model on the 7.5 GiB development host; aggregate multiplies with application processes. |
 | Parser waiters | 4 | A short bounded burst, at default 10 MiB intake at most 40 MiB of waiting document bytes, independent of request count. |
 | Admission wait | 3 seconds | Finite, short overload response; deliberately does not promise to serve an entire queued burst behind a worst-case document. |
-| Worker elapsed time | 20 seconds | More than 30x the synthetic large-DOCX library time below; includes fresh interpreter startup/IPC and is independent of parser progress. |
+| Worker execution deadline | 20 seconds | More than 30x the synthetic large-DOCX library time below; includes normally resolving startup/IPC. Shielded OS spawn resolution and cleanup are not a strict total wall-clock bound. |
 | Cleanup grace | 0.5 seconds | Allows ordinary termination, then kills an unresponsive child and awaits OS reaping. |
 | Worker address space | 768 MiB | About 100 MiB measured loaded baseline + 128 MiB accepted ZIP expansion with several-fold XML/library overhead and margin; worst-case documents may still be rejected safely. |
 | PDF pages | 300 | Retains the accepted prior policy; checked before per-page extraction. |
@@ -132,11 +137,51 @@ Worker diagnostics are discarded; general logging privacy remains separate.
 | INSUFFICIENT_EXTRACTABLE_TEXT | Usable text could not be extracted. |
 | PARSER_OUTPUT_LIMIT | Document parsing exceeded an output limit. |
 
-A parser admission failure after intake creates the ordinary failed document;
-a validation-admission failure occurs before document creation. Folder files
-that passed validation and produced a failed CandidateDocument deliberately
-remain `INDEXED` and count as successful ingestion, per the existing contract.
-The next valid file still parses. This is not a fix for general M-5 or M-9.
+The server-owned terminal set is exactly `INVALID_DOCUMENT`,
+`INSUFFICIENT_EXTRACTABLE_TEXT`, `PARSER_OUTPUT_LIMIT`. These retain a safe
+`PARSE_FAILED` CandidateDocument and authorized original, without canonical
+authority. The other seven codes (`PARSER_BUSY`, `PARSER_STARTUP_FAILED`,
+`PARSER_RESOURCE_UNAVAILABLE`, `PARSER_WORKER_FAILED`, `INVALID_PARSER_OUTPUT`,
+`PARSER_TIMEOUT`, `PARSER_RESOURCE_LIMIT`) are operational. Timeout and memory
+refusal are deliberately operational because one attempt cannot distinguish
+document complexity from host/runtime/baseline conditions sufficiently to
+declare a permanent document defect. No generic accepted document-reparse path
+exists to repair accidental durable failure authority.
+
+Preparation precedes storage for both paths. Operational direct uploads return
+fixed safe HTTP 503 with no new original, CandidateDocument or CanonicalDocument;
+a later valid retry succeeds. Operational folder failures follow the existing
+`FAILED` index path, including unchanged-file retries, preserving any previous
+successful candidate_document_id for changed/retry files. Terminal folder
+failures retain existing `INDEXED` semantics. Candidate shells and general
+folder transaction/recovery architecture remain M-5, outside this correction.
+
+## Direct-upload DB lifecycle correction
+
+Initial API-key authentication and tenant-owned candidate lookup precede
+accepting the operation. Authentication commits its last-used update; the
+read-only candidate phase then commits to release its transaction/connection.
+Bounded intake, validation, parser admission and parsing run with neither a
+request transaction nor a pooled DB connection held. The prepared bytes/result
+or terminal failure stay in memory. No storage/document/audit writes precede
+preparation, so this commit does not weaken their transaction correctness.
+
+A fresh persistence transaction reloads the API key and candidate with shared
+row locks and population of current ORM state, checking key tenant, revocation,
+expiry, candidates:write scope, candidate existence and tenant ownership before
+storage. Locks protect those checks against mutation/deletion until document,
+canonical/terminal outcome and audit persistence commit. No DB pool increase.
+Folder transaction architecture and the separate accepted photo path are
+unchanged.
+
+The correction regression uses per-request sessions and a deliberately smaller
+two-connection pool, SQLAlchemy checkout/checkin counters and transaction
+inspection. One active parser plus four admitted waiters hold **zero** pooled
+connections and no request transactions; an unrelated DB-backed candidate GET
+completes with HTTP 200 while parsing is held. All five uploads then succeed.
+Separate actor transactions revoke/expire/remove scope from the key, delete
+the candidate or change its tenant during preparation; uploads reject before
+storage with 401/403/404 as appropriate.
 
 ## Version, historical authority and deferrals
 
@@ -154,7 +199,8 @@ agentless deployment tooling; #36 benchmark/model selection; #50 Q&A/comparison.
 
 ## Validation results
 
-Actual Linux results (2026-10-02), synthetic/generated documents only:
+Historical reviewed-head Linux results (2026-10-02), synthetic/generated
+documents only, for `ffdee88faaa607be95354e1a8fc825e991812be2` before correction:
 
 | Gate | Result |
 | --- | --- |
@@ -196,12 +242,56 @@ labels. Boundary tests cover actual 300/301 pages, 10,000/10,001 blocks and
 serialized budgets, parent schema/semantic rejection, blank/image-only/zero/
 mixed PDFs, table-only and unchanged body-paragraph DOCX. Integration checks
 prove fixed persisted/API copy, no canonical/profile/identity authority after
-failure, continued original access, next-file isolation, preserved INDEXED
-semantics, and absence of parser-version-only backfill. PR-1 archive safety
+terminal failure, continued original access, next-file isolation, terminal INDEXED
+semantics, operational FAILED retries, and absence of parser-version-only backfill. PR-1 archive safety
 and validation heartbeat/cancellation/admission remain covered.
 
 Exact-head GitHub CI and owner acceptance are separate delivery gates; these
 local results do not claim either or real Mac acceptance.
+
+## Independent acceptance correction validation
+
+Correction of reviewed head `ffdee88faaa607be95354e1a8fc825e991812be2` on the
+existing PR #108 branch; independent re-review remains required. Validation
+results below distinguish completed checks from pending delivery gates. The startup
+regression deliberately holds spawn unresolved beyond a short execution
+deadline, asserts timeout delivery remains pending with its admission slot
+retained, then permits a real child to spawn and verifies safe timeout, OS
+reaping, slot release and recovery. This proves the documented limitation and
+late-child cleanup; it does not claim a never-resolving spawn is bounded.
+
+| Correction gate | Actual result |
+| --- | --- |
+| Correction/failure/isolation regression suite | **93 passed in 36.41s** |
+| Expanded focused parser/upload/folder/reconciliation/PR-1 safety/multilingual/auth/tenant/no-exfiltration/original/preview suite | **242 passed in 68.99s** |
+| `uv run ruff check .` | **All checks passed!** |
+| `uv run mypy src` | **Success: no issues found in 225 source files** |
+| `uv run pytest -q` | **3366 passed in 512.04s (0:08:32)** (30 new correction regressions) |
+| `uv run alembic heads` | **b88a2c4d6e10 (head)** |
+| `git diff --check` | Clean |
+| `scripts/scan-tracked-tree.sh` | Clean; repeated after intentional staging to include the new regression file |
+| Migration / dependency / lockfile diff | None |
+| Exact correction head / GitHub CI | Post-commit delivery gate; the exact head/run/conclusion are recorded in [PR #108](https://github.com/a-r3/meyar/pull/108) and the final operational correction report. Historical CI 37036117775 validates only the old reviewed head. |
+
+Expanded focused reproduction, from `backend/`:
+
+```bash
+uv run pytest -q tests/test_parser_authority_correction.py tests/test_parser_isolation.py tests/test_parser_failure_integration.py tests/test_candidate_documents.py tests/test_folder_indexer.py tests/test_folder_reconciliation.py tests/test_docx_archive_safety.py tests/test_upload_body_limit.py tests/test_folder_scanner_bounds.py tests/test_multilingual_evidence.py tests/test_api_key_auth.py tests/test_tenant_isolation.py tests/test_no_exfiltration.py tests/test_ui_original_cv.py tests/test_ui_candidate_preview.py
+```
+
+Exact correction files relative to the canonical repository root (the original
+PR file list follows separately):
+
+- `backend/src/meyar/api/v1/candidates.py`
+- `backend/src/meyar/ingestion/parser.py`
+- `backend/src/meyar/ingestion/parser_supervisor.py`
+- `backend/src/meyar/services/candidate_document_service.py`
+- `backend/tests/test_parser_authority_correction.py` (new)
+- `backend/tests/test_parser_failure_integration.py`
+- `backend/tests/test_parser_isolation.py`
+- `docs/DECISIONS.md`
+- `docs/ISSUE_46_PR2_VALIDATION.md`
+- `docs/STATUS.md`
 
 ## Changed files
 
@@ -221,6 +311,7 @@ Paths below are relative to the canonical root returned by
 - `backend/src/meyar/services/candidate_document_service.py`
 - `backend/src/meyar/services/folder_indexer_service.py`
 - `backend/tests/test_candidate_documents.py`
+- `backend/tests/test_parser_authority_correction.py`
 - `backend/tests/test_parser_failure_integration.py`
 - `backend/tests/test_parser_isolation.py`
 - `docs/DECISIONS.md`

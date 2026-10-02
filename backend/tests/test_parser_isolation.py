@@ -169,6 +169,41 @@ async def test_startup_failure_and_recovery(monkeypatch):
     await normal()
 
 
+async def test_timeout_waits_for_spawn_resolution_then_reaps_late_child(monkeypatch):
+    original = asyncio.create_subprocess_exec
+    entered = asyncio.Event()
+    allow_spawn = asyncio.Event()
+    children = []
+
+    async def unresolved(*args, **kwargs):
+        entered.set()
+        await allow_spawn.wait()
+        child = await original(sys.executable, "-c", "import time; time.sleep(60)", **kwargs)
+        children.append(child)
+        return child
+
+    with monkeypatch.context() as patch:
+        patch.setattr(asyncio, "create_subprocess_exec", unresolved)
+        task = asyncio.create_task(
+            supervisor.parse_isolated(data=VALID, document_type="PDF", seconds=0.02)
+        )
+        try:
+            await asyncio.wait_for(entered.wait(), 3)
+            await asyncio.sleep(0.08)
+            # Deadline expires, but safe cleanup cannot abandon an unresolved
+            # OS spawn that may still create a child. No total-time claim.
+            assert not task.done() and not children
+            assert supervisor.gate().active == 1
+        finally:
+            allow_spawn.set()
+            with pytest.raises(ParseError) as caught:
+                await asyncio.wait_for(task, 3)
+        assert caught.value.code == ParseFailureCode.PARSER_TIMEOUT
+    assert_reaped(children[0])
+    assert supervisor.gate().active == 0
+    await normal()
+
+
 @pytest.mark.parametrize("during_startup", [False, True])
 async def test_cancellation_reaps_even_during_spawn(monkeypatch, during_startup):
     original = asyncio.create_subprocess_exec

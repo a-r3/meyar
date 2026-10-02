@@ -55,11 +55,23 @@ PARSE_FAILURE_MESSAGES = {
     ParseFailureCode.PARSER_OUTPUT_LIMIT: "Document parsing exceeded an output limit.",
 }
 
+# Only content/explicit output-policy outcomes may become document authority.
+# Timeout and memory refusal cannot distinguish hostile content from host/runtime
+# conditions in one attempt, so remain operational and retryable too.
+TERMINAL_PARSE_FAILURES = frozenset(
+    {
+        ParseFailureCode.INVALID_DOCUMENT,
+        ParseFailureCode.INSUFFICIENT_EXTRACTABLE_TEXT,
+        ParseFailureCode.PARSER_OUTPUT_LIMIT,
+    }
+)
+
 
 class ParseError(Exception):
     """Raised for any parse failure — malformed content, no extractable
-    text, or resource-limit exceeded. Callers must catch this, record safe
-    failure metadata, and must not let it crash the request."""
+    text, or operational refusal. Only is_terminal outcomes may become durable
+    document failure authority; other outcomes must remain retryable. Public
+    and persisted metadata must use the fixed server-owned message."""
 
     def __init__(self, code: ParseFailureCode = ParseFailureCode.INVALID_DOCUMENT) -> None:
         # Legacy/custom providers cannot turn arbitrary exception text into public copy.
@@ -68,6 +80,10 @@ class ParseError(Exception):
         )
         self.public_message = PARSE_FAILURE_MESSAGES[self.code]
         super().__init__(self.public_message)
+
+    @property
+    def is_terminal(self) -> bool:
+        return self.code in TERMINAL_PARSE_FAILURES
 
 
 class DocumentParser(Protocol):

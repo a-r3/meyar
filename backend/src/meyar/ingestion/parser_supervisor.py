@@ -128,6 +128,13 @@ async def _finish(task: asyncio.Task) -> None:
 
 
 async def _run(data: bytes, kind: str, limits: policy.OutputLimits, seconds: float) -> bytes:
+    """Deadline for normally resolving startup and input-controlled worker work.
+
+    Cleanup intentionally awaits shielded OS spawn resolution to obtain/reap
+    any late-created child. An indefinitely stuck OS spawn primitive can delay
+    timeout delivery indefinitely; this is not a strict total wall-clock bound.
+    Terminate/kill/reap cleanup is outside the worker execution deadline.
+    """
     spawn = asyncio.create_task(
         asyncio.create_subprocess_exec(
             sys.executable,

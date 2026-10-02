@@ -2,15 +2,18 @@ import logging
 import uuid
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.config import Settings, get_settings
-from meyar.core.auth import TenantContext, require_scope
+from meyar.core.auth import TenantContext, api_key_is_active, require_scope
 from meyar.db import get_db
 from meyar.ingestion.bounded_read import read_bounded
 from meyar.ingestion.dependency import get_document_parser
 from meyar.ingestion.parser import DocumentParser, ParseError
 from meyar.ingestion.validation import DocumentTooLargeError, UnsupportedDocumentError
+from meyar.models.api_key import ApiKey
+from meyar.models.candidate import Candidate
 from meyar.models.candidate_document import PARSER_STATUS_PARSED, CandidateDocument
 from meyar.models.canonical_document import CanonicalDocument
 from meyar.schemas.api_candidate import ApiCandidateDetailResponse
@@ -25,7 +28,10 @@ from meyar.services.candidate_document_repo import (
     get_latest_canonical_document,
     list_candidate_documents,
 )
-from meyar.services.candidate_document_service import ingest_candidate_document
+from meyar.services.candidate_document_service import (
+    persist_candidate_document,
+    prepare_candidate_document,
+)
 from meyar.services.candidate_photo_service import process_photo_for_document
 from meyar.services.candidate_repo import create_candidate, get_candidate
 from meyar.services.candidate_service import delete_candidate_cascade
@@ -87,6 +93,42 @@ async def _get_candidate_or_404(db: AsyncSession, tenant_id: uuid.UUID, candidat
     if candidate is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Candidate not found.")
     return candidate
+
+
+async def _revalidate_upload_authority(
+    db: AsyncSession, ctx: TenantContext, candidate_id: uuid.UUID
+) -> None:
+    """Fresh persistence-phase authority; locks last only until upload commit.
+
+    Shared locks prevent credential/ownership changes or candidate deletion
+    between revalidation and persistence without serializing unrelated uploads.
+    Tenant-active enforcement remains separate #46 work.
+    """
+    key = await db.scalar(
+        select(ApiKey)
+        .where(ApiKey.id == ctx.api_key_id)
+        .with_for_update(read=True)
+        .execution_options(populate_existing=True)
+    )
+    if key is None or key.tenant_id != ctx.tenant_id or not api_key_is_active(key):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing API key.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if "candidates:write" not in key.scopes:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="API key is missing required scope: candidates:write",
+        )
+    candidate = await db.scalar(
+        select(Candidate)
+        .where(Candidate.id == candidate_id, Candidate.tenant_id == ctx.tenant_id)
+        .with_for_update(read=True)
+        .execution_options(populate_existing=True)
+    )
+    if candidate is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Candidate not found.")
 
 
 @router.post("/candidates", status_code=status.HTTP_201_CREATED, response_model=CandidateOut)
@@ -163,15 +205,15 @@ async def post_candidate_document(
     settings: Settings = Depends(get_settings),
 ) -> CandidateDocumentOut:
     await _get_candidate_or_404(db, ctx.tenant_id, candidate_id)
+    # Complete the short, read-only ownership phase. Auth last-used was already
+    # committed; no document/storage mutation exists yet. Every document write
+    # follows preparation and fresh, locked persistence-phase revalidation.
+    await db.commit()
 
     data = await read_bounded(file, max_bytes=settings.max_upload_bytes)
     try:
-        document = await ingest_candidate_document(
-            db,
-            storage,
+        prepared = await prepare_candidate_document(
             parser,
-            tenant_id=ctx.tenant_id,
-            candidate_id=candidate_id,
             filename=file.filename or "",
             content_type=file.content_type or "",
             data=data,
@@ -187,11 +229,16 @@ async def post_candidate_document(
         ) from exc
 
     except ParseError as exc:
-        # Pre-validation admission fails before storage/document mutation.
+        # Operational validation/parser failures precede every storage/document write.
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=exc.public_message
         ) from None
 
+    await _revalidate_upload_authority(db, ctx, candidate_id)
+    document = await persist_candidate_document(
+        db, storage, prepared, tenant_id=ctx.tenant_id,
+        candidate_id=candidate_id, filename=file.filename or "",
+    )
     await db.commit()
     document_id = document.id
     try:
