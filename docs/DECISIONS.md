@@ -7687,16 +7687,22 @@ PR #96 before slice A; corrected per review).**
   unchanged.
 - Implementation has not started (see *Status* above).
 
-**Amendment A3 — Slice-C authority reconciliation (PROPOSED AMENDMENT /
-PENDING INDEPENDENT ACCEPTANCE; separate docs PR, before any correction of
-slice-C PR #102).**
-- *Status.* PROPOSED — pending independent acceptance; NOT accepted. It is
-  a docs-only amendment on a separate branch/PR from `main` @
-  `9817711c73e9d2701c0385d2bbe0c1bd3fba153e`. Slice C is implemented in PR
-  #102 (head `4e0daf2191b563c49315139ad7a01536dbe41f56`) but is NOT accepted
-  and NOT merged; D-095 belongs to that unaccepted PR and is NOT accepted
-  authority. #88 remains OPEN; #50 remains OPEN and out of scope. No source,
-  test, migration or dependency change; Alembic head stays `b88a2c4d6e10`.
+**Amendment A3 — Slice-C authority reconciliation (ACCEPTED AMENDMENT;
+MERGED through docs PR #103, before any correction of slice-C PR #102).**
+- *Status.* ACCEPTED — independently reviewed and accepted, and MERGED
+  through PR #103. Accepted PR head
+  `7ab7056794f4f693d9b974cba7f6a01f7abd908e` (tree
+  `78ce6e29634aa370f3bdabc0f22d7862bb378558`); squash commit on `main`
+  `d9e96c06169d9ebf25ab6f276eb63bab4c5d4828` (single parent
+  `9817711c73e9d2701c0385d2bbe0c1bd3fba153e`); the squash tree equals the
+  accepted-head tree exactly. Accepted exact-head CI run `36965800982`
+  SUCCESS (3073 pytest passed; 10 hang diagnostics passed). Docs only: no
+  source, test, migration or dependency change; Alembic head stays
+  `b88a2c4d6e10`. Slice C is implemented in PR #102 (head
+  `4e0daf2191b563c49315139ad7a01536dbe41f56`) but is NOT accepted and NOT
+  merged; D-095 belongs to that unaccepted PR and is NOT accepted authority.
+  #88 stays OPEN until slice C is accepted and merged; #50 remains OPEN and
+  out of scope.
 - *Finding.* Independent review of the slice-C implementation found three
   normative reconciliation issues in D-092 itself:
   1. §15 sends the bounded `(role, text)` history "unchanged" AND requires
@@ -7765,8 +7771,8 @@ slice-C PR #102).**
     decision before RANK becomes model-proposable.
   - CREATE_JOB is unchanged: HUMAN_ACTION_ONLY, offered only with the live
     PENDING_DRAFT authority.
-- *Consequence for slice C.* After A3 is accepted and merged, the slice-C
-  implementation (PR #102) must be corrected to:
+- *Consequence for slice C.* A3 is accepted and merged; the slice-C
+  implementation (PR #102) must now be corrected to:
   - keep the privacy-safe assistant outcome-code projection (A3.1);
   - keep coordinated-part coverage (A3.2);
   - exclude LIMIT grounding from requirement coverage (A3.2);
