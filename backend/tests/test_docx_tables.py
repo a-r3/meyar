@@ -156,8 +156,8 @@ def test_long_vertical_merge_and_ambiguous_source_continuation():
     assert [b.text for b in result.content.pages[0].blocks] == ["origin"]
     assert result.content.warnings == ["DOCX_AMBIGUOUS_MERGE_TEXT_OMITTED"]
     view = build_professional_document_view(canonical(result))
-    with pytest.raises(EvidenceValidationError):
-        verify_extraction_evidence(view, claim(0, "origin", "origin"))
+    # Omission in the last physical row no longer invalidates the complete origin row.
+    verify_extraction_evidence(view, claim(0, "origin", "origin"))
 
 
 def nested_document(depth):
@@ -393,7 +393,7 @@ def test_parent_strict_provenance_and_warnings(fault):
     if fault == "warning_duplicate":
         content["warnings"] = ["DOCX_HEADER_TEXT_OMITTED"] * 2
     if fault == "warnings_over":
-        content["warnings"] = ["DOCX_HEADER_TEXT_OMITTED"] * 5
+        content["warnings"] = ["DOCX_HEADER_TEXT_OMITTED"] * 6
     with pytest.raises(ParseError) as caught:
         parser_supervisor.decode_result(json.dumps(payload).encode(), "DOCX", OutputLimits())
     assert caught.value.code == ParseFailureCode.INVALID_PARSER_OUTPUT
@@ -490,19 +490,23 @@ def test_continuation_unsupported_wrapper_text_detected_without_extraction():
     assert [b.text for b in result.content.pages[0].blocks] == ["Python"]
 
 
-def test_all_four_closed_warnings_exact_cardinality():
+def test_all_five_closed_warnings_exact_cardinality():
+    from test_docx_review_corrections import omitted
+
     document = row_document("ambiguous source")
     document.tables[0].cell(0, 0)._tc.get_or_add_tcPr().get_or_add_vMerge().val = "continue"
     document.add_paragraph("Python")
     document.sections[0].header.paragraphs[0].text = "omitted header"
     document.sections[0].footer.paragraphs[0].text = "omitted footer"
     textbox(document, "omitted textbox")
+    omitted(document.add_table(rows=1, cols=1).cell(0, 0), "sdt")
     result = parse(document)
     assert result.content.warnings == [
         "DOCX_HEADER_TEXT_OMITTED",
         "DOCX_FOOTER_TEXT_OMITTED",
         "DOCX_TEXTBOX_TEXT_OMITTED",
         "DOCX_AMBIGUOUS_MERGE_TEXT_OMITTED",
+        "DOCX_TABLE_TEXT_OMITTED",
     ]
     assert parser_supervisor.decode_result(
         result.model_dump_json().encode(), "DOCX", OutputLimits()

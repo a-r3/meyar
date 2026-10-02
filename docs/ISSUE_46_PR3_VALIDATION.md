@@ -31,7 +31,7 @@ pagination is inferred. Paragraph text follows the existing library behavior;
 page-break text fusion is deliberately unchanged.
 
 Optional closed source provenance in canonical JSON is either `{kind: BODY}`
-or `{kind: TABLE, path: [{table, row, cell}, ...], paragraph}`. Path steps record
+or `{kind: TABLE, path: [{table, row, cell}, ...], paragraph, row_context_complete}`. Path steps record
 ancestor table/source-row/source-cell ordinals; table ordinal is local to its
 body or parent cell, and paragraph ordinal is local to its immediate cell,
 including blanks. All coordinates are strict bounded integers, not visual-grid
@@ -42,9 +42,9 @@ Horizontal and rectangular merged origin cells are extracted once. Empty
 vertical continuations emit nothing. Nonempty continuation source text, including text inside unsupported wrappers,
 is ambiguous: it is omitted, its paragraph consumes an index, and a closed warning
 is recorded. No guessed rendering authority is assigned. Where such omission
-exists, supported TABLE blocks in that document cannot grant positive
-professional or phone authority because row context may be incomplete. BODY
-rules remain unchanged.
+exists, supported TABLE blocks in that immediate physical row cannot grant
+context-dependent professional or identity authority. Other complete rows
+remain eligible under existing same-block rules. BODY rules remain unchanged.
 
 ## Table evidence authority
 
@@ -68,6 +68,13 @@ explicit `absent`/`unavailable` in that row vetoes positive professional
 interpretation. In particular `No experience with | Python` cannot prove a
 Python skill, regardless of source-cell direction or cropped quote.
 
+All TABLE identity fields additionally reject the explicit English whole-word
+labels `reference`, `referee`, `recommender`, and `emergency contact` in their
+immediate supported row context, using existing case/whitespace normalization.
+This applies equally to full_name, email and phone; no multilingual or semantic
+classifier is introduced. Persisted identity reads reuse the same verifier via
+`identity_authority.py`, returning no authorized values for rejected versions.
+
 Phone evidence additionally rejects bounded sibling non-phone identifier
 labels through the existing label grammar. A sibling `Phone` label cannot
 make an otherwise unsupported bare numeric token into a phone. Email syntax,
@@ -77,12 +84,13 @@ facts where context is ambiguous; they never guess positive authority.
 
 ## Omission disclosure and terminal behavior
 
-Four closed warnings, each at most once and in deterministic server order:
+Five closed warnings, each at most once and in deterministic server order:
 
 - `DOCX_HEADER_TEXT_OMITTED`
 - `DOCX_FOOTER_TEXT_OMITTED`
 - `DOCX_TEXTBOX_TEXT_OMITTED`
 - `DOCX_AMBIGUOUS_MERGE_TEXT_OMITTED`
+- `DOCX_TABLE_TEXT_OMITTED`
 
 A bounded read-only scan checks the existing main source and existing related
 header/footer parts. Default, first-page and even-page relationships are
@@ -149,7 +157,7 @@ Two new explicit policy limits:
 - **100,000 source XML nodes**, aggregated across the main document and existing
   header/footer parts, bounds empty/unsupported traversal independently of
   emitted blocks. Read-only preflight visits nodes once; supported extraction
-  is a second bounded source pass. Iterator-stack scanning avoids recursive
+  and immediate-row omission detection use additional bounded source passes. Iterator-stack scanning avoids recursive
   detection and width-sized work queues. Exact/over tests exercise both the
   actual policy and the no-text outcome. Coordinates/indexes stay below this
   ceiling and malformed fields are rejected in the parent.
@@ -157,7 +165,7 @@ Two new explicit policy limits:
 These are explicit security ceilings for oversized structural inputs, not
 production-capacity or Mac benchmark measurements. Every emitted table
 paragraph uses TextBudget; provenance and warnings contribute to worker/parent
-serialized-result bounds. Warning cardinality is at most four; unknown,
+serialized-result bounds. Warning cardinality is at most five; unknown,
 duplicate, unsorted, malformed or over-limit metadata fails closed.
 
 ## Explicitly deferred Word structures
@@ -170,7 +178,7 @@ exhaustive Word-completeness claim. Page-break fusion is unchanged. No original
 storage recovery, historical row migration or automatic retry/backfill design
 is added.
 
-## Validation
+## Reviewed-head validation (before independent correction)
 
 Actual focused/full gate output is recorded below before delivery. Tests are
 synthetic only. The documented local PostgreSQL container was initially stopped;
@@ -226,3 +234,86 @@ cd ..
 git diff --check
 scripts/scan-tracked-tree.sh
 ```
+
+## Independent review correction
+
+Same PR #110 / branch `feat/46-docx-ordered-tables`; reviewed head
+`597a8d707a77545ef21e5f570126dfa0634b5719`. Both blockers reproduced before
+production editing: **11 failed in 0.92s**, each because the required rejection
+did not occur. Root causes: missing immediate-row omission authority and
+phone-only sibling identity checks. Reproductions are not counted as success.
+
+### Precise omission mechanism and historical authority
+
+After bounded source preflight, an iterator scan checks each supported physical
+row for nonblank `w:t` / `w:delText` outside the exact direct
+cell/paragraph/run/text and paragraph/hyperlink/run/text paths used by the pinned
+library. Text in content controls (`w:sdt`), skipped revision wrappers
+(`w:ins`, `w:del`, `w:moveFrom`, `w:moveTo`), and recognized cell text boxes is
+only detected, never extracted or assigned accepted/rejected revision semantics.
+Omitted merge/text-box text retains its specific warning; other skipped table
+text adds `DOCX_TABLE_TEXT_OMITTED`. The scan stores only one strict boolean
+`row_context_complete` on each emitted TABLE source. No omitted text is retained.
+Direct supported nested tables are skipped by the enclosing row scan and their
+rows inspected independently; unsupported wrapped nested text remains an omission
+in the enclosing row. This adds bounded passes with no source-node ceiling
+change, recursive detection, layout-grid expansion or width-sized scan queue.
+
+Worker and parent require the boolean on current output, consistent across
+emitted blocks in the same immediate row; false requires a recognized table
+omission warning. Missing/null/coerced/inconsistent metadata fails the protocol.
+Evidence treats false or historical unknown/missing completeness as unknown
+context and fails closed. This is row-local: unrelated rows and header/footer
+stories do not invalidate complete rows. Historical TABLE blocks without the
+boolean are conservatively withheld when current authority needs row context,
+since their omitted text cannot be reconstructed from stored supported blocks.
+Historical rows are never rewritten or automatically reparsed; this is a current
+evidence rule, not parser-version-only invalidation. BODY blocks remain unaffected.
+Metadata is excluded from prompts, canonical API and HR HTML.
+
+### Correction tests and gates
+
+New synthetic suite `backend/tests/test_docx_review_corrections.py` covers:
+
+- `test_omitted_row_rejects_positive_and_current_profile_authority` — sdt,
+  text box, insertion/deletion/move wrappers; no omitted text in canonical,
+  prompt serialization or captured logs; current profile authority rejects.
+- `test_reference_identity_rejected_on_extraction_and_persisted_rebuild` —
+  reference name/email, emergency-contact name, referee phone, recommender email;
+  unchanged persisted identity content, no authorized rebuilt values.
+- `test_incomplete_context_is_immediate_row_local_with_body_unchanged`.
+- `test_nested_row_is_separate_and_complete_hyperlink_text_stays_supported`.
+- `test_complete_table_and_body_identity_preserved_and_incomplete_table_rejected`.
+- `test_positive_identity_sibling_cannot_supply_missing_same_block_support` —
+  full_name/email/phone must still be supported in their own cited block.
+- `test_row_completeness_strict_worker_parent_contract` — missing/null/string/
+  integer/inconsistent flags and missing warning rejected by parent.
+- `test_historical_table_missing_completeness_is_unknown_without_rewrite`.
+- `test_run_revision_and_content_control_omissions_are_not_extracted`.
+
+Existing suites now cover five closed warning codes, unchanged 100,000-node/
+depth/text/IPC boundaries and row-local ambiguous merge behavior. Upload/API/HR
+integration adds content-control omission with friendly partial disclosure,
+authorized original retention, no omitted text, raw code or completeness flag.
+Header/footer and BODY text-box warnings preserve ordinary complete table facts.
+
+Focused command:
+
+```bash
+cd backend
+uv run pytest -q tests/test_docx_tables.py tests/test_docx_review_corrections.py tests/test_docx_table_integration.py tests/test_parser_authority_correction.py tests/test_parser_isolation.py tests/test_parser_failure_integration.py
+```
+
+**185 passed in 43.18s**. Ruff: all checks passed. `mypy src`: no issues in
+226 source files. Full pytest: **3458 passed in 522.31s (0:08:42)**, including
+tenant/auth, original-CV authorization, no-exfiltration, parser isolation/failure,
+evidence/profile/identity authority and UI regressions. Alembic: unchanged single
+head `b88a2c4d6e10`. Diff whitespace checks and tracked-tree secret/real-data scan
+are clean. Migration/model/dependency/uv.lock diff is empty. Published exact-head
+CI is verified separately in the PR/delivery record before requesting re-review.
+
+Corrections preserve parser 1.2.0, physical traversal, all existing bounds,
+process isolation, original retention, public DTOs and friendly HR copy.
+No migration, dependency or lockfile change. No historical rewrite/backfill,
+external AI/OCR or deferred extraction slice. PR-3 remains a proposal awaiting
+independent re-review; #46 remains OPEN.

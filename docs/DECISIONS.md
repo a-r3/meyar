@@ -8542,10 +8542,21 @@ remain mandatory. Enumerated negative/ambiguous row context, over-limit row
 context, and non-phone labels reject conservative interpretations. Nonempty
 vertical continuation text is omitted with a closed warning, never promoted
 into facts; its incomplete table context cannot grant positive authority.
-Historical BODY evidence behavior remains unchanged.
+Immediate-row completeness is a strict server-only boolean: nonblank skipped
+content-control, revision or text-box text vetoes that row without extracting
+it or choosing revision semantics. Other complete rows/nested rows and separate
+header/footer stories are unaffected. Historical TABLE completeness missing this
+metadata is unknown and fails closed under current authority, without rewriting
+rows or reprocessing files. Historical BODY evidence behavior remains unchanged.
+All TABLE identity fields reject the explicit English labels reference, referee,
+recommender and emergency contact in supported immediate-row context. Sibling
+labels never supply positive identity evidence; persisted identity revalidation
+uses the same verifier. Both independent blockers reproduced (11 expected
+rejections absent); correction focused suites pass 185 tests in 43.18s. Exact
+full-gate results are recorded in the PR-3 validation document.
 
 Existing header/footer source parts and recognized text-box containers are
-inspected read-only for omission, never extracted. Four closed durable warning
+inspected read-only for omission, never extracted. Five closed durable warning
 codes carry no source text/XML/path. Mixed supported/omitted documents succeed
 with partial disclosure; unsupported-only documents retain the authorized
 original with terminal UNSUPPORTED_DOCX_TEXT_ONLY and no canonical authority.

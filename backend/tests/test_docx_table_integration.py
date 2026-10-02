@@ -4,6 +4,7 @@ import uuid
 
 import pytest
 from sqlalchemy import select
+from test_docx_review_corrections import omitted
 from test_docx_tables import row_document, save, textbox
 from test_parser_isolation import VALID
 
@@ -19,7 +20,7 @@ from meyar.storage.local import LocalFilesystemStorage
 
 
 @pytest.mark.parametrize(
-    "mode", ["table", "mixed_header", "mixed_footer", "mixed_box", "unsupported"]
+    "mode", ["table", "mixed_header", "mixed_footer", "mixed_box", "mixed_sdt", "unsupported"]
 )
 async def test_upload_api_original_ui_partial_and_terminal(
     client, db_session, tenant_key_and_user, mode
@@ -35,6 +36,8 @@ async def test_upload_api_original_ui_partial_and_terminal(
         document.sections[0].footer.paragraphs[0].text = "OMITTED SYNTHETIC FOOTER"
     if mode == "mixed_box":
         textbox(document, "OMITTED SYNTHETIC BOX")
+    if mode == "mixed_sdt":
+        omitted(document.tables[0].add_row().cells[0], "sdt", "OMITTED SYNTHETIC CONTROL")
     data = save(document)
     candidate = (await client.post("/api/v1/candidates", headers=headers)).json()["id"]
     upload = await client.post(
@@ -63,6 +66,8 @@ async def test_upload_api_original_ui_partial_and_terminal(
         assert body["canonical"]["partial_extraction"] == (mode != "table")
         assert "source" not in body["canonical"]["pages"][0]["blocks"][0]
         assert "warnings" not in body["canonical"]
+        assert "OMITTED SYNTHETIC" not in upload.text
+        assert "row_context_complete" not in upload.text
         assert canonical.content["pages"][0]["blocks"][0]["source"]["kind"] == "TABLE"
         document_row = await db_session.get(CandidateDocument, uuid.UUID(body["id"]))
         await create_profile_version(
@@ -103,6 +108,8 @@ async def test_upload_api_original_ui_partial_and_terminal(
         assert "DOCX_HEADER_TEXT_OMITTED" not in response.text
         assert "DOCX_FOOTER_TEXT_OMITTED" not in response.text
         assert "DOCX_TEXTBOX_TEXT_OMITTED" not in response.text
+        assert "DOCX_TABLE_TEXT_OMITTED" not in response.text
+        assert "row_context_complete" not in response.text
         assert "UNSUPPORTED_DOCX_TEXT_ONLY" not in response.text
         assert '"path"' not in response.text and '"cell"' not in response.text
         assert "səhifə 1" not in response.text and "Səhifə 1" not in response.text

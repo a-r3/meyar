@@ -13,7 +13,14 @@ rows/evidence remain immutable; no parser-version-only reprocessing or old
 failure backfill. No migration, dependency/lockfile change or Target-Mac claim.
 #46 remains OPEN under M9; general M-5/M-9 and #35/#36/#50 remain deferred.
 D-098 and `docs/ISSUE_46_PR3_VALIDATION.md` record the proposal and verification.
-PR-3 is not accepted merely because implementation/CI is green.
+PR #110 independent review corrections add strict row-local omitted-context
+completeness and a four-label reference/emergency-contact identity veto. Current
+profile/identity authority uses these same rules; historical TABLE completeness
+without metadata is unknown, with no historical rewrite/reparse. Other complete
+rows and BODY rules remain eligible. Focused corrections: 185 passed in 43.18s;
+full correction gate: 3458 passed in 522.31s, Ruff/mypy(src) clean, unchanged
+single Alembic head. Details are recorded in the PR-3 validation document. PR-3 awaits
+independent re-review and is not accepted merely because implementation/CI is green.
 
 ## Current phase
 

@@ -24,7 +24,6 @@ class ProfessionalDocumentView(BaseModel):
 
     canonical_document_id: uuid.UUID
     blocks: list[ModelInputBlock]
-    table_context_incomplete: bool = Field(default=False, exclude=True)
 
     def total_chars(self) -> int:
         return sum(len(block.text) for block in self.blocks)
@@ -47,9 +46,6 @@ def build_professional_document_view(canonical: CanonicalDocument) -> Profession
     return ProfessionalDocumentView(
         canonical_document_id=canonical.id,
         blocks=blocks,
-        table_context_incomplete=(
-            "DOCX_AMBIGUOUS_MERGE_TEXT_OMITTED" in canonical.content.get("warnings", [])
-        ),
     )
 
 
@@ -78,7 +74,4 @@ def build_identity_document_view(canonical: CanonicalDocument) -> ProfessionalDo
     return ProfessionalDocumentView(
         canonical_document_id=canonical.id,
         blocks=blocks,
-        table_context_incomplete=(
-            "DOCX_AMBIGUOUS_MERGE_TEXT_OMITTED" in canonical.content.get("warnings", [])
-        ),
     )

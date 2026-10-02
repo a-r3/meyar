@@ -55,6 +55,7 @@ def validate_result(result: ParseResult, kind: str, limits: OutputLimits) -> Non
         raise ParseError(ParseFailureCode.INVALID_PARSER_OUTPUT)
     budget = TextBudget(limits)
     positions: set[tuple] = set()
+    rows: dict[tuple, bool] = {}
     for number, page in enumerate(pages, 1):
         if page.page != number or (kind == "PDF" and len(page.blocks) > 1):
             raise ParseError(ParseFailureCode.INVALID_PARSER_OUTPUT)
@@ -71,6 +72,16 @@ def validate_result(result: ParseResult, kind: str, limits: OutputLimits) -> Non
                 raise ParseError(ParseFailureCode.INVALID_PARSER_OUTPUT)
             if isinstance(block.source, TableSource):
                 key = tuple((step.table, step.row, step.cell) for step in block.source.path)
+                complete = block.source.row_context_complete
+                row = (key[:-1], key[-1][:2])
+                if complete is None or (row in rows and rows[row] != complete):
+                    raise ParseError(ParseFailureCode.INVALID_PARSER_OUTPUT)
+                if not complete and not any(code in warnings for code in (
+                    "DOCX_TEXTBOX_TEXT_OMITTED", "DOCX_AMBIGUOUS_MERGE_TEXT_OMITTED",
+                    "DOCX_TABLE_TEXT_OMITTED",
+                )):
+                    raise ParseError(ParseFailureCode.INVALID_PARSER_OUTPUT)
+                rows[row] = complete
                 position = (key, block.source.paragraph)
                 if position in positions:
                     raise ParseError(ParseFailureCode.INVALID_PARSER_OUTPUT)

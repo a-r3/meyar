@@ -166,7 +166,7 @@ def _table_context(view: ProfessionalDocumentView, ref: EvidenceRef) -> list[str
     source = block.source
     if not isinstance(source, TableSource):
         return []
-    if view.table_context_incomplete:
+    if source.row_context_complete is not True:
         return None
     context: list[str] = []
     size = 0
@@ -179,6 +179,8 @@ def _table_context(view: ProfessionalDocumentView, ref: EvidenceRef) -> list[str
             and other.path[-1].table == source.path[-1].table
             and other.path[-1].row == source.path[-1].row
         ):
+            if other.row_context_complete is not True:
+                return None
             context_text = sibling.table_context_text or sibling.text
             size += len(context_text)
             if len(context) >= _TABLE_CONTEXT_BLOCKS or size > _TABLE_CONTEXT_CHARS:
@@ -701,6 +703,18 @@ def _phone_like_occurrences(text: str) -> Iterator[re.Match[str]]:
             yield match
 
 
+_NON_CANDIDATE_IDENTITY_LABEL = re.compile(
+    r"\b(?:reference|referee|recommender|emergency\s+contact)\b"
+)
+
+
+def _table_identity_veto(view: ProfessionalDocumentView, ref: EvidenceRef) -> bool:
+    context = _table_context(view, ref)
+    return context is None or any(
+        _NON_CANDIDATE_IDENTITY_LABEL.search(_normalize_scope_text(text)) for text in context
+    )
+
+
 def _identity_token_supported(
     view: ProfessionalDocumentView, value: str, evidence: list[EvidenceRef], *, phone: bool
 ) -> bool:
@@ -710,6 +724,8 @@ def _identity_token_supported(
     if not expected:
         return False
     for ref in evidence:
+        if _table_identity_veto(view, ref):
+            continue
         if phone:
             context = _table_context(view, ref)
             if context is None or any(
@@ -748,6 +764,8 @@ def _name_supported(
     if not material_tokens:
         material_tokens = [_normalize_claim_text(value)]
     for ref in evidence:
+        if _table_identity_veto(view, ref):
+            continue
         spans = _source_spans(view, ref)
         # Preserve identity's material-token attribution policy. Professional
         # negation rules must not read a synthetic-data disclaimer as a name

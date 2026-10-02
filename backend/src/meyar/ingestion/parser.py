@@ -25,6 +25,8 @@ class TableSource(BaseModel):
     kind: Literal["TABLE"] = "TABLE"
     path: Annotated[list[SourceCell], Field(min_length=1, max_length=MAX_DOCX_TABLE_DEPTH)]
     paragraph: SourceOrdinal
+    # None is historical/unknown; current worker output must supply a strict bool.
+    row_context_complete: Annotated[bool, Field(strict=True)] | None = None
 
 
 SourceProvenance = Annotated[BodySource | TableSource, Field(discriminator="kind")]
@@ -33,12 +35,14 @@ DocxWarning = Literal[
     "DOCX_FOOTER_TEXT_OMITTED",
     "DOCX_TEXTBOX_TEXT_OMITTED",
     "DOCX_AMBIGUOUS_MERGE_TEXT_OMITTED",
+    "DOCX_TABLE_TEXT_OMITTED",
 ]
 DOCX_WARNING_CODES: tuple[DocxWarning, ...] = (
     "DOCX_HEADER_TEXT_OMITTED",
     "DOCX_FOOTER_TEXT_OMITTED",
     "DOCX_TEXTBOX_TEXT_OMITTED",
     "DOCX_AMBIGUOUS_MERGE_TEXT_OMITTED",
+    "DOCX_TABLE_TEXT_OMITTED",
 )
 
 
@@ -60,7 +64,7 @@ class CanonicalDocumentContent(BaseModel):
 
     language: str | None = None
     pages: list[CanonicalPage]
-    warnings: Annotated[list[DocxWarning], Field(max_length=4)] = Field(default_factory=list)
+    warnings: Annotated[list[DocxWarning], Field(max_length=5)] = Field(default_factory=list)
 
 
 class ParseResult(BaseModel):
