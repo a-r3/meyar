@@ -9,6 +9,7 @@ class EvidenceLocationView(BaseModel):
     page: int
     block_index: int
     snippet: str | None = None
+    physical_page: bool = False
 
 
 class ProfileFactView(BaseModel):
@@ -47,6 +48,7 @@ class CandidateDocumentView(BaseModel):
     parser_name: str | None
     parser_version: str | None
     parse_error_code: str | None
+    partial_extraction: bool = False
     created_at: datetime
 
 
@@ -132,6 +134,7 @@ class CandidateDocumentPreviewView(BaseModel):
     candidate_id: uuid.UUID
     mime_type: str
     available: bool
+    partial_extraction: bool = False
     pages: list[DocumentPreviewPageView] = Field(default_factory=list)
 
 

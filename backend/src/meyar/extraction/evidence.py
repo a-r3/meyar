@@ -8,6 +8,7 @@ from meyar.core.interval_terms import interval_grounded_in_quotes
 from meyar.core.text import fold_az_ascii, normalize_azerbaijani_case
 from meyar.evaluation.normalization import accepted_skill_terms
 from meyar.extraction.view import ProfessionalDocumentView
+from meyar.ingestion.parser import TableSource
 from meyar.schemas.candidate_identity import CandidateIdentityExtraction
 from meyar.schemas.candidate_profile import CandidateProfileExtraction, EmploymentItem, EvidenceRef
 
@@ -76,6 +77,7 @@ _CONTEXT_CHARS = 200
 _SCOPE_BOUNDARY = re.compile(r"\n|[;!?]|\.(?=\s|$)|\b(?:but|however)\b")
 _WORD_TOKEN = re.compile(r"\b\w+\b")
 _NEGATING_USE_VERBS = frozenset({"use", "uses", "using"})
+_NEGATIVE_GOVERNORS = frozenset({"no", "without", "neither"})
 
 
 def _quote_pattern(quote: str) -> re.Pattern[str]:
@@ -110,7 +112,7 @@ def _negated_occurrence(text: str, start: int, end: int) -> bool:
     for index, word in enumerate(words):
         next_word = words[index + 1] if index + 1 < len(words) else None
         previous_word = words[index - 1] if index else None
-        if word in {"no", "without", "neither"}:
+        if word in _NEGATIVE_GOVERNORS:
             governed = True
         elif (
             word == "not"
@@ -153,10 +155,63 @@ def _positive_term_present(
     return mentioned
 
 
+# A wide/long row is ambiguous for this deliberately small lexical veto.
+# Never truncate it and turn an unseen contradiction into positive authority.
+_TABLE_CONTEXT_BLOCKS = 64
+_TABLE_CONTEXT_CHARS = 8192
+
+
+def _table_context(view: ProfessionalDocumentView, ref: EvidenceRef) -> list[str] | None:
+    block = next(b for b in view.blocks if b.page == ref.page and b.block_index == ref.block_index)
+    source = block.source
+    if not isinstance(source, TableSource):
+        return []
+    if source.row_context_complete is not True:
+        return None
+    context: list[str] = []
+    size = 0
+    for sibling in view.blocks:
+        other = sibling.source
+        if (
+            sibling.page == block.page
+            and isinstance(other, TableSource)
+            and other.path[:-1] == source.path[:-1]
+            and other.path[-1].table == source.path[-1].table
+            and other.path[-1].row == source.path[-1].row
+        ):
+            if other.row_context_complete is not True:
+                return None
+            context_text = sibling.table_context_text or sibling.text
+            size += len(context_text)
+            if len(context) >= _TABLE_CONTEXT_BLOCKS or size > _TABLE_CONTEXT_CHARS:
+                return None
+            context.append(context_text)
+    return context
+
+
+def _table_positive_veto(view: ProfessionalDocumentView, ref: EvidenceRef) -> bool:
+    context = _table_context(view, ref)
+    if context is None:
+        return True
+    # Supported negative vocabulary reused from _negated_occurrence. Across
+    # separate cells scope cannot be inferred: any explicit negative governor
+    # makes this row ambiguous. Even a later positive cell cannot cancel it.
+    return any(
+        any(
+            re.search(rf"\b{word}\b", _normalize_scope_text(text))
+            for word in _NEGATIVE_GOVERNORS | {"absent", "unavailable"}
+        )
+        or re.search(r"\bnot(?!\s+only\b)\b", _normalize_scope_text(text))
+        for text in context
+    )
+
+
 def _supported_in_source(
     view: ProfessionalDocumentView, ref: EvidenceRef, terms: frozenset[str]
 ) -> bool:
     spans = _source_spans(view, ref)
+    if _table_positive_veto(view, ref):
+        return False
     return bool(spans) and all(
         _positive_term_present(context, terms, span=(start, end)) for context, start, end in spans
     )
@@ -648,6 +703,18 @@ def _phone_like_occurrences(text: str) -> Iterator[re.Match[str]]:
             yield match
 
 
+_NON_CANDIDATE_IDENTITY_LABEL = re.compile(
+    r"\b(?:reference|referee|recommender|emergency\s+contact)\b"
+)
+
+
+def _table_identity_veto(view: ProfessionalDocumentView, ref: EvidenceRef) -> bool:
+    context = _table_context(view, ref)
+    return context is None or any(
+        _NON_CANDIDATE_IDENTITY_LABEL.search(_normalize_scope_text(text)) for text in context
+    )
+
+
 def _identity_token_supported(
     view: ProfessionalDocumentView, value: str, evidence: list[EvidenceRef], *, phone: bool
 ) -> bool:
@@ -657,6 +724,15 @@ def _identity_token_supported(
     if not expected:
         return False
     for ref in evidence:
+        if _table_identity_veto(view, ref):
+            continue
+        if phone:
+            context = _table_context(view, ref)
+            if context is None or any(
+                _NON_PHONE_IDENTIFIER_LABEL.search(_normalize_scope_text(text))
+                for text in context
+            ):
+                continue
         # Match complete canonical occurrences, not tokens manufactured by
         # cropping or by concatenating digits across words/punctuation.
         block = next(
@@ -688,6 +764,8 @@ def _name_supported(
     if not material_tokens:
         material_tokens = [_normalize_claim_text(value)]
     for ref in evidence:
+        if _table_identity_veto(view, ref):
+            continue
         spans = _source_spans(view, ref)
         # Preserve identity's material-token attribution policy. Professional
         # negation rules must not read a synthetic-data disclaimer as a name

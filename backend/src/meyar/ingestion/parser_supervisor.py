@@ -56,6 +56,8 @@ def decode_result(output: bytes, kind: str, limits: policy.OutputLimits) -> Pars
         payload = json.loads(output, object_pairs_hook=_unique_object)
         if isinstance(payload, dict) and set(payload) == {"error"}:
             code = ParseFailureCode(payload["error"])
+            if code == ParseFailureCode.UNSUPPORTED_DOCX_TEXT_ONLY and kind != "DOCX":
+                raise ParseError(ParseFailureCode.INVALID_PARSER_OUTPUT)
             raise ParseError(code)
         # Bound model construction too, before Pydantic materializes nested models.
         if isinstance(payload, dict) and isinstance(payload.get("content"), dict):

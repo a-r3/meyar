@@ -1,12 +1,55 @@
 from enum import StrEnum
-from typing import Protocol
+from typing import Annotated, Literal, Protocol
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
+
+from meyar.ingestion.parser_policy import MAX_DOCX_SOURCE_NODES, MAX_DOCX_TABLE_DEPTH
+
+SourceOrdinal = Annotated[int, Field(strict=True, ge=0, lt=MAX_DOCX_SOURCE_NODES)]
+
+
+class SourceCell(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    table: SourceOrdinal
+    row: SourceOrdinal
+    cell: SourceOrdinal
+
+
+class BodySource(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    kind: Literal["BODY"] = "BODY"
+
+
+class TableSource(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    kind: Literal["TABLE"] = "TABLE"
+    path: Annotated[list[SourceCell], Field(min_length=1, max_length=MAX_DOCX_TABLE_DEPTH)]
+    paragraph: SourceOrdinal
+    # None is historical/unknown; current worker output must supply a strict bool.
+    row_context_complete: Annotated[bool, Field(strict=True)] | None = None
+
+
+SourceProvenance = Annotated[BodySource | TableSource, Field(discriminator="kind")]
+DocxWarning = Literal[
+    "DOCX_HEADER_TEXT_OMITTED",
+    "DOCX_FOOTER_TEXT_OMITTED",
+    "DOCX_TEXTBOX_TEXT_OMITTED",
+    "DOCX_AMBIGUOUS_MERGE_TEXT_OMITTED",
+    "DOCX_TABLE_TEXT_OMITTED",
+]
+DOCX_WARNING_CODES: tuple[DocxWarning, ...] = (
+    "DOCX_HEADER_TEXT_OMITTED",
+    "DOCX_FOOTER_TEXT_OMITTED",
+    "DOCX_TEXTBOX_TEXT_OMITTED",
+    "DOCX_AMBIGUOUS_MERGE_TEXT_OMITTED",
+    "DOCX_TABLE_TEXT_OMITTED",
+)
 
 
 class CanonicalBlock(BaseModel):
     index: int
     text: str
+    source: SourceProvenance | None = None
 
 
 class CanonicalPage(BaseModel):
@@ -21,6 +64,7 @@ class CanonicalDocumentContent(BaseModel):
 
     language: str | None = None
     pages: list[CanonicalPage]
+    warnings: Annotated[list[DocxWarning], Field(max_length=5)] = Field(default_factory=list)
 
 
 class ParseResult(BaseModel):
@@ -40,9 +84,13 @@ class ParseFailureCode(StrEnum):
     INVALID_PARSER_OUTPUT = "INVALID_PARSER_OUTPUT"
     INSUFFICIENT_EXTRACTABLE_TEXT = "INSUFFICIENT_EXTRACTABLE_TEXT"
     PARSER_OUTPUT_LIMIT = "PARSER_OUTPUT_LIMIT"
+    UNSUPPORTED_DOCX_TEXT_ONLY = "UNSUPPORTED_DOCX_TEXT_ONLY"
 
 
 PARSE_FAILURE_MESSAGES = {
+    ParseFailureCode.UNSUPPORTED_DOCX_TEXT_ONLY: (
+        "This document contains text in DOCX structures that are not yet supported."
+    ),
     ParseFailureCode.INVALID_DOCUMENT: "The document could not be parsed.",
     ParseFailureCode.PARSER_BUSY: "Document parsing is busy. Please try again later.",
     ParseFailureCode.PARSER_TIMEOUT: "Document parsing exceeded the time limit.",
@@ -63,6 +111,7 @@ TERMINAL_PARSE_FAILURES = frozenset(
         ParseFailureCode.INVALID_DOCUMENT,
         ParseFailureCode.INSUFFICIENT_EXTRACTABLE_TEXT,
         ParseFailureCode.PARSER_OUTPUT_LIMIT,
+        ParseFailureCode.UNSUPPORTED_DOCX_TEXT_ONLY,
     }
 )
 

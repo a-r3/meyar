@@ -28,6 +28,7 @@ class CanonicalDocumentOut(BaseModel):
     parser_version: str
     language: str | None
     pages: list[CanonicalPageOut]
+    partial_extraction: bool = False
     created_at: datetime
 
 

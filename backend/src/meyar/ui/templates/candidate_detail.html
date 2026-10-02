@@ -21,6 +21,7 @@
   </div>
   <span class="status-badge" data-state="{{ readiness_state(candidate.profile_status) }}">{{ readiness_label(candidate.profile_status) }}</span>
 </div>
+{% if candidate.documents|selectattr("partial_extraction")|list %}<p class="notice">Sənədin bəzi hissələri hələ şərh edilə bilmir. Orijinal CV-ni yoxlayın.</p>{% endif %}
 <section class="panel identity-panel">
   <h2>Əlaqə məlumatı</h2>
   <dl class="detail-list"><dt>E-poçt</dt><dd>{{ candidate.email or "Məlumat yoxdur" }}</dd><dt>Telefon</dt><dd>{{ candidate.phone or "Məlumat yoxdur" }}</dd></dl>

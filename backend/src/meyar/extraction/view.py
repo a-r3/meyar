@@ -1,8 +1,9 @@
 import uuid
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from meyar.extraction.redaction import redact_block_text
+from meyar.ingestion.parser import SourceProvenance, TableSource
 from meyar.models.canonical_document import CanonicalDocument
 
 
@@ -10,6 +11,9 @@ class ModelInputBlock(BaseModel):
     page: int
     block_index: int
     text: str
+    # Server evidence authority only; never serialized into a model prompt.
+    source: SourceProvenance | None = Field(default=None, exclude=True)
+    table_context_text: str | None = Field(default=None, exclude=True)
 
 
 class ProfessionalDocumentView(BaseModel):
@@ -29,14 +33,20 @@ def build_professional_document_view(canonical: CanonicalDocument) -> Profession
     blocks: list[ModelInputBlock] = []
     for page in canonical.content.get("pages", []):
         for block in page.get("blocks", []):
-            blocks.append(
-                ModelInputBlock(
-                    page=page["page"],
-                    block_index=block["index"],
-                    text=redact_block_text(block["text"]),
-                )
+            view_block = ModelInputBlock(
+                page=page["page"],
+                block_index=block["index"],
+                text=redact_block_text(block["text"]),
+                source=block.get("source"),
             )
-    return ProfessionalDocumentView(canonical_document_id=canonical.id, blocks=blocks)
+            if isinstance(view_block.source, TableSource):
+                # Redaction must never erase a server-side contradiction veto.
+                view_block.table_context_text = block["text"]
+            blocks.append(view_block)
+    return ProfessionalDocumentView(
+        canonical_document_id=canonical.id,
+        blocks=blocks,
+    )
 
 
 def build_identity_document_view(canonical: CanonicalDocument) -> ProfessionalDocumentView:
@@ -51,11 +61,17 @@ def build_identity_document_view(canonical: CanonicalDocument) -> ProfessionalDo
     blocks: list[ModelInputBlock] = []
     for page in canonical.content.get("pages", []):
         for block in page.get("blocks", []):
-            blocks.append(
-                ModelInputBlock(
-                    page=page["page"],
-                    block_index=block["index"],
-                    text=block["text"],
-                )
+            view_block = ModelInputBlock(
+                page=page["page"],
+                block_index=block["index"],
+                text=block["text"],
+                source=block.get("source"),
             )
-    return ProfessionalDocumentView(canonical_document_id=canonical.id, blocks=blocks)
+            if isinstance(view_block.source, TableSource):
+                # Redaction must never erase a server-side contradiction veto.
+                view_block.table_context_text = block["text"]
+            blocks.append(view_block)
+    return ProfessionalDocumentView(
+        canonical_document_id=canonical.id,
+        blocks=blocks,
+    )

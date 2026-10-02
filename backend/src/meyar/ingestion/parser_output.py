@@ -1,7 +1,18 @@
 """Canonical acceptance bounds, checked in worker and again in parent."""
 
-from meyar.ingestion.parser import ParseError, ParseFailureCode, ParseResult
-from meyar.ingestion.parser_policy import PARSER_NAME, PARSER_VERSION, OutputLimits
+from meyar.ingestion.parser import (
+    DOCX_WARNING_CODES,
+    ParseError,
+    ParseFailureCode,
+    ParseResult,
+    TableSource,
+)
+from meyar.ingestion.parser_policy import (
+    MAX_DOCX_SOURCE_NODES,
+    PARSER_NAME,
+    PARSER_VERSION,
+    OutputLimits,
+)
 
 
 class TextBudget:
@@ -28,6 +39,13 @@ def validate_result(result: ParseResult, kind: str, limits: OutputLimits) -> Non
         or result.content.language is not None
     ):
         raise ParseError(ParseFailureCode.INVALID_PARSER_OUTPUT)
+    warnings = result.content.warnings
+    if (
+        len(warnings) != len(set(warnings))
+        or warnings != [code for code in DOCX_WARNING_CODES if code in warnings]
+        or (kind == "PDF" and warnings)
+    ):
+        raise ParseError(ParseFailureCode.INVALID_PARSER_OUTPUT)
     pages = result.content.pages
     if not pages:
         raise ParseError(ParseFailureCode.INSUFFICIENT_EXTRACTABLE_TEXT)
@@ -36,6 +54,8 @@ def validate_result(result: ParseResult, kind: str, limits: OutputLimits) -> Non
     if kind == "DOCX" and len(pages) != 1:
         raise ParseError(ParseFailureCode.INVALID_PARSER_OUTPUT)
     budget = TextBudget(limits)
+    positions: set[tuple] = set()
+    rows: dict[tuple, bool] = {}
     for number, page in enumerate(pages, 1):
         if page.page != number or (kind == "PDF" and len(page.blocks) > 1):
             raise ParseError(ParseFailureCode.INVALID_PARSER_OUTPUT)
@@ -46,7 +66,31 @@ def validate_result(result: ParseResult, kind: str, limits: OutputLimits) -> Non
                 raise ParseError(ParseFailureCode.INVALID_PARSER_OUTPUT)
             if not block.text.strip() or block.text != block.text.strip():
                 raise ParseError(ParseFailureCode.INVALID_PARSER_OUTPUT)
+            if kind == "PDF" and block.source is not None:
+                raise ParseError(ParseFailureCode.INVALID_PARSER_OUTPUT)
+            if kind == "DOCX" and (block.source is None or block.index >= MAX_DOCX_SOURCE_NODES):
+                raise ParseError(ParseFailureCode.INVALID_PARSER_OUTPUT)
+            if isinstance(block.source, TableSource):
+                key = tuple((step.table, step.row, step.cell) for step in block.source.path)
+                complete = block.source.row_context_complete
+                row = (key[:-1], key[-1][:2])
+                if complete is None or (row in rows and rows[row] != complete):
+                    raise ParseError(ParseFailureCode.INVALID_PARSER_OUTPUT)
+                if not complete and not any(code in warnings for code in (
+                    "DOCX_TEXTBOX_TEXT_OMITTED", "DOCX_AMBIGUOUS_MERGE_TEXT_OMITTED",
+                    "DOCX_TABLE_TEXT_OMITTED",
+                )):
+                    raise ParseError(ParseFailureCode.INVALID_PARSER_OUTPUT)
+                rows[row] = complete
+                position = (key, block.source.paragraph)
+                if position in positions:
+                    raise ParseError(ParseFailureCode.INVALID_PARSER_OUTPUT)
+                positions.add(position)
             previous = block.index
             budget.add(block.text)
     if not budget.blocks:
-        raise ParseError(ParseFailureCode.INSUFFICIENT_EXTRACTABLE_TEXT)
+        raise ParseError(
+            ParseFailureCode.UNSUPPORTED_DOCX_TEXT_ONLY
+            if kind == "DOCX" and warnings
+            else ParseFailureCode.INSUFFICIENT_EXTRACTABLE_TEXT
+        )

@@ -10,10 +10,11 @@
 <div class="empty-state"><h2>Görünüş hazır deyil</h2><p>Bu sənəd üçün oxunaqlı görünüş hələ hazır deyil. Orijinal sənədi yükləyə bilərsiniz.</p></div>
 {% else %}
 <p class="field-help">Bu, sənədin MEYAR tərəfindən emal edilmiş, oxunaqlı təqdimatıdır — orijinal fayl deyil.</p>
+{% if preview.partial_extraction %}<p class="notice">Sənədin bəzi hissələri hələ şərh edilə bilmir. Orijinal CV-ni yoxlayın.</p>{% endif %}
 <div class="document-preview">
   {% for page in preview.pages %}
   <section class="panel preview-page">
-    <h2>Səhifə {{ page.page }}</h2>
+    <h2>{% if preview.mime_type == "application/pdf" %}Səhifə {{ page.page }}{% else %}CV mətni{% endif %}</h2>
     <pre class="preview-text">{{ page.text or "Bu səhifədə mətn tapılmadı." }}</pre>
   </section>
   {% endfor %}
