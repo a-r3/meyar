@@ -148,8 +148,29 @@ def _format_filter_match_label(category: str, value: str) -> str:
     return value
 
 
+async def _physical_evidence_pages(
+    db: AsyncSession, *, tenant_id: uuid.UUID, candidate_document_id: uuid.UUID
+) -> bool:
+    mime = await db.scalar(
+        select(CandidateDocument.mime_type).where(
+            CandidateDocument.id == candidate_document_id,
+            CandidateDocument.tenant_id == tenant_id,
+        )
+    )
+    return mime == "application/pdf"
+
+
+async def _current_physical_evidence_pages(
+    db: AsyncSession, *, tenant_id: uuid.UUID, candidate_id: uuid.UUID
+) -> bool:
+    version = await get_current_profile_version(db, tenant_id=tenant_id, candidate_id=candidate_id)
+    return version is not None and await _physical_evidence_pages(
+        db, tenant_id=tenant_id, candidate_document_id=version.candidate_document_id
+    )
+
+
 def _evidence_views(
-    evidence: list[EvidenceRef], *, snippets: bool, maximum: int = 4
+    evidence: list[EvidenceRef], *, snippets: bool, maximum: int = 4, physical_page: bool = False
 ) -> list[EvidenceLocationView]:
     """Deduplicate one immutable profile source by exact evidence occurrence.
 
@@ -167,20 +188,25 @@ def _evidence_views(
             continue
         seen.add(key)
         views.append(
-            EvidenceLocationView(page=item.page, block_index=item.block_index, snippet=quote)
+            EvidenceLocationView(
+                page=item.page, block_index=item.block_index, snippet=quote,
+                physical_page=physical_page,
+            )
         )
         if len(views) >= maximum:
             break
     return views
 
 
-def _facts(profile: CandidateProfileExtraction) -> dict[str, list[ProfileFactView]]:
+def _facts(
+    profile: CandidateProfileExtraction, *, physical_page: bool = False
+) -> dict[str, list[ProfileFactView]]:
     return {
         "skills": [
             ProfileFactView(
                 title=item.name,
                 detail=item.category,
-                evidence=_evidence_views(item.evidence, snippets=True),
+                evidence=_evidence_views(item.evidence, snippets=True, physical_page=physical_page),
             )
             for item in profile.skills
         ],
@@ -193,7 +219,7 @@ def _facts(profile: CandidateProfileExtraction) -> dict[str, list[ProfileFactVie
                         join_nonempty([item.start_date, item.end_date], separator=" — "),
                     ]
                 ),
-                evidence=_evidence_views(item.evidence, snippets=True),
+                evidence=_evidence_views(item.evidence, snippets=True, physical_page=physical_page),
             )
             for item in profile.employment_history
         ],
@@ -202,7 +228,7 @@ def _facts(profile: CandidateProfileExtraction) -> dict[str, list[ProfileFactVie
                 title=combine_degree_and_field(item.degree, item.field_of_study)
                 or "Təhsil məlumatı",
                 detail=join_nonempty([item.institution, item.date]),
-                evidence=_evidence_views(item.evidence, snippets=True),
+                evidence=_evidence_views(item.evidence, snippets=True, physical_page=physical_page),
             )
             for item in profile.education
         ],
@@ -210,7 +236,7 @@ def _facts(profile: CandidateProfileExtraction) -> dict[str, list[ProfileFactVie
             ProfileFactView(
                 title=item.language,
                 detail=item.proficiency,
-                evidence=_evidence_views(item.evidence, snippets=True),
+                evidence=_evidence_views(item.evidence, snippets=True, physical_page=physical_page),
             )
             for item in profile.languages
         ],
@@ -218,14 +244,14 @@ def _facts(profile: CandidateProfileExtraction) -> dict[str, list[ProfileFactVie
             ProfileFactView(
                 title=item.name,
                 detail=join_nonempty([item.issuer, item.date]),
-                evidence=_evidence_views(item.evidence, snippets=True),
+                evidence=_evidence_views(item.evidence, snippets=True, physical_page=physical_page),
             )
             for item in profile.certifications
         ],
         "projects": [
             ProfileFactView(
                 title=item.description,
-                evidence=_evidence_views(item.evidence, snippets=True),
+                evidence=_evidence_views(item.evidence, snippets=True, physical_page=physical_page),
             )
             for item in profile.projects
         ],
@@ -491,7 +517,12 @@ async def get_candidate_detail_view(
         try:
             profile = await authorize_profile_version(db, version=profile_version)
             profile_authorized = True
-            facts = _facts(profile)
+            facts = _facts(
+                profile, physical_page=await _physical_evidence_pages(
+                    db, tenant_id=tenant_id,
+                    candidate_document_id=profile_version.candidate_document_id,
+                ),
+            )
             current_role, top_skills = _current_role_and_skills(profile)
             professional_summary = join_nonempty([current_role, ", ".join(top_skills) or None])
         except ProfileAuthorityError:
@@ -512,6 +543,13 @@ async def get_candidate_detail_view(
     job_titles = await _job_titles_by_id(
         db, tenant_id=tenant_id, job_ids=[evaluation.job_id for evaluation in evaluations]
     )
+    partial_documents: set[uuid.UUID] = set()
+    for document in documents:
+        canonical = await get_latest_canonical_document(
+            db, tenant_id=tenant_id, candidate_document_id=document.id
+        )
+        if canonical is not None and canonical.content.get("warnings"):
+            partial_documents.add(document.id)
     evaluation_views: list[EvaluationHistoryView] = []
     for evaluation in evaluations:
         authorized_profile = await get_authorized_profile_version_by_id(
@@ -564,6 +602,7 @@ async def get_candidate_detail_view(
                 parser_name=document.parser_name,
                 parser_version=document.parser_version,
                 parse_error_code=document.parse_error_code,
+                partial_extraction=document.id in partial_documents,
                 created_at=document.created_at,
             )
             for document in documents
@@ -686,7 +725,13 @@ async def build_search_result_views(
                 profile,
                 [*result.required_filters_matched, *result.preferred_filters_matched],
             )
-            evidence = _evidence_views(attributable_evidence, snippets=True, maximum=4)
+            evidence = _evidence_views(
+                attributable_evidence, snippets=True, maximum=4,
+                physical_page=await _physical_evidence_pages(
+                    db, tenant_id=tenant_id,
+                    candidate_document_id=_profile_row.candidate_document_id,
+                ),
+            )
         views.append(
             CandidateSearchResultView(
                 candidate_id=result.candidate_id,
@@ -735,7 +780,11 @@ async def _agent_candidate_profile_view(
     )
     identity_values = await identity_values_from_version(db, version=identity)
     current_role, _top_skills = _current_role_and_skills(profile)
-    facts = _facts(profile)
+    facts = _facts(
+        profile, physical_page=await _current_physical_evidence_pages(
+            db, tenant_id=tenant_id, candidate_id=candidate_id
+        ),
+    )
     return AgentCandidateProfileView(
         candidate_id=candidate_id,
         full_name=identity_values.full_name,
@@ -846,13 +895,18 @@ async def build_agent_turn_view(
                 db, tenant_id=tenant_id, candidate_id=evidence_result.candidate_id
             )
             identity_values = await identity_values_from_version(db, version=identity)
+            physical_page = await _current_physical_evidence_pages(
+                db, tenant_id=tenant_id, candidate_id=evidence_result.candidate_id
+            )
             match_views = [
                 AgentEvidenceMatchView(
                     category_label=AGENT_EVIDENCE_CATEGORY_LABELS.get(
                         match.category, match.category
                     ),
                     title=match.title,
-                    evidence=_evidence_views(match.evidence, snippets=True),
+                    evidence=_evidence_views(
+                        match.evidence, snippets=True, physical_page=physical_page
+                    ),
                 )
                 for match in evidence_result.matches
             ]
@@ -1290,12 +1344,17 @@ async def build_ranked_candidate_views(
             profile_version_id=result.candidate_profile_version_id,
         )
         profile = authorized[1] if authorized is not None else None
+        physical_page = authorized is not None and await _physical_evidence_pages(
+            db, tenant_id=tenant_id, candidate_document_id=authorized[0].candidate_document_id
+        )
         contributions: list[ScoreContributionView] = []
         for item in result.score_explanation.criteria:
             criterion = criteria.get(item.criterion_id)
             label = criterion_labels.get(item.criterion_id, item.criterion_id)
             evidence = [
-                EvidenceLocationView(page=ref.page, block_index=ref.block_index)
+                EvidenceLocationView(
+                    page=ref.page, block_index=ref.block_index, physical_page=physical_page
+                )
                 for ref in item.evidence_references
             ]
             if criterion is not None and profile is not None:
@@ -1313,7 +1372,9 @@ async def build_ranked_candidate_views(
                     and displayed_result.reason_code == item.reason_code
                     and displayed_locations == scored_locations
                 ):
-                    evidence = _evidence_views(displayed_result.evidence, snippets=True)
+                    evidence = _evidence_views(
+                        displayed_result.evidence, snippets=True, physical_page=physical_page
+                    )
             # Even the truthful page-only fallback must not repeat an identical
             # location when an old score contains duplicate references.
             unique_evidence: list[EvidenceLocationView] = []
@@ -1397,6 +1458,7 @@ async def get_candidate_document_preview(
         candidate_id=candidate_id,
         mime_type=document.mime_type,
         available=True,
+        partial_extraction=bool(content.warnings),
         pages=pages,
     )
 

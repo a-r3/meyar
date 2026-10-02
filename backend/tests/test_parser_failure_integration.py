@@ -189,10 +189,11 @@ async def test_folder_parse_failure_indexed_continues_and_no_version_backfill(
         )
     ).all()
     assert {d.parser_status for d in docs} == (
-        {"PARSED"} if mode in ("timeout", "resource") else {"PARSED", "PARSE_FAILED"}
+        {"PARSED"} if mode in ("timeout", "resource", "table") else {"PARSED", "PARSE_FAILED"}
     )
     canonical = (await db_session.scalars(select(CanonicalDocument))).all()
-    assert len(canonical) == 1
+    expected_canonicals = 2 if mode == "table" else 1
+    assert len(canonical) == expected_canonicals
     # Historical rows are immutable and unchanged files are not reparsed on version drift.
     canonical[0].parser_version = "1.0.0"
     await db_session.flush()
@@ -203,7 +204,7 @@ async def test_folder_parse_failure_indexed_continues_and_no_version_backfill(
     else:
         assert again.unchanged == 2 and again.successful == 0
     assert canonical[0].parser_version == "1.0.0" and canonical[0].content == previous
-    assert len((await db_session.scalars(select(CanonicalDocument))).all()) == 1
+    assert len((await db_session.scalars(select(CanonicalDocument))).all()) == expected_canonicals
 
 
 async def test_validation_busy_before_storage_or_document_mutation(

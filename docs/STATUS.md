@@ -1,5 +1,20 @@
 # MEYAR — Status
 
+
+**Issue #46 PR-3 — implementation proposal, awaiting independent acceptance
+review.** Branch `feat/46-docx-ordered-tables`, verified base main
+`9cc2cf9623b263ba4a2dd92217fce23c566ba0a7`. Parser **1.2.0** adds ordered
+DOCX body/table/cell paragraphs and bounded nested physical-source tables,
+closed internal provenance, conservative table-row evidence vetoes, durable
+partial-extraction disclosure and terminal unsupported-text-only handling.
+Header/footer/text-box text is detected for safe omission disclosure, never
+extracted. DOCX evidence no longer claims a physical page. Historical canonical
+rows/evidence remain immutable; no parser-version-only reprocessing or old
+failure backfill. No migration, dependency/lockfile change or Target-Mac claim.
+#46 remains OPEN under M9; general M-5/M-9 and #35/#36/#50 remain deferred.
+D-098 and `docs/ISSUE_46_PR3_VALIDATION.md` record the proposal and verification.
+PR-3 is not accepted merely because implementation/CI is green.
+
 ## Current phase
 
 **Issue #46 PR-2 — independently ACCEPTED and MERGED through PR #108;

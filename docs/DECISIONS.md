@@ -8520,3 +8520,45 @@ dependency or lockfile change.
 
 Implementation, measured rationale, closed failure table, verification and
 precise deferrals: `docs/ISSUE_46_PR2_VALIDATION.md`.
+
+## D-098 — Issue #46 PR-3 proposal: ordered DOCX tables with bounded source authority
+
+**Status:** IMPLEMENTATION PROPOSAL, awaiting independent acceptance review.
+Refs #46 under M9. Base `9cc2cf9623b263ba4a2dd92217fce23c566ba0a7`;
+branch `feat/46-docx-ordered-tables`. #46 remains OPEN. No Target-Mac claim.
+
+Parser 1.2.0 supports direct body paragraphs/tables, physical source cells,
+ordered cell paragraphs and at most eight nested table levels. All private
+OOXML/python-docx dependence is confined to one adapter. Logical DOCX page=1
+and one global paragraph ordinal preserve blank gaps and exact source order;
+no layout-grid expansion or recursive vertical-merge-origin lookup occurs.
+Closed optional BODY/TABLE provenance uses bounded integer source coordinates.
+The parent validates schema/unknown fields, duplicate coordinates and warning
+cardinality; metadata is included in serialized-output bounds. An aggregate
+100,000-node source ceiling bounds empty/unsupported traversal as well.
+
+Table row context can only veto authority: cited-block positive material rules
+remain mandatory. Enumerated negative/ambiguous row context, over-limit row
+context, and non-phone labels reject conservative interpretations. Nonempty
+vertical continuation text is omitted with a closed warning, never promoted
+into facts; its incomplete table context cannot grant positive authority.
+Historical BODY evidence behavior remains unchanged.
+
+Existing header/footer source parts and recognized text-box containers are
+inspected read-only for omission, never extracted. Four closed durable warning
+codes carry no source text/XML/path. Mixed supported/omitted documents succeed
+with partial disclosure; unsupported-only documents retain the authorized
+original with terminal UNSUPPORTED_DOCX_TEXT_ONLY and no canonical authority.
+No-text/no-known-omission retains INSUFFICIENT_EXTRACTABLE_TEXT. Canonical API
+exposes a human-meaningful partial boolean and strips coordinates. HR shows
+friendly Azerbaijani copy and keeps the original action; DOCX evidence says
+CV-də without physical-page claims, while PDF page wording remains.
+
+Historical rows/evidence/accepted profiles/identities are immutable and are not
+invalidated just by parser version. No unchanged-file reprocessing, terminal
+failure backfill or automatic recovery. Headers/footers/text boxes, revision/
+content-control/SmartArt/notes/comments/AlternateContent/object interpretation
+and page-break fusion changes remain deferred. No migration, SQLAlchemy change,
+dependency or lockfile change; no general M-5/M-9 or #35/#36/#50 work started.
+Implementation contract, limits/rationale and verification:
+`docs/ISSUE_46_PR3_VALIDATION.md`.

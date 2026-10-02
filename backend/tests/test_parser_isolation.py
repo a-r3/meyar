@@ -88,7 +88,7 @@ def docx_bytes(paragraphs: list[str], *, table: bool = False) -> bytes:
 
 async def normal() -> None:
     result = await LocalTextParser().parse(data=VALID, document_type="PDF")
-    assert result.parser_version == "1.1.0"
+    assert result.parser_version == "1.2.0"
     assert result.content.pages[0].blocks
 
 
@@ -312,7 +312,6 @@ async def test_heartbeat_during_real_parsing():
         (pdf([None]), "PDF"),
         (pdf([None], image=True), "PDF"),
         (pdf([]), "PDF"),
-        (docx_bytes([], table=True), "DOCX"),
         (docx_bytes(["  "]), "DOCX"),
     ],
 )

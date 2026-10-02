@@ -36,6 +36,7 @@ TERMINAL = {
     ParseFailureCode.INVALID_DOCUMENT,
     ParseFailureCode.INSUFFICIENT_EXTRACTABLE_TEXT,
     ParseFailureCode.PARSER_OUTPUT_LIMIT,
+    ParseFailureCode.UNSUPPORTED_DOCX_TEXT_ONLY,
 }
 OPERATIONAL = set(ParseFailureCode) - TERMINAL
 

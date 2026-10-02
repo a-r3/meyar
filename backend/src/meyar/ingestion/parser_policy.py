@@ -3,7 +3,10 @@
 from dataclasses import dataclass
 
 PARSER_NAME = "meyar-local-text-parser"
-PARSER_VERSION = "1.1.0"
+PARSER_VERSION = "1.2.0"
+# Bound source work even for empty paragraphs/cells and omitted structures.
+MAX_DOCX_SOURCE_NODES = 100_000
+MAX_DOCX_TABLE_DEPTH = 8
 MAX_ACTIVE = 1
 MAX_WAITERS = 4
 ADMISSION_SECONDS = 3.0

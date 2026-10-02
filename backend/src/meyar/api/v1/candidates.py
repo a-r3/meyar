@@ -55,6 +55,7 @@ def _canonical_out(canonical: CanonicalDocument) -> CanonicalDocumentOut:
         parser_version=canonical.parser_version,
         language=canonical.language,
         pages=canonical.content["pages"],
+        partial_extraction=bool(canonical.content.get("warnings")),
         created_at=canonical.created_at,
     )
 
