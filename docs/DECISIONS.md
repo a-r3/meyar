@@ -8440,9 +8440,19 @@ remain later #46/#35 slices. #36 and #50 untouched.
 
 ## D-097 — Issue #46 PR-2: bounded parsing and truthful failure authority
 
-**Status:** IMPLEMENTATION PROPOSAL; independent review and owner merge pending.
-Verified base main: `d5a06a2342abe4acfb9d072c22bf8f956497801e` (PR #107,
-following accepted PR-1/#106). Refs #46 under M9; does not close #46.
+**Status:** Independently ACCEPTED and MERGED through PR #108; PR-2 is COMPLETE.
+Accepted corrected head: `270260339e12e55fae6338797ca5c100828a36a2`;
+exact-head CI run `37043386062` completed SUCCESS. The owner manually Squash
+and merged PR #108 as `080e1f98788943e21c3664806f00579d85b61710`, the verified
+current main, with sole parent/previous main
+`d5a06a2342abe4acfb9d072c22bf8f956497801e` (PR #107, following accepted
+PR-1/#106). The squash is exactly one commit ahead of that base; independent
+post-merge comparison matched all 19 changed file contents at the accepted
+head and squash result, and the complete trees match. Refs #46 under M9;
+#46 remains OPEN because M-4/PR-3, general M-5, M-9 and other unresolved
+hardening items remain. #35/#36/#50 remain OPEN; this docs-only correction
+does not change or advance them or start another #46 slice. No real
+Apple-Silicon execution or #36 Target-Mac acceptance has occurred.
 
 **Problem:** The async parser performed synchronous untrusted library work on
 the event loop, had no killable elapsed-time/memory boundary or output budget,

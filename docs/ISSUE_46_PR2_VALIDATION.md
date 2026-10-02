@@ -1,8 +1,31 @@
 # Issue #46 PR-2 — bounded parsing and truthful failure authority
 
-Implementation proposal from exact accepted main
-`d5a06a2342abe4acfb9d072c22bf8f956497801e`. This is PR-2 only; it requires
-independent review and owner acceptance. Issue #46 remains open under M9.
+PR-2 is independently ACCEPTED and MERGED through PR #108, and COMPLETE.
+Its previous main/base was `d5a06a2342abe4acfb9d072c22bf8f956497801e`.
+Issue #46 remains OPEN under M9: PR-2 completion does not complete the issue.
+The final delivery record below supersedes pre-merge delivery wording;
+historical reviewed-head and correction test evidence is preserved.
+
+## Final acceptance and post-merge delivery
+
+- Independent re-review accepted the corrected exact head
+  `270260339e12e55fae6338797ca5c100828a36a2` (owner-confirmed acceptance).
+- [Exact-head CI run 37043386062](https://github.com/a-r3/meyar/actions/runs/37043386062)
+  completed SUCCESS for that head.
+- The owner manually Squash and merged
+  [PR #108](https://github.com/a-r3/meyar/pull/108). The squash commit and
+  verified current main are `080e1f98788943e21c3664806f00579d85b61710`.
+- Post-merge verification confirmed PR #108 is merged and main points to the
+  squash, whose sole parent is previous main
+  `d5a06a2342abe4acfb9d072c22bf8f956497801e`: exactly one commit ahead.
+  All 19 changed file contents were independently compared between the
+  accepted head and squash result and matched, including production code.
+  The complete trees also match (`3d4542908e57f61dea74e364355e9997b2cd72d1`).
+- #46 remains OPEN because this was PR-2 only. Remaining work includes
+  M-4/PR-3, general M-5, M-9 and the other unresolved hardening items.
+  #35/#36/#50 remain OPEN; this docs-only correction does not change or
+  advance them and starts no next implementation slice.
+- No real Apple-Silicon execution or #36 Target-Mac acceptance has occurred.
 
 ## Architecture and acceptance
 
@@ -114,7 +137,7 @@ Linux real subprocess refusal/lifecycle is tested here. Darwin feature-path
 unit tests use injected primitives on Linux and are **not macOS execution**.
 Actual Python/library baseline, limit enforcement, normal parsing, timeout,
 cancellation/kill/reap and recovery on the owner Mac remain part of later
-agentless Mac rehearsal. Neither CI nor this proposal establishes #36 or
+agentless Mac rehearsal. Neither CI nor PR-2 acceptance establishes #36 or
 Target-Mac acceptance. No new dependency is used to emulate memory enforcement.
 
 ## Closed failure contract
@@ -246,14 +269,18 @@ terminal failure, continued original access, next-file isolation, terminal INDEX
 semantics, operational FAILED retries, and absence of parser-version-only backfill. PR-1 archive safety
 and validation heartbeat/cancellation/admission remain covered.
 
-Exact-head GitHub CI and owner acceptance are separate delivery gates; these
-local results do not claim either or real Mac acceptance.
+At the historical reviewed head, exact-head GitHub CI and owner acceptance
+were separate pending delivery gates; these local results did not establish
+either or real Mac acceptance. See the final delivery record above for the
+subsequent accepted corrected head and owner merge.
 
 ## Independent acceptance correction validation
 
-Correction of reviewed head `ffdee88faaa607be95354e1a8fc825e991812be2` on the
-existing PR #108 branch; independent re-review remains required. Validation
-results below distinguish completed checks from pending delivery gates. The startup
+Historical pre-merge correction of reviewed head
+`ffdee88faaa607be95354e1a8fc825e991812be2` on the existing PR #108 branch;
+independent re-review was still required when these local results were recorded.
+The final delivery record above resolves the subsequent acceptance/CI/merge
+gates. The startup
 regression deliberately holds spawn unresolved beyond a short execution
 deadline, asserts timeout delivery remains pending with its admission slot
 retained, then permits a real child to spawn and verifies safe timeout, OS
@@ -271,7 +298,7 @@ late-child cleanup; it does not claim a never-resolving spawn is bounded.
 | `git diff --check` | Clean |
 | `scripts/scan-tracked-tree.sh` | Clean; repeated after intentional staging to include the new regression file |
 | Migration / dependency / lockfile diff | None |
-| Exact correction head / GitHub CI | Post-commit delivery gate; the exact head/run/conclusion are recorded in [PR #108](https://github.com/a-r3/meyar/pull/108) and the final operational correction report. Historical CI 37036117775 validates only the old reviewed head. |
+| Exact correction head / GitHub CI | Subsequently completed: accepted head `270260339e12e55fae6338797ca5c100828a36a2`, exact-head CI `37043386062` SUCCESS, owner squash merge `080e1f98788943e21c3664806f00579d85b61710`. Historical CI 37036117775 validates only the old reviewed head. |
 
 Expanded focused reproduction, from `backend/`:
 
