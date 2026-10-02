@@ -11,11 +11,12 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
+from agent_plans import profile_plan
 from fakes import FakeLLMProvider
 from search_helpers import open_test_conversation, seed_active_result_set
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meyar.agent.schemas import AgentActionType, AgentDecision, AgentTurnOutcome
+from meyar.agent.schemas import AgentTurnOutcome
 from meyar.agent.service import run_agent_turn
 from meyar.evaluation.policy import POLICY_ENGINE_VERSION
 from meyar.evaluation.service import evaluate_candidate
@@ -221,9 +222,7 @@ async def test_legacy_completed_python_claim_with_excel_only_evidence_is_not_aut
     agent_result = await run_agent_turn(
         db_session,
         FakeLLMProvider(
-            agent_decision=AgentDecision(
-                action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1
-            )
+            agent_plan=profile_plan("Birinci")
         ),
         tenant_id=tenant.id,
         conversation=conversation,

@@ -12,6 +12,7 @@ import uuid
 from datetime import UTC, datetime
 
 import pytest
+from agent_plans import converse, profile_plan
 from conftest import TEST_DATABASE_URL
 from fakes import FakeLLMProvider
 from search_helpers import (
@@ -25,8 +26,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from meyar.agent.schemas import (
     AgentActionType,
-    AgentDecision,
-    AgentResponseCode,
     AgentToolResult,
     AgentTurnOutcome,
     AgentTurnResult,
@@ -465,7 +464,7 @@ async def test_matrix_d_e_same_session_conversations_are_isolated_and_swap_fails
     assert event.event_metadata["reason"] == "NOT_FOUND"
     # No candidate leaks through a full turn either.
     llm = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1)
+        agent_plan=profile_plan("birincini")
     )
     result = await _turn(
         db_session,
@@ -627,10 +626,7 @@ async def test_pending_draft_a_b_same_session_actionable_relogin_not(
     followup = await _turn(
         db_session,
         FakeLLMProvider(
-            agent_decision=AgentDecision(
-                action=AgentActionType.FINAL_ANSWER,
-                response_code=AgentResponseCode.ACKNOWLEDGEMENT,
-            )
+            agent_plan=converse("ACKNOWLEDGEMENT")
         ),
         tenant=tenant,
         conversation=conversation,
@@ -806,9 +802,7 @@ async def test_title_kind_transitions_once_and_never_stores_text(
     await _turn(
         db_session,
         FakeLLMProvider(
-            agent_decision=AgentDecision(
-                action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.GREETING
-            )
+            agent_plan=converse("GREETING")
         ),
         tenant=tenant,
         conversation=conversation,
@@ -825,13 +819,13 @@ async def test_title_kind_transitions_once_and_never_stores_text(
 
 
 class _RecordingLLM(FakeLLMProvider):
-    def __init__(self, **kwargs) -> None:
-        super().__init__(**kwargs)
-        self.seen_turns: list[list[tuple[str, str]]] = []
-
-    async def decide_agent_action(self, *, recent_turns, **kwargs):
-        self.seen_turns.append(list(recent_turns))
-        return await super().decide_agent_action(recent_turns=recent_turns, **kwargs)
+    @property
+    def seen_turns(self) -> list[list[tuple[str, str]]]:
+        # The ENTIRE model input is the typed AgentPlanContext projection.
+        return [
+            [(turn.role, turn.text) for turn in context.recent_turns]
+            for context in self.agent_plan_contexts
+        ]
 
 
 async def test_persisted_history_exceeds_model_window_but_model_input_stays_bounded(
@@ -846,9 +840,7 @@ async def test_persisted_history_exceeds_model_window_but_model_input_stays_boun
     ]
     await db_session.commit()
     llm = _RecordingLLM(
-        agent_decision=AgentDecision(
-            action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.GREETING
-        )
+        agent_plan=converse("GREETING")
     )
     await _turn(
         db_session, llm, tenant=tenant, conversation=conversation, context=context,
@@ -865,6 +857,11 @@ async def test_persisted_history_exceeds_model_window_but_model_input_stays_boun
     assert len(window) == 8
     assert window[-1] == ("user", "salam")
     assert all("old-turn-1" != text and "old-turn-0" != text for _role, text in window)
+    # Issue #88 slice C: assistant entries are projected as their closed
+    # outcome code only (stored display text may name a candidate, D-045).
+    assert all(
+        text.startswith("[assistant outcome: ") for role, text in window if role == "assistant"
+    )
     assert MAX_PERSISTED_AGENT_TURNS > 8
 
 

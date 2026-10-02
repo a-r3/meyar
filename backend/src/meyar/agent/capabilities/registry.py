@@ -1,15 +1,19 @@
-"""The capability registry (issue #88 slice B, D-092 §8.1 / §9).
+"""The capability registry (issue #88 slices B/C, D-092 §8.1 / §9).
 
 Built once at import time from the closed ``CapabilityName`` enum. The model
 only ever produces a ``CapabilityName`` value; a definition and its executor
 are looked up here by the server — never by a model-supplied module or
-function name.
+function name. ``offered_capabilities`` derives the per-call subset the
+model may propose (D-092 §8.1) from these definitions — there is no
+hand-maintained duplicate list.
 
-Transitional compatibility (§9): ``REFINE_RESULTS`` is today's
-``REFINE_CANDIDATE_RESULTS`` and ``ANALYZE_VACANCY`` today's
-``DRAFT_JOB_CRITERIA``. ``legacy_tool_name`` keeps the existing
-``AgentToolResult.tool_name`` and audit ``tool_name`` strings unchanged;
-audits only GAIN ``capability`` / ``capability_version``."""
+Stable identifiers (§9): ``REFINE_RESULTS`` is the registry name of the
+persisted tool-result/audit identifier ``REFINE_CANDIDATE_RESULTS`` and
+``ANALYZE_VACANCY`` of ``DRAFT_JOB_CRITERIA``. ``legacy_tool_name`` keeps the
+existing ``AgentToolResult.tool_name`` and audit ``tool_name`` strings
+unchanged (persisted transcripts and audit history use them); audits only
+GAIN ``capability`` / ``capability_version``. It is NOT model authority: no
+model output schema contains ``AgentActionType`` after slice C."""
 
 from __future__ import annotations
 
@@ -36,6 +40,7 @@ from meyar.agent.capabilities.contracts import (
     ProfileArgs,
     RefineArgs,
     SearchArgs,
+    ServerLimitArgs,
     SideEffect,
     VacancyArgs,
     ValidatedStep,
@@ -85,8 +90,14 @@ class CapabilityDefinition:
     allowed_task_types: frozenset[TaskType]
     executor: Executor
     audit: AuditPolicy
+    # One-line, server-owned description sent to the model with the
+    # per-call capability subset (D-092 §15). Never HR/CV text.
+    description: str
     # Existing AgentToolResult.tool_name / audit tool_name (unchanged).
     legacy_tool_name: AgentActionType | None = None
+    # A second, SERVER-only argument shape (e.g. FORCE_RESULT_LIMIT's
+    # server-parsed count). Never accepted from a model plan.
+    server_input_schema: type[BaseModel] | None = None
 
 
 class RegistryInvariantError(RuntimeError):
@@ -119,6 +130,7 @@ def _definitions() -> tuple[CapabilityDefinition, ...]:
             allowed_task_types=frozenset({TaskType.CANDIDATE_SEARCH}),
             executor=executors.execute_search_candidates,
             audit=_TOOL_AUDIT,
+            description="Find candidates in the whole candidate library for the user's request.",
             legacy_tool_name=AgentActionType.SEARCH_CANDIDATES,
         ),
         CapabilityDefinition(
@@ -140,7 +152,9 @@ def _definitions() -> tuple[CapabilityDefinition, ...]:
             allowed_task_types=_FOLLOWUP_TYPES,
             executor=executors.execute_refine_results,
             audit=_TOOL_AUDIT,
+            description="Filter and/or limit ONLY the current result list (never a new search).",
             legacy_tool_name=AgentActionType.REFINE_CANDIDATE_RESULTS,
+            server_input_schema=ServerLimitArgs,
         ),
         CapabilityDefinition(
             name=CapabilityName.GET_CANDIDATE_PROFILE,
@@ -159,6 +173,7 @@ def _definitions() -> tuple[CapabilityDefinition, ...]:
             allowed_task_types=_FOLLOWUP_TYPES,
             executor=executors.execute_get_candidate_profile,
             audit=_TOOL_AUDIT,
+            description="Show the professional profile of one candidate of the current results.",
             legacy_tool_name=AgentActionType.GET_CANDIDATE_PROFILE,
         ),
         CapabilityDefinition(
@@ -178,6 +193,7 @@ def _definitions() -> tuple[CapabilityDefinition, ...]:
             allowed_task_types=_FOLLOWUP_TYPES,
             executor=executors.execute_get_candidate_evidence,
             audit=_TOOL_AUDIT,
+            description="Show stored CV evidence for one candidate of the current results.",
             legacy_tool_name=AgentActionType.GET_CANDIDATE_EVIDENCE,
         ),
         CapabilityDefinition(
@@ -185,7 +201,7 @@ def _definitions() -> tuple[CapabilityDefinition, ...]:
             policy_version="cap-vacancy-v1",
             input_schema=VacancyArgs,
             output_schema=AgentJobDraftToolResult,
-            # Today's route scope, unchanged in slice B (D-094).
+            # Today's route scope, unchanged (D-094).
             required_scopes=_READ,
             side_effect=SideEffect.SESSION_WORKING_STATE,
             execution=ExecutionMode.IN_TURN,
@@ -199,6 +215,7 @@ def _definitions() -> tuple[CapabilityDefinition, ...]:
             allowed_task_types=frozenset({TaskType.VACANCY_ANALYSIS}),
             executor=executors.execute_analyze_vacancy,
             audit=_TOOL_AUDIT,
+            description="Server-only vacancy analysis; never proposable by the model.",
             legacy_tool_name=AgentActionType.DRAFT_JOB_CRITERIA,
         ),
         CapabilityDefinition(
@@ -220,6 +237,10 @@ def _definitions() -> tuple[CapabilityDefinition, ...]:
             allowed_task_types=frozenset({TaskType.VACANCY_ANALYSIS}),
             executor=executors.refuse_human_action_only,
             audit=_HUMAN_ROUTE_AUDIT,
+            description=(
+                "Point HR to the existing confirmation form of the pending vacancy draft "
+                "(never creates a job in chat)."
+            ),
         ),
         CapabilityDefinition(
             name=CapabilityName.RANK_JOB_CANDIDATES,
@@ -230,7 +251,13 @@ def _definitions() -> tuple[CapabilityDefinition, ...]:
             # Writes Evaluation rows: NOT read-only (§9).
             side_effect=SideEffect.DERIVED_RECORDS,
             execution=ExecutionMode.HUMAN_ACTION_ONLY,
-            model_proposable=True,
+            # Accepted D-092 Amendment A3.3: NOT model-proposable/offered in
+            # chat until a separately reviewed, server-owned, unambiguous
+            # "current confirmed job" selector exists (none does: several
+            # AgentDraftConfirmation rows may exist per BrowserSession). No
+            # "latest confirmation" choice, no transcript scan. The direct
+            # authenticated CSRF ranking routes are unchanged.
+            model_proposable=False,
             live_context=frozenset({LiveContextReq.CONFIRMED_JOB_IN_SESSION}),
             produces=frozenset(),
             confirmation=ConfirmationPolicy.EXPLICIT_HUMAN_ROUTE,
@@ -239,6 +266,7 @@ def _definitions() -> tuple[CapabilityDefinition, ...]:
             allowed_task_types=frozenset({TaskType.VACANCY_ANALYSIS}),
             executor=executors.refuse_human_action_only,
             audit=_HUMAN_ROUTE_AUDIT,
+            description="Not offered in chat (A3.3); ranking uses its own human route.",
         ),
     )
 
@@ -275,8 +303,9 @@ def assert_registry_invariants(registry: Mapping[CapabilityName, CapabilityDefin
             raise RegistryInvariantError(f"{name}: mutation requires an explicit human route.")
         if definition.identity != IdentityPolicy.NEVER_IN_INPUT_OR_MODEL:
             raise RegistryInvariantError(f"{name}: identity may never be a capability input.")
-        if definition.input_schema.model_config.get("extra") != "forbid":
-            raise RegistryInvariantError(f"{name}: input schema must forbid extra keys.")
+        for schema in (definition.input_schema, definition.server_input_schema):
+            if schema is not None and schema.model_config.get("extra") != "forbid":
+                raise RegistryInvariantError(f"{name}: input schemas must forbid extra keys.")
 
 
 CAPABILITY_REGISTRY: Mapping[CapabilityName, CapabilityDefinition] = MappingProxyType(
@@ -290,8 +319,37 @@ def capability_audit_metadata(definition: CapabilityDefinition) -> dict[str, str
     return {"capability": definition.name.value, "capability_version": definition.policy_version}
 
 
-def definition_for_legacy_action(action: AgentActionType) -> CapabilityDefinition:
-    for definition in CAPABILITY_REGISTRY.values():
-        if definition.legacy_tool_name == action:
-            return definition
-    raise KeyError(action)
+def offered_capabilities(
+    *,
+    principal_scopes: frozenset[str],
+    result_context_present: bool,
+    pending_draft_live: bool,
+    confirmed_job_in_session: bool,
+    registry: Mapping[CapabilityName, CapabilityDefinition] = CAPABILITY_REGISTRY,
+) -> tuple[CapabilityName, ...]:
+    """D-092 §8.1: the per-call subset — model-proposable AND permitted for
+    this principal and context. A result-set consumer is offered when a
+    result context exists or an offered capability can produce one; a
+    HUMAN_ACTION_ONLY capability only with its live target. Advisory for
+    the model; Layer 1 re-checks everything on freshly read context."""
+    live = {
+        LiveContextReq.PENDING_DRAFT: pending_draft_live,
+        LiveContextReq.CONFIRMED_JOB_IN_SESSION: confirmed_job_in_session,
+        LiveContextReq.ACTIVE_RESULT_SET: result_context_present,
+    }
+    permitted = [
+        definition
+        for definition in registry.values()
+        if definition.model_proposable and definition.required_scopes <= principal_scopes
+    ]
+    producible = {req for definition in permitted for req in definition.produces}
+    offered: list[CapabilityName] = []
+    for definition in permitted:
+        satisfied = all(
+            live[req]
+            or (definition.execution == ExecutionMode.IN_TURN and req in producible)
+            for req in definition.live_context
+        )
+        if satisfied:
+            offered.append(definition.name)
+    return tuple(name for name in CapabilityName if name in offered)

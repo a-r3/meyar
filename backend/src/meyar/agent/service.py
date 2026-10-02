@@ -1,22 +1,19 @@
-"""Slice 2 — bounded read-only agent orchestration loop (issue #31, D-035).
+"""Bounded read-only agent orchestration (issue #31 D-035; Agent Core v2,
+issue #88 slices A–C, D-092 / D-095).
 
-Human session -> local Ollama agent -> typed MEYAR tools -> existing
-tenant-scoped search/profile/evidence services -> grounded response. The
-LLM interprets/orchestrates; it never becomes scoring, authorization,
-evidence, or persistence authority (see docs/DECISIONS.md D-030/D-031).
+Human session -> deterministic pre-router -> (server-built plan | ONE local
+Ollama ``agent-plan-v1`` proposal) -> pure Layer-1 validation with source
+grounding -> bounded ordered capability execution (no post-tool model
+re-decision) -> deterministic, server-authority rendering -> Phase B. The
+LLM proposes; it never becomes scoring, authorization, evidence or
+persistence authority (docs/DECISIONS.md D-030/D-031).
 
-Every ``AgentDecision`` the model produces is untrusted input and passes
-through the same discipline any other LLM-produced tool argument does:
-typed schema validation (meyar.agent.schemas), tenant-scoped service calls
-(never a client/model-supplied tenant id), and — for SEARCH_CANDIDATES —
-the existing frozen NL search-planner pipeline's prohibited-attribute and
-no-silent-weakening rules (D-027, D-031). A ``candidate_ref`` is never
-trusted as a raw candidate_id: it is always resolved against this
-conversation's OWN BrowserSession-bound live context
-``active_result_set_id`` (issues #49/#80; see
-``meyar.services.agent_result_set_repo.resolve_active_candidate_ref``), so
-the model's own memory of what it was shown is never the authority for
-which candidate a tool call touches."""
+The model never authors executable text or numbers: it quotes the user's
+own current message and the server resolves offsets and parses counts and
+ordinals itself (D-092 §10.2). Every tool call stays tenant-scoped; a
+candidate ordinal is always resolved against this conversation's OWN
+BrowserSession-bound ``active_result_set_id`` (issues #49/#80; see
+``meyar.services.agent_result_set_repo.resolve_active_candidate_ref``)."""
 
 import hashlib
 import re
@@ -38,9 +35,12 @@ from meyar.agent.canonical_requirements import (
     subject_grounded_in_span,
 )
 from meyar.agent.capabilities import (
+    AGENT_PLAN_SCHEMA_VERSION,
     CAPABILITY_PLAN_SCHEMA_VERSION,
     CAPABILITY_REGISTRY,
+    MAX_PLAN_STEPS,
     CapabilityName,
+    ExecutablePlan,
     ExecutionContext,
     PlanExecution,
     PlanOrigin,
@@ -52,16 +52,24 @@ from meyar.agent.capabilities import (
     ValidationContext,
     capability_audit_metadata,
     execute_plan,
+    offered_capabilities,
     validate_plan,
 )
-from meyar.agent.capabilities.adapter import (
-    plan_for_model_decision,
-    result_limit_plan,
-    search_plan,
-    vacancy_plan,
+from meyar.agent.capabilities.contracts import (
+    AgentPlanContext,
+    AgentPlanProposal,
+    ContextTurn,
+    GroundedField,
+    ModelClarificationCode,
+    OfferedCapability,
+    PlanKind,
 )
 from meyar.agent.capabilities.provenance import plan_validated_metadata
-from meyar.agent.capabilities.validator import pre_existing_result_set_requirements
+from meyar.agent.capabilities.server_plans import result_limit_plan, search_plan, vacancy_plan
+from meyar.agent.capabilities.validator import (
+    pre_existing_result_set_requirements,
+    validate_model_reply,
+)
 from meyar.agent.clarification_schemas import (
     ALLOWED_ANSWERS,
     MAX_CLARIFICATION_ATTEMPTS,
@@ -113,7 +121,6 @@ from meyar.agent.schemas import (
     MAX_CANDIDATE_REF,
     MAX_JD_REQUIREMENT_SPANS,
     AgentActionType,
-    AgentDecision,
     AgentEvidenceToolResult,
     AgentJobDraftToolResult,
     AgentProfileToolResult,
@@ -217,7 +224,10 @@ from meyar.services.agent_task_repo import (
 from meyar.services.audit_repo import record_event
 from meyar.services.profile_authority import get_current_authorized_profile
 
+# One bounded repair for the clarification classifier (A2) and for the
+# single agent-plan-v1 proposal per turn (D-092 §10.3).
 MAX_DECISION_ATTEMPTS = 2
+MAX_PLAN_PROPOSAL_ATTEMPTS = 2
 # Bounds how much of one candidate's profile a single GET_CANDIDATE_EVIDENCE
 # call surfaces — a generous, but not unbounded, response even for a broad
 # (topic-less) request. See _dispatch_evidence.
@@ -343,37 +353,6 @@ def _outcome_and_message_for_refinement_failure(
     )
 
 
-def _summarize_tool_result(result: AgentToolResult) -> dict:
-    """Small, bounded, non-identity JSON fed back into the model's own
-    next-step context — counts/flags only, never evidence quotes or
-    profile facts, so the model cannot lift ungrounded text from here
-    into a later ``message``."""
-    if result.tool_name == AgentActionType.SEARCH_CANDIDATES:
-        assert result.search is not None
-        plan = result.search.response.plan
-        response = result.search.response.search_response
-        return {
-            "tool": "SEARCH_CANDIDATES",
-            "executable": plan.executable,
-            "outcome": plan.outcome.value,
-            "result_count": response.result_count if response else 0,
-        }
-    if result.tool_name == AgentActionType.GET_CANDIDATE_PROFILE:
-        assert result.profile is not None
-        return {
-            "tool": "GET_CANDIDATE_PROFILE",
-            "candidate_ref": result.profile.candidate_ref,
-            "found": result.profile.found,
-        }
-    assert result.evidence is not None
-    return {
-        "tool": "GET_CANDIDATE_EVIDENCE",
-        "candidate_ref": result.evidence.candidate_ref,
-        "found": result.evidence.found,
-        "match_count": len(result.evidence.matches),
-    }
-
-
 async def _dispatch_search(
     db: AsyncSession,
     llm: LLMProvider,
@@ -386,9 +365,9 @@ async def _dispatch_search(
     embedding_config: EmbeddingSearchConfig,
     embedding_provider: EmbeddingProvider | None,
 ) -> tuple[AgentToolResult, uuid.UUID | None]:
-    """Forwards the SERVER-resolved search source (issue #88 slice B: the
-    capability step's WHOLE_MESSAGE / bound resume source — never a
-    model-authored ``search_query``), unmodified, into the existing
+    """Forwards the SERVER-resolved search source (issue #88: the
+    capability step's WHOLE_MESSAGE, exact grounded quotes, or bound resume
+    source — never model-authored text), unmodified, into the existing
     frozen NL search-planner pipeline (D-031) — this module never
     re-implements filter extraction, prohibited-attribute checks, or the
     no-silent-weakening rule; it only reuses them. On an executable
@@ -426,29 +405,29 @@ async def _dispatch_profile(
     db: AsyncSession,
     *,
     tenant_id: uuid.UUID,
-    decision: AgentDecision,
+    candidate_ref: int,
     session_context: TurnSessionState,
 ) -> tuple[AgentToolResult, CandidateProfileExtraction | None, ResultSetResolutionFailure | None]:
-    """Returns (tool result, the raw validated profile when found, the
+    """``candidate_ref`` is the server-parsed ordinal (D-092 §10.2).
+    Returns (tool result, the raw validated profile when found, the
     resolution failure reason when not) — the profile is handed back
     separately so run_agent_turn can build grounded-answer facts (D-037/
     D-038) without a second, redundant DB fetch. candidate_ref resolution
     (issue #49) is entirely owned by
     meyar.services.agent_result_set_repo.resolve_active_candidate_ref —
     this function never resolves an ordinal itself."""
-    assert decision.candidate_ref is not None
     resolved = await resolve_active_candidate_ref(
         db,
         tenant_id=tenant_id,
         browser_session_id=session_context.browser_session_id,
         session_context=session_context,
-        candidate_ref=decision.candidate_ref,
+        candidate_ref=candidate_ref,
     )
     if isinstance(resolved, ResultSetResolutionFailure):
         return (
             AgentToolResult(
                 tool_name=AgentActionType.GET_CANDIDATE_PROFILE,
-                profile=AgentProfileToolResult(candidate_ref=decision.candidate_ref, found=False),
+                profile=AgentProfileToolResult(candidate_ref=candidate_ref, found=False),
             ),
             None,
             resolved,
@@ -462,7 +441,7 @@ async def _dispatch_profile(
             AgentToolResult(
                 tool_name=AgentActionType.GET_CANDIDATE_PROFILE,
                 profile=AgentProfileToolResult(
-                    candidate_ref=decision.candidate_ref,
+                    candidate_ref=candidate_ref,
                     candidate_id=candidate_id,
                     found=False,
                     profile_status=None,
@@ -476,7 +455,7 @@ async def _dispatch_profile(
         AgentToolResult(
             tool_name=AgentActionType.GET_CANDIDATE_PROFILE,
             profile=AgentProfileToolResult(
-                candidate_ref=decision.candidate_ref,
+                candidate_ref=candidate_ref,
                 candidate_id=candidate_id,
                 found=True,
                 profile_status=version.status,
@@ -524,7 +503,7 @@ class RefineDispatchResult:
     tool_result: AgentToolResult | None = None
     new_result_set_id: uuid.UUID | None = None
     resolution_failure: ResultSetResolutionFailure | None = None
-    # Set when decision.filter_query could not be safely interpreted/
+    # Set when the filter source could not be safely interpreted/
     # executed as a deterministic structured filter (non-executable plan,
     # or one that would require semantic/hybrid behavior) — fixed,
     # server-owned copy, never the raw planner rejection reason or the
@@ -557,7 +536,8 @@ async def _dispatch_refine(
     *,
     tenant_id: uuid.UUID,
     session_context: TurnSessionState,
-    decision: AgentDecision,
+    filter_query: str | None,
+    limit: int | None,
     as_of_date: date,
     embedding_config: EmbeddingSearchConfig,
 ) -> RefineDispatchResult:
@@ -570,7 +550,8 @@ async def _dispatch_refine(
        foreign-session active context must fail with its own truthful
        reason regardless of planner health, never surfaced as a generic
        planner-unavailable clarification.
-    2. When decision.filter_query is set, it is forwarded UNMODIFIED into
+    2. When ``filter_query`` (the SERVER-resolved filter source — never
+       model-authored text) is set, it is forwarded UNMODIFIED into
        the existing frozen NL search-planner pipeline (meyar.search.
        planner_service.plan_candidate_search — planning only, never
        meyar.search.service.search_candidates itself, so this never
@@ -586,7 +567,7 @@ async def _dispatch_refine(
        global search (docs/DECISIONS.md D-084).
     3. The planner's own validated explicit-limit interpretation
        (plan.interpretation.result_limit/used_default_limit) is reconciled
-       against decision.limit into one effective_limit: the planner's own
+       against ``limit`` (the server-parsed count) into one effective_limit: the planner's own
        default search limit never becomes an implicit refinement
        truncation, and a genuine conflict between the two is rejected
        rather than silently resolved one way.
@@ -607,12 +588,12 @@ async def _dispatch_refine(
 
     filter_request: CandidateSearchRequest | None = None
     planner_explicit_limit: int | None = None
-    if decision.filter_query is not None:
+    if filter_query is not None:
         plan = await plan_candidate_search(
             db,
             llm,
             tenant_id=tenant_id,
-            natural_language_request=decision.filter_query,
+            natural_language_request=filter_query,
             as_of_date=as_of_date,
             embedding_config=embedding_config,
         )
@@ -641,8 +622,8 @@ async def _dispatch_refine(
         )
         if planner_explicit_limit is not None and planner_explicit_limit > MAX_CANDIDATE_REF:
             # A refinement limit can never exceed the same bound a
-            # candidate_ref ordinal itself is bounded to (see AgentDecision.
-            # limit) — an HR-text count the search policy itself could
+            # candidate_ref ordinal itself is bounded to (MAX_CANDIDATE_REF)
+            # — an HR-text count the search policy itself could
             # produce (up to MAX_SEARCH_LIMIT=100) but a refinement could
             # never honor fails closed here rather than crashing on the
             # narrower AgentRefineToolResult.requested_limit bound below.
@@ -652,16 +633,16 @@ async def _dispatch_refine(
 
     if (
         planner_explicit_limit is not None
-        and decision.limit is not None
-        and decision.limit != planner_explicit_limit
+        and limit is not None
+        and limit != planner_explicit_limit
     ):
-        # The HR text's own explicit count (validated by the planner) and
-        # the small orchestrator's own limit field disagree — the server
-        # must never silently pick one interpretation over the other.
+        # The planner's validated count of the filter source and the
+        # server-parsed limit quote disagree — the server must never
+        # silently pick one interpretation over the other.
         return RefineDispatchResult(
             rejection_message=_agent_response_text(AgentResponseCode.UNSUPPORTED_REQUEST)
         )
-    effective_limit = decision.limit if planner_explicit_limit is None else planner_explicit_limit
+    effective_limit = limit if planner_explicit_limit is None else planner_explicit_limit
 
     outcome = await create_result_set_from_refinement(
         db,
@@ -725,28 +706,31 @@ async def _dispatch_evidence(
     db: AsyncSession,
     *,
     tenant_id: uuid.UUID,
-    decision: AgentDecision,
+    candidate_ref: int,
+    evidence_topic: str | None,
     session_context: TurnSessionState,
 ) -> tuple[AgentToolResult, CandidateProfileExtraction | None, ResultSetResolutionFailure | None]:
-    """Returns (tool result, the raw validated profile when found, the
+    """``candidate_ref`` is the server-parsed ordinal and ``evidence_topic``
+    the server-resolved exact topic slice of the message (or None for all
+    evidence) — D-092 §10.2 rules 5/6.
+    Returns (tool result, the raw validated profile when found, the
     resolution failure reason when not) — see _dispatch_profile's
     docstring; the same profile backs D-037/D-038 grounded-answer
     synthesis for both tools identically (never the raw evidence quote
     text, which stays server-rendered-only, never model input)."""
-    assert decision.candidate_ref is not None
     resolved = await resolve_active_candidate_ref(
         db,
         tenant_id=tenant_id,
         browser_session_id=session_context.browser_session_id,
         session_context=session_context,
-        candidate_ref=decision.candidate_ref,
+        candidate_ref=candidate_ref,
     )
     if isinstance(resolved, ResultSetResolutionFailure):
         return (
             AgentToolResult(
                 tool_name=AgentActionType.GET_CANDIDATE_EVIDENCE,
                 evidence=AgentEvidenceToolResult(
-                    candidate_ref=decision.candidate_ref,
+                    candidate_ref=candidate_ref,
                     found=False,
                 ),
             ),
@@ -762,7 +746,7 @@ async def _dispatch_evidence(
             AgentToolResult(
                 tool_name=AgentActionType.GET_CANDIDATE_EVIDENCE,
                 evidence=AgentEvidenceToolResult(
-                    candidate_ref=decision.candidate_ref,
+                    candidate_ref=candidate_ref,
                     candidate_id=candidate_id,
                     found=False,
                     profile_status=None,
@@ -773,7 +757,7 @@ async def _dispatch_evidence(
         )
     version, profile = authorized
 
-    topic_folded = _fold(decision.evidence_topic) if decision.evidence_topic else None
+    topic_folded = _fold(evidence_topic) if evidence_topic else None
     matches: list[EvidenceMatchItem] = []
     resolved_topic: str | None = None
     for category, title_fn in _EVIDENCE_CATEGORIES:
@@ -797,7 +781,7 @@ async def _dispatch_evidence(
         AgentToolResult(
             tool_name=AgentActionType.GET_CANDIDATE_EVIDENCE,
             evidence=AgentEvidenceToolResult(
-                candidate_ref=decision.candidate_ref,
+                candidate_ref=candidate_ref,
                 candidate_id=candidate_id,
                 found=True,
                 profile_status=version.status,
@@ -2392,6 +2376,89 @@ _RESULT_SET_REJECTIONS = frozenset(
         PlanRejectionCode.CANDIDATE_REF_OUT_OF_RANGE,
     }
 )
+# HUMAN_ACTION_ONLY affordances (D-092 §8.2): fixed server copy pointing at
+# the EXISTING authenticated CSRF form — nothing executes in the turn.
+_AFFORDANCE_COPY = {
+    CapabilityName.CREATE_JOB: (
+        "Vakansiya söhbətdə avtomatik yaradılmır. Yaratmaq üçün aktiv vakansiya "
+        "qaralamasını nəzərdən keçirib onun təsdiq formasından istifadə edin."
+    ),
+    CapabilityName.RANK_JOB_CANDIDATES: (
+        "Namizədlər söhbətdə avtomatik sıralanmır. Bu sessiyada təsdiqlənmiş vakansiyanın "
+        "sıralama formasından istifadə edin."
+    ),
+}
+
+
+class AgentPlanProviderError(RuntimeError):
+    """The one ``propose_agent_plan`` call (or its repair) failed on
+    infrastructure (timeout, unavailable, transport). #85: the turn is
+    ABANDONED — no transcript, no plan execution, no pointer/task/
+    clarification change, no consumed clarification attempt."""
+
+
+def _assistant_context_text(turn: Mapping) -> str:
+    """Assistant transcript text may name a candidate (D-045 stores the
+    rendered headline), so the model projection carries only the closed
+    outcome code — identity stays structurally absent (D-092 §15)."""
+    outcome = turn.get("outcome")
+    code = outcome if outcome in AgentTurnOutcome.__members__ else "UNKNOWN"
+    return f"[assistant outcome: {code}]"
+
+
+def build_plan_context(
+    *,
+    turns: list[dict],
+    max_context_turns: int,
+    offered: tuple[CapabilityName, ...],
+    max_plan_steps: int,
+    active_result_context_present: bool,
+    available_ref_count: int,
+    pending_vacancy_confirmation: bool,
+) -> AgentPlanContext:
+    """D-092 §15: the typed allow-list projection — the ENTIRE input of
+    ``propose_agent_plan``. Only the last ``max_context_turns`` (role, text)
+    pairs (never the durable transcript), closed capability names with
+    server descriptions, presence flags and ordinal numbers. No id, identity,
+    scope, token, audit data or date can be expressed by its types. Lane A
+    is always absent or just superseded when a model plan is requested
+    (§11.1), so ``waiting_clarification`` is null."""
+    recent: list[ContextTurn] = []
+    for turn in turns[-max_context_turns:] if max_context_turns > 0 else []:
+        if turn.get("role") == "user":
+            recent.append(ContextTurn(role="user", text=str(turn.get("text", ""))[:4000]))
+        elif turn.get("role") == "assistant":
+            recent.append(ContextTurn(role="assistant", text=_assistant_context_text(turn)))
+    return AgentPlanContext(
+        recent_turns=recent,
+        available_capabilities=[
+            OfferedCapability(name=name, description=CAPABILITY_REGISTRY[name].description)
+            for name in offered
+        ],
+        max_plan_steps=max_plan_steps,
+        active_result_context_present=active_result_context_present,
+        available_candidate_refs=list(range(1, min(available_ref_count, MAX_CANDIDATE_REF) + 1)),
+        waiting_clarification=None,
+        pending_vacancy_confirmation=pending_vacancy_confirmation,
+    )
+
+
+async def _propose_agent_plan(
+    llm: LLMProvider, context: AgentPlanContext
+) -> tuple[AgentPlanProposal | None, LLMResultProvenance]:
+    """Exactly ONE orchestration proposal per turn plus at most one repair
+    (D-092 §10.3). ``None`` = still schema-invalid after the repair
+    (MALFORMED_MODEL_OUTPUT, scenario H). Infrastructure failure raises
+    ``AgentPlanProviderError``; a busy admission gate propagates as
+    AgentInferenceBusyError (#85) — both abandon the turn."""
+    for attempt in range(1, MAX_PLAN_PROPOSAL_ATTEMPTS + 1):
+        try:
+            return await llm.propose_agent_plan(context=context, repair=attempt > 1)
+        except ModelSchemaInvalidError:
+            continue
+        except LLMProviderError:
+            raise AgentPlanProviderError() from None
+    return None, _configured_provenance(llm)
 
 
 async def _build_validation_context(
@@ -2400,13 +2467,16 @@ async def _build_validation_context(
     tenant_id: uuid.UUID,
     session_context: TurnSessionState,
     proposal: object,
+    source_text: str,
     principal_scopes: frozenset[str],
     max_tool_calls: int,
 ) -> tuple[ValidationContext, ResultSetInspection]:
-    """Issue #88 slice B: the Layer-1 ValidationContext from read-only,
-    audit-free server authority. The pre-existing ResultSet is inspected for
-    exactly the ordinals / whole snapshot the plan consumes (#86)."""
-    ordinals, whole_snapshot = pre_existing_result_set_requirements(proposal)
+    """The Layer-1 ValidationContext from read-only, audit-free server
+    authority. The pre-existing ResultSet is inspected for exactly the
+    server-parsed ordinals / whole snapshot the plan consumes (#86)."""
+    ordinals, whole_snapshot = pre_existing_result_set_requirements(
+        proposal, source_text=source_text
+    )
     inspection = await inspect_active_result_set(
         db,
         tenant_id=tenant_id,
@@ -2431,8 +2501,9 @@ async def _build_validation_context(
             principal_scopes=principal_scopes,
             pre_existing_result_set=result_set,
             pending_draft_live=session_context.active_pending_draft_id is not None,
-            # No in-turn capability consumes it in slice B: RANK proposals
-            # (none can be adapted) fail closed as CONFIRMATION_REQUIRED.
+            # No session-confirmed-job lookup exists in the turn: a RANK
+            # proposal is never offered and fails closed as
+            # CONFIRMATION_REQUIRED (D-095).
             confirmed_job_in_session=False,
             max_tool_calls=max_tool_calls,
         ),
@@ -2448,15 +2519,14 @@ async def _result_set_rejection_result(
     proposal: object,
     rejection: PlanRejection,
     inspection: ResultSetInspection,
-    tool_results: list[AgentToolResult],
-    tool_call_count: int,
     provenance: LLMResultProvenance,
 ) -> AgentTurnResult | None:
-    """A Layer-1 ResultSet-family rejection of a one-step plan keeps TODAY's
-    truthful outward behaviour — the same outcome, message, not-found card
-    and ``agent.result_set.reference_rejected``/``refine_rejected`` audit the
-    executor's own check produced — while ZERO executors run. ``None`` for
-    any other rejection."""
+    """A Layer-1 ResultSet-family rejection keeps TODAY's truthful outward
+    behaviour — the same outcome, message, not-found card and
+    ``agent.result_set.reference_rejected``/``refine_rejected`` audit the
+    executor's own check produced — while ZERO executors run. The ordinal is
+    the server-parsed one carried by the rejection. ``None`` for any other
+    rejection."""
     if rejection.code not in _RESULT_SET_REJECTIONS or rejection.step_index is None:
         return None
     assert isinstance(proposal, Mapping)
@@ -2474,10 +2544,11 @@ async def _result_set_rejection_result(
         )
         outcome, message = _outcome_and_message_for_refinement_failure(failure)
         return _build_result(
-            outcome=outcome, message=message, tool_results=tool_results,
-            tool_call_count=tool_call_count, provenance=provenance,
+            outcome=outcome, message=message, tool_results=[], tool_call_count=0,
+            provenance=provenance,
         )
-    candidate_ref = raw_step["args"]["candidate_ref"]
+    candidate_ref = rejection.candidate_ref
+    assert candidate_ref is not None
     await record_reference_rejection(
         db, tenant_id=tenant_id, session_context=session_context, failure=failure,
         candidate_ref=candidate_ref,
@@ -2496,8 +2567,215 @@ async def _result_set_rejection_result(
     return _build_result(
         outcome=_outcome_for_resolution_failure(failure),
         message=None,
-        tool_results=[*tool_results, card],
-        tool_call_count=tool_call_count,
+        tool_results=[card],
+        tool_call_count=0,
+        provenance=provenance,
+    )
+
+
+def _vacancy_proposal_clarification(
+    llm: LLMProvider,
+    *,
+    session_context: TurnSessionState,
+    user_message: str,
+    user_turn_id: uuid.UUID,
+    stage: _TurnStage,
+) -> AgentTurnResult:
+    """D-092 §6.1 / #79: a MODEL vacancy proposal (an ANALYZE_VACANCY step or
+    CLARIFY(SEARCH_OR_VACANCY)) never drafts. It becomes the server-typed,
+    resumable SEARCH_OR_VACANCY clarification when the text is
+    requirement-shaped; otherwise fixed NEED_MORE_DETAIL copy."""
+    if session_context.context_id is not None and eligible_search_or_vacancy_source(
+        user_message
+    ):
+        stage.new_clarification = search_or_vacancy_clarification(
+            message=user_message, user_turn_id=user_turn_id,
+            question_turn_id=stage.assistant_turn_id,
+        )
+        stage.clarification_payload = clarification_payload(
+            stage.new_clarification.clarification_type
+        )
+        return _fixed_clarification_result(llm, AMBIGUOUS_SEARCH_OR_JOB_COPY)
+    return _fixed_clarification_result(
+        llm, _agent_response_text(AgentResponseCode.NEED_MORE_DETAIL)
+    )
+
+
+def _rejected_capability(proposal: object, rejection: PlanRejection) -> CapabilityName | None:
+    if not isinstance(proposal, Mapping) or rejection.step_index is None:
+        return None
+    raw = proposal["steps"][rejection.step_index]
+    name = raw.get("capability") if isinstance(raw, Mapping) else None
+    if not isinstance(name, str) or name not in CapabilityName.__members__:
+        return None
+    return CapabilityName(name)
+
+
+async def _plan_rejection_result(
+    db: AsyncSession,
+    llm: LLMProvider,
+    *,
+    tenant_id: uuid.UUID,
+    session_context: TurnSessionState,
+    proposal: object,
+    rejection: PlanRejection,
+    inspection: ResultSetInspection,
+    user_message: str,
+    user_turn_id: uuid.UUID,
+    stage: _TurnStage,
+    provenance: LLMResultProvenance,
+) -> AgentTurnResult:
+    """Layer 1 rejected the whole plan: ZERO executors ran. HR sees fixed
+    copy per code family — never the code, a capability name or an id."""
+    result_set_rejection = await _result_set_rejection_result(
+        db, tenant_id=tenant_id, session_context=session_context, proposal=proposal,
+        rejection=rejection, inspection=inspection, provenance=provenance,
+    )
+    if result_set_rejection is not None:
+        return result_set_rejection
+    if rejection.code == PlanRejectionCode.NOT_MODEL_PROPOSABLE and _rejected_capability(
+        proposal, rejection
+    ) == CapabilityName.ANALYZE_VACANCY:
+        # The deterministic entry route is the only authority that can reach
+        # drafting (#79). Any other non-proposable capability (RANK under
+        # A3.3) falls through to the fixed rejection copy below.
+        await record_event(
+            db,
+            tenant_id=tenant_id,
+            event_type="agent.entry.action_rejected",
+            metadata={
+                "routing_source": "MODEL",
+                "routed_action": AgentRoutedAction.CLARIFY.value,
+                "routing_policy_version": ENTRY_ROUTING_POLICY_VERSION,
+            },
+        )
+        return _vacancy_proposal_clarification(
+            llm, session_context=session_context, user_message=user_message,
+            user_turn_id=user_turn_id, stage=stage,
+        )
+    if rejection.code == PlanRejectionCode.REFERENCE_NOT_GROUNDED:
+        # §10.2 rule 5: the existing "which candidate?" / result-context copy.
+        code = (
+            AgentResponseCode.CANDIDATE_REFERENCE_REQUIRED
+            if rejection.grounded_field == GroundedField.REFERENCE
+            else AgentResponseCode.RESULT_CONTEXT_REQUIRED
+        )
+        message = _agent_response_text(code)
+    else:
+        message = PLAN_REJECTED_COPY
+    return _build_result(
+        outcome=AgentTurnOutcome.CLARIFICATION_REQUESTED,
+        message=message,
+        tool_results=[],
+        tool_call_count=0,
+        provenance=provenance,
+    )
+
+
+async def _plan_execution_result(
+    db: AsyncSession,
+    llm: LLMProvider,
+    *,
+    tenant_id: uuid.UUID,
+    plan: ExecutablePlan,
+    execution: PlanExecution,
+    user_message: str,
+    provenance: LLMResultProvenance,
+) -> AgentTurnResult:
+    """Deterministic rendering of an executed plan. There is NO post-tool
+    "what next" model call: the plan was fixed before step 1 (D-092 §5).
+    Per-step audit keeps today's semantics: search/profile/evidence always
+    audit ``agent.tool.executed`` once run; a refinement only on success; a
+    vacancy draft ``agent.tool.executed`` or ``agent.tool.failed``."""
+    tool_results: list[AgentToolResult] = []
+    tool_calls_made = 0
+    for step, outcome in zip(plan.steps, execution.outcomes, strict=False):
+        definition = CAPABILITY_REGISTRY[step.capability]
+        action = definition.legacy_tool_name
+        assert action is not None
+        audit_capability = capability_audit_metadata(definition)
+        if step.capability == CapabilityName.ANALYZE_VACANCY and outcome.tool_result is None:
+            await record_event(
+                db, tenant_id=tenant_id, event_type="agent.tool.failed",
+                metadata={"tool_name": action.value, **audit_capability},
+            )
+            continue
+        if step.capability == CapabilityName.REFINE_RESULTS and not outcome.succeeded:
+            continue
+        assert outcome.tool_result is not None
+        tool_calls_made += 1
+        tool_results.append(outcome.tool_result)
+        metadata: dict[str, object] = {
+            "tool_name": action.value,
+            "tool_call_index": tool_calls_made,
+            **audit_capability,
+        }
+        if outcome.tool_result.job_draft is not None:
+            metadata.update(jd_draft_audit_metadata(outcome.tool_result.job_draft))
+        await record_event(
+            db, tenant_id=tenant_id, event_type="agent.tool.executed", metadata=metadata
+        )
+
+    if execution.status == PlanStatus.INCOMPLETE:
+        return plan_incomplete_result(llm, execution)
+
+    last = execution.outcomes[-1]
+    if execution.status == PlanStatus.STEP_FAILED:
+        # Single-step plan: the step's own truthful outcome, exactly as today.
+        if last.capability == CapabilityName.ANALYZE_VACANCY:
+            return _build_result(
+                outcome=AgentTurnOutcome.JOB_DRAFT_FAILED, message=None, tool_results=[],
+                tool_call_count=0, provenance=provenance,
+            )
+        if last.capability == CapabilityName.REFINE_RESULTS:
+            # A rejection means "the active result set is untouched".
+            if last.rejection_message is not None:
+                return _build_result(
+                    outcome=AgentTurnOutcome.CLARIFICATION_REQUESTED,
+                    message=last.rejection_message, tool_results=[], tool_call_count=0,
+                    provenance=provenance,
+                )
+            failure_outcome, failure_message = _outcome_and_message_for_refinement_failure(
+                last.resolution_failure  # type: ignore[arg-type]
+            )
+            return _build_result(
+                outcome=failure_outcome, message=failure_message, tool_results=[],
+                tool_call_count=0, provenance=provenance,
+            )
+        if last.capability in (
+            CapabilityName.GET_CANDIDATE_PROFILE,
+            CapabilityName.GET_CANDIDATE_EVIDENCE,
+        ):
+            return _build_result(
+                outcome=_outcome_for_resolution_failure(last.resolution_failure),
+                message=None, tool_results=tool_results, tool_call_count=tool_calls_made,
+                provenance=provenance,
+            )
+        # SEARCH_CANDIDATES: a truthful non-executable planner result is the
+        # whole answer, as today.
+        return _build_result(
+            outcome=AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT, message=None,
+            tool_results=tool_results, tool_call_count=tool_calls_made, provenance=provenance,
+        )
+
+    # COMPLETED. A found profile/evidence as the final step gets one bounded
+    # D-038 grounded synthesis over that candidate's own accepted facts (a
+    # rendering aid, not an orchestration decision); None falls back to the
+    # deterministic message (D-036).
+    synthesized_message: str | None = None
+    if (
+        last.capability
+        in (CapabilityName.GET_CANDIDATE_PROFILE, CapabilityName.GET_CANDIDATE_EVIDENCE)
+        and last.matched_profile is not None
+    ):
+        synthesized_message = await _synthesize_grounded_answer(
+            llm, question=user_message, facts=_build_profile_facts(last.matched_profile)
+        )
+    return _build_result(
+        outcome=AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT,
+        message=synthesized_message,
+        tool_results=tool_results,
+        tool_call_count=tool_calls_made,
         provenance=provenance,
     )
 
@@ -2608,11 +2886,10 @@ async def execute_agent_turn(
             )
         return finish(result)
 
-    # Issue #88 slice B (D-092 §23): every capability invocation is a
-    # one-step plan validated by the pure Layer 1 and executed through the
-    # registry. A forced or resumed route yields a SERVER plan over its
-    # server-owned source text; otherwise the model's AgentDecision is
-    # adapted inside the loop below.
+    # Every capability invocation is a validated plan executed through the
+    # registry (D-092 §5). A forced or resumed route yields a SERVER plan over
+    # its server-owned source text; otherwise exactly ONE model plan proposal
+    # is requested below.
     server_plan: tuple[dict, str] | None = None
     if resume is not None:
         # §6.6: the resolved answer maps to exactly one server-built step over
@@ -2685,8 +2962,8 @@ async def execute_agent_turn(
                 user_message,
             )
         elif entry_routing.route == AgentEntryRoute.FORCE_CANDIDATE_SEARCH:
-            # Explicit new searches bypass the orchestration model's action
-            # classification: the user's own text reaches the planner.
+            # Explicit new searches bypass the orchestration model: the
+            # user's own text reaches the planner.
             server_plan = (search_plan(), user_message)
         elif (
             entry_routing.route == AgentEntryRoute.FORCE_RESULT_LIMIT
@@ -2696,419 +2973,170 @@ async def execute_agent_turn(
             # supplies the typed limit; the existing #49 refinement dispatch
             # validates the active ResultSet and rejects truthfully.
             server_plan = (result_limit_plan(entry_routing.result_limit), user_message)
-    # Search forced by the entry router (or a resumed clarification) is
-    # turn-terminal once the existing planner/search path returns: no second
-    # orchestration guess is needed.
-    search_turn_terminal = server_plan is not None and (
-        server_plan[0]["steps"][0]["capability"] == CapabilityName.SEARCH_CANDIDATES.value
-    )
-    tool_results: list[AgentToolResult] = []
-    last_tool_summary: dict | None = None
-    tool_calls_made = 0
+
     provenance = _configured_provenance(llm)
-    # Scoped to this one turn only (never persisted): a small local model
-    # sometimes re-issues an identical SEARCH_CANDIDATES call instead of
-    # recognizing the request is already answered by its own prior result —
-    # found via real-Ollama Slice 2 acceptance testing (PR #40), where this
-    # produced a contradictory-looking TOOL_CALL_LIMIT_EXCEEDED banner
-    # stacked above several duplicated result blocks. Guarded structurally
-    # rather than only by prompt instruction, matching this module's D-038
-    # precedent. Keyed on the SERVER-resolved search source (slice B).
-    searched_queries: set[str] = set()
-    execution_context = ExecutionContext(
-        db=db,
-        llm=llm,
-        tenant_id=tenant_id,
-        session_context=session_context,
-        as_of_date=as_of_date,
-        embedding_config=embedding_config,
-        embedding_provider=embedding_provider,
-    )
-
-    while True:
-        decision: AgentDecision | None
-        if server_plan is not None:
-            proposal, source_text = server_plan
-            origin = PlanOrigin.SERVER
-            server_plan = None
-        else:
-            # Two separate advisory facts are sent to the model. Pointer
-            # presence says only that a result context exists, including a
-            # valid zero-member or stale/expired context; it is deliberately
-            # non-authoritative. The validated count says which ordinals may
-            # currently be referenced. Real authority remains the independent
-            # server validation in refinement/profile/evidence dispatch.
-            active_result_context_present = session_context.active_result_set_id is not None
-            available_ref_count = await active_result_set_size(
-                db,
-                tenant_id=tenant_id,
-                browser_session_id=session_context.browser_session_id,
-                session_context=session_context,
-            )
-            decision = None
-            for attempt in range(1, MAX_DECISION_ATTEMPTS + 1):
-                try:
-                    decision, provenance = await llm.decide_agent_action(
-                        # Model context window only — never the whole
-                        # durable transcript (issue #80).
-                        recent_turns=[(t["role"], t["text"]) for t in turns[-max_context_turns:]],
-                        last_tool_result_summary=last_tool_summary,
-                        active_result_context_present=active_result_context_present,
-                        available_candidate_refs=list(range(1, available_ref_count + 1)),
-                        repair=attempt > 1,
-                    )
-                except ModelSchemaInvalidError:
-                    decision = None
-                    continue
-                except (ModelTimeoutError, ModelUnavailableError, LLMProviderError):
-                    # A follow-up "what next" decision failing after a tool
-                    # already returned a real, grounded result is never a
-                    # fatal turn failure — only the optional closing framing
-                    # is missing (see D-036). A failure on the FIRST decision
-                    # (tool_results still empty) remains a genuine failure.
-                    result = _build_result(
-                        outcome=(
-                            AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
-                            if tool_results
-                            else AgentTurnOutcome.AGENT_PROVIDER_FAILURE
-                        ),
-                        message=None,
-                        tool_results=tool_results,
-                        tool_call_count=tool_calls_made,
-                        provenance=provenance,
-                    )
-                    return finish(result)
-                break
-
-            if decision is None:
-                result = _build_result(
-                    outcome=(
-                        AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
-                        if tool_results
-                        else AgentTurnOutcome.MALFORMED_MODEL_OUTPUT
-                    ),
-                    message=None,
-                    tool_results=tool_results,
-                    tool_call_count=tool_calls_made,
-                    provenance=provenance,
-                )
-                return finish(result)
-
-            if decision.action in (AgentActionType.FINAL_ANSWER, AgentActionType.CLARIFY):
-                assert decision.response_code is not None
-                outcome = (
-                    AgentTurnOutcome.ANSWERED
-                    if decision.action == AgentActionType.FINAL_ANSWER
-                    else AgentTurnOutcome.CLARIFICATION_REQUESTED
-                )
-                result = _build_result(
-                    outcome=outcome,
-                    # Once a tool has run, its validated result owns the
-                    # answer headline. The closed response code is only
-                    # useful for zero-tool generic conversation/clarification.
-                    message=(
-                        None if tool_results else _agent_response_text(decision.response_code)
-                    ),
-                    tool_results=tool_results,
-                    tool_call_count=tool_calls_made,
-                    provenance=provenance,
-                )
-                return finish(result)
-            # Transitional adapter (D-092 §23): one MODEL-origin step. A
-            # model SEARCH_CANDIDATES is WHOLE_MESSAGE — its search_query
-            # never reaches the planner.
-            proposal = plan_for_model_decision(decision, message=user_message)
-            source_text = user_message
-            origin = PlanOrigin.MODEL
-
-        # D-092 §11.1: the ValidationContext comes from READ-ONLY server
-        # authority immediately before validation — including the
-        # pre-existing ResultSet, inspected (audit-free) for exactly what
-        # this plan consumes (#86 member-scoped authority).
-        validation_context, inspection = await _build_validation_context(
+    offered: frozenset[CapabilityName] | None = None
+    if server_plan is not None:
+        proposal, source_text = server_plan
+        origin = PlanOrigin.SERVER
+        schema_version = CAPABILITY_PLAN_SCHEMA_VERSION
+    else:
+        # [3] MODEL_ROUTED (D-092 §5): leave the DB, ONE local-model plan
+        # proposal (+ at most one repair) over the typed allow-list
+        # projection with the registry-derived per-call capability subset.
+        offered_names = offered_capabilities(
+            principal_scopes=principal_scopes,
+            result_context_present=session_context.active_result_set_id is not None,
+            pending_draft_live=session_context.active_pending_draft_id is not None,
+            confirmed_job_in_session=False,
+        )
+        available_ref_count = await active_result_set_size(
             db,
             tenant_id=tenant_id,
+            browser_session_id=session_context.browser_session_id,
             session_context=session_context,
-            proposal=proposal,
-            principal_scopes=principal_scopes,
-            max_tool_calls=max_tool_calls,
         )
-        validated = validate_plan(
-            proposal, origin=origin, source_text=source_text, ctx=validation_context
+        plan_context = build_plan_context(
+            turns=turns,
+            max_context_turns=max_context_turns,
+            offered=offered_names,
+            max_plan_steps=max(1, min(MAX_PLAN_STEPS, max_tool_calls)),
+            active_result_context_present=session_context.active_result_set_id is not None,
+            available_ref_count=available_ref_count,
+            pending_vacancy_confirmation=session_context.active_pending_draft_id is not None,
         )
-        if isinstance(validated, PlanRejection):
-            # Layer 1: zero capabilities executed.
-            await record_event(
-                db,
-                tenant_id=tenant_id,
-                event_type="agent.plan.rejected",
-                metadata={
-                    "reason_code": validated.code.value,
-                    "schema_version": CAPABILITY_PLAN_SCHEMA_VERSION,
-                },
+        model_proposal, provenance = await _propose_agent_plan(llm, plan_context)
+        if model_proposal is None:
+            return finish(
+                _build_result(
+                    outcome=AgentTurnOutcome.MALFORMED_MODEL_OUTPUT, message=None,
+                    tool_results=[], tool_call_count=0, provenance=provenance,
+                )
             )
-            result_set_rejection = await _result_set_rejection_result(
-                db,
-                tenant_id=tenant_id,
-                session_context=session_context,
-                proposal=proposal,
-                rejection=validated,
-                inspection=inspection,
-                tool_results=tool_results,
-                tool_call_count=tool_calls_made,
-                provenance=provenance,
-            )
-            if result_set_rejection is not None:
-                return finish(result_set_rejection)
-            if validated.code == PlanRejectionCode.NOT_MODEL_PROPOSABLE:
-                # The deterministic entry route is the only authority that
-                # can reach drafting. A model DRAFT_JOB_CRITERIA proposal is
-                # not reinterpreted as search or another action; it gets the
-                # fixed clarification and has no tool/business side effect.
+        if model_proposal.kind != PlanKind.PLAN:
+            reply = validate_model_reply(model_proposal)
+            if isinstance(reply, PlanRejection):
                 await record_event(
-                    db,
-                    tenant_id=tenant_id,
-                    event_type="agent.entry.action_rejected",
+                    db, tenant_id=tenant_id, event_type="agent.plan.rejected",
                     metadata={
-                        "routing_source": "MODEL",
-                        "routed_action": AgentRoutedAction.CLARIFY.value,
-                        "routing_policy_version": ENTRY_ROUTING_POLICY_VERSION,
+                        "reason_code": reply.code.value,
+                        "schema_version": AGENT_PLAN_SCHEMA_VERSION,
                     },
                 )
-                message = AMBIGUOUS_SEARCH_OR_JOB_COPY
-            else:
-                message = PLAN_REJECTED_COPY
-            result = _build_result(
-                outcome=AgentTurnOutcome.CLARIFICATION_REQUESTED,
-                message=message,
-                tool_results=tool_results,
-                tool_call_count=tool_calls_made,
-                provenance=provenance,
+                return finish(
+                    _build_result(
+                        outcome=AgentTurnOutcome.CLARIFICATION_REQUESTED,
+                        message=PLAN_REJECTED_COPY, tool_results=[], tool_call_count=0,
+                        provenance=provenance,
+                    )
+                )
+            if reply.clarification_code == ModelClarificationCode.SEARCH_OR_VACANCY:
+                return finish(
+                    _vacancy_proposal_clarification(
+                        llm, session_context=session_context, user_message=user_message,
+                        user_turn_id=user_turn_id, stage=stage,
+                    )
+                )
+            if reply.kind == PlanKind.CLARIFY:
+                assert reply.clarification_code is not None
+                return finish(
+                    _build_result(
+                        outcome=AgentTurnOutcome.CLARIFICATION_REQUESTED,
+                        message=_agent_response_text(
+                            AgentResponseCode(reply.clarification_code.value)
+                        ),
+                        tool_results=[], tool_call_count=0, provenance=provenance,
+                    )
+                )
+            assert reply.response_code is not None
+            return finish(
+                _build_result(
+                    outcome=AgentTurnOutcome.ANSWERED,
+                    message=_agent_response_text(reply.response_code),
+                    tool_results=[], tool_call_count=0, provenance=provenance,
+                )
             )
-            return finish(result)
+        proposal = model_proposal.model_dump(mode="json")
+        source_text = user_message
+        origin = PlanOrigin.MODEL
+        schema_version = AGENT_PLAN_SCHEMA_VERSION
+        offered = frozenset(offered_names)
 
-        # D-092 §19.2 attempt provenance: closed keys only, no text/ids.
+    # [4] Layer 1 on a ValidationContext freshly read (read-only, audit-free)
+    # immediately before validation — including the pre-existing ResultSet,
+    # inspected for exactly what this plan consumes (#86).
+    validation_context, inspection = await _build_validation_context(
+        db,
+        tenant_id=tenant_id,
+        session_context=session_context,
+        proposal=proposal,
+        source_text=source_text,
+        principal_scopes=principal_scopes,
+        max_tool_calls=max_tool_calls,
+    )
+    validated = validate_plan(
+        proposal,
+        origin=origin,
+        source_text=source_text,
+        ctx=validation_context,
+        offered=offered,
+    )
+    if isinstance(validated, PlanRejection):
+        # Whole-plan rejection: ZERO capabilities executed.
         await record_event(
             db,
             tenant_id=tenant_id,
-            event_type="agent.plan.validated",
-            metadata=plan_validated_metadata(validated),
+            event_type="agent.plan.rejected",
+            metadata={"reason_code": validated.code.value, "schema_version": schema_version},
         )
-        (step,) = validated.steps
-        definition = CAPABILITY_REGISTRY[step.capability]
-        action = definition.legacy_tool_name
-        assert action is not None
-        audit_capability = capability_audit_metadata(definition)
-
-        if tool_calls_made >= max_tool_calls:
-            result = _build_result(
-                outcome=AgentTurnOutcome.TOOL_CALL_LIMIT_EXCEEDED,
-                message=None,
-                tool_results=tool_results,
-                tool_call_count=tool_calls_made,
+        return finish(
+            await _plan_rejection_result(
+                db, llm, tenant_id=tenant_id, session_context=session_context,
+                proposal=proposal, rejection=validated, inspection=inspection,
+                user_message=user_message, user_turn_id=user_turn_id, stage=stage,
                 provenance=provenance,
             )
-            return finish(result)
+        )
 
-        if step.capability == CapabilityName.SEARCH_CANDIDATES:
-            assert step.resolved_text is not None
-            normalized_query = _fold(step.resolved_text)
-            if normalized_query in searched_queries:
-                # Already answered by an identical search this same turn —
-                # finalize on the existing results instead of repeating (or
-                # worse, eventually hitting TOOL_CALL_LIMIT_EXCEEDED, which
-                # would co-render a "simplify your query" message above
-                # results that already fully answer the very same query).
-                result = _build_result(
-                    outcome=AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT,
-                    message=None,
-                    tool_results=tool_results,
-                    tool_call_count=tool_calls_made,
-                    provenance=provenance,
-                )
-                return finish(result)
-            searched_queries.add(normalized_query)
-
-        # Registry dispatch (Layer 2 + executor + atomic activation). A
-        # successful producing step's ResultSet becomes the in-turn working
-        # pointer so a later step of this turn and available_candidate_refs
-        # see it immediately; a failed step keeps the previous pointer.
-        execution = await execute_plan(validated, execution_context)
-        (capability_outcome,) = execution.outcomes
-
-        if step.capability == CapabilityName.ANALYZE_VACANCY:
-            # Always turn-terminal, like GET_CANDIDATE_PROFILE/EVIDENCE —
-            # unlike those, the dispatch call itself can genuinely fail
-            # (a real LLM call, not a deterministic DB lookup).
-            job_draft_result = capability_outcome.tool_result
-            if job_draft_result is None:
-                await record_event(
-                    db,
-                    tenant_id=tenant_id,
-                    event_type="agent.tool.failed",
-                    metadata={"tool_name": action.value, **audit_capability},
-                )
-                result = _build_result(
-                    outcome=AgentTurnOutcome.JOB_DRAFT_FAILED,
-                    message=None,
-                    tool_results=tool_results,
-                    tool_call_count=tool_calls_made,
-                    provenance=provenance,
-                )
-                return finish(result)
-            tool_calls_made += 1
-            tool_results.append(job_draft_result)
-            assert job_draft_result.job_draft is not None
-            await record_event(
-                db,
-                tenant_id=tenant_id,
-                event_type="agent.tool.executed",
-                metadata={
-                    "tool_name": action.value,
-                    "tool_call_index": tool_calls_made,
-                    **audit_capability,
-                    **jd_draft_audit_metadata(job_draft_result.job_draft),
-                },
+    # D-092 §19.2 attempt provenance: closed keys only, no text/ids.
+    await record_event(
+        db,
+        tenant_id=tenant_id,
+        event_type="agent.plan.validated",
+        metadata=plan_validated_metadata(validated),
+    )
+    if not validated.steps:
+        # Only HUMAN_ACTION_ONLY affordances (§8.2): nothing executes; HR is
+        # pointed at the existing authenticated CSRF form.
+        affordance = validated.affordances[0]
+        return finish(
+            _build_result(
+                outcome=AgentTurnOutcome.ANSWERED,
+                message=_AFFORDANCE_COPY[affordance.capability],
+                tool_results=[], tool_call_count=0, provenance=provenance,
             )
-            result = _build_result(
-                outcome=AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT,
-                message=None,
-                tool_results=tool_results,
-                tool_call_count=tool_calls_made,
-                provenance=provenance,
-            )
-            return finish(result)
+        )
 
-        if step.capability == CapabilityName.REFINE_RESULTS:
-            # Always turn-terminal (issue #49 PR49-2, docs/DECISIONS.md
-            # D-084) — never let the model keep looping and accidentally
-            # launch a fresh search after a valid refinement. A rejection
-            # here means "the active result set is untouched", never a
-            # candidate_ref resolution outcome.
-            if capability_outcome.rejection_message is not None:
-                result = _build_result(
-                    outcome=AgentTurnOutcome.CLARIFICATION_REQUESTED,
-                    message=capability_outcome.rejection_message,
-                    tool_results=tool_results,
-                    tool_call_count=tool_calls_made,
-                    provenance=provenance,
-                )
-                return finish(result)
-            if capability_outcome.resolution_failure is not None:
-                failure_outcome, failure_message = _outcome_and_message_for_refinement_failure(
-                    capability_outcome.resolution_failure
-                )
-                result = _build_result(
-                    outcome=failure_outcome,
-                    message=failure_message,
-                    tool_results=tool_results,
-                    tool_call_count=tool_calls_made,
-                    provenance=provenance,
-                )
-                return finish(result)
-            assert (
-                capability_outcome.tool_result is not None
-                and execution.activated_result_set_id is not None
-            )
-            tool_calls_made += 1
-            tool_results.append(capability_outcome.tool_result)
-            await record_event(
-                db,
-                tenant_id=tenant_id,
-                event_type="agent.tool.executed",
-                metadata={
-                    "tool_name": action.value,
-                    "tool_call_index": tool_calls_made,
-                    **audit_capability,
-                },
-            )
-            result = _build_result(
-                outcome=AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT,
-                message=None,
-                tool_results=tool_results,
-                tool_call_count=tool_calls_made,
-                provenance=provenance,
-            )
-            return finish(result)
-
-        # SEARCH_CANDIDATES / GET_CANDIDATE_PROFILE / GET_CANDIDATE_EVIDENCE:
-        # every outcome (found or not) is a recorded tool result, as today.
-        tool_result = capability_outcome.tool_result
-        assert tool_result is not None
-        matched_profile = capability_outcome.matched_profile
-        resolution_failure = capability_outcome.resolution_failure
-
-        tool_calls_made += 1
-        tool_results.append(tool_result)
-        last_tool_summary = _summarize_tool_result(tool_result)
-        await record_event(
-            db,
+    # [5] `for step in validated_plan.steps` (bounded by Layer 1): Layer 2 +
+    # executor + atomic activation. No model re-decision between steps.
+    execution = await execute_plan(
+        validated,
+        ExecutionContext(
+            db=db,
+            llm=llm,
             tenant_id=tenant_id,
-            event_type="agent.tool.executed",
-            metadata={
-                "tool_name": action.value,
-                "tool_call_index": tool_calls_made,
-                **audit_capability,
-            },
+            session_context=session_context,
+            as_of_date=as_of_date,
+            embedding_config=embedding_config,
+            embedding_provider=embedding_provider,
+        ),
+    )
+    return finish(
+        await _plan_execution_result(
+            db, llm, tenant_id=tenant_id, plan=validated, execution=execution,
+            user_message=user_message, provenance=provenance,
         )
-
-        if search_turn_terminal and step.capability == CapabilityName.SEARCH_CANDIDATES:
-            # Server-authorized search: the validated planner/search result
-            # (executable, empty, or a truthful non-executable plan) is the
-            # whole answer.
-            result = _build_result(
-                outcome=AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT,
-                message=None,
-                tool_results=tool_results,
-                tool_call_count=tool_calls_made,
-                provenance=provenance,
-            )
-            return finish(result)
-
-        # GET_CANDIDATE_PROFILE / GET_CANDIDATE_EVIDENCE are always
-        # turn-terminal, found or not: each is already a complete,
-        # self-contained, evidence-grounded answer to one specific
-        # question, so no further model judgment is spent (or risked) on
-        # it. Only SEARCH_CANDIDATES loops back — the model may still
-        # decide to look at a specific result (a second tool call, bounded
-        # by max_tool_calls) or close the turn with FINAL_ANSWER/CLARIFY.
-        if step.capability in (
-            CapabilityName.GET_CANDIDATE_PROFILE,
-            CapabilityName.GET_CANDIDATE_EVIDENCE,
-        ):
-            found = (
-                tool_result.profile.found
-                if tool_result.profile is not None
-                else tool_result.evidence.found  # type: ignore[union-attr]
-            )
-            # Never plain ANSWERED here — that outcome is reserved for a
-            # FINAL_ANSWER closed response code rendered as fixed server
-            # copy. A
-            # successful profile/evidence lookup has no model framing at
-            # all — instead, when found, attempt one bounded D-038
-            # grounded-answer synthesis over this candidate's own facts;
-            # a None result (unavailable, invalid, or ungrounded) falls
-            # back to the existing deterministic message exactly as
-            # before (D-036) — never a turn failure.
-            synthesized_message: str | None = None
-            if found and matched_profile is not None:
-                synthesized_message = await _synthesize_grounded_answer(
-                    llm,
-                    question=user_message,
-                    facts=_build_profile_facts(matched_profile),
-                )
-            result = _build_result(
-                outcome=(
-                    AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
-                    if found
-                    else _outcome_for_resolution_failure(resolution_failure)
-                ),
-                message=synthesized_message,
-                tool_results=tool_results,
-                tool_call_count=tool_calls_made,
-                provenance=provenance,
-            )
-            return finish(result)
+    )
 
 
 def plan_incomplete_result(llm: LLMProvider, execution: PlanExecution) -> AgentTurnResult:

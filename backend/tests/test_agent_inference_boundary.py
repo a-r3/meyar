@@ -19,6 +19,7 @@ from collections.abc import AsyncGenerator, Callable
 
 import httpx
 import pytest
+from agent_plans import converse, plan, profile_plan, profile_step, search_plan, search_step
 from conftest import TEST_DATABASE_URL
 from conftest import BrowserTestClient as AsyncClient
 from httpx import ASGITransport
@@ -38,7 +39,25 @@ from meyar.storage.local import LocalFilesystemStorage
 from meyar.storage.photo import LocalPhotoStorage
 
 MODEL = "meyar-test-llm:v1"
-GREETING_DECISION = {"action": "FINAL_ANSWER", "response_code": "GREETING"}
+# Issue #88 slice C: canned agent-plan-v1 proposals as the raw Ollama JSON.
+GREETING_DECISION = converse("GREETING").model_dump(mode="json")
+FIRST_PROFILE_PLAN = profile_plan("birincinin").model_dump(mode="json")
+
+
+def _empty_plan_context():  # noqa: ANN202
+    from meyar.agent.capabilities.contracts import AgentPlanContext
+
+    return AgentPlanContext(
+        recent_turns=[],
+        available_capabilities=[],
+        max_plan_steps=1,
+        active_result_context_present=False,
+        available_candidate_refs=[],
+        pending_vacancy_confirmation=False,
+    )
+
+
+_EMPTY_PLAN_CONTEXT = _empty_plan_context()
 
 # Unrelated DB-backed routes must answer inside this budget while the model
 # is blocked. Pool checkout timeout below is deliberately LONGER than this
@@ -243,6 +262,34 @@ async def test_model_call_holds_no_db_connection_and_unrelated_route_stays_fast(
         assert stored is not None
         assert [t["role"] for t in stored.turns] == ["user", "assistant"]
         assert stored.turns[0]["text"] == "salam"
+
+
+async def test_plan_proposal_and_its_repair_hold_no_db_connection(
+    small_pool, tenant_and_user
+) -> None:
+    """Issue #88 slice C (#85, §22 item 23): the ONE plan proposal and its
+    ONE repair both run with no pooled connection checked out, and the turn
+    then commits normally."""
+    engine, factory, probe = small_pool
+    _tenant, user, password, _membership = tenant_and_user
+    gate = GatedOllama(decisions=[{"not": "an agent plan"}, GREETING_DECISION])
+    _install(Settings(ui_cookie_secure=False, inference_concurrency=1), gate)
+    during_model: list[int] = []
+    gate.on_enter = lambda: during_model.append(probe.checked_out)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        csrf = await _login(client, user.username, password)
+        conversation_id = await _new_conversation(client, csrf)
+        baseline = probe.checked_out
+        turn = _spawn(_agent_post(client, csrf, conversation_id, "salam"))
+        await asyncio.wait_for(gate.entered.wait(), timeout=10)
+        gate.release.set()
+        response = await asyncio.wait_for(turn, timeout=10)
+    assert response.status_code == 200
+    assert gate.calls == 2  # proposal + exactly one repair, no third call
+    assert during_model == [baseline, baseline]
+    stored = await _stored(factory, conversation_id)
+    assert [t["role"] for t in stored.turns] == ["user", "assistant"]
+    assert stored.turns[-1]["outcome"] == "ANSWERED"
 
 
 async def test_twenty_slow_turns_on_distinct_conversations_do_not_starve_db_routes(
@@ -1141,7 +1188,7 @@ async def test_active_result_set_superseded_while_inferring_cannot_commit_stale_
         )
         holder["r2"] = r2.id
 
-    gate_decision = {"action": "GET_CANDIDATE_PROFILE", "candidate_ref": 1}
+    gate_decision = FIRST_PROFILE_PLAN
     engine, factory, probe = small_pool
     gate = GatedOllama(decision=gate_decision)
     _install(Settings(ui_cookie_secure=False, inference_concurrency=1), gate)
@@ -1253,7 +1300,6 @@ def test_settings_validate_queue_and_reservation_bounds() -> None:
 async def test_boundary_wrappers_leave_db_before_and_revalidate_after_every_call() -> None:
     from fakes import FakeEmbeddingProvider, FakeLLMProvider
 
-    from meyar.agent.schemas import AgentActionType, AgentDecision, AgentResponseCode
     from meyar.agent.turn_boundary import (
         AgentInferenceBusyError,
         BoundaryEmbedding,
@@ -1277,16 +1323,11 @@ async def test_boundary_wrappers_leave_db_before_and_revalidate_after_every_call
     boundary = _Recorder()
     llm = BoundaryLLM(
         FakeLLMProvider(
-            agent_decision=AgentDecision(
-                action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.GREETING
-            )
+            agent_plan=converse("GREETING")
         ),
         boundary,
     )
-    await llm.decide_agent_action(
-        recent_turns=[], last_tool_result_summary=None,
-        active_result_context_present=False, available_candidate_refs=[],
-    )
+    await llm.propose_agent_plan(context=_EMPTY_PLAN_CONTEXT)
     embedding = BoundaryEmbedding(FakeEmbeddingProvider(), boundary)
     await embedding.embed("Python")
     assert order == ["leave", "reenter", "leave", "reenter"]
@@ -1294,20 +1335,14 @@ async def test_boundary_wrappers_leave_db_before_and_revalidate_after_every_call
     order.clear()
     failing = BoundaryLLM(FakeLLMProvider(agent_error=ModelTimeoutError("t")), boundary)
     with pytest.raises(ModelTimeoutError):
-        await failing.decide_agent_action(
-            recent_turns=[], last_tool_result_summary=None,
-            active_result_context_present=False, available_candidate_refs=[],
-        )
+        await failing.propose_agent_plan(context=_EMPTY_PLAN_CONTEXT)
     # A handled model failure continues only on revalidated authority.
     assert order == ["leave", "reenter"]
 
     order.clear()
     busy = BoundaryLLM(FakeLLMProvider(agent_error=InferenceBusyError("QUEUE_FULL")), boundary)
     with pytest.raises(AgentInferenceBusyError):
-        await busy.decide_agent_action(
-            recent_turns=[], last_tool_result_summary=None,
-            active_result_context_present=False, available_candidate_refs=[],
-        )
+        await busy.propose_agent_plan(context=_EMPTY_PLAN_CONTEXT)
     # BUSY abandons the turn: no re-entry, and it is NOT an LLMProviderError
     # any fallback could turn into a degraded "successful" answer.
     assert order == ["leave"]
@@ -1382,8 +1417,8 @@ async def test_foreign_owner_cannot_observe_or_touch_an_in_flight_turn(
 
 EMBED_MODEL = "meyar-test-embed:v1"
 HYBRID_REQUEST = "Java is required; backend modernization experience is preferred."
-# Issue #88 slice B: the planner receives the HR user's OWN message (never a
-# model search_query), so the hybrid request is the message itself. It is an
+# Issue #88: the planner receives the HR user's OWN message (never
+# model-authored text), so the hybrid request is the message itself. It is an
 # explicit search (FORCE_CANDIDATE_SEARCH), planned by the fake planner as
 # Java + the grounded semantic phrase -> HYBRID -> one query embedding.
 HYBRID_REQUEST_MESSAGE = "Find Java candidates with backend modernization experience"
@@ -1423,7 +1458,6 @@ async def test_hybrid_agent_search_holds_no_db_connection_while_embedding_waits_
     pooled connection."""
     from fakes import FakeLLMProvider
 
-    from meyar.agent.schemas import AgentActionType, AgentDecision
     from meyar.search.planner_schemas import PlannerDraft
     from meyar.search.schemas import RequiredFilters
 
@@ -1432,9 +1466,7 @@ async def test_hybrid_agent_search_holds_no_db_connection_while_embedding_waits_
     settings = Settings(ui_cookie_secure=False, inference_concurrency=1)
     app.dependency_overrides[get_settings] = lambda: settings
     fake_llm = FakeLLMProvider(
-        agent_decision=AgentDecision(
-            action=AgentActionType.SEARCH_CANDIDATES, search_query=HYBRID_REQUEST
-        ),
+        agent_plan=search_plan(),
         planner_draft=PlannerDraft(
             required_filters=RequiredFilters(skills=["Java"]),
             semantic_query="backend modernization experience",
@@ -1484,7 +1516,6 @@ async def test_hybrid_agent_search_busy_embedding_gate_gives_busy_outcome(
 ) -> None:
     from fakes import FakeLLMProvider
 
-    from meyar.agent.schemas import AgentActionType, AgentDecision
     from meyar.search.planner_schemas import PlannerDraft
     from meyar.search.schemas import RequiredFilters
 
@@ -1495,9 +1526,7 @@ async def test_hybrid_agent_search_busy_embedding_gate_gives_busy_outcome(
     )
     app.dependency_overrides[get_settings] = lambda: settings
     app.dependency_overrides[get_llm_provider] = lambda: FakeLLMProvider(
-        agent_decision=AgentDecision(
-            action=AgentActionType.SEARCH_CANDIDATES, search_query=HYBRID_REQUEST
-        ),
+        agent_plan=search_plan(),
         planner_draft=PlannerDraft(
             required_filters=RequiredFilters(skills=["Java"]),
             semantic_query="backend modernization experience",
@@ -1598,14 +1627,17 @@ async def test_orphan_result_set_from_stale_turn_never_becomes_live_authority(
         },
     )
     await db_session.commit()
-    # Issue #88 slice B: the model only CHOOSES search; the planner gets the
-    # HR user's own (model-routed) message, planned by the local model (call
-    # 2) — then the post-search decision (call 3) blocks.
+    # Issue #88 slice C: ONE two-step plan (call 1); the planner gets the
+    # grounded quote (call 2); the search commits its inert ResultSet, the
+    # profile step reads it, and the grounded-synthesis call (call 3) blocks.
+    # There is no post-tool "what next" call.
     gate = GatedOllama(
         decisions=[
-            {"action": "SEARCH_CANDIDATES", "search_query": "Python bilən namizədləri göstər"},
+            plan(
+                search_step("Python bilən namizəd tap"), profile_step("birincinin")
+            ).model_dump(mode="json"),
             {"required_filters": {"skills": ["Python"]}},
-            GREETING_DECISION,
+            {"used_facts": []},
         ],
         pass_through=2,
     )
@@ -1618,8 +1650,13 @@ async def test_orphan_result_set_from_stale_turn_never_becomes_live_authority(
         csrf_a = await _login(tab_a, user.username, password)
         csrf_b = await _login(tab_b, user.username, password)
         conversation_id = await _new_conversation(tab_a, csrf_a)
-        turn = _spawn(_agent_post(tab_a, csrf_a, conversation_id, "Python haqqında məlumat ver"))
-        # The search ran and committed its ResultSet; the 2nd decision blocks.
+        turn = _spawn(
+            _agent_post(
+                tab_a, csrf_a, conversation_id,
+                "Python bilən namizəd tap və birincinin profilini aç",
+            )
+        )
+        # The search ran and committed its ResultSet; the synthesis call blocks.
         await asyncio.wait_for(gate.entered.wait(), timeout=10)
         async with factory() as db:
             orphan = (
@@ -1645,7 +1682,7 @@ async def test_orphan_result_set_from_stale_turn_never_becomes_live_authority(
         assert str(candidate.id) not in stale.text
 
         # Follow-ups asking for "the first candidate" from both sessions.
-        follow_gate = GatedOllama(decision={"action": "GET_CANDIDATE_PROFILE", "candidate_ref": 1})
+        follow_gate = GatedOllama(decision=FIRST_PROFILE_PLAN)
         follow_gate.release.set()
         _install(Settings(ui_cookie_secure=False, inference_concurrency=1), follow_gate)
         async with factory() as db:

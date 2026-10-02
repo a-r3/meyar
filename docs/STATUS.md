@@ -11,13 +11,27 @@ exact-head CI run `36965800982` SUCCESS (3073 pytest passed; 10 hang
 diagnostics passed). A3 reconciles assistant-history privacy (§15),
 coordinated/limit coverage precision (§10.2) and RANK chat authority.
 
-**Issue #88 Slice C — implemented in PR #102 (head
-`4e0daf2191b563c49315139ad7a01536dbe41f56`), OPEN, NOT accepted, NOT
-merged.** PR #102 must now be corrected to the accepted A3. D-095 (in PR
-#102) is not accepted authority. No migration (Alembic head remains
-`b88a2c4d6e10`). #88 stays OPEN until slice C is accepted and merged; #50
-remains OPEN and out of scope. The historical CI pytest hang root cause remains NOT
-PROVEN.
+**Issue #88 Slice C — implemented in PR #102, corrected to the accepted
+A3; OPEN, pending independent acceptance, NOT accepted, NOT merged.** The
+branch `feat/88c-agent-plan-contract` merged current `main` @
+`32f1a0e5411f0445f3bc794451e5288561ae5cd1` (normal merge, no history
+rewrite). Implements D-092 §23 slice C as amended by A3 (implementation
+record D-095): the `agent-plan-v1` model plan contract via
+`LLMProvider.propose_agent_plan` (one proposal + at most one repair,
+registry-derived per-call capability subset, typed allow-list projection
+with assistant turns as the closed `AgentTurnOutcome` code — A3.1), full
+§10.2 source grounding (unique exact quotes, per-coordinated-part
+requirement coverage from semantic source / reference / topic spans only,
+`limit_quote` excluded from coverage — A3.2, protected-content QUOTES
+prohibition, closed count/ordinal parsers, grounded evidence topic), bounded
+multi-step execution with no post-tool model re-decision, and retirement of
+`decide_agent_action`, `AgentDecision`, `TOOL_ACTIONS`, the transitional
+adapter and the `while True` loop. RANK_JOB_CANDIDATES stays a registered
+HUMAN_ACTION_ONLY capability but is NOT model-proposable or offered in chat
+(A3.3); direct ranking routes are unchanged. CREATE_JOB is unchanged.
+No migration (Alembic head remains `b88a2c4d6e10`); no new dependency.
+#88 stays OPEN until slice C is accepted and merged; #50 remains OPEN and
+out of scope. The historical CI pytest hang root cause remains NOT PROVEN.
 
 **Issue #88 Slice B — IMPLEMENTED, independently technically accepted, and
 MERGED through PR #100.** Squash commit on `main`:

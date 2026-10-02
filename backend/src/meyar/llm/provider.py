@@ -1,10 +1,10 @@
-from typing import Any, Protocol
+from typing import Protocol
 
 from pydantic import BaseModel, Field
 
+from meyar.agent.capabilities.contracts import AgentPlanContext, AgentPlanProposal
 from meyar.agent.clarification_schemas import ClarificationAnswerProposal
 from meyar.agent.schemas import (
-    AgentDecision,
     GroundedFact,
     GroundedSelection,
     JDCriteriaDraft,
@@ -98,19 +98,20 @@ class LLMProvider(Protocol):
         """
         ...
 
-    async def decide_agent_action(
+    async def propose_agent_plan(
         self,
         *,
-        recent_turns: list[tuple[str, str]],
-        last_tool_result_summary: dict[str, Any] | None,
-        active_result_context_present: bool,
-        available_candidate_refs: list[int],
+        context: AgentPlanContext,
         repair: bool = False,
-    ) -> tuple[AgentDecision, "LLMResultProvenance"]:
-        """One bounded orchestration step for Slice 2's read-only agent
-        (meyar.agent.service). Returns a strict AgentDecision and actual
-        call provenance — never raw model output. ``repair`` selects the
-        single bounded repair prompt, mirroring plan_candidate_search."""
+    ) -> tuple[AgentPlanProposal, "LLMResultProvenance"]:
+        """Issue #88 slice C (D-092 §10, §15): ONE bounded ``agent-plan-v1``
+        proposal per model-routed turn (plus at most one repair). ``context``
+        is the typed allow-list projection — the ENTIRE model input — and its
+        ``available_capabilities`` is the per-call subset the constrained
+        schema offers. Returns a strict AgentPlanProposal and actual call
+        provenance — never raw model output. Raises the usual
+        LLMProviderError subclasses (ModelSchemaInvalidError for output that
+        fails the schema)."""
         ...
 
     async def select_grounded_facts(

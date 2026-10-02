@@ -7,6 +7,7 @@ and pending-draft authority across sessions."""
 import re
 import uuid
 
+from agent_plans import converse
 from conftest import BrowserTestClient as AsyncClient
 from fakes import FakeLLMProvider
 from httpx import ASGITransport
@@ -19,7 +20,6 @@ from test_ui_agent_routes import (
     local_ui_settings,  # noqa: F401 - pytest fixture re-export
 )
 
-from meyar.agent.schemas import AgentActionType, AgentDecision, AgentResponseCode
 from meyar.config import Settings
 from meyar.core.roles import ROLE_HR_USER
 from meyar.llm.dependency import get_llm_provider
@@ -35,9 +35,7 @@ from meyar.services.tenant_repo import create_tenant
 from meyar.services.user_repo import create_user
 
 GREETING = FakeLLMProvider(
-    agent_decision=AgentDecision(
-        action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.GREETING
-    )
+    agent_plan=converse("GREETING")
 )
 
 

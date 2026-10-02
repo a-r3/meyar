@@ -14,6 +14,7 @@ matching the PR49-1 precedent."""
 import uuid
 from datetime import UTC, datetime, timedelta
 
+from agent_plans import profile_plan, refine_plan, search_plan
 from fakes import FakeLLMProvider
 from pydantic import ValidationError
 from search_helpers import (
@@ -26,7 +27,6 @@ from search_helpers import (
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meyar.agent.schemas import AgentActionType, AgentDecision, AgentResponseCode
 from meyar.agent.service import run_agent_turn
 from meyar.models.agent_result_set import AgentResultSet, AgentResultSetKind, AgentResultSetMember
 from meyar.models.audit_event import AuditEvent
@@ -99,8 +99,12 @@ async def _refine(
     session_context,
     filter_query: str | None = None,
     limit: int | None = None,
-    message: str = "refine",
+    message: str | None = None,
 ):
+    # Issue #88 slice C: the model only QUOTES the user's message, so the
+    # default message is the one the scripted plan's quotes come from.
+    if message is None:
+        message = getattr(llm, "refine_message", "refine")
     return await run_agent_turn(
         db_session,
         llm,
@@ -116,14 +120,23 @@ async def _refine(
     )
 
 
-def _refine_llm(*, filter_query: str | None = None, limit: int | None = None) -> FakeLLMProvider:
-    return FakeLLMProvider(
-        agent_decision=AgentDecision(
-            action=AgentActionType.REFINE_CANDIDATE_RESULTS,
-            filter_query=filter_query,
-            limit=limit,
-        )
-    )
+def _refine_llm(
+    *, filter_query: str | None = None, limit: int | None = None, limit_quote: str | None = None
+) -> FakeLLMProvider:
+    """Issue #88 slice C: the former model-authored ``filter_query``/``limit``
+    become exact quotes of a model-routed "bunlardan ..." message; the
+    server resolves the filter span and parses the count itself, so the
+    planner and refinement receive exactly the same values as before."""
+    if limit is not None and limit_quote is None:
+        limit_quote = f"ilk {limit}"
+    parts = [part for part in (filter_query, limit_quote) if part]
+    if filter_query and limit_quote and limit_quote in filter_query:
+        # The count is already part of the filter text: quote it there once.
+        parts = [filter_query]
+    filter_quotes = (filter_query,) if filter_query else ()
+    llm = FakeLLMProvider(agent_plan=refine_plan(*filter_quotes, limit_quote=limit_quote))
+    llm.refine_message = "bunlardan " + ", ".join(parts)  # type: ignore[attr-defined]
+    return llm
 
 
 def _fake_structured_plan(
@@ -371,9 +384,7 @@ async def test_zero_result_refinement_is_not_an_error_and_becomes_active(
 
     # A later ordinal reference against the empty active set fails safely.
     ordinal_llm = FakeLLMProvider(
-        agent_decision=AgentDecision(
-            action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1
-        )
+        agent_plan=profile_plan("birincini")
     )
     followup = await _refine(
         db_session,
@@ -512,9 +523,7 @@ async def test_chained_refinement_ordinal_resolves_against_final_derived_set(
     ordinal_result = await _refine(
         db_session,
         FakeLLMProvider(
-            agent_decision=AgentDecision(
-                action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=2
-            )
+            agent_plan=profile_plan("ikinci")
         ),
         tenant_id=tenant.id,
         conversation=conversation,
@@ -554,14 +563,8 @@ async def test_new_independent_search_after_refinement_starts_new_root(
 
     search_llm = FakeLLMProvider(
         planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Java"])),
-        agent_decisions=[
-            AgentDecision(
-                action=AgentActionType.SEARCH_CANDIDATES,
-                search_query="Java bilən namizədləri göstər",
-            ),
-            AgentDecision(
-                action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
-            ),
+        agent_plans=[
+            search_plan(),
         ],
     )
     await _refine(
@@ -602,9 +605,7 @@ async def test_refined_context_survives_conversation_reload(
     result = await _refine(
         db_session,
         FakeLLMProvider(
-            agent_decision=AgentDecision(
-                action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1
-            )
+            agent_plan=profile_plan("birinci")
         ),
         tenant_id=tenant.id,
         conversation=reloaded,
@@ -643,7 +644,7 @@ async def test_new_conversation_reset_invalidates_refined_context(
     assert new_context.active_result_set_id is None
     assert new_context.context_epoch == context.context_epoch
 
-    reset_llm = _refine_llm(limit=1)
+    reset_llm = _refine_llm(limit=1, limit_quote="ilk biri")
     reset_followup = await _refine(
         db_session,
         reset_llm,
@@ -663,9 +664,7 @@ async def test_new_conversation_reset_invalidates_refined_context(
     result = await _refine(
         db_session,
         FakeLLMProvider(
-            agent_decision=AgentDecision(
-                action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1
-            )
+            agent_plan=profile_plan("birinci")
         ),
         tenant_id=tenant.id,
         conversation=new_conversation,
@@ -1306,7 +1305,7 @@ async def test_planner_default_limit_never_becomes_implicit_refinement_truncatio
 
 def test_bare_refinement_intent_with_no_operation_is_schema_rejected() -> None:
     try:
-        AgentDecision(action=AgentActionType.REFINE_CANDIDATE_RESULTS)
+        refine_plan()
         raise AssertionError("expected ValidationError")
     except ValidationError:
         pass
@@ -1478,13 +1477,11 @@ async def test_unknown_snapshot_policy_fails_closed_before_planner_and_profile(
     assert context.active_result_set_id == root.id
 
     profile_llm = FakeLLMProvider(
-        agent_decision=AgentDecision(
-            action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1
-        )
+        agent_plan=profile_plan("birincini")
     )
     profile_result = await _refine(
         db_session, profile_llm, tenant_id=tenant.id, conversation=conversation,
-        session_context=context,
+        session_context=context, message="birincini aç",
     )
     assert profile_result.outcome.value == "RESULT_SET_STALE"
     dumped = profile_result.model_dump_json()

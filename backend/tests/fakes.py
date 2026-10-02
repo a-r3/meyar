@@ -1,14 +1,12 @@
 """Deterministic test doubles. Automated tests must never depend on a
 real running LLM or embedding model — see Slice 4 spec §21."""
 
-from typing import Any
-
+from meyar.agent.capabilities.contracts import AgentPlanContext, AgentPlanProposal
 from meyar.agent.clarification_schemas import (
     ClarificationAnswerProposal,
     ClarificationProposalValue,
 )
 from meyar.agent.schemas import (
-    AgentDecision,
     GroundedFact,
     GroundedSelection,
     JDCriteriaDraft,
@@ -37,11 +35,10 @@ class FakeLLMProvider:
         planner_drafts: list[PlannerDraft] | None = None,
         model_revision: str = "",
         planner_provenance: LLMResultProvenance | None = None,
-        agent_decision: AgentDecision | None = None,
-        agent_decisions: list[AgentDecision] | None = None,
+        agent_plan: AgentPlanProposal | None = None,
+        agent_plans: list[AgentPlanProposal] | None = None,
         agent_error: LLMProviderError | None = None,
         agent_fail_first_n_calls: int = 0,
-        agent_fail_after_n_calls: int | None = None,
         grounded_selection: GroundedSelection | None = None,
         grounded_error: LLMProviderError | None = None,
         grounded_fail_first_n_calls: int = 0,
@@ -62,12 +59,18 @@ class FakeLLMProvider:
         self._planner_drafts = planner_drafts or ([planner_draft] if planner_draft else [])
         self._planner_provenance = planner_provenance
         self.call_count = 0
-        self._agent_decisions = agent_decisions or ([agent_decision] if agent_decision else [])
+        # Issue #88 slice C: one agent-plan-v1 proposal per model-routed turn
+        # (plus at most one repair). Successive successful calls return the
+        # successive plans (the last one repeats).
+        self._agent_plans = agent_plans or ([agent_plan] if agent_plan else [])
         self._agent_error = agent_error
         self._agent_fail_first_n_calls = agent_fail_first_n_calls
-        self._agent_fail_after_n_calls = agent_fail_after_n_calls
         self.agent_call_count = 0
+        # (active_result_context_present, available_candidate_refs) per call.
         self.agent_contexts: list[tuple[bool, list[int]]] = []
+        # The ENTIRE typed model input of every propose_agent_plan call.
+        self.agent_plan_contexts: list[AgentPlanContext] = []
+        self.agent_repairs: list[bool] = []
         self._grounded_selection = grounded_selection
         self._grounded_error = grounded_error
         self._grounded_fail_first_n_calls = grounded_fail_first_n_calls
@@ -142,43 +145,30 @@ class FakeLLMProvider:
         )
         return draft, provenance
 
-    async def decide_agent_action(
-        self,
-        *,
-        recent_turns: list[tuple[str, str]],
-        last_tool_result_summary: dict[str, Any] | None,
-        active_result_context_present: bool,
-        available_candidate_refs: list[int],
-        repair: bool = False,
-    ) -> tuple[AgentDecision, LLMResultProvenance]:
+    async def propose_agent_plan(
+        self, *, context: AgentPlanContext, repair: bool = False
+    ) -> tuple[AgentPlanProposal, LLMResultProvenance]:
         self.agent_call_count += 1
+        self.agent_plan_contexts.append(context)
+        self.agent_repairs.append(repair)
         self.agent_contexts.append(
-            (active_result_context_present, list(available_candidate_refs))
+            (context.active_result_context_present, list(context.available_candidate_refs))
         )
         if self.agent_call_count <= self._agent_fail_first_n_calls:
             from meyar.llm.provider import ModelSchemaInvalidError
 
-            raise ModelSchemaInvalidError("Simulated schema-invalid agent output.")
-        if (
-            self._agent_fail_after_n_calls is not None
-            and self.agent_call_count > self._agent_fail_after_n_calls
-        ):
-            from meyar.llm.provider import ModelSchemaInvalidError
-
-            raise self._agent_error or ModelSchemaInvalidError(
-                "Simulated schema-invalid agent output (post-success failure)."
-            )
-        if self._agent_error is not None and self._agent_fail_after_n_calls is None:
+            raise ModelSchemaInvalidError("Simulated schema-invalid agent plan output.")
+        if self._agent_error is not None:
             raise self._agent_error
         success_index = self.agent_call_count - self._agent_fail_first_n_calls - 1
-        assert self._agent_decisions
-        decision = self._agent_decisions[min(success_index, len(self._agent_decisions) - 1)]
+        assert self._agent_plans, "model-routed turn without a scripted agent plan"
+        plan = self._agent_plans[min(success_index, len(self._agent_plans) - 1)]
         provenance = self._planner_provenance or LLMResultProvenance(
             provider=self.provider_name,
             model_name=self.model_name,
             model_revision=self.model_revision,
         )
-        return decision, provenance
+        return plan, provenance
 
     async def select_grounded_facts(
         self,

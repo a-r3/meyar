@@ -19,6 +19,8 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from agent_plans import evidence_plan, plan, profile_plan, search_step, vacancy_proposal
+from agent_plans import search_plan as search_proposal
 from conftest import BrowserTestClient as AsyncClient
 from fakes import FakeLLMProvider
 from search_helpers import (
@@ -36,6 +38,7 @@ from test_ui_agent_routes import (
 
 from meyar.agent import service as agent_service
 from meyar.agent.capabilities import (
+    AGENT_PLAN_SCHEMA_VERSION,
     CAPABILITY_PLAN_SCHEMA_VERSION,
     ExecutablePlan,
     PlanOrigin,
@@ -44,9 +47,9 @@ from meyar.agent.capabilities import (
     ValidationContext,
     validate_plan,
 )
-from meyar.agent.capabilities.adapter import plan_for_model_decision, search_plan
 from meyar.agent.capabilities.provenance import plan_sha256, plan_validated_metadata
-from meyar.agent.schemas import AgentActionType, AgentDecision, AgentTurnOutcome
+from meyar.agent.capabilities.server_plans import search_plan
+from meyar.agent.schemas import AgentActionType, AgentTurnOutcome
 from meyar.config import Settings
 from meyar.llm.dependency import get_llm_provider
 from meyar.main import app
@@ -121,8 +124,14 @@ async def _setup(db_session: AsyncSession, tenant_and_user, *skills: str):  # no
     return tenant, conversation, context, candidates, result_set
 
 
-def _decision(action: AgentActionType, **fields) -> FakeLLMProvider:  # noqa: ANN003
-    return FakeLLMProvider(agent_decision=AgentDecision(action=action, **fields))
+# Slice C: the ordinal is the server-parsed quote of HR's own words.
+_ORDINAL_WORD = {1: "birincinin", 2: "ikincinin", 3: "üçüncünün", 4: "dördüncünün"}
+
+
+def _ref_turn(action: AgentActionType, ref: int) -> tuple[FakeLLMProvider, str]:
+    word = _ORDINAL_WORD[ref]
+    builder = profile_plan if action == AgentActionType.GET_CANDIDATE_PROFILE else evidence_plan
+    return FakeLLMProvider(agent_plan=builder(word)), f"{word} profilini aç"
 
 
 # ---------------------------------------------------------------------------
@@ -167,9 +176,10 @@ async def test_layer1_rejects_reference_with_todays_outcome_and_zero_executors(
         )
     await db_session.commit()
     spy = _ExecutorSpy(monkeypatch)
+    llm, message = _ref_turn(action, ref)
     result = await _run(
-        db_session, _decision(action, candidate_ref=ref), tenant_id=tenant.id,
-        conversation=conversation, session_context=context, message="birincinin profilini aç",
+        db_session, llm, tenant_id=tenant.id,
+        conversation=conversation, session_context=context, message=message,
     )
     assert spy.calls == []  # Layer 1: ZERO executors, no execute_plan
     # Today's truthful outward behaviour: outcome, no model text, the same
@@ -188,7 +198,7 @@ async def test_layer1_rejects_reference_with_todays_outcome_and_zero_executors(
         expected_reference
     ]
     assert await _events(db_session, tenant.id, "agent.plan.rejected") == [
-        {"reason_code": plan_code, "schema_version": CAPABILITY_PLAN_SCHEMA_VERSION}
+        {"reason_code": plan_code, "schema_version": AGENT_PLAN_SCHEMA_VERSION}
     ]
     assert await _events(db_session, tenant.id, "agent.plan.validated") == []
     assert await _events(db_session, tenant.id, "agent.tool.executed") == []
@@ -206,7 +216,7 @@ async def test_issue86_unrelated_changed_member_never_invalidates_a_reference(
     await db_session.commit()
     spy = _ExecutorSpy(monkeypatch)
     resolved = await _run(
-        db_session, _decision(AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1),
+        db_session, FakeLLMProvider(agent_plan=profile_plan("birincinin")),
         tenant_id=tenant.id, conversation=conversation, session_context=context,
         message="birincinin profilini aç",
     )
@@ -217,7 +227,7 @@ async def test_issue86_unrelated_changed_member_never_invalidates_a_reference(
     assert card.profile is not None and card.profile.candidate_id == first.id
     spy.calls.clear()
     stale = await _run(
-        db_session, _decision(AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=2),
+        db_session, FakeLLMProvider(agent_plan=profile_plan("ikincinin")),
         tenant_id=tenant.id, conversation=conversation, session_context=context,
         message="ikincinin profilini aç",
     )
@@ -347,7 +357,7 @@ async def test_change_after_layer1_is_still_caught_by_executor_checks(
 
     monkeypatch.setattr(agent_service, "_dispatch_profile", spy_profile)
     result = await _run(
-        db_session, _decision(AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1),
+        db_session, FakeLLMProvider(agent_plan=profile_plan("birincinin")),
         tenant_id=tenant.id, conversation=conversation, session_context=context,
         message="birincinin profilini aç",
     )
@@ -392,13 +402,10 @@ async def test_http_route_wiring_runs_layer1(
         )
     await db_session.commit()
     ref = 4 if case == "out-of-range" else 1
-    app.dependency_overrides[get_llm_provider] = lambda: _decision(
-        AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=ref
-    )
+    ref_llm, message = _ref_turn(AgentActionType.GET_CANDIDATE_PROFILE, ref)
+    app.dependency_overrides[get_llm_provider] = lambda: ref_llm
     spy = _ExecutorSpy(monkeypatch)
-    response = await client.post(
-        "/ui/agent", data={"message": "birincinin profilini aç", "csrf_token": csrf}
-    )
+    response = await client.post("/ui/agent", data={"message": message, "csrf_token": csrf})
     assert response.status_code == 200
     expected = {
         "missing": "CANDIDATE_REF_NOT_FOUND", "expired": "RESULT_SET_EXPIRED",
@@ -415,7 +422,7 @@ async def test_http_route_wiring_runs_layer1(
         # Capability names / plan codes never reach HR (the outcome value is
         # an existing data attribute of the turn markup, unchanged).
         for leaked in ("GET_CANDIDATE_PROFILE", "CANDIDATE_REF_OUT_OF_RANGE",
-                       "RESULT_CONTEXT_REQUIRED", "capability-plan-v1"):
+                       "RESULT_CONTEXT_REQUIRED", "capability-plan-v1", "agent-plan-v1"):
             assert leaked not in response.text
 
 
@@ -429,7 +436,7 @@ PLAN_VALIDATED_KEYS = {"plan_sha256", "step_count", "capabilities", "schema_vers
 def _assert_safe(metadata: dict, *forbidden_text: str) -> None:
     assert set(metadata) == PLAN_VALIDATED_KEYS
     assert re.fullmatch(r"[0-9a-f]{64}", metadata["plan_sha256"])
-    assert metadata["schema_version"] == CAPABILITY_PLAN_SCHEMA_VERSION
+    assert metadata["schema_version"] in {CAPABILITY_PLAN_SCHEMA_VERSION, AGENT_PLAN_SCHEMA_VERSION}
     assert isinstance(metadata["step_count"], int) and 1 <= metadata["step_count"] <= 3
     assert metadata["step_count"] == len(metadata["capabilities"])
     from meyar.agent.capabilities import CapabilityName
@@ -461,31 +468,21 @@ async def test_forced_and_model_searches_each_emit_exactly_one_safe_validated_ev
     model_message = "Python haqqında məlumat ver"
     llm = FakeLLMProvider(
         planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
-        agent_decisions=[
-            AgentDecision(
-                action=AgentActionType.SEARCH_CANDIDATES, search_query="Java bilən namizədlər"
-            ),
-            AgentDecision(
-                action=AgentActionType.SEARCH_CANDIDATES,
-                search_query="Java bilən başqa namizədlər",
-            ),
-            AgentDecision(action=AgentActionType.FINAL_ANSWER, response_code="ACKNOWLEDGEMENT"),
-        ],
+        agent_plan=search_proposal(),
     )
     await _run(
         db_session, llm, tenant_id=tenant.id, conversation=conversation,
         session_context=context, message=model_message,
     )
+    # Slice C: exactly ONE proposal per model-routed turn -> exactly one
+    # validated attempt (there is no post-tool re-decision any more).
+    assert llm.agent_call_count == 1
     validated = await _events(db_session, tenant.id, "agent.plan.validated")
-    # Both adapted proposals were validated attempts; only ONE search ran.
-    # (Events of one transaction share created_at: select by content.)
-    assert len(validated) == 3
-    model_events = [e for e in validated if e["plan_sha256"] != forced["plan_sha256"]]
-    assert len(model_events) == 2
-    for metadata in model_events:
-        _assert_safe(metadata, model_message, "Java", "Python")
-        assert metadata["capabilities"] == ["SEARCH_CANDIDATES"]
-    assert model_events[0]["plan_sha256"] == model_events[1]["plan_sha256"]
+    assert len(validated) == 2
+    (model_event,) = [e for e in validated if e["plan_sha256"] != forced["plan_sha256"]]
+    _assert_safe(model_event, model_message, "Python")
+    assert model_event["capabilities"] == ["SEARCH_CANDIDATES"]
+    assert model_event["schema_version"] == AGENT_PLAN_SCHEMA_VERSION
     executed = await _events(db_session, tenant.id, "agent.tool.executed")
     assert [e["tool_call_index"] for e in executed] == [1, 1]  # one per turn
 
@@ -495,7 +492,7 @@ async def test_rejected_plan_emits_rejected_and_no_validated(
 ) -> None:
     tenant, conversation, context, _c, _rs = await _setup(db_session, tenant_and_user)
     await _run(
-        db_session, _decision(AgentActionType.DRAFT_JOB_CRITERIA), tenant_id=tenant.id,
+        db_session, FakeLLMProvider(agent_plan=vacancy_proposal()), tenant_id=tenant.id,
         conversation=conversation, session_context=context, message="salam, necəsən?",
     )
     assert len(await _events(db_session, tenant.id, "agent.plan.rejected")) == 1
@@ -503,8 +500,11 @@ async def test_rejected_plan_emits_rejected_and_no_validated(
 
 
 def _validated(proposal: dict, *, source: str, origin: PlanOrigin = PlanOrigin.MODEL):  # noqa: ANN202
+    from meyar.agent.capabilities import CAPABILITY_REGISTRY
+
     plan = validate_plan(
         proposal, origin=origin, source_text=source,
+        offered=frozenset(n for n, d in CAPABILITY_REGISTRY.items() if d.model_proposable),
         ctx=ValidationContext(
             principal_scopes=frozenset({"candidates:read"}),
             pre_existing_result_set=ResultSetContext(ResultSetStatus.VALID, member_count=5),
@@ -515,47 +515,44 @@ def _validated(proposal: dict, *, source: str, origin: PlanOrigin = PlanOrigin.M
     return plan
 
 
+def _model(proposal) -> dict:  # noqa: ANN001
+    return proposal.model_dump(mode="json")
+
+
 def test_plan_sha256_is_deterministic_and_tracks_safe_structural_meaning() -> None:
-    message = "Python bilən namizədlər"
-    base = _validated(search_plan(), source=message)
-    assert plan_sha256(base) == plan_sha256(_validated(search_plan(), source=message))
-    # Same model text, different model search_query: identical (it is dropped).
-    a = plan_for_model_decision(
-        AgentDecision(action=AgentActionType.SEARCH_CANDIDATES, search_query="Java"),
-        message=message,
+    message = "Python bilən namizədlər; birincinin SQL və Java sübutu"
+    base = _validated(search_plan(), source=message, origin=PlanOrigin.SERVER)
+    assert plan_sha256(base) == plan_sha256(
+        _validated(search_plan(), source=message, origin=PlanOrigin.SERVER)
     )
-    assert plan_sha256(_validated(a, source=message)) == plan_sha256(base)
-    profile_1 = plan_for_model_decision(
-        AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1),
-        message=message,
+    model_whole = _validated(_model(search_proposal()), source=message)
+    assert plan_sha256(model_whole) == plan_sha256(
+        _validated(_model(search_proposal()), source=message)
     )
-    profile_2 = plan_for_model_decision(
-        AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=2),
-        message=message,
+    quoted = _validated(
+        _model(plan(search_step("Python bilən namizədlər"), goal="CANDIDATE_SEARCH")),
+        source=message,
     )
-    evidence_sql = plan_for_model_decision(
-        AgentDecision(
-            action=AgentActionType.GET_CANDIDATE_EVIDENCE, candidate_ref=1, evidence_topic="SQL"
-        ),
-        message=message,
-    )
-    evidence_java = plan_for_model_decision(
-        AgentDecision(
-            action=AgentActionType.GET_CANDIDATE_EVIDENCE, candidate_ref=1, evidence_topic="Java"
-        ),
-        message=message,
-    )
+    reference_message = "birincinin və ikincinin SQL və Java sübutu"
     hashes = {
         plan_sha256(base),
-        plan_sha256(_validated(search_plan(), source="Java bilən namizədlər")),
-        plan_sha256(_validated(search_plan(), source=message, origin=PlanOrigin.SERVER)),
-        plan_sha256(_validated(profile_1, source=message)),
-        plan_sha256(_validated(profile_2, source=message)),
-        plan_sha256(_validated(evidence_sql, source=message)),
-        plan_sha256(_validated(evidence_java, source=message)),
+        plan_sha256(_validated(search_plan(), source="Java bilən namizədlər",
+                               origin=PlanOrigin.SERVER)),
+        plan_sha256(model_whole),  # same text, MODEL origin + schema
+        plan_sha256(quoted),  # a different grounded span
+        plan_sha256(_validated(_model(profile_plan("birincinin")), source=reference_message)),
+        plan_sha256(_validated(_model(profile_plan("ikincinin")), source=reference_message)),
+        plan_sha256(
+            _validated(_model(evidence_plan("birincinin", "SQL")), source=reference_message)
+        ),
+        plan_sha256(
+            _validated(_model(evidence_plan("birincinin", "Java")), source=reference_message)
+        ),
     }
-    assert len(hashes) == 7
-    # The validated metadata holds no text, topic or id.
-    metadata = plan_validated_metadata(_validated(evidence_sql, source=message))
-    _assert_safe(metadata, message, "SQL", "Python")
+    assert len(hashes) == 8
+    # The validated metadata holds no text, quote, topic or id.
+    metadata = plan_validated_metadata(
+        _validated(_model(evidence_plan("birincinin", "SQL")), source=reference_message)
+    )
+    _assert_safe(metadata, reference_message, "SQL", "birincinin", "Java")
     assert str(uuid.uuid4())[:8] not in json.dumps(metadata)

@@ -3,8 +3,9 @@
 **Status: ACCEPTED DESIGN; slice A IMPLEMENTED, technically accepted and
 MERGED (PR #98); slice B IMPLEMENTED, independently technically accepted
 and MERGED (PR #100, D-094);
-slice C implemented in PR #102 but NOT accepted and NOT merged; Amendment
-A3 ACCEPTED and MERGED (PR #103) (see "Current implementation status"
+slice C implemented in PR #102 and corrected to the accepted A3, pending
+independent acceptance, NOT accepted and NOT merged (D-095); Amendment A3
+ACCEPTED and MERGED (PR #103) (see "Current implementation status"
 below).**
 
 Historical status at design acceptance (kept as recorded then):
@@ -107,10 +108,9 @@ D-094), was independently technically accepted at code head
 `76d3719bde0a5bfb8a8b1c8e7aab84832a8de198`, and merged through PR #100
 (accepted head `4b3a2260922f1dc1c19ba753a3c990b44d0c8d2f`, squash commit
 `2961365c961894cc0f6b61ac65619c9891e8cf4e` on `main`).
-Slice C is implemented in PR #102 (head
-`4e0daf2191b563c49315139ad7a01536dbe41f56`), under independent review, NOT
-accepted and NOT merged; it is now blocked on correction to the accepted
-Amendment A3 (merged through PR #103).
+Slice C is implemented in PR #102 and corrected to the accepted Amendment
+A3 (merged through PR #103; implementation record D-095); it is under
+independent review, NOT accepted and NOT merged.
 #88 stays OPEN until slice C is accepted and merged; #50 remains OPEN and
 out of scope. The design text in
 this document is unchanged.

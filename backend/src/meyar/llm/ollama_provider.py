@@ -4,6 +4,11 @@ from typing import Any
 import httpx
 from pydantic import ValidationError
 
+from meyar.agent.capabilities.contracts import (
+    AgentPlanContext,
+    AgentPlanProposal,
+    agent_plan_json_schema,
+)
 from meyar.agent.clarification_schemas import ClarificationAnswerProposal
 from meyar.agent.prompts import (
     AGENT_SYSTEM_PROMPT,
@@ -16,7 +21,6 @@ from meyar.agent.prompts import (
     build_jd_criteria_draft_user_prompt,
 )
 from meyar.agent.schemas import (
-    AgentDecision,
     GroundedFact,
     GroundedSelection,
     JDCriteriaDraft,
@@ -141,34 +145,30 @@ class OllamaLLMProvider:
             ) from exc
         return draft, provenance
 
-    async def decide_agent_action(
+    async def propose_agent_plan(
         self,
         *,
-        recent_turns: list[tuple[str, str]],
-        last_tool_result_summary: dict[str, Any] | None,
-        active_result_context_present: bool,
-        available_candidate_refs: list[int],
+        context: AgentPlanContext,
         repair: bool = False,
-    ) -> tuple[AgentDecision, LLMResultProvenance]:
+    ) -> tuple[AgentPlanProposal, LLMResultProvenance]:
         content, provenance = await self._chat(
             system_prompt=AGENT_SYSTEM_PROMPT,
-            user_prompt=build_agent_user_prompt(
-                recent_turns=recent_turns,
-                last_tool_result_summary=last_tool_result_summary,
-                active_result_context_present=active_result_context_present,
-                available_candidate_refs=available_candidate_refs,
-                repair=repair,
+            user_prompt=build_agent_user_prompt(context, repair=repair),
+            # Per-call subset (D-092 §8.1): constrained decoding offers only
+            # the capabilities this principal/context may propose.
+            schema=agent_plan_json_schema(
+                [offered.name for offered in context.available_capabilities],
+                max_steps=context.max_plan_steps,
             ),
-            schema=AgentDecision.model_json_schema(),
             think=False,
         )
         try:
-            decision = AgentDecision.model_validate(json.loads(content))
-        except (json.JSONDecodeError, ValidationError) as exc:
+            proposal = AgentPlanProposal.model_validate_json(content)
+        except ValidationError as exc:
             raise ModelSchemaInvalidError(
-                "Model output failed AgentDecision structured-schema validation."
+                "Model output failed agent-plan-v1 structured-schema validation."
             ) from exc
-        return decision, provenance
+        return proposal, provenance
 
     async def select_grounded_facts(
         self,
@@ -272,7 +272,7 @@ class OllamaLLMProvider:
             "options": {"temperature": 0.0},
         }
         # think is omitted (Ollama/model default) unless a call site opts in
-        # explicitly — see decide_agent_action/select_grounded_facts/
+        # explicitly — see propose_agent_plan/select_grounded_facts/
         # draft_job_criteria, the agent module's own call sites (D-039/D-042).
         # Every other call site (extraction, identity, planner) must keep
         # its exact pre-D-039 request shape: accepted, previously-verified

@@ -12,6 +12,7 @@ import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 
+from agent_plans import clarify, plan, profile_step, search_plan, search_step
 from conftest import TEST_DATABASE_URL
 from fakes import FakeLLMProvider
 from search_helpers import (
@@ -25,7 +26,6 @@ from search_helpers import (
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from meyar.agent.schemas import AgentActionType, AgentDecision, AgentResponseCode
 from meyar.agent.service import run_agent_turn
 from meyar.models.agent_result_set import AgentResultSet, AgentResultSetMember
 from meyar.models.audit_event import AuditEvent
@@ -357,13 +357,9 @@ async def test_failed_search_leaves_prior_active_result_set_untouched(
 
     llm = FakeLLMProvider(
         planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["qadın"])),
-        agent_decisions=[
-            AgentDecision(
-                action=AgentActionType.SEARCH_CANDIDATES, search_query="qadın namizədləri göstər"
-            ),
-            AgentDecision(
-                action=AgentActionType.CLARIFY, response_code=AgentResponseCode.UNSUPPORTED_REQUEST
-            ),
+        agent_plans=[
+            search_plan(),
+            clarify("UNSUPPORTED_REQUEST"),
         ],
     )
     result = await run_agent_turn(
@@ -399,11 +395,8 @@ async def test_second_search_creates_new_result_set_and_switches_pointer(
 
     llm = FakeLLMProvider(
         planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
-        agent_decisions=[
-            AgentDecision(action=AgentActionType.SEARCH_CANDIDATES, search_query="Python 1"),
-            AgentDecision(
-                action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
-            ),
+        agent_plans=[
+            search_plan(),
         ],
     )
     await run_agent_turn(
@@ -419,11 +412,8 @@ async def test_second_search_creates_new_result_set_and_switches_pointer(
 
     llm2 = FakeLLMProvider(
         planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
-        agent_decisions=[
-            AgentDecision(action=AgentActionType.SEARCH_CANDIDATES, search_query="Python 2"),
-            AgentDecision(
-                action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
-            ),
+        agent_plans=[
+            search_plan(),
         ],
     )
     await run_agent_turn(
@@ -999,14 +989,13 @@ async def test_result_set_flow_never_creates_job_or_evaluation_rows(
 
     llm = FakeLLMProvider(
         planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
-        agent_decisions=[
-            AgentDecision(action=AgentActionType.SEARCH_CANDIDATES, search_query="Python"),
-            AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1),
-        ],
+        # Slice C: one bounded two-step plan (search -> grounded ordinal).
+        agent_plan=plan(search_step("Python bilən namizəd tap"), profile_step("birincinin")),
     )
     await run_agent_turn(
         db_session, llm, tenant_id=tenant.id, conversation=conversation,
-            session_context=context, user_message="Python",
+            session_context=context,
+        user_message="Python bilən namizəd tap və birincinin profilini göstər",
         as_of_date=AS_OF_DATE, embedding_config=_embedding_config(), embedding_provider=None,
         max_tool_calls=3, max_context_turns=8,
     )

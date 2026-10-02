@@ -4,13 +4,13 @@ import re
 import uuid
 from datetime import UTC, datetime
 
+from agent_plans import converse
 from fakes import FakeLLMProvider
 from httpx import AsyncClient
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession
 from test_ui_agent_routes import _login_and_csrf, local_ui_settings  # noqa: F401
 
-from meyar.agent.schemas import AgentActionType, AgentDecision, AgentResponseCode
 from meyar.config import Settings
 from meyar.llm.dependency import get_llm_provider
 from meyar.main import app
@@ -66,9 +66,7 @@ async def test_workspace_has_one_composer_new_action_and_separate_history(
     assert invalid.status_code == 403
 
     app.dependency_overrides[get_llm_provider] = lambda: FakeLLMProvider(
-        agent_decision=AgentDecision(
-            action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.GREETING
-        )
+        agent_plan=converse("GREETING")
     )
     await client.post(
         "/ui/agent", data={"csrf_token": csrf, "conversation_id": first, "message": "Məxfi sorğu"}

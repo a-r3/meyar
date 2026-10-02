@@ -13,6 +13,7 @@ import uuid
 from datetime import date
 
 import pytest
+from agent_plans import vacancy_proposal
 from fakes import FakeLLMProvider
 from httpx import AsyncClient
 from pydantic import ValidationError
@@ -22,8 +23,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meyar.agent.canonical_requirements import JD_SEMANTIC_POLICY_VERSION
 from meyar.agent.prompts import JD_CRITERIA_DRAFT_PROMPT_VERSION
 from meyar.agent.schemas import (
-    AgentActionType,
-    AgentDecision,
     JDCriteriaDraft,
     JDDraftCriterionItem,
     SemanticInterpretationSource,
@@ -354,7 +353,7 @@ async def test_confirmed_version_reconstructs_semantic_provenance_and_still_matc
     await db_session.commit()
     fake = _coordinated_llm(
         VACANCY_MESSAGE,
-        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA)
+        agent_plan=vacancy_proposal()
     )
     app.dependency_overrides[get_llm_provider] = lambda: fake
     csrf = await _login_and_csrf(client, user.username, password)

@@ -5,6 +5,15 @@ calls against a real Postgres session with FakeLLMProvider doubles."""
 from datetime import date
 
 import pytest
+from agent_plans import (
+    clarify,
+    converse,
+    evidence_plan,
+    profile_plan,
+    refine_plan,
+    search_plan,
+    vacancy_proposal,
+)
 from fakes import FakeLLMProvider
 from pydantic import ValidationError
 from search_helpers import (
@@ -16,10 +25,7 @@ from search_helpers import (
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.agent.schemas import (
-    MAX_CANDIDATE_REF,
     AgentActionType,
-    AgentDecision,
-    AgentResponseCode,
     AgentTurnOutcome,
 )
 from meyar.agent.service import run_agent_turn
@@ -132,14 +138,8 @@ async def test_agent_owner_compound_search_preserves_filters_and_returns_positiv
     await db_session.commit()
 
     llm = FakeLLMProvider(
-        agent_decisions=[
-            AgentDecision(
-                action=AgentActionType.SEARCH_CANDIDATES, search_query=OWNER_COMPOUND_QUERY
-            ),
-            AgentDecision(
-                action=AgentActionType.FINAL_ANSWER,
-                response_code=AgentResponseCode.ACKNOWLEDGEMENT,
-            ),
+        agent_plans=[
+            search_plan(),
         ]
     )
     conversation, context = await _new_conversation(db_session, tenant, user, membership)
@@ -219,80 +219,83 @@ async def _run(
     )
 
 
-def test_agent_decision_schema_rejects_mismatched_action_shape() -> None:
-    with pytest.raises(ValidationError):
-        AgentDecision(action=AgentActionType.SEARCH_CANDIDATES)  # missing search_query
-    with pytest.raises(ValidationError):
-        AgentDecision(
-            action=AgentActionType.FINAL_ANSWER,
-            candidate_ref=1,
-            response_code=AgentResponseCode.ACKNOWLEDGEMENT,
-        )
-    with pytest.raises(ValidationError):
-        AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=0)
-    with pytest.raises(ValidationError):
-        AgentDecision(
-            action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1, evidence_topic="x"
-        )
-    with pytest.raises(ValidationError):
-        AgentDecision(
-            action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=MAX_CANDIDATE_REF + 1
-        )
-    # Extra unknown field must be rejected (extra=forbid), same discipline as PlannerDraft.
-    with pytest.raises(ValidationError):
-        AgentDecision.model_validate(
-            {
-                "action": "FINAL_ANSWER",
-                "response_code": "ACKNOWLEDGEMENT",
-                "unexpected_field": "x",
-            }
-        )
+def _proposal(**fields):
+    from agent_plans import proposal
+
+    return proposal(**fields)
 
 
-def test_final_answer_schema_rejects_model_authored_candidate_fact() -> None:
+def test_agent_plan_schema_rejects_mismatched_and_model_authored_arguments() -> None:
+    """Issue #88 slice C (replaces the AgentDecision shape test): the model
+    contract has no field for model-authored search text, ordinals, limits
+    or topics — the retired AgentDecision fields fail ``extra="forbid"``."""
+    plan_step = {"capability": "SEARCH_CANDIDATES", "args": {"source": {"mode": "WHOLE_MESSAGE"}}}
+    for bad_args in (
+        {"search_query": "Python"},
+        {"source": {"mode": "WHOLE_MESSAGE"}, "search_query": "Python"},
+        {"source": {"mode": "QUOTES"}},  # QUOTES needs >= 1 quote
+        {"source": {"mode": "WHOLE_MESSAGE", "quotes": [{"quote": "x"}]}},
+    ):
+        with pytest.raises(ValidationError):
+            _proposal(kind="PLAN", goal="CANDIDATE_SEARCH",
+                      steps=[{"capability": "SEARCH_CANDIDATES", "args": bad_args}])
+    for capability, bad_args in (
+        ("GET_CANDIDATE_PROFILE", {"candidate_ref": 1}),
+        ("GET_CANDIDATE_PROFILE", {"ref_quote": {"quote": "birinci"}, "candidate_ref": 1}),
+        ("GET_CANDIDATE_EVIDENCE", {"ref_quote": {"quote": "1"}, "evidence_topic": "Python"}),
+        ("REFINE_RESULTS", {"filter_query": "SQL"}),
+        ("REFINE_RESULTS", {"limit": 3}),
+        ("REFINE_RESULTS", {}),  # at least one of filter_source / limit_quote
+    ):
+        with pytest.raises(ValidationError):
+            _proposal(kind="PLAN", goal="RESULT_FOLLOWUP",
+                      steps=[{"capability": capability, "args": bad_args}])
+    # Extra unknown fields are rejected everywhere (extra=forbid).
+    with pytest.raises(ValidationError):
+        _proposal(kind="CONVERSE", response_code="ACKNOWLEDGEMENT", unexpected_field="x")
+    with pytest.raises(ValidationError):
+        _proposal(kind="PLAN", goal="CANDIDATE_SEARCH", steps=[{**plan_step, "extra": 1}])
+    # Over-long plans fail the schema bound itself.
+    with pytest.raises(ValidationError):
+        _proposal(kind="PLAN", goal="CANDIDATE_SEARCH", steps=[plan_step] * 4)
+
+
+def test_converse_schema_rejects_model_authored_candidate_fact() -> None:
     # The removed free-text channel is structural: schema-valid model
     # output cannot carry a candidate assertion at all.
     with pytest.raises(ValidationError):
-        AgentDecision.model_validate(
-            {
-                "action": "FINAL_ANSWER",
-                "message": "The first candidate has 20 years of Python experience.",
-            }
-        )
+        _proposal(kind="CONVERSE", message="The first candidate has 20 years of Python.")
 
 
-def test_final_answer_schema_rejects_model_authored_hiring_recommendation() -> None:
+def test_converse_schema_rejects_model_authored_hiring_recommendation() -> None:
     with pytest.raises(ValidationError):
-        AgentDecision.model_validate(
-            {"action": "FINAL_ANSWER", "message": "The first candidate should be hired."}
-        )
+        _proposal(kind="CONVERSE", message="The first candidate should be hired.")
 
 
 def test_clarify_schema_rejects_model_authored_candidate_fact() -> None:
     with pytest.raises(ValidationError):
-        AgentDecision.model_validate(
-            {
-                "action": "CLARIFY",
-                "message": "The first candidate has 20 years of Python experience.",
-            }
-        )
+        _proposal(kind="CLARIFY", message="The first candidate has 20 years of Python.")
 
 
-def test_search_query_max_length_stays_within_the_ollama_grammar_safe_bound() -> None:
-    """Regression guard for D-035: empirically, a Pydantic string field's
-    max_length above ~2000 in a `format`-constrained-decoding JSON schema
-    made a real local Ollama daemon fail every decide_agent_action call
-    with HTTP 500 ("failed to load model vocabulary required for
-    format") — not a validation-time symptom, so no fake-provider test
-    can catch a regression here. This pins the schema's declared bound
-    itself so a future edit cannot silently widen it back past the
-    verified-safe threshold."""
+def test_quote_max_length_stays_within_the_ollama_grammar_safe_bound() -> None:
+    """Regression guard for D-035: a Pydantic string field's max_length
+    above ~2000 in a `format`-constrained-decoding JSON schema made a real
+    local Ollama daemon fail with HTTP 500 — not a validation-time symptom,
+    so no fake-provider test can catch a regression here. Pins every string
+    bound of the agent-plan-v1 schema at or below the verified-safe one."""
+    import json
+
+    from meyar.agent.capabilities.contracts import CapabilityName, agent_plan_json_schema
     from meyar.agent.schemas import MAX_AGENT_SEARCH_QUERY_LENGTH
 
     assert MAX_AGENT_SEARCH_QUERY_LENGTH <= 2000
-    AgentDecision(action=AgentActionType.SEARCH_CANDIDATES, search_query="x" * 2000)
+    schema = json.dumps(agent_plan_json_schema(list(CapabilityName)))
+    import re
+
+    assert all(int(n) <= 2000 for n in re.findall(r'"maxLength": (\d+)', schema))
+    search_plan("x" * 500)
     with pytest.raises(ValidationError):
-        AgentDecision(action=AgentActionType.SEARCH_CANDIDATES, search_query="x" * 2001)
+        search_plan("x" * 501)
 
 
 async def test_search_candidates_tool_is_tenant_scoped_and_evidence_grounded(
@@ -311,14 +314,8 @@ async def test_search_candidates_tool_is_tenant_scoped_and_evidence_grounded(
 
     llm = FakeLLMProvider(
         planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
-        agent_decisions=[
-            AgentDecision(
-                action=AgentActionType.SEARCH_CANDIDATES,
-                search_query="Python bilən namizədləri göstər",
-            ),
-            AgentDecision(
-                action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
-            ),
+        agent_plans=[
+            search_plan(),
         ],
     )
     conversation, context = await _new_conversation(db_session, tenant, user, membership)
@@ -368,14 +365,8 @@ async def test_cross_tenant_search_result_never_leaks(
 
     llm = FakeLLMProvider(
         planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
-        agent_decisions=[
-            AgentDecision(
-                action=AgentActionType.SEARCH_CANDIDATES,
-                search_query="Python bilən namizədləri göstər",
-            ),
-            AgentDecision(
-                action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
-            ),
+        agent_plans=[
+            search_plan(),
         ],
     )
     conversation, context = await _new_conversation(db_session, tenant, user, membership)
@@ -411,14 +402,8 @@ async def test_multi_turn_ordinal_reference_resolves_server_side(
 
     llm = FakeLLMProvider(
         planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
-        agent_decisions=[
-            AgentDecision(
-                action=AgentActionType.SEARCH_CANDIDATES,
-                search_query="Python bilən namizədləri göstər",
-            ),
-            AgentDecision(
-                action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
-            ),
+        agent_plans=[
+            search_plan(),
         ],
     )
     conversation, context = await _new_conversation(db_session, tenant, user, membership)
@@ -439,7 +424,7 @@ async def test_multi_turn_ordinal_reference_resolves_server_side(
     ) == [str(cid) for cid in ordered_ids]
 
     llm2 = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1)
+        agent_plan=profile_plan("birincinin")
     )
     profile_turn = await _run(
         db_session,
@@ -479,9 +464,9 @@ async def test_evidence_tool_never_fabricates_and_is_grounded(
     )
 
     llm = FakeLLMProvider(
-        agent_decision=AgentDecision(
-            action=AgentActionType.GET_CANDIDATE_EVIDENCE, candidate_ref=1, evidence_topic="Python"
-        )
+        # Slice C: the reference must be grounded in the user's own words
+        # (the old model invented candidate_ref=1 for a message naming none).
+        agent_plan=evidence_plan("birincinin", "Python")
     )
     result = await _run(
         db_session,
@@ -489,7 +474,7 @@ async def test_evidence_tool_never_fabricates_and_is_grounded(
         tenant_id=tenant.id,
         conversation=conversation,
         session_context=context,
-        message="Python bacarığını sübut et",
+        message="birincinin Python bacarığını sübut et",
     )
     evidence = result.tool_results[0].evidence
     assert evidence is not None
@@ -504,9 +489,11 @@ async def test_unknown_candidate_ref_is_never_silently_accepted(
     tenant, user, _password, membership = tenant_and_user
     await db_session.commit()
     conversation, context = await _new_conversation(db_session, tenant, user, membership)
-    # No prior search this conversation — candidate_ref=1 cannot resolve.
+    # No prior search this conversation — the grounded ordinal (3) cannot
+    # resolve: Layer 1 RESULT_CONTEXT_REQUIRED keeps today's outward
+    # CANDIDATE_REF_NOT_FOUND card while ZERO executors run.
     llm = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1)
+        agent_plan=profile_plan("üçüncünü")
     )
     result = await _run(
         db_session, llm, tenant_id=tenant.id, conversation=conversation,
@@ -584,7 +571,7 @@ async def test_candidate_ref_from_another_tenants_conversation_cannot_resolve(
     await db_session.flush()
 
     llm = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1)
+        agent_plan=profile_plan("birincini")
     )
     result = await _run(
         db_session, llm, tenant_id=tenant.id, conversation=conversation,
@@ -616,7 +603,7 @@ async def test_two_browser_sessions_never_share_conversation_state(
     assert context_b.active_result_set_id is None
 
     llm = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1)
+        agent_plan=profile_plan("birincini")
     )
     result = await _run(
         db_session, llm, tenant_id=tenant.id, conversation=conversation_b,
@@ -625,54 +612,56 @@ async def test_two_browser_sessions_never_share_conversation_state(
     assert result.outcome == AgentTurnOutcome.CANDIDATE_REF_NOT_FOUND
 
 
-async def test_bounded_tool_call_loop_stops_at_configured_maximum(
+async def test_plan_longer_than_the_effective_bound_executes_nothing(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
-    tenant, user, _password, membership = tenant_and_user
-    await db_session.commit()
-    conversation, context = await _new_conversation(db_session, tenant, user, membership)
+    """Issue #88 slice C (replaces the AgentDecision loop-bound test): there
+    is no loop to bound any more — the effective step bound is
+    min(MAX_PLAN_STEPS, agent_max_tool_calls), checked by Layer 1 BEFORE
+    step 1. A 2-step plan with max_tool_calls=1 is PLAN_TOO_LONG: zero
+    executors (the planner is never called) and exactly one proposal."""
+    from agent_plans import plan, profile_step, search_step
+    from sqlalchemy import select
 
-    # A misbehaving/adversarial model keeps returning TOOL_CALL decisions
-    # forever — the loop must still stop at max_tool_calls, never spin
-    # unboundedly. Issue #88 slice B (D-092 §23): a model-routed search is
-    # WHOLE_MESSAGE, so the model's DISTINCT queries no longer produce
-    # distinct searches; the limit check still runs BEFORE the identical-
-    # search dedup guard, so the bound is exercised at max_tool_calls=1.
+    from meyar.models.audit_event import AuditEvent
     from meyar.search.planner_schemas import PlannerDraft
     from meyar.search.schemas import RequiredFilters
 
+    tenant, user, _password, membership = tenant_and_user
+    await db_session.commit()
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
+    message = "Kotlin bilən namizəd tap və birincinin profilini göstər"
     llm = FakeLLMProvider(
-        planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["NoMatch"])),
-        agent_decisions=[
-            AgentDecision(
-                action=AgentActionType.SEARCH_CANDIDATES,
-                search_query=f"NoMatch bilən namizədləri göstər #{i}",
-            )
-            for i in range(10)
-        ],
+        planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Kotlin"])),
+        agent_plan=plan(search_step(), profile_step("birincinin")),
     )
     result = await _run(
-        db_session,
-        llm,
-        tenant_id=tenant.id,
-        conversation=conversation,
-        session_context=context,
-        # Model-routed on purpose: this exercises the orchestration loop's
-        # own bound, not the server-forced single search.
-        message="NoMatch haqqında məlumat ver",
-        max_tool_calls=1,
+        db_session, llm, tenant_id=tenant.id, conversation=conversation,
+        session_context=context, message=message, max_tool_calls=1,
     )
-    assert result.outcome == AgentTurnOutcome.TOOL_CALL_LIMIT_EXCEEDED
-    assert result.tool_call_count == 1
-    assert llm.agent_call_count == 2
+    assert result.outcome == AgentTurnOutcome.CLARIFICATION_REQUESTED
+    assert result.tool_call_count == 0
+    assert result.tool_results == []
+    assert llm.agent_call_count == 1
+    assert llm.planner_requests == []
+    assert llm.agent_plan_contexts[0].max_plan_steps == 1
+    events = list(
+        await db_session.scalars(
+            select(AuditEvent).where(
+                AuditEvent.tenant_id == tenant.id,
+                AuditEvent.event_type == "agent.plan.rejected",
+            )
+        )
+    )
+    assert [event.event_metadata["reason_code"] for event in events] == ["PLAN_TOO_LONG"]
 
 
-async def test_distinct_model_search_queries_cannot_drive_distinct_searches(
+async def test_model_search_is_whole_message_with_exactly_one_proposal(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
-    """Issue #88 slice B: the model can no longer author search text, so ten
-    distinct model ``search_query`` values collapse into ONE WHOLE_MESSAGE
-    search; the second identical search finalizes on the first result."""
+    """The model cannot author search text: a model-routed WHOLE_MESSAGE
+    search hands the planner exactly the user's message, after exactly ONE
+    plan proposal — there is no post-tool "what next" call."""
     from meyar.search.planner_schemas import PlannerDraft
     from meyar.search.schemas import RequiredFilters
 
@@ -681,13 +670,7 @@ async def test_distinct_model_search_queries_cannot_drive_distinct_searches(
     conversation, context = await _new_conversation(db_session, tenant, user, membership)
     llm = FakeLLMProvider(
         planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["NoMatch"])),
-        agent_decisions=[
-            AgentDecision(
-                action=AgentActionType.SEARCH_CANDIDATES,
-                search_query=f"NoMatch bilən namizədləri göstər #{i}",
-            )
-            for i in range(10)
-        ],
+        agent_plans=[search_plan(), converse("ACKNOWLEDGEMENT")],
     )
     message = "NoMatch haqqında məlumat ver"
     result = await _run(
@@ -702,34 +685,27 @@ async def test_distinct_model_search_queries_cannot_drive_distinct_searches(
     assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
     assert result.tool_call_count == 1
     assert llm.planner_requests == [message]
+    assert llm.agent_call_count == 1
 
 
-async def test_repeated_identical_search_finalizes_instead_of_looping(
+async def test_duplicate_identical_steps_are_rejected_before_any_execution(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
-    """Real-Ollama Slice 2 acceptance testing (PR #40): once made fast by
-    disabling qwen3's default hidden-thinking mode (D-039), the model would
-    re-issue an identical SEARCH_CANDIDATES call for a request it had
-    already fully answered, eventually co-rendering a contradictory
-    TOOL_CALL_LIMIT_EXCEEDED ("simplify your query") banner above several
-    duplicated result blocks. An identical repeated query within one turn
-    must finalize on the existing results instead of repeating the work."""
-    tenant, user, _password, membership = tenant_and_user
-    await db_session.commit()
-    conversation, context = await _new_conversation(db_session, tenant, user, membership)
+    """Real-Ollama Slice 2 acceptance testing (PR #40) found a small model
+    re-issuing an identical SEARCH. Slice C replaces the per-turn
+    ``searched_queries`` guard with Layer 1 DUPLICATE_STEP over the
+    resolved grounded arguments: nothing executes."""
+    from agent_plans import plan, search_step
 
     from meyar.search.planner_schemas import PlannerDraft
     from meyar.search.schemas import RequiredFilters
 
+    tenant, user, _password, membership = tenant_and_user
+    await db_session.commit()
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
     llm = FakeLLMProvider(
-        planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
-        agent_decisions=[
-            AgentDecision(
-                action=AgentActionType.SEARCH_CANDIDATES,
-                search_query="Python bilən namizədləri göstər",
-            )
-        ]
-        * 5,
+        planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["NoMatch"])),
+        agent_plan=plan(search_step(), search_step()),
     )
     result = await _run(
         db_session,
@@ -737,40 +713,40 @@ async def test_repeated_identical_search_finalizes_instead_of_looping(
         tenant_id=tenant.id,
         conversation=conversation,
         session_context=context,
-        message="Python bilən namizədləri göstər",
+        message="NoMatch haqqında məlumat ver",
         max_tool_calls=3,
     )
-    assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
-    assert result.tool_call_count == 1
-    assert len(result.tool_results) == 1
+    assert result.outcome == AgentTurnOutcome.CLARIFICATION_REQUESTED
+    assert result.tool_results == []
+    assert llm.planner_requests == []
+    assert llm.agent_call_count == 1
 
 
-async def test_model_timeout_is_a_safe_typed_failure_not_an_exception(
-    db_session: AsyncSession, tenant_and_user
+@pytest.mark.parametrize(
+    "error", [ModelTimeoutError("simulated timeout"), ModelUnavailableError("simulated outage")]
+)
+async def test_plan_provider_failure_abandons_the_turn(
+    db_session: AsyncSession, tenant_and_user, error
 ) -> None:
+    """Issue #88 slice C (#85): the one plan-proposal call failing on
+    infrastructure abandons the turn — it raises before any transcript,
+    plan execution, pointer or task change (the router audits
+    agent.turn.abandoned and renders the not-run copy)."""
+    from meyar.agent.service import AgentPlanProviderError
+
     tenant, user, _password, membership = tenant_and_user
     await db_session.commit()
     conversation, context = await _new_conversation(db_session, tenant, user, membership)
-    llm = FakeLLMProvider(agent_error=ModelTimeoutError("simulated timeout"))
-    result = await _run(
-        db_session, llm, tenant_id=tenant.id, conversation=conversation,
-            session_context=context, message="salam"
-    )
-    assert result.outcome == AgentTurnOutcome.AGENT_PROVIDER_FAILURE
-
-
-async def test_model_unavailable_is_a_safe_typed_failure(
-    db_session: AsyncSession, tenant_and_user
-) -> None:
-    tenant, user, _password, membership = tenant_and_user
-    await db_session.commit()
-    conversation, context = await _new_conversation(db_session, tenant, user, membership)
-    llm = FakeLLMProvider(agent_error=ModelUnavailableError("simulated outage"))
-    result = await _run(
-        db_session, llm, tenant_id=tenant.id, conversation=conversation,
-            session_context=context, message="salam"
-    )
-    assert result.outcome == AgentTurnOutcome.AGENT_PROVIDER_FAILURE
+    turns_before = list(conversation.turns)
+    llm = FakeLLMProvider(agent_error=error)
+    with pytest.raises(AgentPlanProviderError):
+        await _run(
+            db_session, llm, tenant_id=tenant.id, conversation=conversation,
+            session_context=context, message="salam",
+        )
+    assert llm.agent_call_count == 1  # infrastructure failure is not repaired
+    assert conversation.turns == turns_before
+    assert context.active_result_set_id is None
 
 
 async def test_zero_tool_final_answer_uses_only_server_owned_copy(
@@ -780,10 +756,7 @@ async def test_zero_tool_final_answer_uses_only_server_owned_copy(
     await db_session.commit()
     conversation, context = await _new_conversation(db_session, tenant, user, membership)
     llm = FakeLLMProvider(
-        agent_decision=AgentDecision(
-            action=AgentActionType.FINAL_ANSWER,
-            response_code=AgentResponseCode.GREETING,
-        )
+        agent_plan=converse("GREETING")
     )
 
     result = await _run(
@@ -810,10 +783,7 @@ async def test_hiring_request_uses_server_owned_human_decision_copy(
     await db_session.commit()
     conversation, context = await _new_conversation(db_session, tenant, user, membership)
     llm = FakeLLMProvider(
-        agent_decision=AgentDecision(
-            action=AgentActionType.CLARIFY,
-            response_code=AgentResponseCode.HIRING_DECISION_REQUIRES_HUMAN,
-        )
+        agent_plan=clarify("HIRING_DECISION_REQUIRES_HUMAN")
     )
 
     result = await _run(
@@ -835,21 +805,34 @@ async def test_hiring_request_uses_server_owned_human_decision_copy(
 async def test_repeated_schema_invalid_output_is_a_safe_typed_failure(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
+    """Scenario H: still schema-invalid after the ONE repair ->
+    MALFORMED_MODEL_OUTPUT (today's outcome), nothing executed."""
     tenant, user, _password, membership = tenant_and_user
     await db_session.commit()
     conversation, context = await _new_conversation(db_session, tenant, user, membership)
-    llm = FakeLLMProvider(agent_fail_first_n_calls=99, agent_decision=None)
-    # Give it a decisions list so the fake doesn't assert-fail on success path.
-    llm._agent_decisions = [
-        AgentDecision(
-            action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
-        )
-    ]
+    llm = FakeLLMProvider(agent_fail_first_n_calls=99, agent_plan=converse("ACKNOWLEDGEMENT"))
     result = await _run(
         db_session, llm, tenant_id=tenant.id, conversation=conversation,
             session_context=context, message="salam"
     )
     assert result.outcome == AgentTurnOutcome.MALFORMED_MODEL_OUTPUT
+    assert result.tool_results == []
+    assert llm.agent_repairs == [False, True]
+
+
+async def test_one_repair_recovers_a_schema_invalid_first_proposal(
+    db_session: AsyncSession, tenant_and_user
+) -> None:
+    tenant, user, _password, membership = tenant_and_user
+    await db_session.commit()
+    conversation, context = await _new_conversation(db_session, tenant, user, membership)
+    llm = FakeLLMProvider(agent_fail_first_n_calls=1, agent_plan=converse("GREETING"))
+    result = await _run(
+        db_session, llm, tenant_id=tenant.id, conversation=conversation,
+        session_context=context, message="salam",
+    )
+    assert result.outcome == AgentTurnOutcome.ANSWERED
+    assert llm.agent_repairs == [False, True]
 
 
 async def test_skill_specific_duration_is_never_silently_weakened(
@@ -868,15 +851,8 @@ async def test_skill_specific_duration_is_never_silently_weakened(
     )
     llm = FakeLLMProvider(
         planner_draft=draft,
-        agent_decisions=[
-            AgentDecision(
-                action=AgentActionType.SEARCH_CANDIDATES,
-                search_query="5 il Java təcrübəsi olanları göstər",
-            ),
-            AgentDecision(
-                action=AgentActionType.CLARIFY,
-                response_code=AgentResponseCode.NEED_MORE_DETAIL,
-            ),
+        agent_plans=[
+            search_plan(),
         ],
     )
     conversation, context = await _new_conversation(db_session, tenant, user, membership)
@@ -912,13 +888,8 @@ async def test_prohibited_attribute_in_search_query_is_rejected(
     draft = PlannerDraft(required_filters=RequiredFilters(skills=["qadın"]))
     llm = FakeLLMProvider(
         planner_draft=draft,
-        agent_decisions=[
-            AgentDecision(
-                action=AgentActionType.SEARCH_CANDIDATES, search_query="qadın namizədləri göstər"
-            ),
-            AgentDecision(
-                action=AgentActionType.CLARIFY, response_code=AgentResponseCode.UNSUPPORTED_REQUEST
-            ),
+        agent_plans=[
+            search_plan(),
         ],
     )
     conversation, context = await _new_conversation(db_session, tenant, user, membership)
@@ -960,23 +931,15 @@ async def test_agent_turn_never_writes_a_candidate_or_evaluation_row(
         assert forbidden not in source
 
 
-# --- D-036 regression tests: a successful tool result must never co-occur
-# with a fatal-looking outcome, and a stored assistant turn must never be
-# blank. See docs/DECISIONS.md D-036 for the live-inspection bug report
-# and root cause (a follow-up "what next" decision failing after
-# SEARCH_CANDIDATES already succeeded was returned as MALFORMED_MODEL_OUTPUT
-# while still carrying the successful tool_results). ---
+# --- D-036 regression tests. Issue #88 slice C retired the post-tool "what
+# next" decision whose failure D-036 guarded against: a search turn now makes
+# exactly ONE proposal, so a grounded result can never be followed by a
+# failing framing call. ---
 
 
-async def test_successful_search_with_failed_followup_framing_is_not_fatal(
+async def test_successful_model_search_has_no_followup_model_call(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
-    """The exact owner-reported repro: SEARCH_CANDIDATES succeeds, then the
-    loop's follow-up decision call fails (schema-invalid on both attempts).
-    Must be ANSWERED_FROM_TOOL_RESULT (never MALFORMED_MODEL_OUTPUT or
-    AGENT_PROVIDER_FAILURE) with the grounded search result intact and no
-    model message (a deterministic UI fallback covers it — see
-    test_ui_agent_routes.py for the rendered-page assertion)."""
     tenant, user, _password, membership = tenant_and_user
     candidate, _pv = await seed_candidate_with_profile(
         db_session, tenant_id=tenant.id, profile_content=_profile("Python")
@@ -988,10 +951,7 @@ async def test_successful_search_with_failed_followup_framing_is_not_fatal(
 
     llm = FakeLLMProvider(
         planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
-        agent_decision=AgentDecision(
-            action=AgentActionType.SEARCH_CANDIDATES, search_query="Python bilən namizədləri göstər"
-        ),
-        agent_fail_after_n_calls=1,  # decision #1 (the search) succeeds; every call after fails
+        agent_plan=search_plan(),
     )
     conversation, context = await _new_conversation(db_session, tenant, user, membership)
     result = await _run(
@@ -1000,14 +960,11 @@ async def test_successful_search_with_failed_followup_framing_is_not_fatal(
         tenant_id=tenant.id,
         conversation=conversation,
         session_context=context,
-        message="Python bilən namizədləri göstər",
+        message="Python haqqında məlumat ver",
     )
     assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
-    assert result.outcome not in (
-        AgentTurnOutcome.MALFORMED_MODEL_OUTPUT,
-        AgentTurnOutcome.AGENT_PROVIDER_FAILURE,
-    )
     assert result.message is None
+    assert llm.agent_call_count == 1
     assert len(result.tool_results) == 1
     search = result.tool_results[0].search
     assert search is not None
@@ -1016,60 +973,19 @@ async def test_successful_search_with_failed_followup_framing_is_not_fatal(
     assert search.response.search_response.results[0].candidate_id == candidate.id
 
 
-async def test_successful_search_with_followup_provider_outage_is_not_fatal(
-    db_session: AsyncSession, tenant_and_user
-) -> None:
-    """Same as above, but the follow-up call fails with a provider-level
-    error (timeout/unavailable) rather than repeated schema-invalid
-    output — must reach the same non-fatal ANSWERED_FROM_TOOL_RESULT."""
-    tenant, user, _password, membership = tenant_and_user
-    await seed_candidate_with_profile(
-        db_session, tenant_id=tenant.id, profile_content=_profile("Python")
-    )
-    await db_session.commit()
-
-    from meyar.search.planner_schemas import PlannerDraft
-    from meyar.search.schemas import RequiredFilters
-
-    llm = FakeLLMProvider(
-        planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
-        agent_decision=AgentDecision(
-            action=AgentActionType.SEARCH_CANDIDATES, search_query="Python bilən namizədləri göstər"
-        ),
-        agent_fail_after_n_calls=1,
-        agent_error=ModelTimeoutError("simulated follow-up timeout"),
-    )
-    conversation, context = await _new_conversation(db_session, tenant, user, membership)
-    result = await _run(
-        db_session,
-        llm,
-        tenant_id=tenant.id,
-        conversation=conversation,
-        session_context=context,
-        message="Python bilən namizədləri göstər",
-    )
-    assert result.outcome == AgentTurnOutcome.ANSWERED_FROM_TOOL_RESULT
-    assert len(result.tool_results) == 1
-    assert result.tool_results[0].search.response.search_response.result_count == 1
-
-
 async def test_no_result_model_failure_stays_a_safe_failure_with_no_tool_results(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
-    """The FIRST decision failing (no tool ever ran) must remain a genuine
-    fatal outcome with an empty tool_results list — never dressed up as a
-    success. Covers both the repeated-schema-invalid and provider-outage
-    shapes."""
+    """A proposal that never becomes a valid plan is never dressed up as a
+    success: schema-invalid -> MALFORMED_MODEL_OUTPUT with no tool results;
+    provider outage -> the turn is abandoned (#85)."""
+    from meyar.agent.service import AgentPlanProviderError
+
     tenant, user, _password, membership = tenant_and_user
     await db_session.commit()
     conversation, context = await _new_conversation(db_session, tenant, user, membership)
 
-    llm_malformed = FakeLLMProvider(agent_fail_first_n_calls=99, agent_decision=None)
-    llm_malformed._agent_decisions = [
-        AgentDecision(
-            action=AgentActionType.FINAL_ANSWER, response_code=AgentResponseCode.ACKNOWLEDGEMENT
-        )
-    ]
+    llm_malformed = FakeLLMProvider(agent_fail_first_n_calls=99, agent_plan=converse())
     result = await _run(
         db_session, llm_malformed, tenant_id=tenant.id, conversation=conversation,
             session_context=context, message="salam"
@@ -1079,12 +995,11 @@ async def test_no_result_model_failure_stays_a_safe_failure_with_no_tool_results
 
     conversation2, context2 = await _new_conversation(db_session, tenant, user, membership)
     llm_outage = FakeLLMProvider(agent_error=ModelUnavailableError("simulated outage"))
-    result2 = await _run(
-        db_session, llm_outage, tenant_id=tenant.id, conversation=conversation2,
+    with pytest.raises(AgentPlanProviderError):
+        await _run(
+            db_session, llm_outage, tenant_id=tenant.id, conversation=conversation2,
             session_context=context2, message="salam"
-    )
-    assert result2.outcome == AgentTurnOutcome.AGENT_PROVIDER_FAILURE
-    assert result2.tool_results == []
+        )
 
 
 async def test_stored_assistant_turn_is_never_blank_across_all_outcomes(
@@ -1122,7 +1037,7 @@ async def test_get_candidate_profile_success_has_no_empty_turn_outcome(
     )
 
     llm = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1)
+        agent_plan=profile_plan("birincini")
     )
     result = await _run(
         db_session, llm, tenant_id=tenant.id, conversation=conversation,
@@ -1132,12 +1047,11 @@ async def test_get_candidate_profile_success_has_no_empty_turn_outcome(
     assert result.message is None
 
 
-async def test_ordinal_reference_still_resolves_after_followup_framing_failure(
+async def test_ordinal_reference_resolves_against_the_previous_turns_search(
     db_session: AsyncSession, tenant_and_user
 ) -> None:
-    """Rule E: active_result_set_id must survive a turn whose follow-up
-    framing step failed, so a later 'birincini aç' still resolves — the
-    grounded search result is not undone by the framing failure."""
+    """Rule E: the search turn's active_result_set_id is the authority a
+    later 'birincini aç' resolves against (server-parsed ordinal)."""
     tenant, user, _password, membership = tenant_and_user
     candidate, _pv = await seed_candidate_with_profile(
         db_session, tenant_id=tenant.id, profile_content=_profile("Python")
@@ -1149,10 +1063,7 @@ async def test_ordinal_reference_still_resolves_after_followup_framing_failure(
 
     llm_search = FakeLLMProvider(
         planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
-        agent_decision=AgentDecision(
-            action=AgentActionType.SEARCH_CANDIDATES, search_query="Python bilən namizədləri göstər"
-        ),
-        agent_fail_after_n_calls=1,
+        agent_plan=search_plan(),
     )
     conversation, context = await _new_conversation(db_session, tenant, user, membership)
     first_result = await _run(
@@ -1172,7 +1083,7 @@ async def test_ordinal_reference_still_resolves_after_followup_framing_failure(
     ) == [str(candidate.id)]
 
     llm_profile = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1)
+        agent_plan=profile_plan("birincini")
     )
     second_result = await _run(
         db_session,
@@ -1329,7 +1240,7 @@ async def test_grounded_experience_explanation_uses_only_supplied_facts(
     )
 
     llm = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1),
+        agent_plan=profile_plan("birincinin"),
         grounded_selection=GroundedSelection(used_facts=[2, 0]),  # employment fact, Python skill
     )
     result = await _run(
@@ -1372,7 +1283,7 @@ async def test_grounded_selection_citing_unknown_fact_id_falls_back_safely(
     )
 
     llm = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1),
+        agent_plan=profile_plan("birincinin"),
         grounded_selection=GroundedSelection(used_facts=[999]),
     )
     result = await _run(
@@ -1408,7 +1319,7 @@ async def test_grounded_synthesis_failure_falls_back_to_deterministic_message(
     )
 
     llm = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=1),
+        agent_plan=profile_plan("birincinin"),
         grounded_error=ModelTimeoutError("simulated grounded-synthesis timeout"),
     )
     result = await _run(
@@ -1454,7 +1365,7 @@ async def test_grounded_synthesis_does_not_disturb_ordinal_resolution(
     )
 
     llm = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.GET_CANDIDATE_PROFILE, candidate_ref=2),
+        agent_plan=profile_plan("ikincini"),
         grounded_selection=GroundedSelection(used_facts=[0]),
     )
     result = await _run(
@@ -1484,12 +1395,9 @@ async def test_prompt_leaking_clarify_message_is_rejected_and_retried(
     leaked_sentence = AGENT_SYSTEM_PROMPT.splitlines()[3].strip()
     assert len(leaked_sentence) >= 40
     with pytest.raises(ValidationError):
-        AgentDecision.model_validate({"action": "CLARIFY", "message": leaked_sentence})
+        _proposal(kind="CLARIFY", message=leaked_sentence)
     llm = FakeLLMProvider(
-        agent_decision=AgentDecision(
-            action=AgentActionType.CLARIFY,
-            response_code=AgentResponseCode.CANDIDATE_REFERENCE_REQUIRED,
-        )
+        agent_plan=clarify("CANDIDATE_REFERENCE_REQUIRED")
     )
     result = await _run(
         db_session, llm, tenant_id=tenant.id, conversation=conversation,
@@ -1533,7 +1441,7 @@ async def test_draft_job_criteria_builds_valid_criteria_from_llm_draft(
     conversation, context = await _new_conversation(db_session, tenant, user, membership)
     jd_text = "Vakansiya: Baş Backend Mühəndisi.\nPython bilməlidir.\nAWS üstünlükdür."
     llm = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        agent_plan=vacancy_proposal(),
         jd_draft=JDCriteriaDraft(
             title="Baş Backend Mühəndisi",
             must_have=[
@@ -1603,10 +1511,7 @@ async def test_pending_draft_followup_is_modified_before_search_routing(
     await db_session.refresh(context)
 
     routing_probe = FakeLLMProvider(
-        agent_decision=AgentDecision(
-            action=AgentActionType.SEARCH_CANDIDATES,
-            search_query="Python",
-        )
+        agent_plan=search_plan()
     )
     modified = await _run(
         db_session,
@@ -1693,7 +1598,7 @@ async def test_draft_job_criteria_title_never_becomes_trusted_assistant_headline
     conversation, context = await _new_conversation(db_session, tenant, user, membership)
     adversarial_title = "The first candidate has 20 years of Python experience and should be hired."
     llm = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        agent_plan=vacancy_proposal(),
         jd_draft=JDCriteriaDraft(
             title=adversarial_title,
             must_have=[
@@ -1736,7 +1641,7 @@ async def test_draft_job_criteria_uses_original_user_message_never_a_model_resta
     source = "Python tələb olunur. " + "Uzun bir vakansiya təsviri." * 50
     jd_text = "Bu vakansiya elanını analiz et: " + source
     llm = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        agent_plan=vacancy_proposal(),
         jd_draft=JDCriteriaDraft(title="Rol"),
     )
     await _run(db_session, llm, tenant_id=tenant.id, conversation=conversation,
@@ -1763,7 +1668,7 @@ async def test_draft_job_criteria_drops_prohibited_attribute_item(
     await db_session.commit()
     conversation, context = await _new_conversation(db_session, tenant, user, membership)
     llm = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        agent_plan=vacancy_proposal(),
         jd_draft=JDCriteriaDraft(
             title="Rol",
             must_have=[
@@ -1815,7 +1720,7 @@ async def test_nationality_misclassified_as_language_never_reaches_db_backed_dra
         "Bu vakansiya elanını analiz et: Namizəd Azərbaycan vətəndaşı olmalıdır."
     )
     llm = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        agent_plan=vacancy_proposal(),
         jd_draft=JDCriteriaDraft(
             title="Rol",
             must_have=[
@@ -1856,7 +1761,7 @@ async def test_draft_job_criteria_supports_named_experience_without_inventing_du
     await db_session.commit()
     conversation, context = await _new_conversation(db_session, tenant, user, membership)
     llm = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        agent_plan=vacancy_proposal(),
         jd_draft=JDCriteriaDraft(
             title="Rol",
             must_have=[
@@ -1925,7 +1830,7 @@ async def test_draft_job_criteria_other_kind_is_unsupported_never_scored(
     await db_session.commit()
     conversation, context = await _new_conversation(db_session, tenant, user, membership)
     llm = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        agent_plan=vacancy_proposal(),
         jd_draft=JDCriteriaDraft(
             title="Rol",
             must_have=[
@@ -2017,7 +1922,7 @@ async def test_draft_job_criteria_drops_fabricated_unrelated_requirement(
         "Namizəd ezamiyyətə getməyə hazır olmalıdır."
     )
     llm = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        agent_plan=vacancy_proposal(),
         jd_draft=JDCriteriaDraft(
             title="Kredit Analitiki",
             must_have=[
@@ -2129,9 +2034,7 @@ async def test_server_confirmed_draft_job_criteria_cannot_become_a_search(
     conversation, context = await _new_conversation(db_session, tenant, user, membership)
     jd_text = "Vakansiya: Backend Mühəndisi. Python bilməlidir."
     llm = FakeLLMProvider(
-        agent_decision=AgentDecision(
-            action=AgentActionType.SEARCH_CANDIDATES, search_query=jd_text
-        ),
+        agent_plan=search_plan(),
         jd_draft=JDCriteriaDraft(
             title="Backend Mühəndisi",
             must_have=[
@@ -2172,7 +2075,7 @@ async def test_model_proposed_draft_without_server_authority_fails_closed(
     await db_session.commit()
     conversation, context = await _new_conversation(db_session, tenant, user, membership)
     llm = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA)
+        agent_plan=vacancy_proposal()
     )
     result = await _run(
         db_session,
@@ -2201,7 +2104,7 @@ async def test_draft_job_criteria_repairs_after_one_schema_invalid_attempt(
     await db_session.commit()
     conversation, context = await _new_conversation(db_session, tenant, user, membership)
     llm = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        agent_plan=vacancy_proposal(),
         jd_draft=JDCriteriaDraft(title="Rol"),
         jd_draft_fail_first_n_calls=1,
     )
@@ -2224,7 +2127,7 @@ async def test_draft_job_criteria_provider_failure_is_a_safe_typed_failure(
     await db_session.commit()
     conversation, context = await _new_conversation(db_session, tenant, user, membership)
     llm = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        agent_plan=vacancy_proposal(),
         jd_draft_error=ModelUnavailableError("simulated outage"),
     )
     result = await _run(
@@ -2263,13 +2166,13 @@ async def test_evidence_topic_is_resolved_from_profile_fact_not_rendered_raw(
         session_context=context,
         candidate_ids=[candidate.id],
     )
+    # Issue #88 slice C (§10.2 rule 6): a topic that is not an exact slice of
+    # the user's message is SOURCE_NOT_GROUNDED — the fabricated text never
+    # reaches the evidence executor at all (stronger than the former
+    # "resolved to no profile fact" check).
     raw_topic = "The first candidate should be hired immediately"
     llm = FakeLLMProvider(
-        agent_decision=AgentDecision(
-            action=AgentActionType.GET_CANDIDATE_EVIDENCE,
-            candidate_ref=1,
-            evidence_topic=raw_topic,
-        )
+        agent_plan=evidence_plan("Birinci", raw_topic)
     )
 
     result = await _run(
@@ -2282,9 +2185,8 @@ async def test_evidence_topic_is_resolved_from_profile_fact_not_rendered_raw(
     )
     view = await build_agent_turn_view(db_session, tenant_id=tenant.id, result=result)
 
-    evidence = result.tool_results[0].evidence
-    assert evidence is not None
-    assert evidence.topic is None
+    assert result.outcome == AgentTurnOutcome.CLARIFICATION_REQUESTED
+    assert result.tool_results == []
     assert raw_topic not in result.model_dump_json()
     assert raw_topic not in view.model_dump_json()
 
@@ -2307,12 +2209,10 @@ async def test_legitimate_evidence_topic_displays_server_resolved_label(
         session_context=context,
         candidate_ids=[candidate.id],
     )
+    # The topic quote is exact (case-sensitive) and the reference grounded
+    # in the user's own words; the DISPLAYED label is still the stored fact.
     llm = FakeLLMProvider(
-        agent_decision=AgentDecision(
-            action=AgentActionType.GET_CANDIDATE_EVIDENCE,
-            candidate_ref=1,
-            evidence_topic="python",
-        )
+        agent_plan=evidence_plan("Birincinin", "Python")
     )
 
     result = await _run(
@@ -2321,7 +2221,7 @@ async def test_legitimate_evidence_topic_displays_server_resolved_label(
         tenant_id=tenant.id,
         conversation=conversation,
         session_context=context,
-        message="Python sübutunu göstər",
+        message="Birincinin Python sübutunu göstər",
     )
     view = await build_agent_turn_view(db_session, tenant_id=tenant.id, result=result)
 
@@ -2341,7 +2241,7 @@ async def test_draft_job_criteria_repeated_schema_invalid_is_a_safe_typed_failur
     await db_session.commit()
     conversation, context = await _new_conversation(db_session, tenant, user, membership)
     llm = FakeLLMProvider(
-        agent_decision=AgentDecision(action=AgentActionType.DRAFT_JOB_CRITERIA),
+        agent_plan=vacancy_proposal(),
         jd_draft=JDCriteriaDraft(title="unused"),
         jd_draft_fail_first_n_calls=99,
     )
@@ -2400,9 +2300,7 @@ async def test_explicit_search_is_server_routed_despite_wrong_orchestrator(
     conversation, context = await _new_conversation(db_session, tenant, user, membership)
     llm = FakeLLMProvider(
         planner_draft=PlannerDraft(required_filters=RequiredFilters(skills=["Python"])),
-        agent_decision=AgentDecision(
-            action=AgentActionType.REFINE_CANDIDATE_RESULTS, filter_query="SQL"
-        ),
+        agent_plan=refine_plan(whole_filter=True),
     )
     result = await _run(
         db_session, llm, tenant_id=tenant.id, conversation=conversation,

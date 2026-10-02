@@ -29,9 +29,9 @@ from PIL import Image, ImageDraw
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meyar.agent.capabilities.contracts import AgentPlanContext, AgentPlanProposal
 from meyar.agent.clarification_schemas import ClarificationAnswerProposal
 from meyar.agent.schemas import (
-    AgentDecision,
     GroundedFact,
     GroundedSelection,
     JDCriteriaDraft,
@@ -139,16 +139,10 @@ class _DemoLLMProvider:
     ) -> tuple[PlannerDraft, LLMResultProvenance]:
         raise NotImplementedError("The demo seed provider never plans searches.")
 
-    async def decide_agent_action(
-        self,
-        *,
-        recent_turns: list[tuple[str, str]],
-        last_tool_result_summary: dict | None,
-        active_result_context_present: bool,
-        available_candidate_refs: list[int],
-        repair: bool = False,
-    ) -> tuple[AgentDecision, LLMResultProvenance]:
-        raise NotImplementedError("The demo seed provider never runs the agent loop.")
+    async def propose_agent_plan(
+        self, *, context: AgentPlanContext, repair: bool = False
+    ) -> tuple[AgentPlanProposal, LLMResultProvenance]:
+        raise NotImplementedError("The demo seed provider never runs the agent planner.")
 
     async def select_grounded_facts(
         self,
