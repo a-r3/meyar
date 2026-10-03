@@ -145,6 +145,10 @@ async def search_candidates(
         assert request.semantic_query is not None  # enforced by request validation
         query_text = request.semantic_query.strip()
         embed_result = await embedding_provider.embed(query_text)
+        # Query providers may release the transaction before inference (#85).
+        # Restore live authority before inspecting output or using candidate
+        # facts; hold the short result phase through its consequential commit.
+        await require_active_tenant(db, tenant_id, lock=True)
 
         # Defect fix (post-acceptance-audit): validate the ACTUAL
         # EmbeddingResult's own provenance fields, not just the provider

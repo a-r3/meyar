@@ -4,6 +4,76 @@ Status: implemented, pending independent acceptance; #46 is NOT complete.
 Only S1 under existing #46 / **M9 — Deployment, Benchmark & Integration
 Readiness** (milestone 10). No merge or auto-merge by the agent.
 
+## PR #116 acceptance blocker correction
+
+Reviewed head `d253b3d12c2f86a7b5c417f7ee060131470de8cb` is
+**acceptance-REJECTED**, despite successful CI run 37102399674. The correction
+amends the same branch and PR #116; no new PR or merge. Re-acceptance must use
+its new exact head, published with exact-head CI in the delivery report.
+
+The rejected search checked authority at entry and at final response creation,
+but used the embedding result, queried compatible embeddings and built candidate
+results between the query provider's DB-release commit and the final check.
+Two before-fix synthetic cases (SEMANTIC_ONLY/HYBRID with the real DB-release
+wrapper) failed: candidate embedding lookup was awaited once after suspension.
+
+The only production correction is in `backend/src/meyar/search/service.py`:
+`require_active_tenant(db, tenant_id, lock=True)` immediately after query
+`embed()` returns. It precedes all embedding-result provenance/vector checks,
+compatible-embedding lookup and use of preloaded candidate facts to build results.
+The short post-inference transaction holds Tenant FOR SHARE and re-registers the
+outer commit guard. REST/UI DB release before inference is preserved: no pooled
+connection, transaction or Tenant lock is kept during local query inference.
+The same check works with direct providers and agent `BoundaryEmbedding` (its earlier principal
+re-entry remains unchanged). The existing TenantInactiveError transports refuse
+without candidate results: generic API 401/Bearer, UI login redirect/cookie clear,
+and typed service/safe CLI refusal.
+
+Boundary review: structured-only search has no inference; semantic/hybrid uses
+one query-embedding boundary shared by REST, UI and NL execution. Planner model
+calls and bounded repair do no candidate retrieval; every outcome re-establishes
+authority in `_audit_plan_result()` before returning, and executable plans enter
+the guarded search service. REST/UI identity enrichment/rendering occurs after
+search returns and before the guarded final commit. No equivalent Tenant-active authority
+gap was found elsewhere in these paths; no planner/route/wrapper production
+change is needed. Existing provenance/ranking/isolation behavior remains intact.
+
+New `backend/tests/test_search_tenant_authority.py`: **25 parameterized cases**:
+
+```text
+test_direct_query_embedding_loss_refuses_before_candidate_use[release_db=True/False × SEMANTIC_ONLY/HYBRID]
+test_tenant_refusal_precedes_embedding_result_validation[SEMANTIC_ONLY/HYBRID]
+test_rest_query_embedding_tenant_authority_and_active_control[disable=True/False × natural_language=True/False × SEMANTIC_ONLY/HYBRID]
+test_ui_classic_query_embedding_tenant_authority_and_active_control[disable=True/False × SEMANTIC_ONLY/HYBRID]
+test_natural_language_service_query_embedding_refuses_candidate_use[SEMANTIC_ONLY/HYBRID]
+test_disable_just_before_query_db_release_is_rejected_by_commit_guard[SEMANTIC_ONLY/HYBRID]
+test_planner_inference_loss_preserves_existing_post_model_authority[service/REST/UI]
+```
+
+Assertions include no candidate-embedding lookup or result construction after
+loss, refusal before returned-result validation, no candidate IDs/profile/name
+in refusal responses, unchanged active results, real pool checkout count zero
+inside query/plan inference, and refusal before the inner provider is called if
+suspension occurs immediately before the DB-release commit. All data is synthetic.
+
+Correction gate: new regressions **25 passed in 7.66s**. Required focused suites
+**422 passed in 73.67s (0:01:13)**; full gate **3,568 passed in 799.21s
+(0:13:19)**. Ruff clean; mypy(src)
+clean (227 source files); unchanged single Alembic head `b88a2c4d6e10`. No migration/dependency/lockfile change. All S2+,
+other-issue and Target-Mac deferrals remain in force. Independent acceptance
+is pending; issue #46 remains OPEN.
+
+The first correction full run had **1 failed, 3,567 passed in 816.54s**:
+existing unmodified `test_docx_tables.py::
+test_existing_header_variants_shared_parts_and_no_definition_creation[footer]`
+compared two independently serialized DOCX ZIP archives. The mismatch at byte
+28717 maps to local-header offset 10 (ZIP modification time) for word/settings.xml.
+A controlled two-second serialization-time change reproduced differing archive
+bytes with identical names and every XML/payload part. The unchanged header/footer
+cases passed on recheck (2 passed in 0.79s). Parser/test stabilization is deferred;
+no parser source/test, clock patch or test exclusion is part of this correction.
+The normal full rerun passed all 3,568 tests with the same production/test code.
+
 ## Starting authority and scope
 
 Verified local `main`, `origin/main`, live GitHub `main` and remote-head SHA:
@@ -179,10 +249,11 @@ Compatibility updates in existing regressions:
   now use an active synthetic tenant and real test session for the new initial
   authority check, retaining all existing policy and no-model-call assertions.
 
-## Validation
+## Historical validation — acceptance-rejected initial head
 
-Final quality-gate results are recorded below. Commands run
-from backend, with `UV_CACHE_DIR=/tmp/meyar-s1-uv` for a writable cache:
+Initial quality-gate results for `d253b3d12c2f86a7b5c417f7ee060131470de8cb`
+are recorded below; these did not detect the query-embedding acceptance blocker.
+Commands run from backend, with `UV_CACHE_DIR=/tmp/meyar-s1-uv` for a writable cache:
 
 ```bash
 uv run ruff check .

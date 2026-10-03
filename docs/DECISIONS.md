@@ -8746,8 +8746,11 @@ Before-fix proof, corrected matrix, gates, acceptance and deferrals:
 
 ## D-101 — Issue #46 S1: live Tenant active authorization
 
-Status: implemented on `fix/46-s1-tenant-authority`, pending exact-head CI and
-independent acceptance. Only S1 under existing #46 / milestone M9 (10).
+Status: implementation/correction on `fix/46-s1-tenant-authority` / PR #116,
+pending independent re-acceptance. Reviewed head
+`d253b3d12c2f86a7b5c417f7ee060131470de8cb` was acceptance-REJECTED for missing
+immediate tenant revalidation after non-agent query embedding. Its green CI
+was not acceptance. Only S1 under existing #46 / milestone M9 (10).
 #46/#35/#36/#45/#50 remain OPEN; no Target-Mac work.
 
 `Tenant.is_active` is application authority, alongside existing tenant ownership,
@@ -8812,6 +8815,18 @@ rolls back the whole current candidate (including earlier stages); already
 committed candidates remain durable. Search/planning and existing tenant-bound
 CLI processing use the same checks; NL planning ends its short initial authority
 phase before calling the local model and restores its commit check at audit.
+Semantic/hybrid query embedding is also an authority gap: REST/UI's existing
+`DbReleasingEmbeddingProvider` commits before local inference, releasing the
+previous Tenant lock and commit registration. Immediately after `embed()` returns,
+search now calls `require_active_tenant(..., lock=True)` before inspecting the
+embedding result, querying compatible embeddings or using preloaded candidate
+facts to construct any result. This fresh check locks the short result phase
+and registers its final commit guard. Suspension during embedding returns no
+candidate result through the existing typed refusal / generic API 401 / UI
+login redirect and cookie clear. No DB transaction or Tenant lock is introduced
+across query inference; agent `BoundaryEmbedding` retains its own re-entry checks.
+Structured-only search makes no embedding call. Planner post-model audit checks,
+search provenance, ranking and tenant isolation remain unchanged.
 S1 takes no Tenant authority lock across background inference. Existing folder
 DB transaction/connection lifetime and FK locks remain deferred #46 work.
 
