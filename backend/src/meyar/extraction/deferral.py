@@ -14,6 +14,7 @@ import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.services.audit_repo import record_event
+from meyar.services.tenant_authority import require_active_tenant
 
 INFERENCE_BUSY = "INFERENCE_BUSY"
 
@@ -40,6 +41,7 @@ async def defer_extraction(
 ) -> ExtractionDeferredError:
     """Audit (ids + closed codes only — never PII, prompt, or model output)
     and return the error for the caller to raise."""
+    await require_active_tenant(db, tenant_id)
     await record_event(
         db,
         tenant_id=tenant_id,

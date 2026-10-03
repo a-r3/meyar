@@ -39,6 +39,7 @@ from meyar.services.folder_indexed_file_repo import (
     update_folder_indexed_file,
 )
 from meyar.services.folder_source_repo import get_or_create_folder_source
+from meyar.services.tenant_authority import require_active_tenant
 from meyar.storage.base import DocumentStorage
 
 
@@ -90,6 +91,7 @@ async def index_folder(
     # Eager validation before any DB write — scan_source_root is a
     # generator and would otherwise only raise once first iterated,
     # after the FolderSource row below had already been created.
+    await require_active_tenant(db, tenant_id)
     resolve_source_root(root_path)
 
     source = await get_or_create_folder_source(db, tenant_id=tenant_id, root_path=root_path)
@@ -206,6 +208,7 @@ async def index_folder(
             )
     missing_count = len(remaining)
 
+    await require_active_tenant(db, tenant_id)
     summary = FolderScanSummary(
         folder_source_id=source.id,
         discovered=discovered,
@@ -292,6 +295,7 @@ async def _handle_new_file(
         )
         return INDEX_STATUS_FAILED
 
+    await require_active_tenant(db, tenant_id)
     if duplicate is not None:
         await create_folder_indexed_file(
             db,
@@ -419,6 +423,7 @@ async def _handle_changed_or_retry(
         return INDEX_STATUS_INDEXED
     assert prepared is not None
 
+    await require_active_tenant(db, tenant_id)
     candidate_id = row.candidate_id
     if candidate_id is None:
         candidate = await create_candidate(db, tenant_id=tenant_id)

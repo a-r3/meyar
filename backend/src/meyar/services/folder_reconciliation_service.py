@@ -30,6 +30,7 @@ from meyar.services.folder_indexed_file_repo import list_folder_indexed_files
 from meyar.services.folder_indexer_service import FolderScanSummary, index_folder
 from meyar.services.identity_authority import authorize_identity_version
 from meyar.services.profile_authority import get_current_authorized_profile
+from meyar.services.tenant_authority import TenantInactiveError, require_active_tenant
 from meyar.storage.base import DocumentStorage
 from meyar.storage.dependency import get_photo_storage
 
@@ -233,6 +234,7 @@ async def process_pending_candidates(
     each repeated call re-derives this ordering fresh from current
     provenance, no separate scheduling state needed. See
     docs/DECISIONS.md D-021."""
+    await require_active_tenant(db, tenant_id)
     rows = await list_folder_indexed_files(
         db, tenant_id=tenant_id, folder_source_id=folder_source_id
     )
@@ -296,17 +298,23 @@ async def process_pending_candidates(
                 max_identity_input_chars=max_identity_input_chars,
                 max_embedding_input_chars=max_embedding_input_chars,
             )
+            await require_active_tenant(db, tenant_id)
             await db.commit()
+        except TenantInactiveError:
+            await db.rollback()
+            raise
         except (ExtractionDeferredError, EmbeddingBusyError):
             # Transient admission refusal: keep any stage already completed
             # for this candidate plus the deferral audit; no FAILED version
             # was minted, so the next run retries exactly what is missing.
+            await require_active_tenant(db, tenant_id)
             await db.commit()
             inference_busy = True
             deferred += 1
             continue
         except Exception as exc:
             await db.rollback()
+            await require_active_tenant(db, tenant_id)
             await record_event(
                 db,
                 tenant_id=tenant_id,

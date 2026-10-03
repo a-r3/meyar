@@ -20,6 +20,7 @@ from meyar.services.candidate_profile_repo import (
     get_latest_profile_attempt,
 )
 from meyar.services.profile_authority import ProfileAuthorityError, authorize_profile_version
+from meyar.services.tenant_authority import require_active_tenant
 
 
 class EmbeddingPreconditionError(Exception):
@@ -65,6 +66,7 @@ async def embed_candidate_profile(
     event) if the provider itself fails — never persists a partial/
     invalid vector; a failed attempt produces no CandidateEmbeddingVersion
     row at all."""
+    await require_active_tenant(db, tenant_id)
     profile_version = await get_effective_profile_version(
         db, tenant_id=tenant_id, candidate_id=candidate_id
     )
@@ -150,6 +152,7 @@ async def embed_candidate_profile(
         )
         raise
 
+    await require_active_tenant(db, tenant_id)
     version = await create_embedding_version(
         db,
         tenant_id=tenant_id,

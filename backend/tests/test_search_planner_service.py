@@ -92,17 +92,18 @@ async def _latest_plan_event(db_session: AsyncSession, tenant_id: uuid.UUID) -> 
 
 
 async def test_owner_compound_query_keeps_both_hard_filters_without_model(
-    monkeypatch: pytest.MonkeyPatch,
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    tenant = await _tenant(db_session)
     async def no_audit(*args, **kwargs) -> None:
         pass
 
     monkeypatch.setattr(planner_service, "_audit_plan_result", no_audit)
     llm = FakeLLMProvider()
     result = await plan_candidate_search(
-        None,  # type: ignore[arg-type]  # Audit boundary is replaced above.
+        db_session,
         llm,
-        tenant_id=uuid.uuid4(),
+        tenant_id=tenant.id,
         natural_language_request=OWNER_QUERY,
         as_of_date=OWNER_AS_OF_DATE,
         embedding_config=_config(),
@@ -135,17 +136,18 @@ async def test_owner_compound_query_keeps_both_hard_filters_without_model(
     ],
 )
 async def test_upward_cefr_comparator_preserves_minimum_b2(
-    query: str, monkeypatch: pytest.MonkeyPatch
+    query: str, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    tenant = await _tenant(db_session)
     async def no_audit(*args, **kwargs) -> None:
         pass
 
     monkeypatch.setattr(planner_service, "_audit_plan_result", no_audit)
     llm = FakeLLMProvider()
     result = await plan_candidate_search(
-        None,  # type: ignore[arg-type]
+        db_session,
         llm,
-        tenant_id=uuid.uuid4(),
+        tenant_id=tenant.id,
         natural_language_request=query,
         as_of_date=OWNER_AS_OF_DATE,
         embedding_config=_config(),
@@ -172,8 +174,9 @@ async def test_upward_cefr_comparator_preserves_minimum_b2(
     ],
 )
 async def test_downward_cefr_comparator_fails_closed_before_model_repair(
-    query: str, monkeypatch: pytest.MonkeyPatch
+    query: str, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    tenant = await _tenant(db_session)
     async def no_audit(*args, **kwargs) -> None:
         pass
 
@@ -186,9 +189,9 @@ async def test_downward_cefr_comparator_fails_closed_before_model_repair(
         )
     )
     result = await plan_candidate_search(
-        None,  # type: ignore[arg-type]
+        db_session,
         llm,
-        tenant_id=uuid.uuid4(),
+        tenant_id=tenant.id,
         natural_language_request=query,
         as_of_date=OWNER_AS_OF_DATE,
         embedding_config=_config(),
@@ -272,17 +275,18 @@ async def test_downward_cefr_and_connector_never_searches_c1_or_c2_profiles(
 
 
 async def test_unresolved_material_coordination_fails_closed_before_model(
-    monkeypatch: pytest.MonkeyPatch,
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    tenant = await _tenant(db_session)
     async def no_audit(*args, **kwargs) -> None:
         pass
 
     monkeypatch.setattr(planner_service, "_audit_plan_result", no_audit)
     llm = FakeLLMProvider()
     result = await plan_candidate_search(
-        None,  # type: ignore[arg-type]
+        db_session,
         llm,
-        tenant_id=uuid.uuid4(),
+        tenant_id=tenant.id,
         natural_language_request=(
             "Python bilən və Java bilən və ingilis dili B2 olan namizədləri göstər."
         ),
@@ -295,8 +299,9 @@ async def test_unresolved_material_coordination_fails_closed_before_model(
 
 
 async def test_model_path_cannot_execute_when_a_source_bound_skill_is_dropped(
-    monkeypatch: pytest.MonkeyPatch,
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    tenant = await _tenant(db_session)
     from dataclasses import replace
 
     from meyar.agent.schemas import SemanticRequirementState
@@ -323,9 +328,9 @@ async def test_model_path_cannot_execute_when_a_source_bound_skill_is_dropped(
         planner_draft=PlannerDraft(required_filters=RequiredFilters(languages=["English"]))
     )
     result = await plan_candidate_search(
-        None,  # type: ignore[arg-type]
+        db_session,
         llm,
-        tenant_id=uuid.uuid4(),
+        tenant_id=tenant.id,
         natural_language_request=OWNER_QUERY,
         as_of_date=OWNER_AS_OF_DATE,
         embedding_config=_config(),

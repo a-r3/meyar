@@ -1,5 +1,14 @@
 # MEYAR — Status
 
+**Issue #46 S1 — Tenant Active Authorization: implementation proposed on
+`fix/46-s1-tenant-authority`; independent acceptance pending.** Starts from
+verified local/origin/live GitHub main `41833a91aaa1a57643a5020737d5574a80114cd5`
+(PR #115 merged). D-101 and `docs/ISSUE_46_S1_VALIDATION.md` record live tenant
+suspension across API/UI/agent/background processing, tenant-only session and
+pending-claim invalidation, and transactionally serialized commits. No schema
+change. #46/#35/#36/#45/#50 remain OPEN; #46 is not complete. S2+ and Target-Mac
+work were not started. The accepted/merged M-9 and M-5 records below remain valid.
+
 **Issue #46 M-9 — independently ACCEPTED and MERGED through PR #114;
 M-9 slice COMPLETE, but #46 itself is NOT complete and remains OPEN.**
 Owner-confirmed independent acceptance **PASS** at exact PR #114 head

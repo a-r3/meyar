@@ -25,6 +25,7 @@ from meyar.services.candidate_document_repo import get_candidate_document
 from meyar.services.candidate_identity_repo import get_current_identity_version
 from meyar.services.candidate_photo_repo import create_photo_version, get_photo_for_document
 from meyar.services.identity_authority import authorize_identity_version
+from meyar.services.tenant_authority import TenantInactiveError, require_active_tenant
 from meyar.storage.base import DocumentStorage
 from meyar.storage.photo import LocalPhotoStorage
 
@@ -93,6 +94,7 @@ async def process_photo_for_document(
     A terminal result is reused for this exact document/extractor. Failure
     never changes the original CV or professional processing state.
     """
+    await require_active_tenant(db, tenant_id)
     derived_key: str | None = None
     try:
         document = await get_candidate_document(
@@ -112,6 +114,7 @@ async def process_photo_for_document(
         original = await document_storage.read(storage_key=document.storage_key)
         kind = "PDF" if document.mime_type == "application/pdf" else "DOCX"
         outcome = await _extract_isolated(original, kind)
+        await require_active_tenant(db, tenant_id)
         if outcome["status"] == PHOTO_AVAILABLE:
             jpeg = base64.b64decode(outcome.pop("jpeg_base64"), validate=True)
             if (
@@ -131,7 +134,7 @@ async def process_photo_for_document(
         )
         await db.commit()
         return row
-    except Exception:
+    except Exception as exc:
         try:
             await db.rollback()
         except Exception:
@@ -141,8 +144,11 @@ async def process_photo_for_document(
                 await photo_storage.delete(tenant_id=tenant_id, storage_key=derived_key)
             except Exception:
                 logger.warning("New derived photo cleanup failed")
+        if isinstance(exc, TenantInactiveError):
+            raise
         logger.warning("Photo processing failed for a stored candidate document")
         try:
+            await require_active_tenant(db, tenant_id)
             row = await create_photo_version(
                 db,
                 tenant_id=tenant_id,
@@ -154,6 +160,8 @@ async def process_photo_for_document(
             )
             await db.commit()
             return row
+        except TenantInactiveError:
+            raise
         except Exception:
             await db.rollback()
             logger.warning("Could not persist terminal photo failure")

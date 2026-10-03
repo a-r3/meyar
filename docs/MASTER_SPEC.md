@@ -155,6 +155,15 @@ hand-duplicated elsewhere (Slice 12 finalizes Swagger + README examples).
 
 ## 8. Access control
 
+Issue #46 S1 (D-101, pending independent acceptance): `Tenant.is_active`
+is live application authority in addition to API-key/user/membership/session
+validity. Suspension rejects normal tenant application access and prevents
+generated processing results from committing after authority loss. Supported
+deactivation revokes that tenant's BrowserSessions and rotates only its
+membership pending-login stamps. Reactivation cannot revive those sessions or
+claims; independently valid API keys may resume. See
+`docs/ISSUE_46_S1_VALIDATION.md` for enforcement and lock order. No schema change.
+
 Format: `meyar_live_<random>` (test env: `meyar_test_<random>`). Only a
 SHA-256 hash of the secret is persisted; plaintext is shown once at creation
 and never logged. Fields: id, tenant_id, prefix (first 12 chars, safe to

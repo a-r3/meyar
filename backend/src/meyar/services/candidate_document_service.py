@@ -17,6 +17,7 @@ from meyar.services.candidate_document_repo import (
     create_candidate_document,
     create_canonical_document,
 )
+from meyar.services.tenant_authority import require_active_tenant
 from meyar.storage.base import DocumentStorage
 
 
@@ -67,6 +68,7 @@ async def ingest_candidate_document(
     connection during validation and parsing. Folder transaction architecture
     remains unchanged; operational failures follow its existing FAILED retry path.
     """
+    await require_active_tenant(db, tenant_id)
     prepared = await prepare_candidate_document(
         parser, filename=filename, content_type=content_type, data=data, max_bytes=max_bytes
     )
@@ -89,6 +91,7 @@ async def persist_candidate_document(
     Request callers revalidate and lock live authority first. Operational
     failures never reach storage.save or CandidateDocument creation.
     """
+    await require_active_tenant(db, tenant_id)
     detected, data, outcome = prepared.detected, prepared.data, prepared.outcome
     if isinstance(outcome, ParseError) and not outcome.is_terminal:
         raise outcome

@@ -61,17 +61,13 @@ from meyar.search.schemas import RequiredFilters
 
 # D-092 §12.2: principal -> conversation -> session context -> clarification
 # -> task -> submission.
-LOCK_RANK = {
-    "users": 0,
-    "tenant_memberships": 1,
-    "browser_sessions": 2,
-    "agent_conversations": 3,
-    "agent_conversation_session_contexts": 4,
-    "agent_clarifications": 5,
-    "agent_tasks": 6,
-    "agent_turn_submissions": 7,
-}
-PRINCIPAL = ["users", "tenant_memberships", "browser_sessions"]
+# S1 adds Tenant between User and Membership. Principal rechecks later in
+# the same transaction target the same server-owned rows, not new lock owners.
+PRINCIPAL = ["users", "tenants", "tenant_memberships", "browser_sessions"]
+LOCK_RANK = {table: rank for rank, table in enumerate(PRINCIPAL + [
+    "agent_conversations", "agent_conversation_session_contexts",
+    "agent_clarifications", "agent_tasks", "agent_turn_submissions",
+])}
 PHASE_A_TABLES = [
     "agent_conversations", "agent_conversation_session_contexts", "agent_turn_submissions",
 ]
@@ -119,15 +115,21 @@ class TransactionProbe:
 
 
 def lock_sequence(statements: list[str]) -> list[str]:
-    """Tables row-locked by a transaction, in order, consecutive repeats
-    collapsed (the lane-B task lock follows the clarification's task)."""
+    """Row-lock acquisition order; principal reacquisition and consecutive
+    repeats collapse (one server-owned principal per request)."""
     tables: list[str] = []
     for statement in statements:
         if _LOCKING.search(statement):
             match = _FROM.search(statement)
             assert match is not None, statement
-            if not tables or tables[-1] != match.group(1):
-                tables.append(match.group(1))
+            table = match.group(1)
+            # S1 auth/reservation/commit rechecks reacquire this request's
+            # already-held principal rows. Assert the order of acquisition;
+            # keep all non-principal/consequential lock-order assertions.
+            if table in PRINCIPAL and table in tables:
+                continue
+            if not tables or tables[-1] != table:
+                tables.append(table)
     return tables
 
 
@@ -370,14 +372,17 @@ async def test_final_phase_b_starts_fresh_and_locks_principal_first(
         tx for tx, statements in transactions.items()
         if any(
             statement.startswith("UPDATE agent_turn_submissions") for statement in statements
-        ) and "users" not in lock_sequence(statements)
-        and lock_sequence(statements)[:1] == ["agent_conversations"]
+        ) and not any(
+            statement.startswith("UPDATE agent_conversations") and "turns=" in statement
+            for statement in statements
+        )
     ]
     phase_b = [
         tx for tx, statements in transactions.items()
         if lock_sequence(statements)[:1] == ["users"]
         and any(
-            statement.startswith("UPDATE agent_turn_submissions") for statement in statements
+            statement.startswith("UPDATE agent_conversations") and "turns=" in statement
+            for statement in statements
         )
     ]
     if phase_b_locks is None:

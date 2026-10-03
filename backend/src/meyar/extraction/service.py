@@ -24,6 +24,7 @@ from meyar.models.candidate_profile_version import (
 from meyar.services.audit_repo import record_event
 from meyar.services.candidate_document_repo import get_latest_canonical_document
 from meyar.services.candidate_profile_repo import create_profile_version
+from meyar.services.tenant_authority import require_active_tenant
 
 # One initial attempt + one bounded retry on schema-invalid structured
 # output. Never unbounded — see Slice 4 spec §5.
@@ -55,6 +56,7 @@ async def extract_candidate_profile(
     evidence verification -> immutable CandidateProfileVersion. Caller
     must have already verified candidate_document belongs to
     (tenant_id, candidate_id)."""
+    await require_active_tenant(db, tenant_id)
     await record_event(
         db,
         tenant_id=tenant_id,
@@ -102,6 +104,7 @@ async def extract_candidate_profile(
     last_error_code = "MODEL_SCHEMA_INVALID"
     last_error_message = "Model output failed schema validation."
     for _attempt in range(MAX_MODEL_ATTEMPTS):
+        await require_active_tenant(db, tenant_id)
         try:
             extraction, model_name = await llm.extract_candidate_profile(view)
         except InferenceBusyError as exc:
@@ -162,6 +165,7 @@ async def extract_candidate_profile(
                 error_message=str(exc),
             )
 
+        await require_active_tenant(db, tenant_id)
         version = await create_profile_version(
             db,
             tenant_id=tenant_id,
@@ -217,6 +221,7 @@ async def _persist_failure(
     error_code: str,
     error_message: str,
 ) -> CandidateProfileVersion:
+    await require_active_tenant(db, tenant_id)
     version = await create_profile_version(
         db,
         tenant_id=tenant_id,

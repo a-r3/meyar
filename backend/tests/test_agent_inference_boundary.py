@@ -815,7 +815,7 @@ async def test_browser_session_revoked_while_inferring_fails_closed(
     assert (await _stored(factory, conversation_id)).turns == []
 
 
-@pytest.mark.parametrize("change", ["password", "membership"])
+@pytest.mark.parametrize("change", ["password", "membership", "tenant"])
 async def test_issue87_security_change_during_inference_rejects_phase_b(
     small_pool, tenant_and_user, change: str
 ) -> None:
@@ -824,7 +824,11 @@ async def test_issue87_security_change_during_inference_rejects_phase_b(
 
     async def mutate(db, *, user, membership, **_):  # noqa: ANN001, ANN003, ANN202
         assert small_pool[2].checked_out == 0  # inference holds no DB connection
-        if change == "password":
+        if change == "tenant":
+            from meyar.services.tenant_authority import set_tenant_active
+
+            await set_tenant_active(db, tenant_id=membership.tenant_id, is_active=False)
+        elif change == "password":
             await set_password(
                 db, user_id=user.id, plaintext_password="rotated-synthetic-password"
             )
@@ -904,6 +908,10 @@ async def _security_change(db, change: str, *, user, membership) -> None:  # noq
 
     if change == "password":
         await set_password(db, user_id=user.id, plaintext_password="rotated-synthetic-password")
+    elif change == "tenant":
+        from meyar.services.tenant_authority import set_tenant_active
+
+        await set_tenant_active(db, tenant_id=membership.tenant_id, is_active=False)
     else:
         await set_membership_active(db, membership_id=membership.id, is_active=False)
 
@@ -961,7 +969,7 @@ async def race_factory():  # noqa: ANN201
         await engine.dispose()
 
 
-@pytest.mark.parametrize("change", ["password", "membership"])
+@pytest.mark.parametrize("change", ["password", "membership", "tenant"])
 async def test_issue87_phase_b_holding_authority_blocks_security_change_commit(
     small_pool, tenant_and_user, race_factory, change: str
 ) -> None:
@@ -1005,7 +1013,7 @@ async def test_issue87_phase_b_holding_authority_blocks_security_change_commit(
         assert stale.status_code == 303
 
 
-@pytest.mark.parametrize("change", ["password", "membership"])
+@pytest.mark.parametrize("change", ["password", "membership", "tenant"])
 async def test_issue87_uncommitted_security_change_makes_phase_b_wait_then_fail_closed(
     small_pool, tenant_and_user, race_factory, change: str
 ) -> None:
@@ -1708,3 +1716,39 @@ async def test_orphan_result_set_from_stale_turn_never_becomes_live_authority(
         ).all()
         assert all(c.active_result_set_id != orphan.id for c in contexts)
         assert await db.get(AgentResultSet, orphan.id) is not None  # inert, not deleted
+
+
+@pytest.mark.parametrize("supported", [True, False])
+async def test_tenant_disabled_while_inferring_has_no_agent_consequences(
+    small_pool, tenant_and_user, supported
+) -> None:
+    from meyar.models.agent_result_set import AgentResultSet
+    from meyar.models.agent_task import AgentClarification, AgentTask
+    from meyar.services.tenant_authority import set_tenant_active
+
+    async def disable(db, *, membership, **_):
+        assert small_pool[2].checked_out == 0
+        if supported:
+            await set_tenant_active(db, tenant_id=membership.tenant_id, is_active=False)
+        else:
+            from sqlalchemy import update
+
+            from meyar.models.tenant import Tenant
+
+            await db.execute(update(Tenant).where(
+                Tenant.id == membership.tenant_id
+            ).values(is_active=False))
+
+    factory, tenant, conversation_id, response = await _run_with_mutation_during_inference(
+        small_pool, tenant_and_user, disable
+    )
+    assert response.status_code == 303 and response.headers["location"] == "/ui/login"
+    stored = await _stored(factory, conversation_id)
+    assert stored.turns == [] and stored.active_turn_id is None and stored.turn_version == 0
+    context = await _only_context(factory, conversation_id)
+    assert context.active_result_set_id is None
+    assert context.active_pending_draft_id is None
+    assert context.active_clarification_id is None
+    async with factory() as db:
+        for model in (AgentTask, AgentClarification, AgentResultSet):
+            assert await db.scalar(select(model).where(model.tenant_id == tenant.id)) is None

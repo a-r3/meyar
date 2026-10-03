@@ -61,6 +61,7 @@ from meyar.search.schemas import (
 )
 from meyar.search.service import search_candidates
 from meyar.services.audit_repo import record_event
+from meyar.services.tenant_authority import require_active_tenant
 
 MAX_PLANNER_ATTEMPTS = 2
 
@@ -233,6 +234,7 @@ async def _audit_plan_result(
                 "result_limit": result.search_request.limit,
             }
         )
+    await require_active_tenant(db, tenant_id)
     await record_event(db, tenant_id=tenant_id, event_type=event_type, metadata=metadata)
 
 
@@ -251,6 +253,8 @@ async def plan_candidate_search(
     Candidate retrieval belongs exclusively to ``search_candidates`` and
     is invoked only by ``plan_and_search_candidates`` below.
     """
+    await require_active_tenant(db, tenant_id)
+    await db.commit()
     request_hash = _request_sha256(natural_language_request)
     configured_provenance = _configured_provenance(llm)
 

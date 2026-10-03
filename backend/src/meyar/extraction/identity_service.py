@@ -24,6 +24,7 @@ from meyar.models.candidate_identity_version import (
 from meyar.services.audit_repo import record_event
 from meyar.services.candidate_document_repo import get_latest_canonical_document
 from meyar.services.candidate_identity_repo import create_identity_version
+from meyar.services.tenant_authority import require_active_tenant
 
 # One initial attempt + one bounded retry on schema-invalid structured
 # output — same bound as candidate-profile extraction (Slice 4 spec §5).
@@ -59,6 +60,7 @@ async def extract_candidate_identity(
     real PII, never logged or placed in audit metadata — only ids/status
     are. Caller must have already verified candidate_document belongs to
     (tenant_id, candidate_id)."""
+    await require_active_tenant(db, tenant_id)
     await record_event(
         db,
         tenant_id=tenant_id,
@@ -106,6 +108,7 @@ async def extract_candidate_identity(
     last_error_code = "MODEL_SCHEMA_INVALID"
     last_error_message = "Model output failed schema validation."
     for _attempt in range(MAX_MODEL_ATTEMPTS):
+        await require_active_tenant(db, tenant_id)
         try:
             extraction, model_name = await llm.extract_candidate_identity(view)
         except InferenceBusyError as exc:
@@ -166,6 +169,7 @@ async def extract_candidate_identity(
                 error_message=str(exc),
             )
 
+        await require_active_tenant(db, tenant_id)
         version = await create_identity_version(
             db,
             tenant_id=tenant_id,
@@ -226,6 +230,7 @@ async def _persist_failure(
     error_code: str,
     error_message: str,
 ) -> CandidateIdentityVersion:
+    await require_active_tenant(db, tenant_id)
     version = await create_identity_version(
         db,
         tenant_id=tenant_id,

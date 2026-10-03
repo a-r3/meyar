@@ -33,6 +33,7 @@ from meyar.services.audit_repo import record_event
 from meyar.services.candidate_embedding_repo import search_compatible_embeddings
 from meyar.services.candidate_profile_repo import list_effective_profile_versions_for_tenant
 from meyar.services.profile_authority import ProfileAuthorityError, authorize_profile_versions
+from meyar.services.tenant_authority import require_active_tenant
 
 # Bound canonical IN parameters and canonical-content memory, independent of
 # tenant history/size. ResultSet/page consumers already bound their own batches.
@@ -64,6 +65,7 @@ async def search_candidates(
     is READ (call .embed()) only for SEMANTIC_ONLY/HYBRID — STRUCTURED_ONLY
     never invokes it, even if one is supplied (hard regression requirement,
     see docs/DECISIONS.md and test_search_structured.py)."""
+    await require_active_tenant(db, tenant_id)
     needs_semantic = request.mode in (SearchMode.SEMANTIC_ONLY, SearchMode.HYBRID)
     as_of_year = request.as_of_date.year if request.as_of_date else None
 
@@ -289,6 +291,7 @@ async def search_candidates(
         db, tenant_id=tenant_id, event_type="CANDIDATE_SEARCH_EXECUTED", metadata=audit_metadata
     )
 
+    await require_active_tenant(db, tenant_id)
     return CandidateSearchResponse(
         mode=request.mode,
         policy_version=SEARCH_POLICY_VERSION,

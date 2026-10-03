@@ -92,6 +92,7 @@ from meyar.services.agent_conversation_repo import (
     get_session_context_for_update,
     touch_session_context,
 )
+from meyar.services.tenant_authority import require_active_tenant, tenant_is_active
 
 AGENT_TURN_REQUIRED_SCOPE = "candidates:read"
 
@@ -238,6 +239,12 @@ async def reserve_agent_turn(
     another turn already holds a live reservation. Does not commit: the
     caller's transaction (and the row lock) continue until the first
     ``TurnBoundary.leave_db`` or the Phase B commit."""
+    user_active = await db.scalar(
+        select(User.is_active).where(User.id == owner.user_id).with_for_update(read=True)
+    )
+    if user_active is not True or not await tenant_is_active(db, owner.tenant_id, lock=True):
+        raise TurnAuthorityLostError(TurnStaleReason.PRINCIPAL_REVOKED)
+    await require_active_tenant(db, owner.tenant_id)
     conversation = await get_owned_conversation_for_update(
         db, owner=owner, conversation_id=conversation_id
     )
@@ -283,7 +290,7 @@ async def _principal_is_live(db: AsyncSession, reservation: TurnReservation) -> 
 
     issue #87 (D-091): the authority rows are row-locked ``FOR SHARE`` for
     the rest of this short re-entry/Phase B transaction, in the same
-    User -> TenantMembership -> BrowserSession order every security mutator
+    User -> Tenant -> TenantMembership -> BrowserSession order every security mutator
     (set_password, set_user_active, set_membership_active, logout) writes
     them. A credential/session revocation therefore either commits first
     (this check then waits for it and sees the revoked state) or waits
@@ -303,6 +310,9 @@ async def _principal_is_live(db: AsyncSession, reservation: TurnReservation) -> 
     )
     if user is None or not user.is_active:
         return False
+    if not await tenant_is_active(db, owner.tenant_id, lock=True):
+        return False
+    await require_active_tenant(db, owner.tenant_id)
     membership = await db.scalar(
         select(TenantMembership)
         .where(TenantMembership.id == owner.membership_id)
