@@ -1,6 +1,8 @@
 import logging
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -10,23 +12,36 @@ from meyar.extraction.deferral import ExtractionDeferredError
 from meyar.extraction.evidence import EvidenceValidationError
 from meyar.extraction.identity_service import (
     IdentityExtractionPreconditionError,
-    extract_candidate_identity,
+    infer_candidate_identity,
+    load_identity_view,
+    persist_identity_outcome,
 )
-from meyar.extraction.service import ExtractionPreconditionError, extract_candidate_profile
+from meyar.extraction.service import (
+    ExtractionPreconditionError,
+    infer_candidate_profile,
+    load_profile_view,
+    persist_profile_outcome,
+)
+from meyar.extraction.view import ProfessionalDocumentView
 from meyar.ingestion.parser import DocumentParser
 from meyar.llm.provider import LLMProvider
+from meyar.models.candidate_document import CandidateDocument
 from meyar.models.candidate_identity_version import IDENTITY_STATUS_COMPLETED
 from meyar.models.candidate_profile_version import PROFILE_STATUS_COMPLETED, CandidateProfileVersion
 from meyar.services.audit_repo import record_event
-from meyar.services.candidate_document_repo import get_candidate_document
+from meyar.services.candidate_document_repo import get_newest_candidate_document
 from meyar.services.candidate_embedding_repo import list_embedding_versions_for_candidate
 from meyar.services.candidate_embedding_service import (
     EmbeddingPreconditionError,
-    embed_candidate_profile,
+    persist_embedding,
+    prepare_embedding,
+    record_embedding_failure,
+    record_embedding_reused,
 )
 from meyar.services.candidate_identity_repo import get_latest_identity_version_for_document
 from meyar.services.candidate_photo_service import process_photo_for_document
 from meyar.services.candidate_profile_repo import get_latest_profile_version_for_document
+from meyar.services.candidate_repo import get_candidate
 from meyar.services.folder_indexed_file_repo import list_folder_indexed_files
 from meyar.services.folder_indexer_service import FolderScanSummary, index_folder_and_commit
 from meyar.services.identity_authority import authorize_identity_version
@@ -54,6 +69,9 @@ class ReconciliationSummary:
     # inference gate was busy (QUEUE_FULL/QUEUE_TIMEOUT). Not failures: no
     # FAILED version was written; a later run retries them.
     deferred: int = 0
+    # Issue #46 S9: candidates whose authority vanished mid-run (deleted, or a newer
+    # document became current). Nothing was persisted for the stale authority.
+    superseded: int = 0
 
 
 async def _is_ready(
@@ -100,6 +118,201 @@ async def _is_ready(
     return has_embedding, profile
 
 
+SUPERSEDED_CANDIDATE_DELETED = "CANDIDATE_DELETED"
+SUPERSEDED_DOCUMENT_NOT_CURRENT = "DOCUMENT_NOT_CURRENT"
+SUPERSEDED_PROFILE_NOT_CURRENT = "PROFILE_NOT_CURRENT"
+
+
+@dataclass(frozen=True)
+class _StageResult:
+    """superseded: the exact tenant/candidate/current-document authority this run
+    was working for no longer exists (deleted, or a newer document is current).
+    Nothing of this run was persisted for it; it is not a processing failure."""
+
+    superseded: str | None = None
+    version: Any = None
+
+
+async def _authority(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    candidate_id: uuid.UUID,
+    document_id: uuid.UUID,
+    persist: bool,
+) -> tuple[CandidateDocument | None, str | None]:
+    """Exact tenant + candidate + CURRENT-document authority (issue #46 S9).
+
+    persist=False is the short read phase before inference (no lock). persist=True is
+    the short persistence phase after inference: Tenant SHARE, then the Candidate row
+    FOR UPDATE, held only until the phase's commit. That excludes candidate hard-delete
+    (same Candidate UPDATE, same Tenant -> Candidate order as S5/S6), every concurrent
+    persister for this candidate (so version numbers and already-done checks are
+    race-free) and a changed-document ingestion's Candidate SHARE. It is never held
+    across local inference."""
+    await require_active_tenant(db, tenant_id, lock=persist)
+    candidate = await get_candidate(
+        db, tenant_id=tenant_id, candidate_id=candidate_id, lock=persist
+    )
+    if candidate is None:
+        return None, SUPERSEDED_CANDIDATE_DELETED
+    newest = await get_newest_candidate_document(
+        db, tenant_id=tenant_id, candidate_id=candidate_id
+    )
+    if newest is None or newest.id != document_id:
+        return None, SUPERSEDED_DOCUMENT_NOT_CURRENT
+    return newest, None
+
+
+async def _extraction_stage(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    candidate_id: uuid.UUID,
+    document_id: uuid.UUID,
+    get_latest: Callable[..., Awaitable[Any]],
+    completed_status: str,
+    load_view: Callable[..., Awaitable[tuple[ProfessionalDocumentView, uuid.UUID]]],
+    infer: Callable[[ProfessionalDocumentView], Awaitable[Any]],
+    persist_outcome: Callable[..., Awaitable[Any]],
+    preconditions: tuple[type[Exception], ...],
+) -> _StageResult:
+    """Phase A (short, committed) -> local inference with NO SQL transaction,
+    pooled connection or row lock -> Phase B (short, revalidated, committed)."""
+    document, reason = await _authority(
+        db, tenant_id=tenant_id, candidate_id=candidate_id, document_id=document_id,
+        persist=False,
+    )
+    if document is None:
+        return _StageResult(superseded=reason)
+    latest = await get_latest(db, tenant_id=tenant_id, candidate_document_id=document_id)
+    if latest is not None and latest.status == completed_status:
+        await db.commit()
+        return _StageResult(version=latest)
+    try:
+        view, canonical_id = await load_view(
+            db, tenant_id=tenant_id, candidate_id=candidate_id, candidate_document=document
+        )
+    except preconditions:
+        await db.commit()  # keep the audit of the unsupported document
+        return _StageResult()
+    await db.commit()  # Phase A ends: the connection returns to the pool
+
+    outcome = await infer(view)
+
+    document, reason = await _authority(
+        db, tenant_id=tenant_id, candidate_id=candidate_id, document_id=document_id,
+        persist=True,
+    )
+    if document is None:
+        return _StageResult(superseded=reason)
+    latest = await get_latest(db, tenant_id=tenant_id, candidate_document_id=document_id)
+    if latest is not None and latest.status == completed_status:
+        await db.commit()  # a concurrent run completed this stage: discard our result
+        return _StageResult(version=latest)
+    version = await persist_outcome(db, document, canonical_id, outcome)
+    await db.commit()
+    return _StageResult(version=version)
+
+
+async def _embedding_stage(
+    db: AsyncSession,
+    embedding_provider: EmbeddingProvider,
+    *,
+    tenant_id: uuid.UUID,
+    candidate_id: uuid.UUID,
+    document_id: uuid.UUID,
+    max_input_chars: int,
+) -> tuple[_StageResult, bool]:
+    """Same two-phase shape for embedding. Returns (stage result, embedded)."""
+    document, reason = await _authority(
+        db, tenant_id=tenant_id, candidate_id=candidate_id, document_id=document_id,
+        persist=False,
+    )
+    if document is None:
+        return _StageResult(superseded=reason), False
+    try:
+        plan = await prepare_embedding(
+            db, embedding_provider, tenant_id=tenant_id, candidate_id=candidate_id,
+            max_input_chars=max_input_chars,
+        )
+    except EmbeddingPreconditionError:
+        await db.commit()
+        return _StageResult(), False
+    if plan.existing is not None:
+        await record_embedding_reused(db, tenant_id=tenant_id, candidate_id=candidate_id, plan=plan)
+        await db.commit()
+        return _StageResult(), True
+    await db.commit()  # Phase A ends: no connection while the local model runs
+
+    failure: EmbeddingProviderError | None = None
+    result = None
+    try:
+        result = await embedding_provider.embed(plan.text)
+    except EmbeddingProviderError as exc:
+        failure = exc
+
+    document, reason = await _authority(
+        db, tenant_id=tenant_id, candidate_id=candidate_id, document_id=document_id,
+        persist=True,
+    )
+    if document is None:
+        return _StageResult(superseded=reason), False
+    if failure is not None:
+        await record_embedding_failure(
+            db, tenant_id=tenant_id, candidate_id=candidate_id, plan=plan, exc=failure
+        )
+        await db.commit()
+        if isinstance(failure, EmbeddingBusyError):
+            raise failure  # transient: defer the candidate, never count it failed
+        return _StageResult(), False
+    assert result is not None
+    try:
+        current = await prepare_embedding(
+            db, embedding_provider, tenant_id=tenant_id, candidate_id=candidate_id,
+            max_input_chars=max_input_chars,
+        )
+    except EmbeddingPreconditionError:
+        await db.commit()
+        return _StageResult(superseded=SUPERSEDED_PROFILE_NOT_CURRENT), False
+    if current.profile_version_id != plan.profile_version_id:
+        await db.commit()  # the effective profile moved while embedding: never bind to it
+        return _StageResult(superseded=SUPERSEDED_PROFILE_NOT_CURRENT), False
+    if current.existing is not None:
+        await record_embedding_reused(
+            db, tenant_id=tenant_id, candidate_id=candidate_id, plan=current
+        )
+    else:
+        await persist_embedding(
+            db, tenant_id=tenant_id, candidate_id=candidate_id, plan=current, result=result
+        )
+    await db.commit()
+    return _StageResult(), True
+
+
+async def _supersede(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    candidate_id: uuid.UUID,
+    document_id: uuid.UUID,
+    reason: str,
+) -> None:
+    await db.rollback()
+    await require_active_tenant(db, tenant_id)
+    await record_event(
+        db,
+        tenant_id=tenant_id,
+        event_type="FOLDER_RECONCILE_CANDIDATE_SUPERSEDED",
+        metadata={
+            "candidate_id": str(candidate_id),
+            "document_id": str(document_id),
+            "reason_code": reason,
+        },
+    )
+    await db.commit()
+
+
 async def _process_one_candidate_document(
     db: AsyncSession,
     llm: LLMProvider,
@@ -112,83 +325,81 @@ async def _process_one_candidate_document(
     max_profile_input_chars: int,
     max_identity_input_chars: int,
     max_embedding_input_chars: int,
-) -> bool:
-    """Drives one candidate's CURRENT document through whichever of
-    profile extraction / identity extraction / embedding is not yet
-    COMPLETE, reusing the exact Slice 4/7 services unchanged — no
-    parallel extraction/embedding logic. Each stage is independently
-    attempted so partial progress from a prior failed run is never
-    redone: extraction and identity are only (re)run when not already
-    COMPLETED for this document; embedding is idempotent by construction
-    (candidate_embedding_service.embed_candidate_profile) so calling it
-    whenever the profile is COMPLETED is always safe and cheap on reuse.
-    Returns True only if the candidate is fully ready after this call."""
-    document = await get_candidate_document(
-        db, tenant_id=tenant_id, candidate_id=candidate_id, document_id=candidate_document_id
-    )
-    if document is None:
-        return False  # defensive: should not happen for a row created by index_folder
+) -> tuple[bool, str | None]:
+    """Drives one candidate's CURRENT document through whichever of profile
+    extraction / identity extraction / embedding is not yet COMPLETE.
 
-    profile = await get_latest_profile_version_for_document(
-        db, tenant_id=tenant_id, candidate_document_id=candidate_document_id
-    )
-    if profile is None or profile.status != PROFILE_STATUS_COMPLETED:
-        try:
-            profile = await extract_candidate_profile(
-                db,
-                llm,
-                tenant_id=tenant_id,
-                candidate_id=candidate_id,
-                candidate_document=document,
-                model_provider_name=model_provider_name,
-                max_input_chars=max_profile_input_chars,
-            )
-        except ExtractionPreconditionError:
-            profile = None
+    Issue #46 S9: every stage is a short committed read phase, local inference with
+    no SQL transaction/connection/lock, and a short persistence phase that
+    revalidates tenant + candidate + exact current document under the Candidate row
+    lock and discards the result if it lost a race. A stage is attempted only when
+    not already COMPLETED, so partial progress is never redone. Returns
+    (fully ready, superseded reason). A superseded run persisted nothing for the
+    document that is no longer authoritative."""
+    common = dict(tenant_id=tenant_id, candidate_id=candidate_id, document_id=candidate_document_id)
 
-    identity = await get_latest_identity_version_for_document(
-        db, tenant_id=tenant_id, candidate_document_id=candidate_document_id
-    )
-    if identity is None or identity.status != IDENTITY_STATUS_COMPLETED:
-        try:
-            identity = await extract_candidate_identity(
-                db,
-                llm,
-                tenant_id=tenant_id,
-                candidate_id=candidate_id,
-                candidate_document=document,
-                model_provider_name=model_provider_name,
-                max_input_chars=max_identity_input_chars,
-            )
-        except IdentityExtractionPreconditionError:
-            identity = None
+    async def persist_profile(db_, document, canonical_id, outcome):
+        return await persist_profile_outcome(
+            db_, tenant_id=tenant_id, candidate_id=candidate_id, candidate_document=document,
+            canonical_document_id=canonical_id, model_provider_name=model_provider_name,
+            outcome=outcome,
+        )
 
+    async def persist_identity(db_, document, canonical_id, outcome):
+        return await persist_identity_outcome(
+            db_, tenant_id=tenant_id, candidate_id=candidate_id, candidate_document=document,
+            canonical_document_id=canonical_id, model_provider_name=model_provider_name,
+            outcome=outcome,
+        )
+
+    profile_stage = await _extraction_stage(
+        db, **common,
+        get_latest=get_latest_profile_version_for_document,
+        completed_status=PROFILE_STATUS_COMPLETED,
+        load_view=load_profile_view,
+        infer=lambda view: infer_candidate_profile(
+            llm, view, max_input_chars=max_profile_input_chars
+        ),
+        persist_outcome=persist_profile,
+        preconditions=(ExtractionPreconditionError,),
+    )
+    if profile_stage.superseded:
+        return False, profile_stage.superseded
+
+    identity_stage = await _extraction_stage(
+        db, **common,
+        get_latest=get_latest_identity_version_for_document,
+        completed_status=IDENTITY_STATUS_COMPLETED,
+        load_view=load_identity_view,
+        infer=lambda view: infer_candidate_identity(
+            llm, view, max_input_chars=max_identity_input_chars
+        ),
+        persist_outcome=persist_identity,
+        preconditions=(IdentityExtractionPreconditionError,),
+    )
+    if identity_stage.superseded:
+        return False, identity_stage.superseded
+
+    profile = profile_stage.version
+    identity = identity_stage.version
     profile_ok = profile is not None and profile.status == PROFILE_STATUS_COMPLETED
     identity_ok = identity is not None and identity.status == IDENTITY_STATUS_COMPLETED
 
     embedded = False
     if profile_ok:
-        try:
-            await embed_candidate_profile(
-                db,
-                embedding_provider,
-                tenant_id=tenant_id,
-                candidate_id=candidate_id,
-                max_input_chars=max_embedding_input_chars,
-            )
-            embedded = True
-        except EmbeddingBusyError:
-            raise  # transient: defer the candidate, never count it failed
-        except (EmbeddingPreconditionError, EmbeddingProviderError):
-            embedded = False
+        embedding_stage, embedded = await _embedding_stage(
+            db, embedding_provider, max_input_chars=max_embedding_input_chars, **common
+        )
+        if embedding_stage.superseded:
+            return False, embedding_stage.superseded
 
     if not (profile_ok and identity_ok and embedded):
-        return False
+        return False, None
     ready, _ = await _is_ready(
         db, tenant_id=tenant_id, candidate_id=candidate_id,
         candidate_document_id=candidate_document_id,
     )
-    return ready
+    return ready, None
 
 
 async def process_pending_candidates(
@@ -242,6 +453,7 @@ async def process_pending_candidates(
 
     considered = already_ready = processed = ready_after = failed = skipped_due_to_limit = 0
     deferred = 0
+    superseded = 0
     inference_busy = False
     seen_documents: set[uuid.UUID] = set()
     pending: list[tuple[uuid.UUID, uuid.UUID, str, bool]] = []
@@ -287,7 +499,7 @@ async def process_pending_candidates(
 
         processed += 1
         try:
-            success = await _process_one_candidate_document(
+            success, superseded_reason = await _process_one_candidate_document(
                 db,
                 llm,
                 embedding_provider,
@@ -299,6 +511,15 @@ async def process_pending_candidates(
                 max_identity_input_chars=max_identity_input_chars,
                 max_embedding_input_chars=max_embedding_input_chars,
             )
+            if superseded_reason is not None:
+                # Deleted, or a newer document is current: nothing was persisted
+                # for the stale authority; a truthful audit, not a failure.
+                await _supersede(
+                    db, tenant_id=tenant_id, candidate_id=candidate_id,
+                    document_id=candidate_document_id, reason=superseded_reason,
+                )
+                superseded += 1
+                continue
             await require_active_tenant(db, tenant_id)
             await db.commit()
         except TenantInactiveError:
@@ -342,6 +563,7 @@ async def process_pending_candidates(
         failed=failed,
         skipped_due_to_limit=skipped_due_to_limit,
         deferred=deferred,
+        superseded=superseded,
     )
 
 

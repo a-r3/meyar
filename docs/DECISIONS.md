@@ -9241,7 +9241,7 @@ existing (unreproduced-here) ordering and is deferred with the changed-file slic
 
 ## D-108 — Issue #46 S8: changed-file acquisition and candidate-delete authority
 
-Status: implemented proposal; independent acceptance pending. Refs #46 under
+Status: ACCEPTED + MERGED (PR #123, accepted head `7d87f9d160886f99fa4eb85e3b4b4481562c0f2d`, squash/main `a1841768fca2cd92d733852a71d42087e51341be`, tree `e988994d5befd7610dff1fa6e03e72c23f613a73`, parent S7 main `1a4e0ce95991fe43449d0d45d9da1b28b4d10ada`). Refs #46 under
 existing M9 milestone 10. Starts from ACCEPTED + MERGED S7 / PR #122:
 squash/main `1a4e0ce95991fe43449d0d45d9da1b28b4d10ada`, tree
 `54570e9711fe4354aaedd08e559efad27486c3c5`; accepted head/CI in D-107.
@@ -9291,3 +9291,55 @@ No migration/dependency/parser/scoring/evidence/PII-log policy change. No downst
 extraction/photo concurrency work, retention/orphan sweep, S4 hard-kill recovery,
 embedding readiness, deployment, Target-Mac, or #45/#35/#36/#50 work.
 `docs/ISSUE_46_S8_VALIDATION.md` records outcomes and gates; #46 remains OPEN.
+
+
+## D-109 — Issue #46 S9: downstream folder reconciliation concurrency authority
+
+Status: implemented, independent acceptance pending; Refs #46, M9 milestone 10.
+Starts from ACCEPTED + MERGED S8 / PR #123: squash/main
+`a1841768fca2cd92d733852a71d42087e51341be`, tree `e988994d5befd7610dff1fa6e03e72c23f613a73`.
+
+Proof on exact S8 production source (real PostgreSQL, gated deterministic local
+providers, Events / `pg_stat_activity` / `pg_blocking_pids`; the race existed):
+- two runs for one candidate/document (profile or identity missing): BOTH ran inference and
+  BOTH committed a COMPLETED version (2 profile / 2 identity versions) because
+  `max(version)+1` is computed at persist time; with embedding missing the loser hit the
+  unique constraint and was reported failed (`FOLDER_RECONCILE_CANDIDATE_FAILED`);
+- changed document: an in-flight run for old document A persisted a newer-numbered profile
+  after document B was fully processed, so the latest-attempt rule made STALE A the
+  effective/searchable profile (a Java query matched a candidate whose file now says Python);
+- candidate deleted mid-run: reported as a processing failure (FK IntegrityError);
+- a pooled connection stayed `idle in transaction` through the whole of local inference and
+  held version-insert locks through later stages (confirmed pre-existing; here inseparable
+  from the correctness fix, because a revalidated persistence phase requires phase-separated
+  transactions);
+- tenant suspension, delete-after-persist, unrelated-work non-serialization, and concurrent
+  photo passes for one document already behaved correctly (photo: S6 phases + unique
+  constraint + exact-row recheck converge on one row and one derived asset; no fix).
+
+Decision (no migration, no new dependency, no new table):
+1. `extraction/service`, `identity_service`, `candidate_embedding_service` are split into DB
+   prepare (`load_*_view` / `prepare_embedding`), DB-free inference (`infer_*`), and DB persist
+   (`persist_*_outcome` / `persist_embedding`). The legacy `extract_*` / `embed_*` entry points
+   recompose them unchanged (API/CLI/demo behavior and tests intact).
+2. `process_pending_candidates` runs each stage as Phase A (short, read + authority check,
+   committed) -> local inference with NO SQL transaction, pooled connection or row lock ->
+   Phase B (short): Tenant SHARE (live), Candidate row FOR UPDATE, exact CURRENT document
+   (newest CandidateDocument), then "stage already COMPLETED by another run?" -> if so the
+   result is discarded; else persist and commit. The embedding stage also re-derives the
+   effective profile and binds only to the same profile version.
+3. Superseded outcome (`ReconciliationSummary.superseded`, audit
+   `FOLDER_RECONCILE_CANDIDATE_SUPERSEDED`, closed reason codes CANDIDATE_DELETED /
+   DOCUMENT_NOT_CURRENT / PROFILE_NOT_CURRENT): nothing is persisted for the stale authority
+   and it is not counted failed. A stale document's result is never written, so it can never
+   become current/searchable authority. Duplicate inference between concurrent runs remains
+   possible (wasted local work) but never duplicate authority; a durable reservation was not
+   justified by the evidence and would need a migration.
+4. Lock order: Tenant SHARE -> Candidate UPDATE, identical to delete (S5/S6) and photo Phase B;
+   S7/S8 scans take FolderSource -> ... -> Candidate SHARE and wait on, never hold-and-wait
+   against, a persister (it takes no source/content lock). Locks last only Phase B.
+   Different candidates, sources and tenants never share a lock.
+
+Out of scope and unchanged: API/CLI single-transaction extraction (still spans inference),
+photo path (no change), changed-file/dedup authority (S7/S8), retention/orphan sweeper,
+S4 hard-kill residuals, configured embedding readiness, schema drift.

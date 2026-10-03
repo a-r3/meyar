@@ -434,8 +434,14 @@ async def test_reconciliation_disabled_during_each_stage_rolls_back_whole_candid
             max_identity_input_chars=20_000,
             max_embedding_input_chars=20_000,
         )
-    for model in (CandidateProfileVersion, CandidateIdentityVersion, CandidateEmbeddingVersion):
-        assert await db_session.scalar(select(model)) is None
+    # Issue #46 S9: each stage is its own short committed phase. Stages that committed
+    # while the tenant was still active are durable; the disabled stage and every later
+    # stage persist nothing (the Phase B tenant re-check refuses it).
+    expected = {"profile": 0, "identity": 1, "embedding": 2}[stage]
+    models = (CandidateProfileVersion, CandidateIdentityVersion, CandidateEmbeddingVersion)
+    for index, model in enumerate(models):
+        count = await db_session.scalar(select(func.count()).select_from(model))
+        assert count == (1 if index < expected else 0), (stage, model.__name__, count)
 
 
 async def test_final_commit_rechecks_live_tenant_and_cannot_be_bypassed(

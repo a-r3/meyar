@@ -54,7 +54,26 @@ No migration, no new dependency. D-107 and `docs/ISSUE_46_S7_VALIDATION.md`. Cha
 authority is investigated in the bounded S8 proposal below; other deferred scope stays open.
 #46/#35/#36/#45/#50 remain OPEN.
 
-**Issue #46 S8 — changed-file snapshot / candidate-delete authority proposal;
+**Issue #46 S9 — downstream folder-reconciliation concurrency authority implemented;
+independent acceptance pending.** Starts from verified main
+`a1841768fca2cd92d733852a71d42087e51341be` (tree `e988994d5befd7610dff1fa6e03e72c23f613a73`).
+Reproduced before the fix: concurrent runs for one candidate each committed a COMPLETED
+profile/identity version (or failed on the embedding unique key); an in-flight run for an
+OLD document persisted after the new document was processed and became the effective,
+searchable profile; a mid-run candidate delete was reported as a failure; and a connection
+stayed idle in transaction through local inference. Folder downstream processing is now
+Phase A (short, committed) -> inference with no transaction/connection/lock -> Phase B
+(Tenant SHARE, Candidate FOR UPDATE, exact current document, already-done check). Stale or
+deleted authority is discarded as `superseded`, never persisted. Photo path audited: already
+convergent, unchanged. No migration. D-109 and `docs/ISSUE_46_S9_VALIDATION.md`.
+#46/#35/#36/#45/#50 remain OPEN.
+
+**Issue #46 S8 — ACCEPTED + MERGED (PR #123).** Accepted head
+`7d87f9d160886f99fa4eb85e3b4b4481562c0f2d`; squash/main
+`a1841768fca2cd92d733852a71d42087e51341be`; tree `e988994d5befd7610dff1fa6e03e72c23f613a73`;
+parent S7 main `1a4e0ce95991fe43449d0d45d9da1b28b4d10ada`.
+
+**(historical) Issue #46 S8 — changed-file snapshot / candidate-delete authority proposal;
 independent acceptance pending.** Exact S7's bounded descriptor reads and metadata
 checks missed a real mmap mutation: a valid mixed-generation PDF was stored despite
 unchanged size/mtime-ns/ctime-ns/device/inode. Acquisition now requires two matching

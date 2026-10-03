@@ -548,6 +548,7 @@ async def _reconcile_folder(tenant_id: str, root: str, limit: int | None) -> Non
     print(f"Not fully ready (pending retry): {reconciliation_summary.failed}")
     print(f"Skipped due to --limit: {reconciliation_summary.skipped_due_to_limit}")
     print(f"Deferred (local inference busy, retry later): {reconciliation_summary.deferred}")
+    print(f"Superseded (deleted or newer document current): {reconciliation_summary.superseded}")
     if (
         scan_summary.failed > 0
         or scan_summary.skipped_oversized > 0
