@@ -43,9 +43,10 @@ async def embed_candidate_profile(
     """Embeds the candidate's CURRENT CandidateProfileVersion's
     professional content — never CandidateIdentity, which this function
     never even queries. "Current" is derived from
-    get_effective_profile_version (newest COMPLETED, then current evidence
-    verification) at call time. Failed/manual-review attempts cannot replace
-    accepted facts; an embedding stays bound to the exact selected version.
+    get_effective_profile_version (latest-attempt document's newest COMPLETED,
+    then current evidence verification) at call time. Only same-document
+    failed/manual-review attempts may preserve accepted facts; an embedding stays
+    bound to the exact selected version.
 
     Idempotent: if a CandidateEmbeddingVersion already exists for the
     exact seven-field identity (profile version, provider, model,

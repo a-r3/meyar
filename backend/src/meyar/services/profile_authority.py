@@ -132,7 +132,7 @@ async def authorize_profile_versions(
 async def get_current_authorized_profile(
     db: AsyncSession, *, tenant_id: uuid.UUID, candidate_id: uuid.UUID
 ) -> tuple[CandidateProfileVersion, CandidateProfileExtraction] | None:
-    """Effective facts: newest COMPLETED, current evidence, fail closed (D-100)."""
+    """Effective facts: latest-attempt document, newest COMPLETED, current evidence (D-100)."""
     version = await get_effective_profile_version(
         db, tenant_id=tenant_id, candidate_id=candidate_id
     )

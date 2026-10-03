@@ -1,6 +1,8 @@
 # Issue #46 M-9 — preserve accepted facts after failed re-extraction
 
-Status: implementation proposal; independent acceptance pending. Refs #46,
+Status: PR #114 independent acceptance FAIL at reviewed head
+`d5984e779f7ec707e04f9bf3798c6d65da341a5a`; document-boundary correction
+on the existing branch, corrected-head independent acceptance pending. Refs #46,
 M9 — Deployment, Benchmark & Integration Readiness (milestone 10).
 #46 MUST remain OPEN. #35/#36/#50 remain OPEN and unchanged.
 No Target-Mac execution, benchmark, model approval or acceptance is claimed.
@@ -17,7 +19,7 @@ its independent acceptance is durably recorded in D-099 and M-5 validation.
 PR #113 (M-5 post-merge record) MERGED at the exact base above.
 Unrelated dependency PRs #3/#4/#5/#67 were not changed.
 
-## Root cause and before-fix reproduction
+## Original same-document root cause and reproduction (historical)
 
 The single, tenant-wide and bounded-member repository helpers selected max
 version_number without filtering status. Read-time evidence authorization then
@@ -52,7 +54,35 @@ Specific failures: authorized profile was None; search result_count was 0
 PROFILE_NOT_COMPLETED with status FAILED; detail skills were [] (expected
 Python). After the initial implementation: `5 passed in 0.65s`.
 
+## Acceptance blocker and corrected-head reproduction
+
+Reviewed head used candidate-wide newest COMPLETED. It incorrectly revived
+D1 facts after a D2 failed/manual attempt. The former changed-document test
+asserted that wrong policy; it has been corrected, not treated as acceptance.
+Before-fix reproduction of the original same-document bug above remains history.
+The original green 355-focused/3492-full results below apply to the REJECTED
+reviewed head and do not validate the document-boundary correction.
+
+Final synthetic correction tests were also run against reviewed profile/identity/
+library code loaded into a separate Python process. Working production files
+were not reverted. Exact reviewed source came from `git show` of that head.
+The initial correction run had 13 product assertion failures and four invalid
+semantic request fixtures (17 failed, 16 passed in 6.82s); semantic fixtures
+were corrected before the final reviewed-code reproduction recorded below.
+
+Final reviewed-code reproduction:
+
+```text
+19 failed, 17 passed in 6.76s
+```
+
+All 19 failures are corrected-contract assertions: retry boundary, new-document
+identity, mixed query selection, all three search modes, current scoring,
+ResultSet/agent and UI. The same-document/evidence/success-switch cases pass.
+
 ## Authority contract (D-100)
+
+**Fallback is permitted only inside the latest attempt's CandidateDocument boundary. Cross-document fallback is prohibited.**
 
 - **Latest extraction attempt:** highest immutable version_number regardless of
   COMPLETED/FAILED/MANUAL_REVIEW_REQUIRED. Used for diagnostics, history,
@@ -60,14 +90,18 @@ Python). After the initial implementation: `5 passed in 0.65s`.
   latest-attempt operations; legacy repository `get_current_*`/`list_current_*`
   functions retain attempt semantics for compatibility. Production professional
   consumers use the new effective selectors.
-- **Effective accepted professional profile:** select newest COMPLETED for that
-  tenant/candidate, then pass unchanged `authorize_profile_version()` (or its
+- **Effective accepted professional profile:** resolve latest attempt regardless
+  of status, take its CandidateDocument, select newest COMPLETED within that
+  SAME tenant/candidate/document, then pass unchanged `authorize_profile_version()` (or its
   identical batch form). Status selection alone never grants fact authority.
   With no COMPLETED row, professional authority is absent. If the selected
   COMPLETED fails current evidence checks, authority is absent: **fail closed,
   no scan back through older COMPLETED rows**.
-- COMPLETED v1 → FAILED or MANUAL_REVIEW_REQUIRED v2 preserves v1 only while
-  v1's own canonical source still passes current evidence authority.
+- D1 COMPLETED v1 → same-D1 FAILED or MANUAL_REVIEW_REQUIRED v2 may preserve
+  v1 while its current canonical evidence remains valid.
+- D1/v1 → new-D2 failed/manual v2 yields no effective profile if D2 has no
+  completed version. D1 is history only. D2/v3 COMPLETED restores current
+  authority subject to evidence authorization.
 - A newer COMPLETED v3 replaces v1 deterministically, subject to that same
   current evidence boundary. Unsupported v3 blocks facts; it cannot silently
   restore a potentially superseded older profile.
@@ -82,8 +116,10 @@ recovering older facts when the newest COMPLETED is evidence-invalid.
 
 ## Consumer behavior
 
-**Search / embeddings.** Structured search keeps v1 after failed/manual-review
-attempts. Semantic and hybrid reuse only the exact v1 embedding with unchanged
+**Search / embeddings.** Structured search keeps v1 only after same-document
+failed/manual-review attempts. New-document failure excludes D1 from all current
+structured/semantic/hybrid results and embedding preparation. For same-document
+fallback, semantic and hybrid reuse only the exact v1 embedding with unchanged
 profile-id, serializer source-hash, provider/model/revision/dimension matching.
 A v3 switch excludes v1's embedding even when content/config could coincide.
 Until v3's compatible embedding exists, existing missing-embedding exclusion
@@ -104,19 +140,21 @@ rejected by evaluation's evidence boundary.
 
 **Reconciliation.** Per-document latest-attempt queries and processing orchestration
 retain attempt semantics. A new document B's v2 FAILED remains not READY and is
-retried even when candidate-level search retains document A/v1. The readiness
+retried; candidate-level facts from document A/v1 are unavailable as current
+when the latest profile attempt is B and B has no accepted completion. Readiness
 check still requires the exact document's profile and identity and that profile's
 embedding. A real extraction failure followed by successful retry creates v3,
 switches professional authority, and leaves v2 FAILED immutable.
 M-5 ingestion/path/failure/retention semantics are unchanged.
 
 **HR.** Detail and library facts/evidence come from the effective source, with
-Azerbaijani disclosure: “Son yenilənmə tamamlanmadı. Əvvəlki təsdiqlənmiş profil
-göstərilir.” Normal HTML shows no error code, profile UUID, version number or
+same-document fallback disclosure: “Son yenilənmə tamamlanmadı. Əvvəlki
+təsdiqlənmiş profil göstərilir.” Normal HTML shows no error code, profile UUID, version number or
 model/provider internals. Evidence locations/quotes and PDF/DOCX page wording
 are resolved against the preserved profile's own source, never a failed newer
 source. Evidence-invalid COMPLETED rows expose no facts and receive safe
-unavailable copy.
+unavailable copy. A new-document failed/manual attempt displays attention state
+without old-document professional facts. Old evaluations/documents remain history.
 
 The REST detail DTO reuses CandidateDetailView, so its schema gains additive
 `latest_attempt_status`, `preserved_profile` and `preserved_identity` fields.
@@ -133,10 +171,11 @@ Effective fact availability is shown independently by facts/warning/unavailable
 copy. With no profile attempt, the accepted M-5 parser-failure presentation
 fallback is unchanged. This is not a claim that a failed refresh is ready.
 
-**Identity.** The analogous defect is included narrowly: newest COMPLETED
-identity, then unchanged current identity evidence verification, no historical
-scan. Failed/manual-review identity remains history; supported old name/email/
-phone remain available for HR only. New unsupported COMPLETED identity fails
+**Identity.** Select the latest identity attempt's CandidateDocument, then its
+newest COMPLETED and unchanged current identity evidence verification, without
+historical scan. Same-document failure may preserve supported name/email/phone
+for HR only. New-document failed/manual identity cannot reuse D1 contacts.
+New unsupported COMPLETED identity fails
 closed. Detail/library disclose preserved contacts independently. Identity remains
 absent from professional extraction, embeddings, search, ranking and evaluation.
 Photos deliberately retain their separate latest-document plus exact-document
@@ -145,8 +184,10 @@ identity authorization rule; M-9 does not revive an older photo.
 **Agent / ResultSet.** Current professional-profile/evidence operations share
 `get_current_authorized_profile`, now resolving the effective profile. Member
 checks use the bounded effective selector and existing batch evidence boundary.
-A snapshot recording v1 remains compatible after failed/manual-review v2; a
-new COMPLETED v3 makes it STALE (even if v3 is subsequently evidence-invalid).
+A snapshot recording D1/v1 remains compatible after same-D1 failed/manual v2
+only while exact effective authority still matches. New-D2 failure with no
+accepted completion makes the old member STALE; a new COMPLETED v3 also does
+(even if v3 is subsequently evidence-invalid).
 All original profile/embedding member ids, scores, ordinal and persisted policy
 provenance remain immutable. Refinement still uses the original bounded member
 set; it never adds unrelated new candidates. Missing/mismatched embeddings,
@@ -155,11 +196,13 @@ D-090's live compatibility rule; stored member-snapshot-v1 format is unchanged.
 
 ## Performance / concurrency
 
-Single selection uses tenant/candidate/status + version DESC LIMIT 1. Tenant-wide
-selection uses filtered max/version GROUP BY and one result row per candidate.
-Member selection uses existing candidate ownership join, bounded candidate ids,
-COMPLETED + DISTINCT ON ordered version DESC. No Python historical loading,
-per-candidate selector, or historical evidence scan was introduced. Search now
+Single, bounded and tenant-wide profile selectors share one SQL statement:
+tenant-scoped DISTINCT ON latest-attempt provenance (all statuses), followed by
+a same tenant/candidate/document join and newest-COMPLETED DISTINCT ON. Bounded
+candidate IDs restrict the inner query; candidate ownership remains checked.
+Only selected content is returned. Identity single/page selectors use the same
+logical rule and the library now reuses the shared bounded identity selector.
+No Python historical loading, per-candidate selector, or historical evidence scan was introduced. Search now
 uses shared canonical batches of at most 500 instead of a query per candidate,
 bounding bind parameters and canonical-content memory.
 Library uses page-bounded effective selection and batch professional authority;
@@ -181,7 +224,7 @@ selected immutable snapshot; a concurrent newer commit is reflected on a later
 selection. Exact evaluation/embedding provenance cannot be relabeled by that
 concurrent update. No new transaction isolation, locking or retry behavior.
 
-## Regression evidence and gates
+## Original reviewed-head gates (historical, acceptance REJECTED)
 
 All data and providers are synthetic; local tests require the local development
 PostgreSQL test database, never a real model or candidate fixture. UV_CACHE_DIR
@@ -210,25 +253,6 @@ Actual output:
 ...................................................................      [100%]
 355 passed in 51.58s
 ```
-
-Required matrix mapping (new tests in `backend/tests/test_m9_effective_profile.py`
-plus the focused existing boundary suites):
-
-| Required cases | Synthetic regression |
-|---|---|
-| 1: COMPLETED → FAILED, latest v2/effective v1 | accepted_then_failed + authority/structured/ranking/embedding/detail tests |
-| 2: manual-review fallback | manual_review_preserves_effective_and_batched_selection; ResultSet FAILED/manual parameterization |
-| 3, 17: no completed / tenant isolation | only_failure_has_no_authority_and_is_tenant_isolated + test_tenant_isolation.py |
-| 4, 7, 8, 19: exact embedding/successful switch | semantic_hybrid_exact_embedding_and_successful_switch + actual failed/successful extraction retry |
-| 5: unsupported newest COMPLETED fails closed | newest_completed_invalid_evidence_fails_closed + factual authority backstop suite |
-| 6, 11: structured/embedding survive failure | structured_search_survives_failed_attempt / embedding_survives_failed_attempt |
-| 9, 10, 18: score/rank exact provenance, immutable evaluation | ranking_survives_failed_attempt / direct_score_matches_batch_and_preserves_history |
-| 12: changed document retry/not READY | changed_document_not_ready_and_retries_without_losing_old_facts + folder reconciliation suite |
-| 13, 14: HR facts/evidence, safe warning and latest-attempt filter | ui_facts_source_warning_and_operational_filter + UI route suite |
-| 15, 16: agent facts/evidence, immutable compatible/stale snapshot | agent_profile_evidence_and_snapshot_preserved_then_stale + ResultSet suites |
-| 18: immutable profile/failed/embedding history | semantic/hybrid switch and real-extraction retry tests refresh unchanged persisted rows |
-| 20: identity fallback/current evidence | identity_failure_preserves_separate_authorized_hr_fields (FAILED/manual); unsupported newest COMPLETED fails closed |
-| performance | search_and_member_lookup_do_not_query_each_history (default/forced chunk size) + #86 scale suite |
 
 Full gate, executed from backend (the existing test-only hang diagnostics were
 enabled, as in CI):
@@ -266,6 +290,68 @@ is not required by this slice. Full migration regressions remain in pytest.
 
 The final pushed head, PR and exact-head CI evidence are reported in the delivery
 report/PR verification after publication; independent acceptance remains pending.
+
+## Corrected regression matrix and gates
+
+All fixtures/providers remain clearly synthetic. Commands use the local test
+PostgreSQL and writable UV cache, without real CVs or model calls.
+
+| Acceptance cases | Corrected regression |
+|---|---|
+| 1–2 same-document FAILED/manual preserves | authority/search/rank/embed/detail; manual selector parity; ResultSet FAILED/manual tests |
+| 3–4 new-document FAILED/manual has no effective profile | new_document_has_no_effective_profile_in_any_selector (single/bounded/tenant-wide) |
+| 5,7 current structured/semantic/hybrid and embedding exclusion | new_document_excludes_old_search_and_embedding (three modes × two statuses) |
+| 6 current rank/direct score; immutable readable history | new_document_blocks_current_scoring_preserves_history |
+| 8 stale D1 ResultSet/agent profile/evidence/refinement; immutable members | new_document_stales_result_set_and_agent_facts |
+| 9 UI withholds old professional facts, truthful latest state | new_document_ui_withholds_old_facts (detail/library HTML, safe text) |
+| 10 identity boundary | identity_failure_respects_document_boundary (same/new × FAILED/manual; detail/library and bounded query) |
+| 11–12 new-document not READY, actual retry restores search/rank/readiness | changed_document_failure_then_retry_restores_authority |
+| 13 same-document snapshot remains valid | agent_profile_evidence_and_snapshot_preserved_then_stale; existing snapshot FAILED/manual parameterization |
+| 14 invalid selected completion, no backward scan | newest_completed_invalid_evidence_fails_closed (same/new document), factual authority suite |
+| 15 existing Java D1 → Python D2 success | test_folder_reconciliation.py |
+| 16 query scale/bounds | search_and_member_lookup_do_not_query_each_history (mixed document boundary × 500/2 chunk size); #86 scale suite |
+
+Executed separately from backend:
+
+```bash
+export UV_CACHE_DIR=/tmp/meyar-m9-uv-cache
+uv run --offline pytest -q tests/test_m9_effective_profile.py
+```
+
+```text
+36 passed in 7.57s
+```
+
+The 19-file focused boundary command above was rerun on the correction:
+
+```text
+374 passed in 89.72s (0:01:29)
+```
+
+Static checks rerun on corrected source:
+
+```text
+All checks passed!
+Success: no issues found in 226 source files
+```
+
+Corrected full gate (diagnostic lines omitted):
+
+```text
+3511 passed in 819.97s (0:13:39)
+b88a2c4d6e10 (head)
+```
+
+`git diff --check`: exit 0, no output. `scripts/scan-tracked-tree.sh`:
+`Tracked-tree secret/real-data scan: clean.` Both checks are repeated against
+intentionally staged correction files before commit. No database migration,
+dependency or lockfile changed.
+
+The full gate uses the same commands above, with test-only hang diagnostics
+redirected to a temporary log. These diagnostics do not change production
+behavior. Exact pushed head and its CI run are verified in the delivery report;
+the reviewed head's successful CI is historical only. Independent acceptance
+remains pending after the corrected head.
 
 ## Files changed
 

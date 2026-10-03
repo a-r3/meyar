@@ -112,17 +112,24 @@ SECURITY_PRIVACY.md for isolation enforcement and tests.
 ### Extraction attempts and effective facts (D-100, M-9 proposal)
 
 Latest attempt means the newest immutable version regardless of extraction
-status, and governs operational status/per-document readiness/retry. Current
-professional facts instead use newest COMPLETED plus current canonical evidence
-authorization. Failed/manual-review attempts preserve a supported earlier profile;
-no COMPLETED or evidence-invalid newest COMPLETED means no professional authority.
-No historical scan or rewrite. The same rule applies independently to HR identity
-fields, never to suitability inputs. Search/ranking/evaluation/embeddings and agent
-facts use the effective profile's exact provenance. A new COMPLETED switch requires
-its own compatible embedding; old ResultSets become stale on that switch, while
-failed attempts preserve their exact accepted snapshot. Library status filters and
-badges mean latest processing attempt, with separately disclosed preserved facts.
-See `docs/ISSUE_46_M9_VALIDATION.md` for the proposal and deferrals.
+status, and governs operational status/per-document readiness/retry. Effective
+professional selection takes that attempt's CandidateDocument and chooses the
+newest COMPLETED within the SAME tenant/candidate/document, then applies current
+canonical evidence authorization.
+
+Fallback is permitted only inside the latest attempt's CandidateDocument boundary. Cross-document fallback is prohibited.
+
+Same-document failed/manual refresh may preserve authorized facts; a failed
+new document with no completed profile means no effective facts. Unsupported
+selected COMPLETED fails closed without scanning older completions. Identity
+uses its own latest attempt's document and equivalent HR-only evidence boundary;
+name/contact values never enter suitability. Search/ranking/current evaluation/
+embeddings and agent facts use exact effective provenance. ResultSets survive
+same-document failures only while exact effective authority matches; new-document
+failure, a completed switch or evidence loss makes old members stale. History
+is immutable. Library status filters/badges show latest processing; preserved
+facts/contacts are disclosed only when same-document fallback applies.
+See `docs/ISSUE_46_M9_VALIDATION.md` for the correction and deferrals.
 
 ## 7. Internal API surface (`/api/v1`)
 

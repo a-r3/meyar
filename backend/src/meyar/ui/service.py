@@ -67,6 +67,7 @@ from meyar.services.candidate_document_repo import (
 )
 from meyar.services.candidate_identity_repo import (
     get_effective_identity_version,
+    get_effective_identity_versions_for_candidates,
     get_latest_identity_attempt,
 )
 from meyar.services.candidate_profile_repo import (
@@ -406,35 +407,12 @@ async def list_candidate_library(
         .scalars()
         .all()
     )
-    latest_identity = (
-        select(
-            CandidateIdentityVersion.candidate_id,
-            func.max(CandidateIdentityVersion.version_number).label("max_version"),
-        )
-        .where(
-            CandidateIdentityVersion.tenant_id == tenant_id,
-            CandidateIdentityVersion.status == "COMPLETED",
-        )
-        .group_by(CandidateIdentityVersion.candidate_id)
-        .subquery()
-    )
     identities = list(
         (
-            await db.execute(
-                select(CandidateIdentityVersion)
-                .join(
-                    latest_identity,
-                    (CandidateIdentityVersion.candidate_id == latest_identity.c.candidate_id)
-                    & (CandidateIdentityVersion.version_number == latest_identity.c.max_version),
-                )
-                .where(
-                    CandidateIdentityVersion.tenant_id == tenant_id,
-                    CandidateIdentityVersion.candidate_id.in_(candidate_ids),
-                )
+            await get_effective_identity_versions_for_candidates(
+                db, tenant_id=tenant_id, candidate_ids=candidate_ids
             )
-        )
-        .scalars()
-        .all()
+        ).values()
     )
     latest_identity_rows = await db.execute(
         select(CandidateIdentityVersion.candidate_id, CandidateIdentityVersion.version_number)
@@ -476,7 +454,7 @@ async def list_candidate_library(
         .all()
     )
     # Operational display/filter remains the latest attempt. Facts come from
-    # the independently selected newest COMPLETED, batch-authorized source.
+    # the latest-attempt document's newest COMPLETED, batch-authorized source.
     profiles_by_candidate = {item.candidate_id: item for item in profiles}
     effective_profiles = await get_effective_profile_versions_for_candidates(
         db, tenant_id=tenant_id, candidate_ids=candidate_ids

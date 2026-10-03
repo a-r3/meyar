@@ -1,21 +1,26 @@
 # MEYAR — Status
 
-**Issue #46 M-9 — implementation proposal; independent acceptance pending.**
-Base/main verified live at `22cf6a5b0b46bc61841cae2d3a646a353b9889a9`.
-Newest extraction attempt remains immutable operational history; professional
-facts now select newest COMPLETED and pass unchanged current evidence authority.
-FAILED/manual-review refreshes preserve an evidence-valid earlier profile;
-unsupported newest COMPLETED fails closed. Search/scoring/embedding/agent/HR
-facts share this rule; per-document readiness/retry remains attempt-based.
-HR discloses preserved facts and contacts while showing latest processing status.
-ResultSet v1 snapshots survive failed attempts, become stale on a completed switch,
-and retain immutable exact provenance. No migration/dependency/scoring-policy
-change. D-100 and `docs/ISSUE_46_M9_VALIDATION.md` record scope and validation.
-#46 remains OPEN under M9; #35/#36/#50 remain OPEN and unchanged. M-5 stays
-accepted/merged. Local gate: 355 focused passed in 51.58s; 3492 full passed in
-503.92s; Ruff/mypy(src) clean (226 source files); unchanged single Alembic head
-`b88a2c4d6e10`; tracked-tree scan clean. No merge, Target-Mac execution or
-acceptance is claimed.
+**Issue #46 M-9 — PR #114 independent acceptance FAIL at reviewed head;
+document-boundary correction pending independent acceptance.**
+Reviewed head: `d5984e779f7ec707e04f9bf3798c6d65da341a5a`; its successful
+CI run `37094854961` did not establish acceptance. Base/main verified live at
+`22cf6a5b0b46bc61841cae2d3a646a353b9889a9`. Existing task branch/PR only.
+Effective facts select the latest attempt's CandidateDocument, then that same
+tenant/candidate/document's newest COMPLETED, then unchanged current evidence.
+Same-document failures may preserve authorized facts; new-document failures with
+no accepted completion cannot reuse old facts or HR identity. Invalid selected
+COMPLETED fails closed without scanning backwards. ResultSets retain same-document
+snapshot authority only while it matches exactly; new-document failure, a new
+completion or evidence loss makes old members stale. Exact-document readiness
+and retry remain attempt-based. No migration/dependency/scoring-policy change.
+D-100 and `docs/ISSUE_46_M9_VALIDATION.md` record the correction and gates.
+#114/#46/#35/#36/#50 remain OPEN; M9 remains open. M-5 stays accepted/merged.
+Corrected local gate: M-9 separately 36 passed in 7.57s; affected boundaries
+374 passed in 89.72s; full 3511 passed in 819.97s. Ruff and mypy(src) clean
+(226 source files); unchanged single Alembic head `b88a2c4d6e10`; tracked-tree
+scan and diff check clean. Exact pushed head/CI are verified in the delivery
+report; independent acceptance remains pending.
+No merge, Target-Mac execution or acceptance is claimed.
 
 **Issue #46 M-5 — independently ACCEPTED and MERGED through PR #112;
 M-5 slice COMPLETE, but #46 remains OPEN.** Owner-confirmed independent

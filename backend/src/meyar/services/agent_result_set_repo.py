@@ -96,7 +96,8 @@ async def validate_member_snapshots(
     - the candidate still exists in this tenant;
     - its effective professional profile version is still exactly the recorded
       ``candidate_profile_version_id`` (a newer COMPLETED version makes it stale;
-      failed/manual-review attempts preserve that snapshot, never rewrite it);
+      same-document failed/manual-review attempts preserve that snapshot; a new
+      document with no accepted completion makes it stale, never rewrites it);
     - that profile still passes the SAME professional evidence authority
       as ``authorize_profile_version`` (shared implementation);
     - SEMANTIC_ONLY/HYBRID only: the exact recorded embedding row still

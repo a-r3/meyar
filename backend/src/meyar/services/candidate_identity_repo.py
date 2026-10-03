@@ -1,6 +1,7 @@
 import uuid
+from collections.abc import Collection
 
-from sqlalchemy import func, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.models.candidate_identity_version import (
@@ -111,22 +112,61 @@ async def get_identity_version_by_id(
 get_latest_identity_attempt = get_current_identity_version
 
 
+def _effective_identity_statement(
+    tenant_id: uuid.UUID, candidate_ids: Collection[uuid.UUID]
+) -> Select[tuple[CandidateIdentityVersion]]:
+    latest = (
+        select(
+            CandidateIdentityVersion.tenant_id,
+            CandidateIdentityVersion.candidate_id,
+            CandidateIdentityVersion.candidate_document_id,
+        )
+        .where(
+            CandidateIdentityVersion.tenant_id == tenant_id,
+            CandidateIdentityVersion.candidate_id.in_(candidate_ids),
+        )
+        .order_by(
+            CandidateIdentityVersion.candidate_id, CandidateIdentityVersion.version_number.desc()
+        )
+        .distinct(CandidateIdentityVersion.candidate_id)
+        .subquery()
+    )
+    return (
+        select(CandidateIdentityVersion)
+        .join(
+            latest,
+            (CandidateIdentityVersion.tenant_id == latest.c.tenant_id)
+            & (CandidateIdentityVersion.candidate_id == latest.c.candidate_id)
+            & (CandidateIdentityVersion.candidate_document_id == latest.c.candidate_document_id),
+        )
+        .where(
+            CandidateIdentityVersion.tenant_id == tenant_id,
+            CandidateIdentityVersion.status == IDENTITY_STATUS_COMPLETED,
+        )
+        .order_by(
+            CandidateIdentityVersion.candidate_id, CandidateIdentityVersion.version_number.desc()
+        )
+        .distinct(CandidateIdentityVersion.candidate_id)
+    )
+
+
 async def get_effective_identity_version(
     db: AsyncSession, *, tenant_id: uuid.UUID, candidate_id: uuid.UUID
 ) -> CandidateIdentityVersion | None:
-    """Newest COMPLETED identity for HR; current evidence is mandatory.
+    """Newest COMPLETED inside the latest identity attempt's document, HR only.
 
-    Failed/manual-review rows remain attempts. Unsupported newest COMPLETED
-    fails closed in identity_authority, with no historical scan.
+    Current evidence is mandatory. Invalid selected evidence fails closed,
+    without searching older completions or another document.
     """
-    row = await db.scalars(
-        select(CandidateIdentityVersion)
-        .where(
-            CandidateIdentityVersion.tenant_id == tenant_id,
-            CandidateIdentityVersion.candidate_id == candidate_id,
-            CandidateIdentityVersion.status == IDENTITY_STATUS_COMPLETED,
-        )
-        .order_by(CandidateIdentityVersion.version_number.desc())
-        .limit(1)
-    )
-    return row.one_or_none()
+    rows = await db.scalars(_effective_identity_statement(tenant_id, [candidate_id]))
+    return rows.one_or_none()
+
+
+async def get_effective_identity_versions_for_candidates(
+    db: AsyncSession, *, tenant_id: uuid.UUID, candidate_ids: Collection[uuid.UUID]
+) -> dict[uuid.UUID, CandidateIdentityVersion]:
+    """One page-bounded HR selection query; callers MUST verify identity evidence."""
+    if not candidate_ids:
+        return {}
+    rows = await db.scalars(_effective_identity_statement(tenant_id, candidate_ids))
+    return {version.candidate_id: version for version in rows}
