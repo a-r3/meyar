@@ -1,10 +1,17 @@
 # MEYAR — Status
 
-**Issue #46 M-9 — PR #114 independent acceptance FAIL at reviewed head;
-document-boundary correction pending independent acceptance.**
-Reviewed head: `d5984e779f7ec707e04f9bf3798c6d65da341a5a`; its successful
-CI run `37094854961` did not establish acceptance. Base/main verified live at
-`22cf6a5b0b46bc61841cae2d3a646a353b9889a9`. Existing task branch/PR only.
+**Issue #46 M-9 — independently ACCEPTED and MERGED through PR #114;
+M-9 slice COMPLETE, but #46 itself is NOT complete and remains OPEN.**
+Owner-confirmed independent acceptance **PASS** at exact PR #114 head
+`ffc59eab3447b4a6ecb07017725751a8024fa062`; its
+[exact-head CI run 37097082007](https://github.com/a-r3/meyar/actions/runs/37097082007)
+completed **SUCCESS**. The owner manually **Squash and merged** PR #114 to
+`32f9cc9ed1a39c0a43ffe112dce2f641d6608cc4`, whose sole parent is
+`22cf6a5b0b46bc61841cae2d3a646a353b9889a9`. Live GitHub and local Git
+verification confirm the accepted head and squash have the identical full tree:
+`6459479c913c45f42410cc646fa4ad4e68f22b02`. Accepted and merged content
+are therefore identical.
+
 Effective facts select the latest attempt's CandidateDocument, then that same
 tenant/candidate/document's newest COMPLETED, then unchanged current evidence.
 Same-document failures may preserve authorized facts; new-document failures with
@@ -14,13 +21,19 @@ snapshot authority only while it matches exactly; new-document failure, a new
 completion or evidence loss makes old members stale. Exact-document readiness
 and retry remain attempt-based. No migration/dependency/scoring-policy change.
 D-100 and `docs/ISSUE_46_M9_VALIDATION.md` record the correction and gates.
-#114/#46/#35/#36/#50 remain OPEN; M9 remains open. M-5 stays accepted/merged.
+#114 is MERGED. #46/#35/#36/#50 remain OPEN; M9 remains open.
+M-5 stays accepted/merged. Remaining #46 scope includes concurrency/reconciliation
+overlap and same-content races; folder transaction lifetime/inference separation;
+storage-save/DB rollback compensation; retention/orphan cleanup; configured
+embedding readiness; and remaining ingestion/resource/runtime/config/security
+hardening owned by #46. This docs-only follow-up starts no new product behavior
+or hardening item and does not advance #35/#36/#50.
 Corrected local gate: M-9 separately 36 passed in 7.57s; affected boundaries
 374 passed in 89.72s; full 3511 passed in 819.97s. Ruff and mypy(src) clean
 (226 source files); unchanged single Alembic head `b88a2c4d6e10`; tracked-tree
-scan and diff check clean. Exact pushed head/CI are verified in the delivery
-report; independent acceptance remains pending.
-No merge, Target-Mac execution or acceptance is claimed.
+scan and diff check clean. These are the accepted implementation's historical
+local results; the accepted exact-head CI is identified above. This follow-up
+records the owner's M-9 acceptance/merge only. No Target-Mac work was performed.
 
 **Issue #46 M-5 — independently ACCEPTED and MERGED through PR #112;
 M-5 slice COMPLETE, but #46 remains OPEN.** Owner-confirmed independent
@@ -46,11 +59,11 @@ No automatic legacy candidate deletion or hiding: persisted folder associations
 cannot prove exclusive creation ownership, so ambiguous/shared/manual
 zero-document candidates are retained. Storage-save/DB rollback orphan recovery,
 concurrent reconciliation/dedup, folder transaction lifetime, generic retention/
-orphan cleanup, M-9 and other unresolved #46 work remain pending.
+orphan cleanup and other unresolved #46 work remain pending.
 No migration/dependency/lockfile/parser behavior change in this docs-only
 follow-up. #46 remains OPEN under **M9**; #35/#36/#50 remain OPEN and unchanged.
-At that M-5 docs-only follow-up M-9 had not started; the current M-9
-implementation proposal is recorded above.
+At that M-5 docs-only follow-up M-9 had not started; its subsequent acceptance
+and merge are recorded above.
 Historical local gate: 185 focused passed in 57.69s; 3475 full pytest passed in
 499.99s; Ruff/mypy(src) clean; unchanged single Alembic head `b88a2c4d6e10`.
 Accepted exact-head CI is the published delivery authority. No Target-Mac
@@ -67,8 +80,8 @@ one commit ahead. The accepted head and merged squash have identical complete
 trees/content, tree SHA `74cecde0a625eab9f9ef1c68cde0e2602469e0cb`.
 GitHub closed #46 on merge; the owner reopened it, and its verified final state
 is OPEN. PR-3 completes only its approved M-4/table subset. M-5 is now COMPLETE
-through PR #112; M-9 and other remaining #46 hardening/acceptance work are
-still pending.
+through PR #112; M-9 is COMPLETE through PR #114. Other remaining #46
+hardening/acceptance work is still pending.
 
 Parser **1.2.0** adds ordered
 DOCX body/table/cell paragraphs and bounded nested physical-source tables,
@@ -78,7 +91,7 @@ Header/footer/text-box text is detected for safe omission disclosure, never
 extracted. DOCX evidence no longer claims a physical page. Historical canonical
 rows/evidence remain immutable; no parser-version-only reprocessing or old
 failure backfill. No migration, dependency/lockfile change or Target-Mac claim.
-#46 remains OPEN under M9. General remaining #46 M-5/M-9 work is outside
+#46 remains OPEN under M9. Other remaining #46 hardening is outside
 PR-3. #35 remains OPEN with substantial existing `meyar-ops` implementation;
 PR-3 does not advance or modify #35. #36 and #50 remain OPEN and are not
 advanced by PR-3. The real Target-Mac benchmark has not been completed;
@@ -112,7 +125,7 @@ failure metadata. No-text documents create no canonical authority; no OCR.
 Parser version 1.1.0 preserves ordinary successful block/page layout and all
 historical canonical evidence. No parser-version-only folder reprocessing.
 M-4 DOCX completeness is explicitly PR-3; recovery beyond the completed M-5
-slice, M-9 and remaining #46 items stay open. No Target-Mac/#36 acceptance
+slice and remaining #46 items stay open. No Target-Mac/#36 acceptance
 claim; actual Apple-Silicon lifecycle remains later agentless rehearsal.
 #46 stays OPEN under M9.
 See `docs/ISSUE_46_PR2_VALIDATION.md` for architecture, limits and verification.
@@ -129,7 +142,7 @@ Alembic single head `b88a2c4d6e10`; **242 focused regressions passed in 68.99s**
 Final acceptance and delivery evidence is recorded in
 `docs/ISSUE_46_PR2_VALIDATION.md`; historical pre-merge results remain identified.
 No migration, dependency or `uv.lock` change.
-Remaining #46 work includes recovery beyond the completed M-5 slice, M-9
+Remaining #46 work includes recovery beyond the completed M-5 slice
 and the other unresolved hardening items; these remain deferred/open. No real
 Apple-Silicon execution or #36 Target-Mac acceptance has occurred. This docs-only
 status correction starts no next implementation slice and does not change or advance
@@ -148,9 +161,9 @@ DOCX archive member/expansion/ratio bounds with counted streaming
 verification, and bounded, stability-checked folder-scanner reads that never
 block on special files (FIFO/device/socket). No migration (Alembic head
 remains `b88a2c4d6e10`), no dependency and no `uv.lock` change. #46 stays
-OPEN because further hardening slices remain (including the M-5 general
-phantom-candidate fix, parser limits, M-4, M-9 and the other items of the
-issue). #35, #36 and #50 were not started by PR-1 and remain OPEN.
+OPEN. At PR-1 merge, pending work included the M-5 general phantom-candidate
+fix, parser limits, M-4, M-9 and other issue items; subsequent accepted slices
+are recorded above. #35, #36 and #50 were not started by PR-1 and remain OPEN.
 
 **D-092 Amendment A3 — ACCEPTED and MERGED through PR #103.** Squash
 commit on `main`: `d9e96c06169d9ebf25ab6f276eb63bab4c5d4828` (single parent

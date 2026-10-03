@@ -1,18 +1,40 @@
 # Issue #46 M-9 — preserve accepted facts after failed re-extraction
 
-Status: PR #114 independent acceptance FAIL at reviewed head
-`d5984e779f7ec707e04f9bf3798c6d65da341a5a`; document-boundary correction
-on the existing branch, corrected-head independent acceptance pending. Refs #46,
-M9 — Deployment, Benchmark & Integration Readiness (milestone 10).
-#46 MUST remain OPEN. #35/#36/#50 remain OPEN and unchanged.
-No Target-Mac execution, benchmark, model approval or acceptance is claimed.
-No PR is merged by the agent. M-5 remains independently accepted and merged.
+Status: M-9 independently **ACCEPTED + MERGED** through PR #114.
+Refs #46, M9 — Deployment, Benchmark & Integration Readiness (milestone 10).
+#46 itself is NOT complete and MUST remain OPEN. #35/#36/#50 remain OPEN and
+unchanged. No Target-Mac work, benchmark or production model approval is claimed.
+M-5 remains independently accepted and merged. No new product behavior or next
+#46 hardening item is started by this documentation-only follow-up.
 
-## Verified base and prerequisite state
+## Verified independent acceptance and owner merge
 
-Live GitHub main and local task base:
+Owner-confirmed independent acceptance **PASS** at exact PR #114 head
+`ffc59eab3447b4a6ecb07017725751a8024fa062`; its
+[exact-head CI run 37097082007](https://github.com/a-r3/meyar/actions/runs/37097082007)
+completed **SUCCESS**. The owner manually **Squash and merged** PR #114 to
+`32f9cc9ed1a39c0a43ffe112dce2f641d6608cc4`, whose sole parent is
+`22cf6a5b0b46bc61841cae2d3a646a353b9889a9`. Live GitHub and local Git
+verification confirm the accepted head and squash have the identical full tree:
+`6459479c913c45f42410cc646fa4ad4e68f22b02`. Accepted and merged content
+are therefore identical.
+
+PR #114 is MERGED; M-9 independent acceptance is PASS. #46 was verified OPEN
+before this follow-up proceeded; #35/#36/#50 and milestone M9 remain OPEN.
+The accepted latest-attempt/document-boundary, same-document preservation,
+fail-closed selected evidence, ResultSet, readiness and HR-only identity
+semantics below remain unchanged. Cross-document fallback remains prohibited.
+
+The earlier rejected head `d5984e779f7ec707e04f9bf3798c6d65da341a5a` and its
+successful CI run `37094854961` are historical correction evidence only;
+the accepted head/run above supersede their pending/rejected delivery status.
+The post-merge docs PR is separate and is not merged by the agent.
+
+## Original implementation base and prerequisites (historical)
+
+Original implementation main and local task base:
 `22cf6a5b0b46bc61841cae2d3a646a353b9889a9`.
-Task branch: `fix/46-m9-effective-profile`; hooksPath verified `.githooks`.
+Implementation branch: `fix/46-m9-effective-profile`; hooksPath verified `.githooks`.
 Live #46/#35/#36/#50: OPEN. M9 milestone 10: open.
 PR #112 (M-5) MERGED at `d14ab1a5b4e25bd7d012bada4041ea59aaf55b61`;
 its independent acceptance is durably recorded in D-099 and M-5 validation.
@@ -288,8 +310,8 @@ files so they are included; pre-existing untracked personal material is not
 staged or inspected. No DB schema change, so fresh-migration/alembic-check work
 is not required by this slice. Full migration regressions remain in pytest.
 
-The final pushed head, PR and exact-head CI evidence are reported in the delivery
-report/PR verification after publication; independent acceptance remains pending.
+These original gate results belong to the rejected reviewed head. The accepted
+correction, exact-head CI and owner merge are recorded above and below.
 
 ## Corrected regression matrix and gates
 
@@ -349,11 +371,11 @@ dependency or lockfile changed.
 
 The full gate uses the same commands above, with test-only hang diagnostics
 redirected to a temporary log. These diagnostics do not change production
-behavior. Exact pushed head and its CI run are verified in the delivery report;
-the reviewed head's successful CI is historical only. Independent acceptance
-remains pending after the corrected head.
+behavior. The corrected head was subsequently independently accepted and
+manually merged by the owner; exact-head CI and full-tree equality are recorded
+above. The rejected reviewed head's successful CI remains historical only.
 
-## Files changed
+## Implementation files changed (PR #114, historical)
 
 Exact repository-relative paths (root discovered with git rev-parse):
 
@@ -387,16 +409,17 @@ docs/STATUS.md
 
 ## Remaining #46 risks and deferrals
 
-#46 stays OPEN. This M-9 implementation is not independent acceptance and does
-not close other hardening work. No automatic repair/backfill of historical
+M-9 is independently ACCEPTED + MERGED. #46 itself is NOT complete and stays
+OPEN; M-9 acceptance does not close other runtime/ingestion/recovery hardening.
+No automatic repair/backfill of historical
 FAILED rows, partial-claim extraction, parser-version reprocessing, resurrection
 of evidence-invalid COMPLETED profiles, photo fallback, or automatic historical
 rescoring. Newest-COMPLETED evidence failure deliberately leaves no effective
 facts; an explicit repair/new extraction is required.
 
-Unresolved concurrency/reconciliation overlap and exact-content races, folder
-transaction lifetime/inference separation, storage-save/DB rollback orphan
-recovery, generic retention/legacy orphan cleanup, configured embedding readiness,
-and the remaining runtime/config/security items retain their existing issue
-ownership. No #35/#36/#50 advancement or Target-Mac work. See #46 and accepted
+Unresolved concurrency/reconciliation overlap and same-content races, folder
+transaction lifetime/inference separation, storage-save/DB rollback compensation,
+generic retention/legacy orphan cleanup, configured embedding readiness, and
+remaining ingestion/resource/runtime/config/security items stay owned by #46.
+No #35/#36/#50 advancement or Target-Mac work. See #46 and accepted
 M-5/PR-3 records for other deferrals; no accepted slice is reopened.
