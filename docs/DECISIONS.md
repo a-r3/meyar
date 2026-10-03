@@ -9161,7 +9161,7 @@ work, or changes to #35/#36/#45/#50. #46 remains OPEN and is not complete.
 
 ## D-106 — Issue #46 S6: post-upload photo persistence / candidate-delete serialization
 
-Status: implemented, independent acceptance pending; Refs #46, M9 milestone 10.
+Status: ACCEPTED + MERGED (PR #121, head `8441392ab903433015942f6cb8dd553794addedc`, CI 37142749403 attempt 1 SUCCESS, squash/main `3582189fbb6d4e462f346bc094ccd996a0d8423b`, tree `14b3199d64797b739ec26dcd89d34210c48124db`); Refs #46, M9 milestone 10.
 Starts from accepted/merged S5 (PR #120): head `1c18bae1c75c64d419bd361e8dd08995764df47a`,
 CI 37137376151 attempt 1 SUCCESS, squash/main `dd4b4d0ce8b48b9948f948182094a5b1a50482f1`,
 tree `721438a6cbccedd54443bc5ba57cdb8718b03bf7`.
@@ -9188,3 +9188,46 @@ commit) -> extraction with no SQL transaction, pooled connection or row lock ->
 Phase B (Tenant SHARE -> Candidate SHARE -> exact document and photo-row
 revalidation -> save -> insert -> commit). Authority is never carried across
 extraction; delete or suspension during extraction is handled by Phase B.
+
+
+## D-107 — Issue #46 S7: folder reconciliation / same-content dedup serialization
+
+Status: implemented, independent acceptance pending; Refs #46, M9 milestone 10.
+Starts from accepted/merged S6 (PR #121): squash/main `3582189fbb6d4e462f346bc094ccd996a0d8423b`,
+tree `14b3199d64797b739ec26dcd89d34210c48124db`.
+
+Proof (before the fix): same source + same new file -> loser failed with an unhandled
+`IntegrityError` (`uq_folder_indexed_files_path`; `uq_folder_sources_tenant_root` when the
+source itself was new) after saving its own original (S4 compensated it, so nothing leaked
+but the run crashed); identical bytes in two sources -> two Candidates (the dedup check is
+read-then-write); duplicate link racing a candidate delete -> FK `IntegrityError`. Different
+tenants/sources/content were already independent.
+
+Decision (smallest PostgreSQL authority, no migration):
+1. `get_or_create_folder_source`: `INSERT .. ON CONFLICT DO NOTHING` then
+   `SELECT .. FOR NO KEY UPDATE`, held to the caller's commit/rollback. Same-source
+   reconciliation is single-writer; the loser reads existing rows, and re-checks the live
+   tenant, only after the wait. A row lock suffices because the insert-conflict itself waits
+   on the holder, so no advisory lock is needed for source state.
+2. Exact-content dedup: a tenant-scoped, namespaced transaction advisory lock
+   (`content_authority.lock_tenant_content`) around lookup -> ingest -> link. No row exists to
+   lock for a new hash and the schema has no content-unique identity, so an advisory lock is
+   the narrowest authority. Different tenants/content never wait. A process-local lock was
+   rejected (not an authority across processes).
+3. A linked duplicate's Candidate is `SHARE`-locked before the link; if a delete won, the
+   lookup repeats against durable truth (no FK failure).
+4. Order: Tenant (non-locking check; SHARE at commit, never awaited while holding source/
+   content/candidate locks because suspension takes none of them) -> FolderSource -> content
+   -> Candidate. Tenant is deliberately not locked for the whole scan so operator suspension
+   stays prompt. S1/S5/S6 edges are unchanged.
+5. One scan holds one content lock per ingested file in scan order, so two scans over
+   different sources with the same contents in opposite order can deadlock. PostgreSQL aborts
+   one; `index_folder_and_commit` (shared by `index-folder` and `reconcile-folder`) repeats the
+   whole scan up to 4 times from durable truth after S4 compensation. Any other error
+   propagates unchanged.
+
+All filesystem writes remain under S4. Not addressed: changed-file read races, folder
+transaction-lifetime (inference) refactor, downstream extraction/photo concurrency of two
+same-source runs after ingestion commits, S4 hard-kill residuals, retention/orphan sweeping,
+schema drift. A folder re-ingest of a *changed* file for a candidate being deleted keeps its
+existing (unreproduced-here) ordering and is deferred with the changed-file slice.
