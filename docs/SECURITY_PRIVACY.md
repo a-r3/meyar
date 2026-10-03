@@ -540,6 +540,26 @@ remains the model-approval evidence boundary.
 
 ## Tenant isolation enforcement
 
+Issue #46 S1 / D-101 adds live tenant suspension authority to the existing
+ownership boundaries (pending independent acceptance). An inactive or absent
+Tenant fails closed even with otherwise valid credentials. The supported
+`set_tenant_active` operation revokes only that tenant's BrowserSessions and
+rotates its membership security stamps; it leaves other memberships, their
+sessions/claims and API-key revocation state unchanged. Reactivation does not
+clear revocation or restore old stamps. Direct SQL state changes are still
+checked live, but operators must use the supported service/CLI to guarantee
+permanent session/claim invalidation across reactivation.
+
+The shared helper re-reads DB scalar authority without identity-map caching.
+Processing transactions register tenant IDs only, not authorization decisions;
+an outer-commit hook re-reads and SHARE-locks them until commit. Savepoint release
+does not drop this obligation. Agent principal order is User -> Tenant ->
+TenantMembership -> BrowserSession, then existing conversation/context/dialogue/
+submission order. No agent DB connection/transaction/row lock crosses inference.
+Background folder transaction lifetime is unchanged; no new tenant lock is held
+across its model calls. Details and explicit deferrals:
+`docs/ISSUE_46_S1_VALIDATION.md`.
+
 Enforced in the data-access layer, not the UI/route layer: every repository
 function signature requires `tenant_id` and every query filters on it.
 Postgres Row-Level Security is a documented future hardening step — not

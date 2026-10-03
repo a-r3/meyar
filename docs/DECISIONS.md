@@ -8743,3 +8743,97 @@ compensation; retention/orphan cleanup; configured embedding readiness; and
 remaining ingestion/resource/runtime/config/security items owned by #46.
 Before-fix proof, corrected matrix, gates, acceptance and deferrals:
 `docs/ISSUE_46_M9_VALIDATION.md`.
+
+## D-101 — Issue #46 S1: live Tenant active authorization
+
+Status: implementation/correction on `fix/46-s1-tenant-authority` / PR #116,
+pending independent re-acceptance. Reviewed head
+`d253b3d12c2f86a7b5c417f7ee060131470de8cb` was acceptance-REJECTED for missing
+immediate tenant revalidation after non-agent query embedding. Its green CI
+was not acceptance. Only S1 under existing #46 / milestone M9 (10).
+#46/#35/#36/#45/#50 remain OPEN; no Target-Mac work.
+
+`Tenant.is_active` is application authority, alongside existing tenant ownership,
+API-key scope/expiry/revocation and human user/membership/session authority. False
+or missing means suspension. Tenant identity remains derived from credentials,
+membership or server-owned processing context, never a client authority field.
+Inactive API authentication uses the unchanged generic 401 and does not touch
+last_used. Authenticated API DB phases hold Tenant FOR SHARE; authenticated UI
+resolution locks User FOR SHARE before Tenant FOR SHARE, protecting normal reads
+and avoiding logout BrowserSession-update versus commit-guard lock inversion.
+UI resolution then freshly re-reads and SHARE-locks BrowserSession, rejecting a
+session revoked while the request waited for the User/Tenant locks (including
+a concurrent deactivate/reactivate cycle). Login choices exclude inactive tenants;
+pending selection and final session creation recheck live state. Existing session resolution rejects/clears
+its cookie with normal safe login behavior.
+
+One `meyar.services.tenant_authority` helper reads scalar DB state (no ORM
+identity-map active cache). `require_active_tenant` checks live state and registers
+only tenant IDs for the current outer transaction. SQLAlchemy's synchronous
+`Session.before_commit` event executes inside AsyncSession's committing greenlet:
+it re-reads each registered Tenant with FOR SHARE in UUID order, before final
+flush/commit, using the same connection/transaction. No global active flag or
+second connection is used. A failed check blocks repeated commit attempts until
+rollback; normal helper refusal rolls back pending generated results. Outer
+transaction end clears registrations; savepoint end neither checks prematurely
+nor clears the outer obligation. Entry/pre-persistence checks are nonlocking
+unless a short authority-critical transaction explicitly requires a lock. This
+protects direct caller-owned processing commits as well as folder per-candidate
+commits without changing folder inference transaction architecture.
+
+The supported `set_tenant_active` service and `meyar disable-tenant --tenant-id`
+/ `enable-tenant --tenant-id` CLI serialize suspension: affected Users locked
+FOR NO KEY UPDATE in UUID order -> Tenant FOR NO KEY UPDATE -> tenant Memberships
+FOR NO KEY UPDATE in UUID order -> BrowserSession revocation. NO KEY UPDATE
+allows existing FK FOR KEY SHARE locks (including folder inserts) to coexist,
+while conflicting with authority FOR SHARE. Deactivation rotates each affected
+membership security_version and sets revoked_at on its unrevoked BrowserSessions
+in one transaction. It does not deactivate memberships, rotate User stamps,
+revoke unrelated sessions/pending membership choices or modify API keys.
+Reactivation changes only tenant state; old sessions/claims stay invalid and
+valid non-revoked/unexpired keys may resume. Direct SQL toggles cannot promise
+old-session/claim invalidation across reactivation; the supported boundary can.
+
+Agent reservation locks User -> Tenant before conversation, so an inactive
+tenant cannot reserve. Every re-entry/final Phase B locks User -> Tenant ->
+TenantMembership -> BrowserSession FOR SHARE before existing consequential rows.
+The fresh-Phase-B rule remains unchanged. Deactivation either commits first
+(re-entry waits and returns PRINCIPAL_REVOKED with safe login redirect) or waits
+for the authorized turn to commit before suspension. It cannot commit between
+Phase B's authority check and consequential commit. Every inference boundary
+still commits first, returning all pooled connections/transactions/locks.
+Transcript, live pointers, task and clarification writes remain Phase-B-only.
+Existing closed reservation cleanup and structural authority-loss audit remain
+permitted; they grant no candidate-data access or generated-result authority.
+
+Upload persistence locks Tenant -> ApiKey -> Candidate FOR SHARE after parsing.
+Folder index, reconciliation, direct profile/identity extraction, candidate
+embedding and photo processing check the same live authority, recheck before
+produced writes and register the final commit check. Refusal propagates without
+converting suspension into new failed application versions. Reconciliation
+rolls back the whole current candidate (including earlier stages); already
+committed candidates remain durable. Search/planning and existing tenant-bound
+CLI processing use the same checks; NL planning ends its short initial authority
+phase before calling the local model and restores its commit check at audit.
+Semantic/hybrid query embedding is also an authority gap: REST/UI's existing
+`DbReleasingEmbeddingProvider` commits before local inference, releasing the
+previous Tenant lock and commit registration. Immediately after `embed()` returns,
+search now calls `require_active_tenant(..., lock=True)` before inspecting the
+embedding result, querying compatible embeddings or using preloaded candidate
+facts to construct any result. This fresh check locks the short result phase
+and registers its final commit guard. Suspension during embedding returns no
+candidate result through the existing typed refusal / generic API 401 / UI
+login redirect and cookie clear. No DB transaction or Tenant lock is introduced
+across query inference; agent `BoundaryEmbedding` retains its own re-entry checks.
+Structured-only search makes no embedding call. Planner post-model audit checks,
+search provenance, ranking and tenant isolation remain unchanged.
+S1 takes no Tenant authority lock across background inference. Existing folder
+DB transaction/connection lifetime and FK locks remain deferred #46 work.
+
+No migration, new dependency, tenant admin UI or external candidate AI. S1 does
+not implement S2 logging/privacy, HTTP cache/docs policy, demo ownership, schema
+drift, storage compensation, readiness changes, retention sweepers, folder
+concurrency/source leases/dedup, folder inference transaction separation, #45,
+#35, #36 or #50. Existing runtime-storage rollback orphan risk is deferred;
+DB rollback does not imply filesystem compensation. Validation and delivery:
+`docs/ISSUE_46_S1_VALIDATION.md`. This decision does not complete #46.

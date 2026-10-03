@@ -58,6 +58,11 @@ from meyar.services.candidate_photo_service import PLACEHOLDER_JPEG, current_pre
 from meyar.services.candidate_repo import get_candidate
 from meyar.services.job_criteria_repo import create_criteria_version, get_criteria_version_by_id
 from meyar.services.job_repo import archive_job, create_job, find_active_duplicate_job
+from meyar.services.tenant_authority import (
+    TenantInactiveError,
+    require_active_tenant,
+    tenant_is_active,
+)
 from meyar.services.tenant_membership_repo import (
     get_membership_by_id,
     list_active_memberships_for_user,
@@ -231,6 +236,7 @@ async def _finalize_human_login(
     on MEYAR AI, not the classic search page — Slice 4 (issue #33, D-030)
     makes the agent the primary post-login HR surface; classic search
     remains one click away via the secondary nav."""
+    await require_active_tenant(db, tenant_id, lock=True)
     _session, raw_session_token = await create_browser_session(
         db,
         user_id=user_id,
@@ -309,6 +315,13 @@ async def login(
         )
 
     if len(memberships) == 1:
+        # User was locked first; Tenant must precede the Membership lock.
+        if not await tenant_is_active(db, memberships[0].tenant_id, lock=True):
+            await db.rollback()
+            return _render(
+                request, "login.html", _context(error=_GENERIC_LOGIN_ERROR),
+                status_code=status.HTTP_401_UNAUTHORIZED,
+            )
         selected_membership = await get_membership_by_id(
             db, memberships[0].id, for_update=True
         )
@@ -352,7 +365,8 @@ async def login(
     tenant_options = []
     for membership_id, tenant_id in membership_ids_and_tenant_ids:
         tenant = await get_tenant(db, tenant_id)
-        tenant_options.append((membership_id, tenant.name if tenant else str(tenant_id)))
+        if tenant is not None and await tenant_is_active(db, tenant_id):
+            tenant_options.append((membership_id, tenant.name))
     return _render(
         request,
         "select_tenant.html",
@@ -388,6 +402,14 @@ async def select_tenant(
     except ValueError:
         selected_membership_id = None
     user = await get_user_by_id(db, claim.user_id, for_update=True)
+    selected = (
+        await get_membership_by_id(db, selected_membership_id)
+        if selected_membership_id is not None else None
+    )
+    tenant_active = (
+        selected is not None
+        and await tenant_is_active(db, selected.tenant_id, lock=True)
+    )
     membership = (
         await get_membership_by_id(db, selected_membership_id, for_update=True)
         if selected_membership_id is not None else None
@@ -396,7 +418,7 @@ async def select_tenant(
         user is None or not user.is_active
         or user.security_version != claim.user_security_version
         or membership is None or membership.user_id != claim.user_id
-        or not membership.is_active
+        or not membership.is_active or not tenant_active
         or claim.membership_versions.get(membership.id) != membership.security_version
     ):
         await db.rollback()
@@ -707,6 +729,7 @@ async def _render_agent_workspace(
     from meyar.models.agent_conversation import AgentConversation
 
     assert isinstance(conversation, AgentConversation)
+    await require_active_tenant(db, ctx.tenant_id)
     latest_draft_ids = frozenset(
         result.job_draft.draft_id
         for result in latest.tool_results
@@ -937,6 +960,9 @@ async def agent_turn(
             browser_session_id=ctx.session_id,
             ttl_seconds=settings.agent_turn_reservation_seconds,
         )
+    except TurnAuthorityLostError:
+        await db.rollback()
+        raise UIAccessError(status.HTTP_303_SEE_OTHER, clear_cookie=True) from None
     except ConversationTurnInProgressError:
         await db.rollback()
         unused_submission = await get_bound_submission(
@@ -2187,6 +2213,26 @@ def install_ui(app: FastAPI) -> None:
     app.add_middleware(UISecurityHeadersMiddleware)
     app.mount("/ui/static", StaticFiles(directory=str(_static_dir)), name="ui-static")
     app.include_router(router)
+
+    @app.exception_handler(TenantInactiveError)
+    async def _tenant_access_error(request: Request, exc: TenantInactiveError) -> Response:
+        if not request.url.path.startswith("/ui"):
+            from fastapi.responses import JSONResponse
+
+            return JSONResponse(
+                {"detail": "Invalid or missing API key."}, status_code=401,
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        if request.url.path.startswith("/ui/login"):
+            response = _render(
+                request, "login.html", _context(error=_GENERIC_LOGIN_ERROR),
+                status_code=status.HTTP_401_UNAUTHORIZED,
+            )
+            _clear_session_cookie(response, get_settings())
+            return response
+        return await _ui_access_error(
+            request, UIAccessError(status.HTTP_303_SEE_OTHER, clear_cookie=True)
+        )
 
     @app.exception_handler(UIAccessError)
     async def _ui_access_error(request: Request, exc: UIAccessError) -> Response:

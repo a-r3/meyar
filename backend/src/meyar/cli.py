@@ -2,7 +2,10 @@ import argparse
 import asyncio
 import getpass
 import uuid
+from collections.abc import Callable, Coroutine
 from datetime import date
+from functools import wraps
+from typing import Any
 
 from sqlalchemy import select
 
@@ -46,6 +49,11 @@ from meyar.services.demo_seed_service import DemoTenantAmbiguousError, reset_dem
 from meyar.services.folder_indexer_service import index_folder
 from meyar.services.folder_reconciliation_service import reconcile_folder
 from meyar.services.job_criteria_repo import get_current_criteria_version
+from meyar.services.tenant_authority import (
+    TenantInactiveError,
+    require_active_tenant,
+    set_tenant_active,
+)
 from meyar.services.tenant_membership_repo import (
     create_membership,
     get_membership_for_user_and_tenant,
@@ -59,6 +67,32 @@ from meyar.services.user_repo import (
     set_user_active,
 )
 from meyar.storage.dependency import get_document_storage, get_photo_storage
+
+
+def _safe_tenant_cli[**P, T](
+    fn: Callable[P, Coroutine[Any, Any, T]],
+) -> Callable[P, Coroutine[Any, Any, T | None]]:
+    @wraps(fn)
+    async def run(*args: P.args, **kwargs: P.kwargs) -> T | None:
+        try:
+            return await fn(*args, **kwargs)
+        except TenantInactiveError:
+            print("Tenant application access is unavailable.")
+            raise SystemExit(1) from None
+    return run
+
+
+@_safe_tenant_cli
+async def _set_tenant_active_cli(tenant_id: str, *, active: bool) -> None:
+    try:
+        parsed_id = uuid.UUID(tenant_id)
+    except ValueError:
+        print("Invalid tenant ID.")
+        return
+    async with get_session_factory()() as db:
+        await set_tenant_active(db, tenant_id=parsed_id, is_active=active)
+        await db.commit()
+    print(f"Tenant is now {'active' if active else 'inactive'}.")
 
 
 async def _create_tenant(name: str) -> None:
@@ -212,11 +246,13 @@ async def _set_membership_active_cli(username: str, tenant_id: str, *, active: b
     )
 
 
+@_safe_tenant_cli
 async def _extract_profile(tenant_id: str, candidate_id: str, document_id: str) -> None:
     settings = get_settings()
     factory = get_session_factory()
     llm = get_llm_provider()
     async with factory() as db:
+        await require_active_tenant(db, uuid.UUID(tenant_id))
         document = await get_candidate_document(
             db,
             tenant_id=uuid.UUID(tenant_id),
@@ -261,6 +297,7 @@ async def _extract_profile(tenant_id: str, candidate_id: str, document_id: str) 
         print(f"Error: {version.error_code} — {version.error_message}")
 
 
+@_safe_tenant_cli
 async def _evaluate(
     tenant_id: str, candidate_id: str, job_id: str, as_of_date_text: str
 ) -> None:
@@ -279,6 +316,7 @@ async def _evaluate(
     try:
         factory = get_session_factory()
         async with factory() as db:
+            await require_active_tenant(db, uuid.UUID(tenant_id))
             profile_version = await get_effective_profile_version(
                 db, tenant_id=parsed_tenant_id, candidate_id=parsed_candidate_id
             )
@@ -315,6 +353,8 @@ async def _evaluate(
         raise SystemExit(3) from exc
     except SystemExit:
         raise
+    except TenantInactiveError:
+        raise
     except Exception as exc:
         print(f"Evaluation infrastructure failure: {type(exc).__name__}")
         raise SystemExit(4) from exc
@@ -343,6 +383,7 @@ async def _evaluate(
         )
 
 
+@_safe_tenant_cli
 async def _rank_job(
     tenant_id: str, job_criteria_version_id: str, as_of_date_text: str
 ) -> None:
@@ -357,6 +398,7 @@ async def _rank_job(
     try:
         factory = get_session_factory()
         async with factory() as db:
+            await require_active_tenant(db, uuid.UUID(tenant_id))
             result = await rank_candidates_for_job(
                 db,
                 tenant_id=parsed_tenant_id,
@@ -370,6 +412,8 @@ async def _rank_job(
     except ScoringPolicyError as exc:
         print(f"Scoring policy failed: {exc.code} — {exc}")
         raise SystemExit(3) from exc
+    except TenantInactiveError:
+        raise
     except Exception as exc:
         print(f"Batch ranking infrastructure failure: {type(exc).__name__}")
         raise SystemExit(4) from exc
@@ -390,6 +434,7 @@ async def _rank_job(
         )
 
 
+@_safe_tenant_cli
 async def _index_folder(tenant_id: str, root: str) -> None:
     """CLI entry point for Slice 6 — never prints CV text, filenames, or
     any candidate PII; only ids and counts. Exit codes: 0 = clean scan,
@@ -402,6 +447,7 @@ async def _index_folder(tenant_id: str, root: str) -> None:
 
     try:
         async with factory() as db:
+            await require_active_tenant(db, uuid.UUID(tenant_id))
             summary = await index_folder(
                 db,
                 storage,
@@ -415,6 +461,8 @@ async def _index_folder(tenant_id: str, root: str) -> None:
     except InvalidSourceRootError as exc:
         print(f"Invalid source folder: {exc}")
         raise SystemExit(2) from exc
+    except TenantInactiveError:
+        raise
     except Exception as exc:  # infrastructure/database failure
         print(f"Folder indexing failed: {type(exc).__name__}")
         raise SystemExit(3) from exc
@@ -434,6 +482,7 @@ async def _index_folder(tenant_id: str, root: str) -> None:
         raise SystemExit(1)
 
 
+@_safe_tenant_cli
 async def _reconcile_folder(tenant_id: str, root: str, limit: int | None) -> None:
     """CLI entry point for Slice 14 — one command serves both initial
     bulk import and repeatable reconciliation: discovery/ingestion
@@ -454,6 +503,7 @@ async def _reconcile_folder(tenant_id: str, root: str, limit: int | None) -> Non
 
     try:
         async with factory() as db:
+            await require_active_tenant(db, uuid.UUID(tenant_id))
             scan_summary, reconciliation_summary = await reconcile_folder(
                 db,
                 storage,
@@ -473,6 +523,8 @@ async def _reconcile_folder(tenant_id: str, root: str, limit: int | None) -> Non
     except InvalidSourceRootError as exc:
         print(f"Invalid source folder: {exc}")
         raise SystemExit(2) from exc
+    except TenantInactiveError:
+        raise
     except Exception as exc:  # infrastructure/database failure
         print(f"Folder reconciliation failed: {type(exc).__name__}")
         raise SystemExit(3) from exc
@@ -504,6 +556,7 @@ async def _reconcile_folder(tenant_id: str, root: str, limit: int | None) -> Non
         raise SystemExit(1)
 
 
+@_safe_tenant_cli
 async def _retire_result_sets(tenant_id: str, max_batches: int) -> None:
     """Agentless ops sweep for issue #86 ResultSet retention: drains a
     historical backlog for ONE explicit tenant in bounded batches (each
@@ -525,7 +578,9 @@ async def _retire_result_sets(tenant_id: str, max_batches: int) -> None:
             if await get_tenant(db, parsed_tenant_id) is None:
                 print("Tenant not found.")
                 raise SystemExit(2)
+            await require_active_tenant(db, parsed_tenant_id)
             while batches < max_batches:
+                await require_active_tenant(db, parsed_tenant_id)
                 count = await retire_next_result_set_batch(db, tenant_id=parsed_tenant_id)
                 await db.commit()
                 if count == 0:
@@ -534,8 +589,11 @@ async def _retire_result_sets(tenant_id: str, max_batches: int) -> None:
                 batches += 1
                 retired += count
             else:
+                await require_active_tenant(db, parsed_tenant_id)
                 pending = await result_set_retirement_pending(db, tenant_id=parsed_tenant_id)
     except SystemExit:
+        raise
+    except TenantInactiveError:
         raise
     except Exception as exc:  # infrastructure/database failure
         print(f"Result set retirement failed: {type(exc).__name__}")
@@ -637,6 +695,7 @@ async def _seed_demo(reset: bool) -> None:
     print(summary.human_temp_password)
 
 
+@_safe_tenant_cli
 async def _extract_identity(tenant_id: str, candidate_id: str, document_id: str) -> None:
     """PII-safe by design: never prints full_name/email/phone. Only ids,
     status, and a non-identifying found-field count. There is no
@@ -645,6 +704,7 @@ async def _extract_identity(tenant_id: str, candidate_id: str, document_id: str)
     factory = get_session_factory()
     llm = get_llm_provider()
     async with factory() as db:
+        await require_active_tenant(db, uuid.UUID(tenant_id))
         document = await get_candidate_document(
             db,
             tenant_id=uuid.UUID(tenant_id),
@@ -687,6 +747,7 @@ async def _extract_identity(tenant_id: str, candidate_id: str, document_id: str)
         print(f"Error: {version.error_code} — {version.error_message}")
 
 
+@_safe_tenant_cli
 async def _embed_candidate(tenant_id: str, candidate_id: str) -> None:
     """Operates on the candidate's current CandidateProfileVersion.
     Never prints the vector. Reports whether the result was newly
@@ -697,6 +758,7 @@ async def _embed_candidate(tenant_id: str, candidate_id: str) -> None:
 
     try:
         async with factory() as db:
+            await require_active_tenant(db, uuid.UUID(tenant_id))
             version, was_reused = await embed_candidate_profile(
                 db,
                 provider,
@@ -720,6 +782,7 @@ async def _embed_candidate(tenant_id: str, candidate_id: str) -> None:
     print(f"Reused existing embedding: {was_reused}")
 
 
+@_safe_tenant_cli
 async def _search_candidates(tenant_id: str, request_file: str) -> None:
     """CLI demonstration of Slice 8 structured/semantic/hybrid search — no
     natural-language input (Slice 9). Reads a strict CandidateSearchRequest
@@ -745,6 +808,7 @@ async def _search_candidates(tenant_id: str, request_file: str) -> None:
     factory = get_session_factory()
     try:
         async with factory() as db:
+            await require_active_tenant(db, uuid.UUID(tenant_id))
             response = await search_candidates(
                 db,
                 tenant_id=uuid.UUID(tenant_id),
@@ -774,6 +838,7 @@ async def _search_candidates(tenant_id: str, request_file: str) -> None:
         )
 
 
+@_safe_tenant_cli
 async def _plan_search(
     tenant_id: str, query: str, as_of_date_text: str, *, execute: bool
 ) -> None:
@@ -790,6 +855,7 @@ async def _plan_search(
     factory = get_session_factory()
     try:
         async with factory() as db:
+            await require_active_tenant(db, uuid.UUID(tenant_id))
             if execute:
                 planned = await plan_and_search_candidates(
                     db,
@@ -815,6 +881,8 @@ async def _plan_search(
     except (SearchRequestError, EmbeddingProviderError) as exc:
         print(f"Natural-language search execution failed: {exc.code}")
         raise SystemExit(4) from exc
+    except TenantInactiveError:
+        raise
     except Exception as exc:
         print(f"Natural-language search infrastructure failure: {type(exc).__name__}")
         raise SystemExit(4) from exc
@@ -862,6 +930,12 @@ def main() -> None:
         "create-tenant", help="Create a tenant and its first API key."
     )
     create_tenant_parser.add_argument("--name", required=True)
+
+    for command in ("disable-tenant", "enable-tenant"):
+        tenant_state_parser = sub.add_parser(
+            command, help="Suspend/resume tenant application access."
+        )
+        tenant_state_parser.add_argument("--tenant-id", required=True)
 
     create_user_parser = sub.add_parser(
         "create-user",
@@ -1037,6 +1111,8 @@ def main() -> None:
     args = parser.parse_args()
     if args.command == "create-tenant":
         asyncio.run(_create_tenant(args.name))
+    elif args.command in ("disable-tenant", "enable-tenant"):
+        asyncio.run(_set_tenant_active_cli(args.tenant_id, active=args.command == "enable-tenant"))
     elif args.command == "create-user":
         asyncio.run(_create_user(args.username))
     elif args.command == "add-membership":

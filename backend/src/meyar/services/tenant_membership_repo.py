@@ -3,6 +3,7 @@ import uuid
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meyar.models.tenant import Tenant
 from meyar.models.tenant_membership import TenantMembership
 from meyar.models.user import User
 from meyar.services.browser_session_repo import revoke_sessions_for_membership
@@ -52,9 +53,10 @@ async def list_active_memberships_for_user(
     the server-side authority for login-time tenant selection/
     auto-selection. Never trusts a client-supplied tenant id."""
     result = await db.execute(
-        select(TenantMembership).where(
-            TenantMembership.user_id == user_id, TenantMembership.is_active.is_(True)
-        )
+        select(TenantMembership).join(Tenant, Tenant.id == TenantMembership.tenant_id).where(
+            TenantMembership.user_id == user_id, TenantMembership.is_active.is_(True),
+            Tenant.is_active.is_(True),
+        ).execution_options(populate_existing=True)
     )
     return list(result.scalars().all())
 

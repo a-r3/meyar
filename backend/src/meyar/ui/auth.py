@@ -5,13 +5,16 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from fastapi import Depends, Request, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.core.roles import permissions_for_role
 from meyar.db import get_db
+from meyar.models.browser_session import BrowserSession
+from meyar.models.user import User
 from meyar.services.browser_session_repo import get_browser_session_by_token
+from meyar.services.tenant_authority import require_active_tenant, tenant_is_active
 from meyar.services.tenant_membership_repo import get_membership_by_id
-from meyar.services.user_repo import get_user_by_id
 
 UI_SESSION_COOKIE = "meyar_ui_session"
 
@@ -26,7 +29,7 @@ class UIAccessError(Exception):
 @dataclass(frozen=True)
 class UIContext:
     """The accountable human principal for one authenticated UI request.
-    Every field below is re-derived live from the User + TenantMembership
+    Every field below is re-derived live from the User + Tenant + TenantMembership
     rows on every request (see get_ui_context) — a disabled user or a
     deactivated/revoked membership takes effect immediately, without
     waiting for the session to expire or for re-login."""
@@ -67,12 +70,34 @@ async def resolve_ui_context(request: Request, db: AsyncSession) -> UIContext:
     if session is None or session.revoked_at is not None or session.expires_at <= now:
         raise UIAccessError(status.HTTP_303_SEE_OTHER, clear_cookie=True)
 
-    user = await get_user_by_id(db, session.user_id)
+    # User precedes Tenant in the security lock order. Holding Tenant before
+    # logout's BrowserSession UPDATE also avoids a commit-guard inversion.
+    user = await db.scalar(
+        select(User).where(User.id == session.user_id).with_for_update(read=True)
+        .execution_options(populate_existing=True)
+    )
     if user is None or not user.is_active:
         raise UIAccessError(status.HTTP_303_SEE_OTHER, clear_cookie=True)
 
     membership = await get_membership_by_id(db, session.tenant_membership_id)
     if membership is None or not membership.is_active or membership.user_id != user.id:
+        raise UIAccessError(status.HTTP_303_SEE_OTHER, clear_cookie=True)
+
+    if not await tenant_is_active(db, membership.tenant_id, lock=True):
+        raise UIAccessError(status.HTTP_303_SEE_OTHER, clear_cookie=True)
+    await require_active_tenant(db, membership.tenant_id)
+    # An earlier cookie lookup can predate a security change committed while
+    # we waited for User/Tenant. Re-read and lock the session last; in particular
+    # disable + re-enable must never make that earlier session snapshot usable.
+    session = await db.scalar(
+        select(BrowserSession).where(
+            BrowserSession.id == session.id, BrowserSession.user_id == user.id,
+            BrowserSession.tenant_membership_id == membership.id,
+            BrowserSession.revoked_at.is_(None),
+            BrowserSession.expires_at > datetime.now(UTC),
+        ).with_for_update(read=True).execution_options(populate_existing=True)
+    )
+    if session is None:
         raise UIAccessError(status.HTTP_303_SEE_OTHER, clear_cookie=True)
 
     return UIContext(

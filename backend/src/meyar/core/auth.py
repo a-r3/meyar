@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meyar.db import get_db
 from meyar.models.api_key import ApiKey
 from meyar.services.api_key_repo import get_api_key_by_plaintext, touch_last_used
+from meyar.services.tenant_authority import require_active_tenant, tenant_is_active
 
 bearer_scheme = HTTPBearer(
     scheme_name="ApiKeyBearer",
@@ -51,6 +52,8 @@ async def authenticate_raw_api_key(
     api_key = await get_api_key_by_plaintext(db, plaintext)
     if api_key is None or not api_key_is_active(api_key):
         return None
+    if not await tenant_is_active(db, api_key.tenant_id, lock=True):
+        return None
     if update_last_used:
         await touch_last_used(db, api_key.id)
     return api_key
@@ -68,6 +71,7 @@ async def get_current_tenant(
     if api_key is None:
         raise _unauthorized()
     await db.commit()
+    await require_active_tenant(db, api_key.tenant_id, lock=True)
 
     return TenantContext(
         tenant_id=api_key.tenant_id, api_key_id=api_key.id, scopes=list(api_key.scopes)

@@ -7,6 +7,9 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.models.browser_session import BrowserSession
+from meyar.models.tenant_membership import TenantMembership
+from meyar.models.user import User
+from meyar.services.tenant_authority import TenantInactiveError, require_active_tenant
 
 
 def hash_session_token(raw_token: str) -> str:
@@ -22,6 +25,25 @@ async def create_browser_session(
     reusing a client-presented value."""
     if ttl_hours <= 0:
         raise ValueError("Browser-session TTL must be positive.")
+    user_active = await db.scalar(
+        select(User.is_active).where(User.id == user_id).with_for_update(read=True)
+    )
+    tenant_id = await db.scalar(
+        select(TenantMembership.tenant_id).where(
+            TenantMembership.id == tenant_membership_id, TenantMembership.user_id == user_id
+        )
+    )
+    if user_active is not True or tenant_id is None:
+        raise TenantInactiveError()
+    await require_active_tenant(db, tenant_id, lock=True)
+    membership_active = await db.scalar(
+        select(TenantMembership.is_active).where(
+            TenantMembership.id == tenant_membership_id,
+            TenantMembership.user_id == user_id, TenantMembership.tenant_id == tenant_id,
+        ).with_for_update(read=True)
+    )
+    if membership_active is not True:
+        raise TenantInactiveError()
     raw_token = secrets.token_urlsafe(32)
     now = datetime.now(UTC)
     session = BrowserSession(

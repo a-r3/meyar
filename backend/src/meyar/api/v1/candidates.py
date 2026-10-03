@@ -35,6 +35,7 @@ from meyar.services.candidate_document_service import (
 from meyar.services.candidate_photo_service import process_photo_for_document
 from meyar.services.candidate_repo import create_candidate, get_candidate
 from meyar.services.candidate_service import delete_candidate_cascade
+from meyar.services.tenant_authority import require_active_tenant
 from meyar.storage.base import DocumentStorage
 from meyar.storage.dependency import get_document_storage, get_photo_storage
 from meyar.storage.photo import LocalPhotoStorage
@@ -103,8 +104,9 @@ async def _revalidate_upload_authority(
 
     Shared locks prevent credential/ownership changes or candidate deletion
     between revalidation and persistence without serializing unrelated uploads.
-    Tenant-active enforcement remains separate #46 work.
+    Tenant is SHARE-locked before key and candidate through the final commit.
     """
+    await require_active_tenant(db, ctx.tenant_id, lock=True)
     key = await db.scalar(
         select(ApiKey)
         .where(ApiKey.id == ctx.api_key_id)
@@ -250,6 +252,7 @@ async def post_candidate_document(
     except Exception:
         await db.rollback()
         logger.warning("Unexpected photo-only failure after durable document upload")
+    await require_active_tenant(db, ctx.tenant_id)
     durable_document = await get_candidate_document(
         db, tenant_id=ctx.tenant_id, candidate_id=candidate_id, document_id=document_id
     )
