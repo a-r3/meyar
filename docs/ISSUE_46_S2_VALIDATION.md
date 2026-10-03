@@ -1,8 +1,12 @@
 # Issue #46 S2 — Logging / Privacy Hardening
 
-Status: PR #117 head `5e40f9f52a0b377741274a3d4f23724c1cb84a4c`
-acceptance-REJECTED. Corrected S2 requires independent re-acceptance; #46 remains OPEN. Only S2 under
-existing M9 milestone 10. Branch `fix/46-s2-diagnostic-privacy`.
+S2 Diagnostic Privacy is independently **ACCEPTED + MERGED** through PR #117.
+Accepted head `4ee99cbcd68faffbb820c8726ca0631f9f58e06b`; exact-head CI
+[37115861862](https://github.com/a-r3/meyar/actions/runs/37115861862) **SUCCESS**.
+Owner squash/main `a470305df37bfc952f74446834bfae6615b9bc00`; accepted and
+merged full tree `0d4b8271af3db366f605495b35de83764ec315b4`.
+The earlier rejected S2 head and its remediation are historical.
+#46 remains OPEN; S2 only under M9 milestone 10.
 
 ## Verified starting state and scope authority
 
@@ -286,7 +290,7 @@ flakiness remain deferred. Stored legacy failure rows are not rewritten.
 
 Exact PR number, delivered head and exact-head CI are published in the PR and
 operational delivery report, without a self-referential source commit.
-Independent S2 acceptance remains pending; no merge or issue closure is claimed.
+S2 is independently accepted and owner-merged as recorded above. #46 remains OPEN.
 
-Independently review the new exact S2 head. Do not merge, enable auto-merge,
-close #46, start S3+ or advance other issues. Reply `S2 PASS` or provide corrections.
+The former S2 re-acceptance request is historical and has been fulfilled by the
+owner. This S3 PR records that post-merge state; it does not reopen S2.

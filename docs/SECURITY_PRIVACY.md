@@ -616,9 +616,10 @@ file on disk.
 
 ## PII-safe logging
 
-Issue #46 S2 / D-102 proposes an executable diagnostic boundary (independent
-re-acceptance pending after PR #117 head `5e40f9f...` was rejected for operator
-path/member failure leaks), alongside MASTER_SPEC.md §19. Failure Findings use
+Issue #46 S2 / D-102 is independently accepted and owner-merged through
+PR #117 at accepted head `4ee99cb...`, CI `37115861862` SUCCESS, squash/main
+`a470305...`; the earlier rejection is historical. Alongside MASTER_SPEC.md
+§19, failure Findings use
 closed structural copy, never arbitrary operator paths/member names; this is S2
 ownership, not a #35 deferral. Application failures emit
 closed component/reason codes and bounded exception class names; no raw
@@ -639,6 +640,24 @@ messages and echoed argument values. Explicit one-time credential provisioning
 and authorized product data presentation remain separate from operational logs.
 AuditEvent structural metadata, local-only processing, tenant authority and
 inference DB release are unchanged. Details/proof: `docs/ISSUE_46_S2_VALIDATION.md`.
+
+## S3 runtime response and demo-human policy
+
+D-103 / `docs/ISSUE_46_S3_VALIDATION.md` proposes a single ASGI policy for
+/api/v1 and /api/v1/*: `Cache-Control: no-store` and
+`X-Content-Type-Options: nosniff`, including safe errors and stream/file/empty
+responses. Existing UI headers and non-API asset semantics are preserved.
+Production registers no /docs, /openapi.json or /docs-assets surface; all return
+ordinary 404. Development/test Swagger remains local/offline; default CDN
+ReDoc is disabled. No additional authentication subsystem.
+
+Demo human ownership requires a trusted exact-User-ID creation audit marker;
+rotation/deletion additionally requires exclusivity across ALL memberships.
+Unmarked/shared Users remain unchanged. Legacy seed preserves data and issues
+a new marked synthetic login; only obsolete demo-tenant membership authority
+may be retired. An immutable unambiguous marker chain permits explicit
+replacement while preserving provenance. Plaintext credentials are never
+persisted/logged. No schema change. Independent S3 acceptance remains pending.
 
 ## Retention / deletion
 

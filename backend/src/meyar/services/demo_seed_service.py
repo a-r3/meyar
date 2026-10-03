@@ -26,7 +26,7 @@ from datetime import date
 from docx import Document
 from docx.shared import Inches
 from PIL import Image, ImageDraw
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.agent.capabilities.contracts import AgentPlanContext, AgentPlanProposal
@@ -47,6 +47,8 @@ from meyar.ingestion.parser import DocumentParser
 from meyar.llm.provider import LLMResultProvenance
 from meyar.models.audit_event import AuditEvent
 from meyar.models.tenant import Tenant
+from meyar.models.tenant_membership import TenantMembership
+from meyar.models.user import User
 from meyar.schemas.candidate_identity import CandidateIdentityExtraction, IdentityFieldItem
 from meyar.schemas.candidate_profile import (
     CandidateProfileExtraction,
@@ -63,18 +65,16 @@ from meyar.schemas.criteria import CriterionIn, CriterionKind, CriterionType
 from meyar.search.planner_schemas import PlannerDraft
 from meyar.services.api_key_repo import create_api_key, revoke_active_api_keys_for_tenant
 from meyar.services.audit_repo import record_event
+from meyar.services.browser_session_repo import revoke_sessions_for_membership
 from meyar.services.candidate_document_service import ingest_candidate_document
 from meyar.services.candidate_embedding_service import embed_candidate_profile
 from meyar.services.candidate_repo import count_candidates_for_tenant, create_candidate
 from meyar.services.job_criteria_repo import create_criteria_version
 from meyar.services.job_repo import create_job
 from meyar.services.profile_authority import get_current_authorized_profile
-from meyar.services.tenant_membership_repo import (
-    create_membership,
-    get_membership_for_user_and_tenant,
-)
+from meyar.services.tenant_membership_repo import create_membership
 from meyar.services.tenant_repo import create_tenant
-from meyar.services.user_repo import create_user, get_user_by_username, set_password
+from meyar.services.user_repo import create_user, get_user_by_id, get_user_by_username, set_password
 from meyar.storage.base import DocumentStorage
 
 # The display name every demo tenant is created with. NEVER sufficient
@@ -97,12 +97,10 @@ DEMO_TENANT_MARKER_EVENT = "DEMO_TENANT_BOOTSTRAPPED"
 
 # The synthetic demo HUMAN login (Slice 1, issue #30) — distinct from,
 # and in addition to, the machine API key summary.api_key_plaintext below.
-# Only ever created/rotated inside the positively-identified demo tenant
-# (see _bootstrap_demo_human_login) — this never touches a real operator
-# account, even one that happens to share this username, because a
-# same-named user is only ever treated as "the demo user" if it already
-# holds a TenantMembership on the positively-identified demo tenant.
+# Username and membership are never proof of User ownership. Only an exact
+# trusted creation marker plus exclusive membership permits User mutation.
 DEMO_USER_USERNAME = "demo.hr"
+DEMO_HUMAN_MARKER_EVENT = "DEMO_HUMAN_BOOTSTRAPPED"
 
 
 class _DemoLLMProvider:
@@ -960,33 +958,72 @@ async def _find_demo_tenant(db: AsyncSession) -> Tenant | None:
     return tenant
 
 
+async def _marked_demo_human(
+    db: AsyncSession, tenant_id: uuid.UUID,
+) -> tuple[User | None, AuditEvent | None, list[TenantMembership]]:
+    """Validate the immutable creation chain before any seed/reset mutation.
+
+    A replacement links its predecessor explicitly; multiple roots, forks,
+    duplicate User IDs, malformed/dangling links or a missing current User/
+    demo membership are ambiguous. Never adopt a User by its username.
+    """
+    markers = list((await db.scalars(select(AuditEvent).where(
+        AuditEvent.tenant_id == tenant_id, AuditEvent.event_type == DEMO_HUMAN_MARKER_EVENT,
+    ))).all())
+    if not markers:
+        return None, None, []
+    by_previous: dict[uuid.UUID | None, AuditEvent] = {}
+    user_ids: dict[uuid.UUID, uuid.UUID] = {}
+    try:
+        for marker in markers:
+            metadata = marker.event_metadata
+            if set(metadata) not in ({"user_id"}, {"user_id", "previous_marker_id"}):
+                raise ValueError()
+            user_id = uuid.UUID(metadata["user_id"])
+            previous = (
+                uuid.UUID(metadata["previous_marker_id"])
+                if "previous_marker_id" in metadata else None
+            )
+            if previous in by_previous or user_id in user_ids.values():
+                raise ValueError()
+            by_previous[previous] = marker
+            user_ids[marker.id] = user_id
+        current = by_previous[None]
+        visited = {current.id}
+        while current.id in by_previous:
+            current = by_previous[current.id]
+            if current.id in visited:
+                raise ValueError()
+            visited.add(current.id)
+        if len(visited) != len(markers):
+            raise ValueError()
+    except (ValueError, TypeError, KeyError, AttributeError):
+        raise DemoTenantAmbiguousError("Demo human creation markers are ambiguous.") from None
+
+    # Lock the User before checking ALL memberships (including inactive ones).
+    # Its FK lock also prevents a concurrent membership insert from racing a
+    # successful exclusivity check. Match existing User -> Membership order.
+    user = await get_user_by_id(db, user_ids[current.id], for_update=True)
+    memberships = list((await db.scalars(select(TenantMembership).where(
+        TenantMembership.user_id == user_ids[current.id],
+    ).with_for_update().execution_options(populate_existing=True))).all())
+    if user is None or not any(m.tenant_id == tenant_id for m in memberships):
+        raise DemoTenantAmbiguousError("Marked demo human authority is missing.")
+    return user, current, memberships
+
+
 async def reset_demo(db: AsyncSession) -> bool:
-    """Deletes the positively-identified demo tenant (see
-    _find_demo_tenant) — every tenant-owned table cascades via its
-    existing ondelete=CASCADE foreign key, no bespoke deletion logic —
-    plus the demo human User row (Slice 1), which is NOT tenant-owned
-    (a User can belong to more than one tenant by design) and so does
-    not cascade-delete on its own. Only deleted when it is positively
-    tied to this exact demo tenant via an active TenantMembership,
-    mirroring the same collision-safety discipline as the tenant lookup
-    itself — an unrelated same-named user is never touched. Without this,
-    a reset -> seed cycle would orphan the demo user (its membership
-    deleted with the tenant, the user row surviving) and the next
-    seed_demo would misidentify it as a name collision. Returns whether a
-    demo tenant existed to delete. Raises DemoTenantAmbiguousError (never
-    deletes anything) if the demo tenant cannot be positively and
-    unambiguously identified — see _find_demo_tenant. There is no path
-    here that accepts an arbitrary tenant id."""
+    """Delete the marked demo tenant and only a marked, exclusive current User.
+
+    Unmarked/shared identities survive; only tenant-owned rows cascade away.
+    Ambiguous human markers abort before deletion. No operator-supplied IDs.
+    """
     tenant = await _find_demo_tenant(db)
     if tenant is None:
         return False
-    demo_user = await get_user_by_username(db, DEMO_USER_USERNAME)
-    if demo_user is not None:
-        membership = await get_membership_for_user_and_tenant(
-            db, user_id=demo_user.id, tenant_id=tenant.id
-        )
-        if membership is not None:
-            await db.delete(demo_user)
+    demo_user, _, memberships = await _marked_demo_human(db, tenant.id)
+    if demo_user is not None and all(m.tenant_id == tenant.id for m in memberships):
+        await db.delete(demo_user)
     await db.delete(tenant)
     await db.flush()
     return True
@@ -995,29 +1032,41 @@ async def reset_demo(db: AsyncSession) -> bool:
 async def _bootstrap_demo_human_login(
     db: AsyncSession, *, tenant_id: uuid.UUID
 ) -> tuple[str, str]:
-    """Creates the synthetic demo human login on first run, or rotates its
-    temporary password on every subsequent seed-demo run — mirroring the
-    existing machine API-key rotation behavior below. The plaintext is
-    returned once for the CLI to print; it is never persisted, logged, or
-    reused. Never touches any user other than the one positively tied to
-    tenant_id (see DEMO_USER_USERNAME's docstring above)."""
+    """Issue a fresh credential without adopting legacy or shared identities."""
+    existing, marker, memberships = await _marked_demo_human(db, tenant_id)
     temp_password = secrets.token_urlsafe(12)
-    existing = await get_user_by_username(db, DEMO_USER_USERNAME)
-    if existing is not None:
-        membership = await get_membership_for_user_and_tenant(
-            db, user_id=existing.id, tenant_id=tenant_id
-        )
-        if membership is None:
-            raise DemoTenantAmbiguousError(
-                f"A user named {DEMO_USER_USERNAME!r} exists but is not a member of "
-                "the demo tenant — refusing to rotate an unrelated account's password. "
-                "Rename or remove that user if this is a name collision."
-            )
+    if (existing is not None and existing.is_active
+            and all(m.tenant_id == tenant_id for m in memberships)
+            and all(m.is_active and m.role == ROLE_HR_USER for m in memberships)):
         await set_password(db, user_id=existing.id, plaintext_password=temp_password)
         return existing.username, temp_password
 
-    user = await create_user(db, username=DEMO_USER_USERNAME, plaintext_password=temp_password)
+    # Retire stale DEMO-tenant access only. The generic membership setter also
+    # bumps User.security_version, so it is deliberately inappropriate here.
+    legacy = await get_user_by_username(db, DEMO_USER_USERNAME)
+    retired_ids = {u.id for u in (existing, legacy) if u is not None}
+    for user_id in retired_ids:
+        stale = await db.scalar(select(TenantMembership).where(
+            TenantMembership.user_id == user_id, TenantMembership.tenant_id == tenant_id,
+        ))
+        if stale is not None:
+            await db.execute(update(TenantMembership).where(
+                TenantMembership.id == stale.id,
+            ).values(is_active=False, security_version=uuid.uuid4()))
+            await revoke_sessions_for_membership(db, membership_id=stale.id)
+
+    username = DEMO_USER_USERNAME
+    # Names are server-derived; collisions never authorize adopting an identity.
+    while await get_user_by_username(db, username) is not None:
+        username = f"demo.hr.{tenant_id.hex}.{uuid.uuid4().hex}"
+    user = await create_user(db, username=username, plaintext_password=temp_password)
     await create_membership(db, user_id=user.id, tenant_id=tenant_id, role=ROLE_HR_USER)
+    metadata = {"user_id": str(user.id)}
+    if marker is not None:
+        metadata["previous_marker_id"] = str(marker.id)
+    await record_event(
+        db, tenant_id=tenant_id, event_type=DEMO_HUMAN_MARKER_EVENT, metadata=metadata,
+    )
     return user.username, temp_password
 
 
@@ -1060,18 +1109,19 @@ async def seed_demo(
             db, tenant_id=tenant.id, event_type=DEMO_TENANT_MARKER_EVENT, metadata={}
         )
 
+    # Validate before key rotation, dataset creation or any identity mutation.
+    human_username, human_temp_password = await _bootstrap_demo_human_login(db, tenant_id=tenant.id)
+
     existing_candidate_count = await count_candidates_for_tenant(db, tenant_id=tenant.id)
+    # Exactly one active key even for a marked legacy tenant with no dataset.
+    await revoke_active_api_keys_for_tenant(db, tenant_id=tenant.id)
+    api_key, plaintext = await create_api_key(db, tenant_id=tenant.id, env="test")
     if existing_candidate_count > 0:
         # Rotate: revoke every currently-active key on this positively-
         # identified demo tenant before minting the replacement, so a
         # re-run never leaves an unusable orphaned key behind and never
         # accumulates indefinitely many valid demo credentials. Scoped
         # strictly to tenant.id — never a generic cross-tenant operation.
-        await revoke_active_api_keys_for_tenant(db, tenant_id=tenant.id)
-        api_key, plaintext = await create_api_key(db, tenant_id=tenant.id, env="test")
-        human_username, human_temp_password = await _bootstrap_demo_human_login(
-            db, tenant_id=tenant.id
-        )
         await db.flush()
         return DemoSeedSummary(
             tenant_id=tenant.id,
@@ -1088,8 +1138,6 @@ async def seed_demo(
             human_username=human_username,
             human_temp_password=human_temp_password,
         )
-
-    api_key, plaintext = await create_api_key(db, tenant_id=tenant.id, env="test")
 
     documents_created = profiles_created = identities_created = embeddings_created = 0
     created_candidate_ids: list[uuid.UUID] = []
@@ -1182,10 +1230,6 @@ async def seed_demo(
             )
             if scored.evaluation.status == "COMPLETED":
                 evaluations_created += 1
-
-    human_username, human_temp_password = await _bootstrap_demo_human_login(
-        db, tenant_id=tenant.id
-    )
 
     return DemoSeedSummary(
         tenant_id=tenant.id,

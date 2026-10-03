@@ -9,11 +9,18 @@ have the identical full tree `8c017e6eeae367fbb411e88e64a2faf4af2d9b32`.
 D-101 and `docs/ISSUE_46_S1_VALIDATION.md` record tenant suspension, tenant-only
 session/pending-claim invalidation, guarded commits and immediate post-query
 embedding revalidation while preserving DB release. No schema change.
-#46/#35/#36/#45/#50 remain OPEN; #46 is not complete. Only S2 logging/privacy
-is now proposed under D-102 / `docs/ISSUE_46_S2_VALIDATION.md`; independent
-acceptance of PR #117 head `5e40f9f52a0b377741274a3d4f23724c1cb84a4c` was
-REJECTED for operator path/member failure leaks. Corrected S2 re-acceptance is
-pending. No S3+, other-issue advancement or Target-Mac work.
+#46/#35/#36/#45/#50 remain OPEN; #46 is not complete.
+S2 Diagnostic Privacy is independently **ACCEPTED + MERGED** through PR #117.
+Accepted head `4ee99cbcd68faffbb820c8726ca0631f9f58e06b`; exact-head CI
+[37115861862](https://github.com/a-r3/meyar/actions/runs/37115861862) **SUCCESS**.
+Owner squash/main `a470305df37bfc952f74446834bfae6615b9bc00`; accepted and
+merged full tree `0d4b8271af3db366f605495b35de83764ec315b4`.
+The earlier rejected S2 head and its remediation are historical.
+Only S3 runtime-security is now proposed under D-103 /
+`docs/ISSUE_46_S3_VALIDATION.md`: positive demo-human ownership, centralized API
+privacy headers, and production docs/OpenAPI routing. Independent acceptance
+is pending. #46/#35/#36/#45/#50 remain OPEN. No later-slice, storage recovery,
+folder concurrency, readiness, retention, schema-drift or Target-Mac work.
 The accepted/merged M-9 and M-5 records below remain valid.
 
 **Issue #46 M-9 — independently ACCEPTED and MERGED through PR #114;

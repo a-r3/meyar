@@ -183,11 +183,21 @@ uv run uvicorn meyar.main:app --reload
 
 Open `http://127.0.0.1:8000/ui/login` and sign in with the demo **human**
 username/password printed by `seed-demo` (Slice 1 — Human Identity & Dual
-Access, issue #30): username `demo.hr`, plus the temporary password shown
-once under "Human/UI login" in the command's output. The normal `/ui/login`
+Access, issue #30): the exact username printed (normally `demo.hr`), plus the
+temporary password shown once under "Human/UI login" in the command's output.
+The normal `/ui/login`
 screen no longer accepts an API key — that machine credential (also printed
 by `seed-demo`, under "Machine/API credential") is for REST API/Swagger
 testing only, via `Authorization: Bearer <key>`.
+
+S3 compatibility (D-103): an existing unmarked `demo.hr` or a marked human
+shared with another tenant is never adopted or password-rotated. The dataset
+stays intact; seed creates a positively marked synthetic human with a
+server-derived username when needed. Use the printed username, not an assumed
+`demo.hr`. Only obsolete demo-tenant memberships/sessions may be retired;
+the old User and unrelated memberships/sessions remain unchanged. Subsequent
+seeds rotate only the marked exclusive usable human. Ambiguous audit markers
+stop seed/reset before destructive changes. No migration or manual adoption.
 
 ## 8. Browser URLs
 
@@ -269,7 +279,7 @@ uv run meyar seed-demo
 ```
 
 This revokes the previously-active demo API key and mints a fresh one, and
-sets a fresh temporary password for the demo human login (`demo.hr`) —
+issues a fresh temporary password for the marked exclusive demo human login —
 copy whichever you'll need again, or just leave them unused since the demo
 tenant is isolated and harmless to leave in place.
 
@@ -281,3 +291,6 @@ uv run meyar seed-demo --reset
 
 This does not affect any other tenant, does not require a database reset,
 and there is no broader "wipe everything" command.
+Only the current positively marked exclusive human may be deleted with the
+demo tenant; unmarked/shared Users survive. The `--reset` seed command then
+creates a fresh demo dataset and prints its new credentials as before.
