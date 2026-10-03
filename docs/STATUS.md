@@ -1,23 +1,37 @@
 # MEYAR — Status
 
-**Issue #46 M-5 — implementation PROPOSAL awaiting independent acceptance.**
-Starts from verified accepted main `f1429c7309b1537fd8e94547a2f666995a80859a`
-(after merged PR #110 and docs PR #111). New rejected/operationally failed
-folder files reserve candidate-less FAILED path rows; successful retries
-attach durable same-tenant authority to the same row. Existing candidate/
-prior-document pointers survive changed-file rejection. Retained terminal
-parser-failed originals remain authorized and INDEXED; with no profile
-attempt, library/detail show “Diqqət tələb edir” instead of “Emal olunur”.
-D-099 and `docs/ISSUE_46_M5_VALIDATION.md` specify the contract and validation.
-No automatic legacy candidate deletion: persisted folder associations cannot
-prove exclusive creation ownership, so ambiguous/shared/manual empty candidates
-are retained. General storage/DB compensation, overlapping-scan locking and
-M-9 remain separately unresolved. No migration/dependency/parser-version
-change. #46 remains OPEN under **M9**, and #35/#36/#50 are not advanced.
-Local proposal gate: 185 focused passed; 3475 full pytest passed in 499.99s;
-Ruff/mypy(src) clean; unchanged single Alembic head `b88a2c4d6e10`.
-No merge, independent acceptance or Target-Mac acceptance is claimed.
+**Issue #46 M-5 — independently ACCEPTED and MERGED through PR #112;
+M-5 slice COMPLETE, but #46 remains OPEN.** Owner-confirmed independent
+acceptance at exact head `869415b7a08dba18e4c732b6c4f9d74baa1347cd`;
+accepted exact-head CI run `37081927902` completed SUCCESS. The owner manually
+Squash and merged PR #112. Verified main/squash:
+`d14ab1a5b4e25bd7d012bada4041ea59aaf55b61`, whose sole parent is previous
+main `f1429c7309b1537fd8e94547a2f666995a80859a`: exactly one commit ahead.
+Accepted head and merged squash have identical complete trees/content,
+tree SHA `9c832498875f61a8c3df5313bce9424872e4ca1c`.
 
+New rejected/operationally failed folder files retain candidate-less FAILED
+path rows; successful retries attach durable same-tenant authority to the same
+row. Exact-content dedup remains tenant-scoped and verifies Candidate,
+CandidateDocument and hash ownership. Existing Candidate/prior successful
+CandidateDocument pointers survive changed-file rejection. Retained terminal
+parser-failed originals remain authorized and INDEXED with CandidateDocument,
+without canonical/profile authority; with no profile attempt, library/detail
+show “Diqqət tələb edir” instead of “Emal olunur”. Existing profile-status
+precedence is unchanged; M-9 semantics were not modified.
+D-099 and `docs/ISSUE_46_M5_VALIDATION.md` record the contract and delivery.
+No automatic legacy candidate deletion or hiding: persisted folder associations
+cannot prove exclusive creation ownership, so ambiguous/shared/manual
+zero-document candidates are retained. Storage-save/DB rollback orphan recovery,
+concurrent reconciliation/dedup, folder transaction lifetime, generic retention/
+orphan cleanup, M-9 and other unresolved #46 work remain pending.
+No migration/dependency/lockfile/parser behavior change in this docs-only
+follow-up. #46 remains OPEN under **M9**; #35/#36/#50 remain OPEN and unchanged.
+M-9 has NOT started; this follow-up starts no next implementation slice.
+Historical local gate: 185 focused passed in 57.69s; 3475 full pytest passed in
+499.99s; Ruff/mypy(src) clean; unchanged single Alembic head `b88a2c4d6e10`.
+Accepted exact-head CI is the published delivery authority. No Target-Mac
+execution, benchmark or acceptance is claimed.
 
 
 **Issue #46 PR-3 — independently ACCEPTED and MERGED through PR #110;
@@ -29,8 +43,9 @@ parent is previous main `9cc2cf9623b263ba4a2dd92217fce23c566ba0a7`: exactly
 one commit ahead. The accepted head and merged squash have identical complete
 trees/content, tree SHA `74cecde0a625eab9f9ef1c68cde0e2602469e0cb`.
 GitHub closed #46 on merge; the owner reopened it, and its verified final state
-is OPEN. PR-3 completes only its approved M-4/table subset. M-5, M-9 and other
-remaining #46 hardening/acceptance work are still pending.
+is OPEN. PR-3 completes only its approved M-4/table subset. M-5 is now COMPLETE
+through PR #112; M-9 and other remaining #46 hardening/acceptance work are
+still pending.
 
 Parser **1.2.0** adds ordered
 DOCX body/table/cell paragraphs and bounded nested physical-source tables,
@@ -73,9 +88,10 @@ fail-closed Linux/Darwin resource-limit setup, output/IPC bounds and closed safe
 failure metadata. No-text documents create no canonical authority; no OCR.
 Parser version 1.1.0 preserves ordinary successful block/page layout and all
 historical canonical evidence. No parser-version-only folder reprocessing.
-M-4 DOCX completeness is explicitly PR-3; general M-5/M-9 and remaining #46
-items stay open. No Target-Mac/#36 acceptance claim; actual Apple-Silicon
-lifecycle remains later agentless rehearsal. #46 stays OPEN under M9.
+M-4 DOCX completeness is explicitly PR-3; recovery beyond the completed M-5
+slice, M-9 and remaining #46 items stay open. No Target-Mac/#36 acceptance
+claim; actual Apple-Silicon lifecycle remains later agentless rehearsal.
+#46 stays OPEN under M9.
 See `docs/ISSUE_46_PR2_VALIDATION.md` for architecture, limits and verification.
 PR #108 independent acceptance correction separates terminal content/output
 failures from seven operational codes (including timeout/memory refusal).
@@ -90,10 +106,10 @@ Alembic single head `b88a2c4d6e10`; **242 focused regressions passed in 68.99s**
 Final acceptance and delivery evidence is recorded in
 `docs/ISSUE_46_PR2_VALIDATION.md`; historical pre-merge results remain identified.
 No migration, dependency or `uv.lock` change.
-Remaining #46 work includes M-4/PR-3, general M-5, M-9 and the other
-unresolved hardening items; these remain deferred/open. No real Apple-Silicon
-execution or #36 Target-Mac acceptance has occurred. This docs-only status
-correction starts no next implementation slice and does not change or advance
+Remaining #46 work includes recovery beyond the completed M-5 slice, M-9
+and the other unresolved hardening items; these remain deferred/open. No real
+Apple-Silicon execution or #36 Target-Mac acceptance has occurred. This docs-only
+status correction starts no next implementation slice and does not change or advance
 #35/#36/#50. Do not close #46.
 
 **Issue #46 PR-1 (bounded ingestion intake) — independently ACCEPTED and
