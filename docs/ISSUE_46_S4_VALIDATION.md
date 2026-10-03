@@ -2,7 +2,10 @@
 
 Implementation proposed for independent acceptance. Refs #46, existing M9
 milestone 10. #46 is not complete; #46/#35/#36/#45/#50 remain OPEN. D-104 records
-the architecture.
+the architecture. PR #119 head `95b39467f16235129b06135634ea119d59dea362`
+is **acceptance-REJECTED**. The correction amends the existing
+`fix/46-s4-storage-db-recovery` branch and PR only; new exact-head re-acceptance
+is pending. No merge or issue closure is authorized.
 
 ## Starting state and S3 post-merge evidence
 
@@ -36,6 +39,93 @@ main's source (`git stash` of `backend/src`):
 
 All data synthetic (`fixtures/synthetic_cvs`); no real CVs, paths or operator data.
 
+## Acceptance blocker: rejected-head partial-stage reproduction
+
+Before modifying production source, added
+`test_partial_stage_source_unlink_failure_cleans_new_trash[document/photo]`
+on exact rejected HEAD `95b39467f16235129b06135634ea119d59dea362`.
+Production diff was empty. Each case saved a real synthetic owned object through
+its namespace, allowed the real `os.link` to succeed, then injected failure only
+when `os.unlink` received the original path. Before raising, the injection
+asserted one trash object and `os.path.samefile(original, trash)`. The exception
+was the injected source-unlink failure, and identical original bytes survived.
+The final assertion failed because the untracked trash hardlink also survived.
+
+```bash
+cd backend
+uv run pytest -q tests/test_s4_storage_authority.py -k partial_stage_source_unlink_failure
+```
+
+Captured failing assertion/output (synthetic temporary paths omitted):
+
+```text
+> assert leftovers == [], "source remains present but an unwanted trash hardlink remains"
+E AssertionError: source remains present but an unwanted trash hardlink remains
+E assert [PosixPath('<synthetic .trash path>')] == []
+FAILED ...::test_partial_stage_source_unlink_failure_cleans_new_trash[document]
+FAILED ...::test_partial_stage_source_unlink_failure_cleans_new_trash[photo]
+2 failed, 28 deselected in 1.51s
+```
+
+## Partial-stage correction and new regressions
+
+`storage/staging.py::stage_file` now returns `None` before trash creation for an
+absent source. Link failure preserves the original and propagates; a missing
+trash parent while the source exists is structural, not an absent-object result.
+After a successful link, any source-unlink failure triggers removal of that
+specific new link before the original failure propagates. The sequence is
+reversible same-filesystem hardlink/unlink, **not an atomic rename**. Successful
+staging still reads no CV bytes and uses constant memory. Restore remains
+no-overwrite; no new journal or ledger design.
+
+If partial cleanup also fails, the primitive raises `StorageStagingError` with
+fixed message `Storage staging cleanup unresolved`, suppresses raw exception
+chaining, and emits only
+`component=storage_staging code=STORAGE_STAGE_CLEANUP_UNRESOLVED unresolved_count=1`.
+The original stays present; the unresolved trash hardlink remains detectable for
+later orphan reconciliation. This is an explicit unresolved failure, never a
+claim of successful staging or clean rollback.
+
+Eleven added cases in `backend/tests/test_s4_storage_authority.py`:
+
+- `test_partial_stage_source_unlink_failure_cleans_new_trash` (document/photo):
+  real hardlink, source unlink fails, exact original bytes remain, trash empty.
+- `test_partial_stage_cleanup_failure_is_closed_and_observable` (document/photo):
+  both unlinks fail, original and trash remain the same inode with identical bytes;
+  fixed error/log, no raw path/key/tenant/content/exception payload in emitted logs
+  or formatted traceback, no logging exception/stack payload.
+- `test_partial_stage_absent_source_and_link_failure_do_not_mutate_original`
+  (document/photo × absent/link/trash-parent): absent returns `None`; link errors
+  propagate without source mutation or a new trash object.
+- `test_partial_stage_cascade_later_source_unlink_failure_restores_earlier_assets`:
+  three historical documents, first source already staged, second real trash link
+  succeeds then source unlink fails; candidate and every exact document row remain,
+  all original bytes are restored/preserved, trash empty. Byte-buffering is vetoed
+  during staging/restore.
+
+First correction verification: full S4 suite **39 passed in 10.28s**.
+
+Focused compatibility verification on the same corrected production/tests:
+
+```bash
+cd backend
+uv run pytest -q tests/test_s4_storage_authority.py tests/test_candidate_documents.py tests/test_candidate_photo_service.py tests/test_candidate_photo_worker.py tests/test_candidate_photo_noninterference.py tests/test_demo_seed.py tests/test_demo_user_ownership.py tests/test_upload_body_limit.py tests/test_folder_indexer.py tests/test_folder_indexer_cli.py tests/test_folder_scanner_bounds.py tests/test_folder_reconciliation.py tests/test_folder_reconciliation_cli.py tests/test_folder_ingestion_compensation.py tests/test_logging_privacy.py tests/test_logging_privacy_runtime.py tests/test_audit_privacy_guard.py tests/test_ops_diagnostic_privacy.py tests/test_no_exfiltration.py tests/test_ops_no_exfiltration.py tests/test_http_response_policy.py
+```
+
+```text
+........................................................................ [ 21%]
+........................................................................ [ 42%]
+........................................................................ [ 63%]
+........................................................................ [ 84%]
+...................................................                      [100%]
+339 passed in 225.52s (0:03:45)
+```
+
+This includes the full S4 storage authority suite (ambiguous commit, restore
+collision, historical originals, mixed photos/originals, reset-demo and tenant
+isolation), candidate deletion/photo recovery, direct upload, folder ingestion/
+reconciliation, and S2 privacy/no-exfiltration. DB suites ran sequentially.
+
 ## Architecture (see D-104)
 
 Per-session ledger + SAVEPOINT-scoped persist + DB-arbitrated settle for created
@@ -66,15 +156,21 @@ retention sweeper yet; tenant DB cascade is reachable only through `reset_demo`)
 
 No durable journal (no migration). A process kill (power loss, SIGKILL) between a
 filesystem mutation and its compensation can leave: an unreferenced original
-(killed after `save`, before commit); or an object under `.trash` (killed after
+(killed after `save`, before commit); a duplicate hardlink under `.trash` and the
+original name (killed between link creation and source unlink); or an object
+under `.trash` (killed after completed
 `stage_delete`, before purge/restore), where the DB either kept the rows (object
 absent at its key but intact in `.trash`) or deleted them (orphan in `.trash`).
 Bytes are never destroyed irrecoverably before the DB outcome is durable. Repair
 is the later #46 orphan/retention reconciliation (DB-vs-storage sweep that
 purges or restores `.trash`). A crash mid `reset_demo` of an already committed
 tenant delete has no rows left to enumerate; same owner.
+Separately, explicitly reported staging-cleanup, compensation or post-commit purge
+failures can leave observable residuals for that same future reconciliation. The
+handled partial-mutation gap at the rejected head was not a hard-crash window;
+it is corrected as described above when cleanup succeeds.
 
-## Regressions
+## Original S4 regressions (rejected-head history)
 
 `backend/tests/test_s4_storage_authority.py` (28 tests): creation / canonical /
 audit failure (1, 2); commit failure for parsed and terminal parse-failure
@@ -95,12 +191,53 @@ not fail the operation; `reset_demo` stage/restore/purge. Existing photo-recover
 tests now inject faults at `stage_delete`; `reset_demo` callers in demo tests pass
 the stores.
 
-## Gates
+## Original S4 gates (rejected-head history)
 
 `uv run ruff check .` clean; `uv run mypy src` clean (232 files); full
 `uv run pytest -q`: **3706 passed**; `uv run alembic heads`: `b88a2c4d6e10` (unchanged);
 `git diff --check` clean; `scripts/scan-tracked-tree.sh` clean. No migration,
 dependency or lockfile change. Exact-head CI is recorded in the PR.
+
+Rejected-head CI run [37126184791](https://github.com/a-r3/meyar/actions/runs/37126184791):
+attempt 1 failed the existing S3
+`test_real_rest_candidate_search_evaluation_and_204_are_private` because scoring
+returned 404 instead of 200; attempt 2 succeeded at the **same exact SHA**.
+Both attempts are live-verified. The cause remains unexplained; attempt 2 does
+not erase attempt 1 or confer acceptance on the rejected implementation.
+The correction requires full local gates and a fresh exact-head CI run. A failed
+fresh run must be investigated before re-acceptance, never proactively rerun for green.
+
+## Correction local gates and delivery boundary
+
+Final production/tests were unchanged between focused and full gates. Normal full
+suite ran sequentially after the focused suite, with no exclusions or diagnostic
+environment override:
+
+```text
+$ uv run ruff check .
+All checks passed!
+$ uv run mypy src
+Success: no issues found in 232 source files
+$ uv run pytest -q
+3717 passed in 638.19s (0:10:38)
+$ uv run alembic heads
+b88a2c4d6e10 (head)
+```
+
+`git diff --check` and `scripts/scan-tracked-tree.sh` are clean; the scan includes
+the intentionally staged correction before commit. No migration, dependency or
+lockfile change. The existing `.aws` entry was not inspected, staged or modified.
+No folder concurrency, readiness, retention, schema drift, #45/#35/#36/#50 or
+Target-Mac work was started. PR #119 remains the only delivery PR and is associated
+with existing M9 milestone 10. #46/#35/#36/#45/#50 remain OPEN; nothing is merged.
+The new exact head, fresh CI run ID and first-attempt outcome are recorded in
+PR #119's delivery report, avoiding a self-referential source commit.
+
+## HUMAN ACTION REQUIRED
+
+Independently re-accept the NEW exact PR #119 head after its fresh CI is verified.
+Do not merge, enable auto-merge, close #46 or begin a later slice. Reply `S4 PASS`
+or provide corrections. Green local gates and CI are not independent acceptance.
 
 Fixture note: tests that inserted arbitrary non-generated `storage_key` values
 (`test/<hex>`, used with candidate delete) now use the real `<tenant>/<hex>` shape,

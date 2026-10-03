@@ -1,12 +1,15 @@
 """Reversible, constant-memory delete for local storage namespaces (issue #46 S4).
 
-A staged delete moves an object into an opaque trash path on the same
-filesystem (an atomic rename — no bytes are read into memory). It is then
-either purged (the database deletion became durable) or restored to its exact
-original key (the database deletion did not). Restore never overwrites: an
-existing different object at the original key fails closed.
+A staged delete uses a reversible same-filesystem hardlink/unlink sequence
+into an opaque trash path; no bytes are read into memory. If source unlink
+fails, the partial trash link is removed before the failure propagates. Failed
+partial cleanup raises a closed staging error and leaves observable trash for
+later reconciliation. A completed stage is either purged (the database deletion
+became durable) or restored to its exact original key (the deletion did not).
+Restore never overwrites: a different object at the original key fails closed.
 """
 
+import logging
 import os
 import uuid
 from dataclasses import dataclass
@@ -14,6 +17,14 @@ from pathlib import Path
 
 TRASH_DIR = ".trash"
 _CHUNK = 1024 * 1024
+logger = logging.getLogger(__name__)
+
+
+class StorageStagingError(OSError):
+    """Partial staging cleanup failed; unresolved trash requires reconciliation."""
+
+    def __init__(self) -> None:
+        super().__init__("Storage staging cleanup unresolved")
 
 
 class StorageRestoreConflictError(OSError):
@@ -33,6 +44,8 @@ class StagedObject:
 def stage_file(root: Path, path: Path, *, namespace: str, tenant_id: uuid.UUID,
                storage_key: str) -> StagedObject | None:
     """Move an existing object to trash. None means it was already absent."""
+    if not path.exists():
+        return None
     trash_ref = f"{TRASH_DIR}/{tenant_id.hex}/{uuid.uuid4().hex}"
     trash_path = root / trash_ref
     trash_path.parent.mkdir(parents=True, exist_ok=True)
@@ -41,8 +54,21 @@ def stage_file(root: Path, path: Path, *, namespace: str, tenant_id: uuid.UUID,
         # collision on the random trash name can never replace a staged object.
         os.link(path, trash_path)
     except FileNotFoundError:
+        if path.exists():
+            raise  # missing trash parent is a structural failure, not absent source
         return None
-    os.unlink(path)
+    try:
+        os.unlink(path)
+    except BaseException:
+        try:
+            os.unlink(trash_path)
+        except BaseException:
+            logger.error(
+                "component=storage_staging code=STORAGE_STAGE_CLEANUP_UNRESOLVED "
+                "unresolved_count=1"
+            )
+            raise StorageStagingError() from None
+        raise
     return StagedObject(namespace, tenant_id, storage_key, trash_ref)
 
 

@@ -24,10 +24,18 @@ tree `9970ce5ad3b2835335df1d2ef1fd205869445945` (D-103).
 Only S4 original-CV storage <-> PostgreSQL recovery is now proposed under D-104 /
 `docs/ISSUE_46_S4_VALIDATION.md`: bounded compensation for handled failures of
 original-document save/create and candidate/tenant deletion, with staged
-(reversible) deletes. Independent acceptance is pending. A hard process kill
-between a filesystem mutation and its compensation is a documented residual
-window owned by the later #46 orphan-reconciliation work. #46/#35/#36/#45/#50
-remain OPEN. No folder-concurrency, readiness, retention, schema-drift or
+(reversible) deletes. PR #119 head `95b39467f16235129b06135634ea119d59dea362`
+is acceptance-REJECTED: successful trash link plus failed source unlink left an
+untracked duplicate before ledger tracking. The same-PR correction cleans that
+partial link before propagating; failed cleanup raises a closed staging error and
+logs only a structural unresolved code. New exact-head re-acceptance is pending.
+Rejected-head CI run `37126184791` failed its S3 scoring assertion on attempt 1
+(404 vs 200), then passed at the identical SHA on attempt 2; cause unexplained.
+A hard process kill between a filesystem mutation and its compensation is a
+documented residual window owned by the later #46 orphan-reconciliation work.
+Explicitly reported cleanup/compensation/purge failures can also leave
+observable residuals; ordinary source-unlink failure with successful cleanup cannot.
+#46/#35/#36/#45/#50 remain OPEN. No folder-concurrency, readiness, retention, schema-drift or
 Target-Mac work.
 The accepted/merged M-9 and M-5 records below remain valid.
 

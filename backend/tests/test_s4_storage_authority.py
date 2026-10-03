@@ -5,6 +5,8 @@ run against the unfixed tree; S4-only APIs are imported inside the tests.
 """
 
 import logging
+import os
+import traceback
 import uuid
 from pathlib import Path
 
@@ -94,6 +96,160 @@ async def delete_now(db, storage, photos, tenant_id, candidate_id):
         db, storage, tenant_id=tenant_id, candidate_id=candidate_id,
         photo_storage=photos, actor_id=uuid.uuid4(),
     )
+
+
+@pytest.mark.parametrize("namespace", ["document", "photo"])
+async def test_partial_stage_source_unlink_failure_cleans_new_trash(
+    tmp_path, monkeypatch, namespace
+):
+    """Use the real owned object and real hardlink, then fail only source unlink."""
+    root = tmp_path / "storage"
+    store = (LocalFilesystemStorage if namespace == "document" else LocalPhotoStorage)(str(root))
+    tenant_id = uuid.uuid4()
+    content = b"synthetic partial-stage original"
+    key = await store.save(tenant_id=tenant_id, content=content)
+    source = root / key
+    real_unlink = os.unlink
+    linked_trash = []
+    failure = OSError("synthetic source unlink failure")
+
+    def fail_source_unlink(path, *args, **kwargs):
+        if Path(path) == source:
+            trash = files_under(root / ".trash")
+            assert len(trash) == 1
+            assert os.path.samefile(source, trash[0])  # real os.link already succeeded
+            linked_trash.extend(trash)
+            raise failure
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", fail_source_unlink)
+    with pytest.raises(OSError) as info:
+        await store.stage_delete(tenant_id=tenant_id, storage_key=key)
+    assert info.value is failure
+    assert len(linked_trash) == 1
+    assert source.read_bytes() == content
+    leftovers = files_under(root / ".trash")
+    assert leftovers == [], "source remains present but an unwanted trash hardlink remains"
+
+
+@pytest.mark.parametrize("namespace", ["document", "photo"])
+async def test_partial_stage_cleanup_failure_is_closed_and_observable(
+    tmp_path, monkeypatch, caplog, namespace
+):
+    from meyar.storage.staging import StorageStagingError
+
+    root = tmp_path / "storage"
+    store = (LocalFilesystemStorage if namespace == "document" else LocalPhotoStorage)(str(root))
+    tenant_id = uuid.uuid4()
+    content = b"SYNTHETIC_PRIVATE_STAGE_CONTENT"
+    key = await store.save(tenant_id=tenant_id, content=content)
+    source = root / key
+    payload = f"SYNTHETIC_PRIVATE_UNLINK {source} {key} {content.decode()}"
+    attempted = []
+
+    def fail_both_unlinks(path, *args, **kwargs):
+        attempted.append(Path(path))
+        trash = files_under(root / ".trash")
+        assert len(trash) == 1 and os.path.samefile(source, trash[0])
+        raise OSError(payload)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "unlink", fail_both_unlinks)
+        with caplog.at_level(logging.ERROR):
+            with pytest.raises(StorageStagingError) as info:
+                await store.stage_delete(tenant_id=tenant_id, storage_key=key)
+    trash = files_under(root / ".trash")
+    assert attempted == [source, trash[0]]
+    assert source.read_bytes() == content and trash[0].read_bytes() == content
+    assert os.path.samefile(source, trash[0])
+    assert str(info.value) == "Storage staging cleanup unresolved"
+    assert info.value.__cause__ is None and info.value.__suppress_context__
+    emitted = caplog.text + "".join(traceback.format_exception(info.value))
+    for private in (str(root), key, content.decode(), payload, str(trash[0]), tenant_id.hex):
+        assert private not in emitted
+    records = [r for r in caplog.records if r.name == "meyar.storage.staging"]
+    assert len(records) == 1
+    assert records[0].getMessage() == (
+        "component=storage_staging code=STORAGE_STAGE_CLEANUP_UNRESOLVED unresolved_count=1"
+    )
+    assert records[0].exc_info is None and records[0].stack_info is None
+
+
+@pytest.mark.parametrize("namespace", ["document", "photo"])
+@pytest.mark.parametrize("fault", ["absent", "link", "trash_parent"])
+async def test_partial_stage_absent_source_and_link_failure_do_not_mutate_original(
+    tmp_path, monkeypatch, namespace, fault
+):
+    root = tmp_path / "storage"
+    store = (LocalFilesystemStorage if namespace == "document" else LocalPhotoStorage)(str(root))
+    tenant_id = uuid.uuid4()
+    content = b"synthetic link failure original"
+    key = await store.save(tenant_id=tenant_id, content=content)
+    source = root / key
+    if fault == "absent":
+        source.unlink()
+
+    failure = (FileNotFoundError if fault == "trash_parent" else PermissionError)(
+        "synthetic link creation failure"
+    )
+
+    def fail_link(*args, **kwargs):
+        if fault == "absent":
+            raise AssertionError("an absent source must not attempt staging")
+        raise failure
+
+    monkeypatch.setattr(os, "link", fail_link)
+    if fault == "absent":
+        assert await store.stage_delete(tenant_id=tenant_id, storage_key=key) is None
+        assert not source.exists()
+    else:
+        with pytest.raises(type(failure)) as info:
+            await store.stage_delete(tenant_id=tenant_id, storage_key=key)
+        assert info.value is failure
+        assert source.read_bytes() == content
+    assert files_under(root / ".trash") == []
+
+
+async def test_partial_stage_cascade_later_source_unlink_failure_restores_earlier_assets(
+    db_session, tenant_and_key, storage, photos, tmp_path, monkeypatch
+):
+    tenant, _, _ = tenant_and_key
+    tenant_id = tenant.id
+    candidate_id, docs = await candidate_with_documents(db_session, storage, tenant_id, n=3)
+    before = {key: await storage.read(storage_key=key) for _, key in docs}
+    root = tmp_path / "storage"
+    sources = {root / key for key in before}
+    real_unlink = os.unlink
+    staged_sources = []
+    failure = OSError("synthetic later source unlink failure")
+
+    def fail_second_source(path, *args, **kwargs):
+        path = Path(path)
+        if path in sources:
+            staged_sources.append(path)
+            if len(staged_sources) == 2:
+                assert not staged_sources[0].exists()  # earlier stage completed
+                trash = files_under(root / ".trash")
+                assert len(trash) == 2
+                assert any(os.path.samefile(path, p) for p in trash)
+                raise failure
+        return real_unlink(path, *args, **kwargs)
+
+    def no_buffering(self):
+        raise AssertionError("staging and restore must not buffer CV bytes")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "unlink", fail_second_source)
+        patch.setattr(Path, "read_bytes", no_buffering)
+        with pytest.raises(OSError) as info:
+            await delete_now(db_session, storage, photos, tenant_id, candidate_id)
+    assert info.value is failure and len(staged_sources) == 2
+    assert await db_session.get(Candidate, candidate_id) is not None
+    for document_id, key in docs:
+        row = await db_session.get(CandidateDocument, document_id)
+        assert row is not None and row.candidate_id == candidate_id and row.storage_key == key
+        assert await storage.read(storage_key=key) == before[key]
+    assert files_under(root / ".trash") == []
 
 
 # ---------------------------------------------------------------- create / save

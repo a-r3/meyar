@@ -8972,6 +8972,10 @@ other-issue or Target-Mac work. Evidence: docs/ISSUE_46_S3_VALIDATION.md.
 
 Status: implementation proposed for independent acceptance, Refs #46 under
 existing M9 milestone 10. Starting main `df5264d869ba3810b857b77b7d9491b77b6f39c1`.
+PR #119 head `95b39467f16235129b06135634ea119d59dea362` is acceptance-REJECTED:
+source unlink failure after successful trash hardlink creation escaped before
+ledger tracking, leaving an untracked duplicate during a handled failure.
+The correction stays on the same branch/PR; new exact-head re-acceptance is pending.
 S1-S3 are accepted/merged; #46/#35/#36/#45/#50 remain OPEN. No migration,
 dependency or lockfile change.
 
@@ -9004,14 +9008,21 @@ Design (explicit, bounded compensation; no new durable journal).
 3. Deletes are staged, not performed. `DocumentStorage` gains tenant-validated
    `delete_owned`, `stage_delete`, `purge_staged`, `restore_staged`
    (`LocalPhotoStorage` gains the staging trio and loses the in-memory
-   `restore_exact`). Staging is an atomic same-filesystem link+unlink into
-   `.trash/<tenant>/<random>`: constant memory, no CV bytes read, no unbounded
-   snapshots for candidates with many historical documents. Purge happens only
+   `restore_exact`). Staging is a reversible same-filesystem hardlink/unlink
+   sequence into `.trash/<tenant>/<random>`: constant memory, no CV bytes read,
+   no unbounded snapshots for candidates with many historical documents. Purge happens only
    after the DB deletion is durable; restore returns the object to its exact key
    using a no-overwrite link; an occupied key with identical bytes is idempotent,
    with different bytes fails closed (`StorageRestoreConflictError`) and the staged
    object is kept. Already-absent objects stage to `None` and are never fabricated.
    Existing hash/absent-photo semantics are unchanged (staging never reads photos).
+   If the trash link succeeds but source unlink fails, staging removes that new
+   link before re-raising the original failure, leaving the original authoritative.
+   If partial-link cleanup also fails, `StorageStagingError` has a fixed closed
+   message and suppresses raw exception chaining; the log contains only
+   `component=storage_staging code=STORAGE_STAGE_CLEANUP_UNRESOLVED unresolved_count=1`.
+   The unresolved duplicate remains detectable under `.trash` for later reconciliation;
+   clean rollback is never claimed. No ledger handle was returned for this partial stage.
 4. `LocalFilesystemStorage.save` now removes its temporary file in `finally`
    (parity with `LocalPhotoStorage`); `os.replace` atomicity is unchanged. Keys
    remain opaque UUID keys; no filename becomes a path; new primitives validate the
@@ -9034,7 +9045,8 @@ primitive) instead of `delete`; their assertions are unchanged.
 
 Residual hard-crash window (not closed here, by design). A process kill (power
 loss, SIGKILL) after `storage.save` but before commit leaves an unreferenced
-original; a kill after `stage_delete` leaves the object under `.trash` while the
+original; a kill between trash link creation and source unlink can leave both
+names present. A kill after completed `stage_delete` leaves the object under `.trash` while the
 DB either kept (object missing at its key but recoverable from `.trash`) or deleted
 (orphan in `.trash`) the rows. Nothing is lost irrecoverably, but no automatic
 repair exists. A durable journal/migration was judged unjustified for S4; the
@@ -9042,6 +9054,16 @@ later #46 orphan/retention reconciliation owns a DB-vs-storage sweep (including
 purging/restoring `.trash`). Demo `reset_demo` of an already-deleted tenant has no
 rows to enumerate, so a crash mid-reset can strand originals under that tenant's
 directory until that sweep.
+This crash-only window is separate from explicitly reported cleanup/compensation/
+purge failures, which can also leave observable residuals. Ordinary source-unlink
+failure with successful partial-link cleanup no longer leaves untracked trash.
+
+Rejected-head CI history is unchanged: run `37126184791`, attempt 1 failed
+`test_real_rest_candidate_search_evaluation_and_204_are_private` (score returned
+404 instead of 200); attempt 2 succeeded at the identical rejected SHA. The cause
+remains unexplained. The correction requires a fresh exact-head CI run; a failing
+fresh run must be investigated, not proactively rerun to obtain green. Synthetic
+pre-fix proof and correction gates are recorded in `docs/ISSUE_46_S4_VALIDATION.md`.
 
 Out of scope and not started: folder reconciliation overlap/leases, readiness,
 retention sweepers, schema drift, #45/#35/#36/#50, Target-Mac. Evidence:
