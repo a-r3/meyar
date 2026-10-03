@@ -1,5 +1,22 @@
 # MEYAR — Status
 
+**Issue #46 M-9 — implementation proposal; independent acceptance pending.**
+Base/main verified live at `22cf6a5b0b46bc61841cae2d3a646a353b9889a9`.
+Newest extraction attempt remains immutable operational history; professional
+facts now select newest COMPLETED and pass unchanged current evidence authority.
+FAILED/manual-review refreshes preserve an evidence-valid earlier profile;
+unsupported newest COMPLETED fails closed. Search/scoring/embedding/agent/HR
+facts share this rule; per-document readiness/retry remains attempt-based.
+HR discloses preserved facts and contacts while showing latest processing status.
+ResultSet v1 snapshots survive failed attempts, become stale on a completed switch,
+and retain immutable exact provenance. No migration/dependency/scoring-policy
+change. D-100 and `docs/ISSUE_46_M9_VALIDATION.md` record scope and validation.
+#46 remains OPEN under M9; #35/#36/#50 remain OPEN and unchanged. M-5 stays
+accepted/merged. Local gate: 355 focused passed in 51.58s; 3492 full passed in
+503.92s; Ruff/mypy(src) clean (226 source files); unchanged single Alembic head
+`b88a2c4d6e10`; tracked-tree scan clean. No merge, Target-Mac execution or
+acceptance is claimed.
+
 **Issue #46 M-5 — independently ACCEPTED and MERGED through PR #112;
 M-5 slice COMPLETE, but #46 remains OPEN.** Owner-confirmed independent
 acceptance at exact head `869415b7a08dba18e4c732b6c4f9d74baa1347cd`;
@@ -27,7 +44,8 @@ concurrent reconciliation/dedup, folder transaction lifetime, generic retention/
 orphan cleanup, M-9 and other unresolved #46 work remain pending.
 No migration/dependency/lockfile/parser behavior change in this docs-only
 follow-up. #46 remains OPEN under **M9**; #35/#36/#50 remain OPEN and unchanged.
-M-9 has NOT started; this follow-up starts no next implementation slice.
+At that M-5 docs-only follow-up M-9 had not started; the current M-9
+implementation proposal is recorded above.
 Historical local gate: 185 focused passed in 57.69s; 3475 full pytest passed in
 499.99s; Ruff/mypy(src) clean; unchanged single Alembic head `b88a2c4d6e10`.
 Accepted exact-head CI is the published delivery authority. No Target-Mac

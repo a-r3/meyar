@@ -44,6 +44,21 @@
   rest of the API — there is no anonymous or public read path anywhere in
   MEYAR (it is internal HR tooling, not a public product).
 
+## Attempt versus effective fact authority (D-100, M-9 proposal)
+
+Professional authority selects the newest tenant/candidate COMPLETED profile,
+then applies the unchanged current canonical evidence validator. FAILED and
+MANUAL_REVIEW_REQUIRED remain immutable visible attempts and cannot replace a
+supported older profile. Unsupported newest COMPLETED fails closed; older completed
+history is not scanned for fallback. Exact embedding/source/config compatibility,
+evaluation profile references and ResultSet snapshot provenance remain mandatory.
+Document readiness still requires the exact document's successful latest attempt;
+an older searchable profile cannot make a failed new document READY. Identity
+uses an independent evidence-gated HR-only selector and never enters suitability.
+HR discloses both preserved facts/contacts and latest processing state. No external
+candidate AI, historical mutation, mutable authority marker or new auth/CSRF bypass.
+Contract, performance and limitations: `docs/ISSUE_46_M9_VALIDATION.md`.
+
 ## AI extraction (Slice 4)
 
 - `OllamaLLMProvider` refuses to construct against a non-loopback

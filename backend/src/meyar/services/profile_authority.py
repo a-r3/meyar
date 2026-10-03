@@ -14,7 +14,7 @@ from meyar.models.candidate_profile_version import (
 from meyar.models.canonical_document import CanonicalDocument
 from meyar.schemas.candidate_profile import CandidateProfileExtraction
 from meyar.services.candidate_profile_repo import (
-    get_current_profile_version,
+    get_effective_profile_version,
     get_profile_version_by_id,
 )
 
@@ -132,7 +132,10 @@ async def authorize_profile_versions(
 async def get_current_authorized_profile(
     db: AsyncSession, *, tenant_id: uuid.UUID, candidate_id: uuid.UUID
 ) -> tuple[CandidateProfileVersion, CandidateProfileExtraction] | None:
-    version = await get_current_profile_version(db, tenant_id=tenant_id, candidate_id=candidate_id)
+    """Effective facts: newest COMPLETED, current evidence, fail closed (D-100)."""
+    version = await get_effective_profile_version(
+        db, tenant_id=tenant_id, candidate_id=candidate_id
+    )
     if version is None:
         return None
     try:

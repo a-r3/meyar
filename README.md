@@ -76,6 +76,12 @@ be described here as implemented.
   not just schema-shaped output. Facts a source document doesn't literally
   support fail closed to `FAILED`/unavailable rather than becoming
   positive evidence.
+- Failed or attention-required re-extraction preserves the newest completed
+  professional profile only while its own evidence still validates. Latest
+  processing status remains visible and the changed document remains retryable.
+  A newer completed profile is selected and must pass current evidence checks;
+  if those checks fail, professional facts are unavailable. HR name/contact
+  values use an independent equivalent rule. See the [M-9 proposal and validation](docs/ISSUE_46_M9_VALIDATION.md).
 - Local embeddings (pgvector-backed) are generated from professional
   content only, with version/provenance tracking so a superseded profile's
   embedding is correctly excluded.

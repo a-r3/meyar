@@ -109,6 +109,21 @@ tenant_id at the data-access layer (repository functions take tenant_id as a
 mandatory first argument) — never left to route-level filtering alone. See
 SECURITY_PRIVACY.md for isolation enforcement and tests.
 
+### Extraction attempts and effective facts (D-100, M-9 proposal)
+
+Latest attempt means the newest immutable version regardless of extraction
+status, and governs operational status/per-document readiness/retry. Current
+professional facts instead use newest COMPLETED plus current canonical evidence
+authorization. Failed/manual-review attempts preserve a supported earlier profile;
+no COMPLETED or evidence-invalid newest COMPLETED means no professional authority.
+No historical scan or rewrite. The same rule applies independently to HR identity
+fields, never to suitability inputs. Search/ranking/evaluation/embeddings and agent
+facts use the effective profile's exact provenance. A new COMPLETED switch requires
+its own compatible embedding; old ResultSets become stale on that switch, while
+failed attempts preserve their exact accepted snapshot. Library status filters and
+badges mean latest processing attempt, with separately disclosed preserved facts.
+See `docs/ISSUE_46_M9_VALIDATION.md` for the proposal and deferrals.
+
 ## 7. Internal API surface (`/api/v1`)
 
 Implemented:
@@ -262,7 +277,7 @@ the database. Slice 11 delegates to this accepted service unchanged.
 ## 16. Batch ranking (implemented, Slice 10)
 
 One `JobCriteriaVersion` → the tenant's active candidate library → exactly one
-current completed profile per candidate → score each (fit band + 0–100 score)
+effective evidence-authorized completed profile per candidate → score each (fit band + 0–100 score)
 → explicit fit-tier/score/UUID order with safe reasons/evidence references.
 It reuses the same evaluation/scoring path per candidate and has no semantic
 search, embedding, LLM, or CandidateIdentity dependency (D-017).

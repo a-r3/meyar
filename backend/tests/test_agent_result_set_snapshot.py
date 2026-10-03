@@ -6,7 +6,7 @@ A unrelated new candidate ingested            -> member still resolves
 B unrelated candidate new COMPLETED profile   -> member still resolves
 C unrelated candidate FAILED re-extraction    -> member still resolves
 D member new COMPLETED profile                -> STALE
-E member newer FAILED / manual-review profile -> STALE
+E member newer FAILED / manual-review profile -> preserved (D-100)
 F member candidate hard-deleted               -> STALE (delete not blocked)
 G member loses canonical evidence authority   -> STALE
 H semantic member embedding deleted/incompatible -> STALE
@@ -225,7 +225,7 @@ async def test_d_member_new_completed_profile_is_stale_and_never_served(
 
 
 @pytest.mark.parametrize("status", ["FAILED", "MANUAL_REVIEW_REQUIRED"])
-async def test_e_member_newer_failed_or_review_profile_is_stale(
+async def test_e_member_newer_failed_or_review_profile_preserves_snapshot(
     db_session: AsyncSession, tenant_and_user, status: str
 ) -> None:
     tenant, session, context, _rs, members = await _structured_snapshot(
@@ -233,9 +233,9 @@ async def test_e_member_newer_failed_or_review_profile_is_stale(
     )
     candidate, v1 = members[0]
     await _newer_version(db_session, tenant, candidate, v1, status=status)
-    assert await _resolve(db_session, tenant, session, context) == (
-        ResultSetResolutionFailure.STALE
-    )
+    resolved = await _resolve(db_session, tenant, session, context)
+    assert not isinstance(resolved, ResultSetResolutionFailure)
+    assert resolved.candidate_id == candidate.id
 
 
 async def test_f_member_hard_delete_is_not_blocked_and_fails_closed(

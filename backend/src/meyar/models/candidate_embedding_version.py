@@ -18,7 +18,7 @@ class CandidateEmbeddingVersion(Base):
     attempt is never persisted (see meyar.services.candidate_embedding_service).
     "Current" is NOT simply the newest row: it is the row whose
     candidate_profile_version_id equals the candidate's current
-    CandidateProfileVersion (get_current_profile_version) AND whose
+    CandidateProfileVersion (get_effective_profile_version) AND whose
     provider/model_name/model_revision/serializer_version/source_sha256
     exactly match the requested embedding configuration — an older
     embedding for a superseded profile version, OR for a superseded

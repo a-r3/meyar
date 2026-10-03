@@ -38,7 +38,7 @@ from meyar.search.structured import evaluate_required_filters
 from meyar.services.audit_repo import record_event, record_events
 from meyar.services.browser_session_repo import get_browser_session_by_id
 from meyar.services.candidate_embedding_repo import get_embedding_versions_by_ids
-from meyar.services.candidate_profile_repo import get_current_profile_versions_for_candidates
+from meyar.services.candidate_profile_repo import get_effective_profile_versions_for_candidates
 from meyar.services.profile_authority import ProfileAuthorityError, authorize_profile_versions
 
 # issue #49 PR49-2 — the deterministic policy REFINE_CANDIDATE_RESULTS
@@ -94,9 +94,9 @@ async def validate_member_snapshots(
 
     A member is valid only while ALL hold:
     - the candidate still exists in this tenant;
-    - its CURRENT profile version is still exactly the recorded
-      ``candidate_profile_version_id`` (a newer COMPLETED, FAILED or
-      manual-review version makes it stale — never silently served);
+    - its effective professional profile version is still exactly the recorded
+      ``candidate_profile_version_id`` (a newer COMPLETED version makes it stale;
+      failed/manual-review attempts preserve that snapshot, never rewrite it);
     - that profile still passes the SAME professional evidence authority
       as ``authorize_profile_version`` (shared implementation);
     - SEMANTIC_ONLY/HYBRID only: the exact recorded embedding row still
@@ -107,7 +107,7 @@ async def validate_member_snapshots(
       embeddings. CandidateIdentity is never read."""
     if not members:
         return []
-    current = await get_current_profile_versions_for_candidates(
+    current = await get_effective_profile_versions_for_candidates(
         db, tenant_id=tenant_id, candidate_ids={member.candidate_id for member in members}
     )
     versions = []

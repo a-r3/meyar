@@ -3,7 +3,10 @@ import uuid
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meyar.models.candidate_identity_version import CandidateIdentityVersion
+from meyar.models.candidate_identity_version import (
+    IDENTITY_STATUS_COMPLETED,
+    CandidateIdentityVersion,
+)
 
 
 async def create_identity_version(
@@ -102,3 +105,28 @@ async def get_identity_version_by_id(
         )
     )
     return result.scalar_one_or_none()
+
+
+# Operational alias; keeps per-candidate latest-attempt semantics explicit.
+get_latest_identity_attempt = get_current_identity_version
+
+
+async def get_effective_identity_version(
+    db: AsyncSession, *, tenant_id: uuid.UUID, candidate_id: uuid.UUID
+) -> CandidateIdentityVersion | None:
+    """Newest COMPLETED identity for HR; current evidence is mandatory.
+
+    Failed/manual-review rows remain attempts. Unsupported newest COMPLETED
+    fails closed in identity_authority, with no historical scan.
+    """
+    row = await db.scalars(
+        select(CandidateIdentityVersion)
+        .where(
+            CandidateIdentityVersion.tenant_id == tenant_id,
+            CandidateIdentityVersion.candidate_id == candidate_id,
+            CandidateIdentityVersion.status == IDENTITY_STATUS_COMPLETED,
+        )
+        .order_by(CandidateIdentityVersion.version_number.desc())
+        .limit(1)
+    )
+    return row.one_or_none()

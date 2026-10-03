@@ -19,7 +19,7 @@ from meyar.scoring.policy import ScoringPolicyError
 from meyar.search.schemas import CandidateSearchRequest, RequiredFilters, SearchMode
 from meyar.search.service import search_candidates
 from meyar.services.candidate_identity_repo import create_identity_version
-from meyar.services.candidate_profile_repo import list_current_profile_versions_for_tenant
+from meyar.services.candidate_profile_repo import list_effective_profile_versions_for_tenant
 from meyar.services.candidate_repo import create_candidate, list_candidates_for_tenant
 from meyar.services.job_criteria_repo import create_criteria_version
 from meyar.services.job_repo import create_job
@@ -453,12 +453,12 @@ async def test_stable_uuid_tie_is_insertion_order_and_identity_invariant(
 
     async def reversed_profiles(db, *, tenant_id):
         return list(
-            reversed(await list_current_profile_versions_for_tenant(db, tenant_id=tenant_id))
+            reversed(await list_effective_profile_versions_for_tenant(db, tenant_id=tenant_id))
         )
 
     monkeypatch.setattr(batch_module, "list_candidates_for_tenant", reversed_candidates)
     monkeypatch.setattr(
-        batch_module, "list_current_profile_versions_for_tenant", reversed_profiles
+        batch_module, "list_effective_profile_versions_for_tenant", reversed_profiles
     )
     reversed_result = await rank_candidates_for_job(
         db_session,
@@ -497,8 +497,7 @@ async def test_batch_tenant_isolation_zero_set_and_skip_counts(
     assert result.evaluated_count == 0
     assert result.skipped_count == 2
     assert result.skip_reason_counts == {
-        "CURRENT_PROFILE_NOT_COMPLETED": 1,
-        "NO_CURRENT_PROFILE": 1,
+        "NO_EFFECTIVE_PROFILE": 2,
     }
     assert result.results == []
 

@@ -8652,3 +8652,63 @@ redesign, migration, dependency, lockfile or parser-version change.
 
 Detailed contract, rollback/concurrency analysis, synthetic before-fix proof,
 verification and precise limits: `docs/ISSUE_46_M5_VALIDATION.md`.
+
+
+## D-100 — Issue #46 M-9: extraction attempts versus effective accepted facts
+
+**Date:** 2026-10-03
+**Status:** implementation proposal; independent acceptance pending. Refs #46,
+M9; #46 remains OPEN. #35/#36/#50 are unchanged. M-5 remains accepted/merged.
+
+**Decision:** latest extraction attempt = max immutable version_number regardless
+of status. Effective accepted professional authority = newest COMPLETED selected
+in tenant-scoped SQL, then unchanged current evidence authorization. Failed or
+manual-review attempts never replace accepted facts. No COMPLETED means no facts;
+unsupported newest COMPLETED fails closed without scanning older COMPLETED rows.
+A supported new COMPLETED becomes effective and requires its own exactly
+compatible embedding. History and exact evaluated/embedded profile references
+remain immutable; no migration, mutable current flag or automatic rescore.
+
+This explicitly amends chronology-only "current profile" semantics in D-014,
+D-015/D-017/D-018/D-019 and D-090. D-049/D-050's current evidence boundary stays
+mandatory and unchanged. New explicit effective repository selectors are shared
+by search, scoring, embedding, agent/member checks and HR facts. Legacy current
+repository helpers retain diagnostic latest-attempt semantics. The shared
+get_current_authorized_profile function now returns effective authorized facts.
+
+D-021's document-level readiness retains latest-attempt semantics: failed new
+source B remains retryable/not READY while candidate-level authority can retain
+source A. M-5 ingestion/path/retention behavior is unchanged. Identity receives
+the same narrow newest-COMPLETED-then-current-evidence rule solely for HR
+name/contact display, separately from every professional input. Photos retain
+their conservative exact latest-document rule.
+
+HR facts and evidence remain bound to the selected source. Detail/library disclose
+an unsuccessful update while displaying previously accepted facts; identity
+fallback is disclosed separately. The library filter is explicitly “Son emalın
+vəziyyəti” and continues filtering latest-attempt stored status, matching its
+badge; fact availability is independent and evidence-gated. No internal IDs,
+error codes or model metadata become normal HR text. REST detail inherits
+additive latest_attempt_status/preserved_profile/preserved_identity view fields;
+no existing field is removed.
+
+An existing ResultSet member recording v1 stays compatible after FAILED/manual
+v2, but becomes STALE after newer COMPLETED v3. Evidence authority and exact
+embedding compatibility remain mandatory. No historical member is rewritten;
+member-snapshot-v1 persistence/format and bounded subset refinement remain.
+
+**Why / performance:** failing closed on unsupported newest COMPLETED prevents
+silent revival of superseded facts and bounds evidence work. Set-based max or
+bounded DISTINCT ON queries select one row per candidate; no historical-content
+scan or candidate-by-candidate selector. Search (500-version chunks) and library reuse shared batch
+professional evidence verification. Ranking retains its existing exact-evaluation
+validation cost. Existing immutable rows/unique version constraints govern writes;
+no pointer races are introduced or existing concurrent extraction/reconciliation
+races claimed solved. A concurrent successful extraction affects later selections,
+never relabels an in-flight immutable evaluation or embedding.
+
+**Reversibility / limits:** query and consumer changes only. No database schema/dependency/
+lockfile/scoring policy/local-only AI/auth/CSRF change. No automatic failure repair,
+partial-fact persistence, photo fallback, historical recalculation, Target-Mac
+work or unrelated issue progression. Detailed before-fix proof, regression matrix,
+executed gates and unresolved #46 scope: `docs/ISSUE_46_M9_VALIDATION.md`.

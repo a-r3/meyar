@@ -15,7 +15,10 @@ from meyar.services.candidate_embedding_repo import (
     create_embedding_version,
     get_embedding_version_by_source,
 )
-from meyar.services.candidate_profile_repo import get_current_profile_version
+from meyar.services.candidate_profile_repo import (
+    get_effective_profile_version,
+    get_latest_profile_attempt,
+)
 from meyar.services.profile_authority import ProfileAuthorityError, authorize_profile_version
 
 
@@ -40,9 +43,9 @@ async def embed_candidate_profile(
     """Embeds the candidate's CURRENT CandidateProfileVersion's
     professional content — never CandidateIdentity, which this function
     never even queries. "Current" is derived from
-    get_current_profile_version (max version_number) at call time, so an
-    embedding is only ever created against the candidate's latest
-    professional facts.
+    get_effective_profile_version (newest COMPLETED, then current evidence
+    verification) at call time. Failed/manual-review attempts cannot replace
+    accepted facts; an embedding stays bound to the exact selected version.
 
     Idempotent: if a CandidateEmbeddingVersion already exists for the
     exact seven-field identity (profile version, provider, model,
@@ -61,14 +64,20 @@ async def embed_candidate_profile(
     event) if the provider itself fails — never persists a partial/
     invalid vector; a failed attempt produces no CandidateEmbeddingVersion
     row at all."""
-    profile_version = await get_current_profile_version(
+    profile_version = await get_effective_profile_version(
         db, tenant_id=tenant_id, candidate_id=candidate_id
     )
     if profile_version is None:
+        latest = await get_latest_profile_attempt(
+            db, tenant_id=tenant_id, candidate_id=candidate_id
+        )
+        if latest is not None:
+            raise EmbeddingPreconditionError(
+                "PROFILE_NOT_COMPLETED", "No completed professional profile is available."
+            )
         raise EmbeddingPreconditionError(
             "NO_PROFILE_VERSION",
-            "No CandidateProfileVersion exists for this candidate — run profile "
-            "extraction first.",
+            "No CandidateProfileVersion exists for this candidate — run profile extraction first.",
         )
     profile_content = profile_version.profile_content
     if profile_version.status != PROFILE_STATUS_COMPLETED or profile_content is None:

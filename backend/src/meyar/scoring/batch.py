@@ -17,7 +17,7 @@ from meyar.scoring.policy import (
 )
 from meyar.scoring.schemas import BatchRankingResult, RankedCandidate, ScoreExplanation
 from meyar.services.audit_repo import record_event
-from meyar.services.candidate_profile_repo import list_current_profile_versions_for_tenant
+from meyar.services.candidate_profile_repo import list_effective_profile_versions_for_tenant
 from meyar.services.candidate_repo import list_candidates_for_tenant
 from meyar.services.job_criteria_repo import get_criteria_version_by_id
 from meyar.services.job_repo import get_job
@@ -85,7 +85,7 @@ async def rank_candidates_for_job(
     validate_criteria_total_weight(criteria)
 
     candidates = await list_candidates_for_tenant(db, tenant_id=tenant_id)
-    current_profiles = await list_current_profile_versions_for_tenant(db, tenant_id=tenant_id)
+    current_profiles = await list_effective_profile_versions_for_tenant(db, tenant_id=tenant_id)
     profiles_by_candidate = {profile.candidate_id: profile for profile in current_profiles}
     skipped: Counter[str] = Counter()
     ranked: list[RankedCandidate] = []
@@ -97,7 +97,7 @@ async def rank_candidates_for_job(
             continue
         profile = profiles_by_candidate.get(candidate.id)
         if profile is None:
-            skipped["NO_CURRENT_PROFILE"] += 1
+            skipped["NO_EFFECTIVE_PROFILE"] += 1
             continue
         if profile.status != PROFILE_STATUS_COMPLETED or profile.profile_content is None:
             skipped["CURRENT_PROFILE_NOT_COMPLETED"] += 1
