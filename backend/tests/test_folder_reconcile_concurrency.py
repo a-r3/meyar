@@ -111,12 +111,18 @@ async def state(observer, storage, tenant_id):
             .order_by(FolderIndexedFile.relative_path)
         )
     ).all()
-    files = [f for f in originals(storage) if f.startswith(f"{tenant_id}/")]
-    # No unreferenced original and no staged-but-unpurged trash for a handled conflict.
+    all_files = originals(storage)  # the COMPLETE storage tree, including .trash/
+    files = [f for f in all_files if f.startswith(f"{tenant_id}/")]
+    # No unreferenced original, no S4 staged-but-unpurged delete (.trash/<tenant.hex>/<id>)
+    # and no partial temp file for a handled conflict. The storage root is isolated per
+    # test, so the whole-tree check below is global as well as tenant-scoped.
+    tenant_trash = [f for f in all_files if f.startswith(f".trash/{tenant_id.hex}/")]
+    assert tenant_trash == [], "staged .trash leftovers for the tenant"
+    assert [f for f in all_files if f.startswith(".trash/")] == [], "staged .trash leftovers"
+    assert [f for f in all_files if f.endswith(".tmp")] == [], "partial temp files"
     assert sorted(d.storage_key for d in documents) == files, (
         "stored originals differ from durable CandidateDocument authority"
     )
-    assert not [f for f in files if ".trash" in f or f.endswith(".tmp")]
     for row in rows:  # ownership: every INDEXED row points at a real candidate/document pair
         # A row whose candidate was deleted keeps its path with NULL links (FK SET
         # NULL) and is retried by the next scan; that is existing delete behavior.
@@ -379,6 +385,8 @@ async def test_duplicate_link_waits_for_candidate_delete_then_ingests_fresh(
     real_delete = candidate_service.delete_candidate_row
 
     async def pause_after_staging(db, **kwargs):
+        # The S4 staged delete really exists now: .trash/<tenant.hex>/<id>.
+        assert [f for f in originals(storage) if f.startswith(f".trash/{tenant.id.hex}/")]
         staged.set()
         await release.wait()
         return await real_delete(db, **kwargs)
@@ -518,3 +526,17 @@ async def test_opposite_content_order_deadlock_victim_compensates_and_retries(
         assert len(final["rows"]) == 4 and len(final["files"]) == 2
         assert {s.new for s in summaries} == {2} and {s.successful for s in summaries} == {2}
         assert all(s.failed == 0 for s in summaries)
+
+
+async def test_state_helper_detects_staged_trash_and_temp_leftovers(env, factory):
+    tenant, _, storage, _ = env
+    trash = storage._root / ".trash" / tenant.id.hex / uuid.uuid4().hex
+    trash.parent.mkdir(parents=True)
+    trash.write_bytes(X)
+    async with factory() as observer:
+        with pytest.raises(AssertionError, match="staged .trash leftovers"):
+            await state(observer, storage, tenant.id)
+        trash.unlink()
+        (storage._root / "stray.tmp").write_bytes(b"x")
+        with pytest.raises(AssertionError, match="partial temp files"):
+            await state(observer, storage, tenant.id)

@@ -64,12 +64,22 @@ No migration (`alembic heads` unchanged: `b88a2c4d6e10`), no dependency change.
 ## Final invariants asserted (independent observer connection + filesystem)
 
 Candidate count, CandidateDocument count, FolderIndexedFile ownership (INDEXED rows point at a
-real candidate/document pair with matching hash), stored originals == durable document keys, no
-`.trash`/`.tmp` leftovers, and truthful scan summaries (winner commit/ambiguous -> loser
+real candidate/document pair with matching hash), the tenant's normal originals == durable
+document keys, and an inspection of the COMPLETE isolated storage tree asserting no
+`.trash/<tenant.hex>/...` (S4 staged-delete) leftovers, no `.trash/` file at all, and no `.tmp`
+file; and truthful scan summaries (winner commit/ambiguous -> loser
 `unchanged=1, new=0`; winner rollback -> loser `new=1, successful=1`; dedup loser
 `new=1, successful=1, failed=0`).
 
-## Regression coverage (24 tests)
+Correction (re-audit of head `d0cd9791…`): the first helper filtered files to the tenant's
+normal namespace *before* checking for `.trash`, so it could not see staged leftovers. It now
+lists the whole tree, and a helper self-test plants a `.trash/<tenant.hex>/<id>` file and a stray
+`.tmp` and requires the assertion to fail. The duplicate-link-vs-delete test also asserts that a
+real `.trash/<tenant.hex>/` object exists while the S4 staged delete is paused. The check runs in
+every `state()` caller (same-source, different-source, deadlock-retry, delete cases). The S4
+recovery ledger itself is not inspected; only durable DB rows and the filesystem are.
+
+## Regression coverage (25 tests)
 
 - same source, same file x {commit, rollback, ambiguous-commit} x {source exists, source new} (6)
 - different sources, same bytes x {commit, rollback, ambiguous} (3)
@@ -78,13 +88,14 @@ real candidate/document pair with matching hash), stored originals == durable do
 - duplicate link waits for a candidate delete, then ingests fresh (1)
 - unsynchronized bounded repetitions: 4 x same-source runs, 4 x five-source same-content runs (8)
 - opposite-order deadlock victim: S4 compensation of its saved original + retry, 2 repetitions (2)
-  (with `MAX_DEADLOCK_ATTEMPTS=1` this test fails with `DeadlockDetectedError`)
+- helper self-test: planted `.trash`/`.tmp` leftovers are detected (1)
+  (deadlock: with `MAX_DEADLOCK_ATTEMPTS=1` this test fails with `DeadlockDetectedError`)
 
 ## Gates (actual output)
 
-Full `pytest -q`: 3784 passed. `ruff check .` clean; `mypy src` clean (233 files);
+Full `pytest -q`: 3785 passed (after the trash-assertion correction). `ruff check .` clean; `mypy src` clean (233 files);
 `alembic heads`: `b88a2c4d6e10 (head)`; `git diff --check` clean; `scripts/scan-tracked-tree.sh` clean.
-Focused (S7 + folder index/reconcile/compensation/CLI + S4 + S5/S6 + tenant authority/isolation/
+Focused S4/S5/S6 recovery (S4 authority, delete/upload, photo delete): 82 passed. Focused (S7 + folder index/reconcile/compensation/CLI + S4 + S5/S6 + tenant authority/isolation/
 auth + privacy/no-exfiltration + scanner bounds): 243 passed.
 
 ## Residual #46 scope
