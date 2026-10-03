@@ -9180,3 +9180,11 @@ logged by S4 and returns None; photo remains presentation-only. The upload endpo
 returns 404 "Candidate not found." when a legitimate delete committed after the
 document did. No schema change, no new dependency, no new lock edge. Residuals
 (hard-kill window, trash/orphan sweeping, folder concerns) remain deferred.
+
+Correction (same decision): the first S6 head `f83dbb1d0cb105ada889b08657b169aea753c38b`
+was independently rejected because extraction still held an open read transaction
+and pooled connection. Photo processing is now Phase A (short read phase ending in a
+commit) -> extraction with no SQL transaction, pooled connection or row lock ->
+Phase B (Tenant SHARE -> Candidate SHARE -> exact document and photo-row
+revalidation -> save -> insert -> commit). Authority is never carried across
+extraction; delete or suspension during extraction is handled by Phase B.

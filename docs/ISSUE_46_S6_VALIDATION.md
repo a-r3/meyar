@@ -51,9 +51,17 @@ reproduce on the accepted S5 tree. 12 tests: 5 failed, 7 passed.
 
 ## Correction
 
-Photo persistence now has a short fresh authority phase after DB-lock-free
-isolated extraction (no locks held during extraction; the read-only transaction
-holds none under READ COMMITTED):
+Photo processing is now three phases (corrected after independent rejection of
+head `f83dbb1d0cb105ada889b08657b169aea753c38b`, see below):
+
+- **Phase A (short read phase):** live tenant check, exact document lookup, exact
+  photo-version check, copy of primitive fields, then `db.commit()` of the
+  read-only transaction (`expire_on_commit=False`, so caller ORM state stays valid).
+- **Extraction:** original read, isolated worker and output decode/hash/bounds
+  validation hold **no SQL transaction, no pooled PostgreSQL connection and no
+  Tenant/Candidate row lock**.
+- **Phase B (persistence, below)** freshly revalidates everything; no authority
+  decision crosses extraction.
 
 `Tenant SHARE (live) -> Candidate SHARE (tenant-scoped) -> exact document
 revalidation -> existing-row recheck -> derived save (tracked in the S4 ledger,
@@ -76,13 +84,38 @@ API: if the candidate/document is gone after a durable upload because a delete
 committed, the endpoint returns 404 "Candidate not found." (no generic catch; the
 assert is replaced by an explicit state contract).
 
-## Regression tests (12 in the new file)
+## Regression tests (13 in the new file: the original 12 plus the pool regression)
 
 case A, case B, case C, delete-first photo waits and writes nothing, idempotent
 reuse per document/extractor, photo commit failure, ambiguous commit keeps
 referenced asset, save-then-insert failure, derived cleanup failure observable,
 tenant suspended in persistence phase, unrelated candidate not serialized, API
 response 404 when delete wins.
+
+## Independent rejection and correction (historical)
+
+Head `f83dbb1d…` was independently rejected for one blocker: Phase A's SELECTs
+autobegan a transaction that stayed open (a pooled connection checked out) for the
+entire worker subprocess; "no row lock" was not sufficient under the bounded-pool
+architecture. Correction: Phase A commits before extraction. New regression
+`test_extraction_holds_no_pooled_connection_transaction_or_lock` uses a real
+`pool_size=1, max_overflow=0` PostgreSQL pool with checkout/checkin counters and an
+Event-gated extraction; while paused it proves the worker session is not in a
+transaction, zero connections are checked out, an unrelated session acquires the
+pool, and `FOR UPDATE NOWAIT` on the Candidate row succeeds. Before-fix output
+(rejected-head source):
+
+```text
+E assert not True
+E  +  where True = in_transaction()
+FAILED tests/test_photo_delete_concurrency.py::test_extraction_holds_no_pooled_connection_transaction_or_lock
+1 failed, 12 passed
+```
+
+Test harness corrections: wait-graph probing now finds the backend blocked by a
+known holder (the worker's connection is legitimately different per phase and
+`pg_stat_activity` is cached per observer transaction); commit-fault tests target
+the persistence-phase commit, not Phase A's.
 
 ## Gates
 

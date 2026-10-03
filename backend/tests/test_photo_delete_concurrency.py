@@ -84,13 +84,19 @@ async def pid(session):
 
 
 async def blocked_or_finished(observer, task, waiter, holder):
+    """True once some backend is blocked by ``holder`` (the pooled connection used
+    by the waiting phase may differ from one seen earlier); False if the task ends."""
     async with asyncio.timeout(10):
         while not task.done():
-            blockers = await observer.scalar(
-                text("SELECT pg_blocking_pids(:pid)"), {"pid": waiter}
+            blocked = await observer.scalar(
+                text("SELECT count(*) FROM pg_stat_activity "
+                     "WHERE CAST(:holder AS integer) = ANY(pg_blocking_pids(pid))"),
+                {"holder": holder},
             )
-            if holder in blockers:
+            await observer.rollback()  # pg_stat_activity is cached per transaction
+            if blocked:
                 return True
+            await asyncio.sleep(0.01)
         return False
 
 
@@ -156,17 +162,19 @@ async def test_case_b_photo_row_flushed_before_delete_cascade_leaves_no_orphan(s
     the document delete until the photo commits and cascades the row away."""
     ctx, candidate_id, document_id, storage, photos = setup
     flushed, release = asyncio.Event(), asyncio.Event()
+    holder: dict = {}
     real_create = candidate_photo_service.create_photo_version
 
     async def pause_after_flush(db, **kwargs):
         row = await real_create(db, **kwargs)
+        holder["pid"] = await pid(db)  # the connection holding Candidate SHARE
         flushed.set()
         await release.wait()
         return row
 
     monkeypatch.setattr(candidate_photo_service, "create_photo_version", pause_after_flush)
     async with factory() as worker, factory() as deleter, factory() as observer:
-        worker_pid, delete_pid = await pid(worker), await pid(deleter)
+        delete_pid = await pid(deleter)
         photo_task = asyncio.create_task(
             photo(worker, storage, photos, ctx, candidate_id, document_id)
         )
@@ -176,8 +184,9 @@ async def test_case_b_photo_row_flushed_before_delete_cascade_leaves_no_orphan(s
             assert len(derived_files(photos)) == 1
             delete_task = asyncio.create_task(delete(deleter, ctx, candidate_id, storage, photos))
             waits_on_photo = await blocked_or_finished(
-                observer, delete_task, delete_pid, worker_pid
+                observer, delete_task, delete_pid, holder["pid"]
             )
+            assert waits_on_photo  # delete is serialized behind the photo commit
             release.set()
             await asyncio.wait_for(asyncio.gather(photo_task, delete_task), 20)
         finally:
@@ -257,7 +266,7 @@ async def test_delete_holding_authority_first_makes_photo_wait_and_write_nothing
     monkeypatch.setattr(candidate_photo_service, "_extract_isolated", paused_extract)
     monkeypatch.setattr(candidate_service, "delete_candidate_row", pause_after_staging)
     async with factory() as worker, factory() as deleter, factory() as observer:
-        worker_pid, delete_pid = await pid(worker), await pid(deleter)
+        delete_pid = await pid(deleter)
         photo_task = asyncio.create_task(
             photo(worker, storage, photos, ctx, candidate_id, document_id)
         )
@@ -267,7 +276,7 @@ async def test_delete_holding_authority_first_makes_photo_wait_and_write_nothing
             delete_task = asyncio.create_task(delete(deleter, ctx, candidate_id, storage, photos))
             await asyncio.wait_for(staged.wait(), 10)
             extraction_go.set()
-            assert await blocked_or_finished(observer, photo_task, worker_pid, delete_pid)
+            assert await blocked_or_finished(observer, photo_task, None, delete_pid)
             assert derived_files(photos) == []  # nothing saved while waiting
             release.set()
             assert await asyncio.wait_for(photo_task, 20) is None
@@ -297,7 +306,7 @@ async def test_photo_commit_failure_removes_unreferenced_derived_asset(
 
         async def fail_first_commit():
             nonlocal failed
-            if not failed:
+            if not failed and derived_files(photos):  # persistence-phase commit
                 failed = True
                 raise OSError("synthetic photo commit failure")
             await real_commit()
@@ -321,7 +330,8 @@ async def test_ambiguous_photo_commit_keeps_referenced_asset(setup, factory, mon
 
         async def commit_then_fail():
             await real_commit()
-            raise OSError("synthetic ambiguous photo commit")
+            if derived_files(photos):  # persistence-phase commit, not Phase A
+                raise OSError("synthetic ambiguous photo commit")
 
         monkeypatch.setattr(worker, "commit", commit_then_fail)
         await photo(worker, storage, photos, ctx, candidate_id, document_id)
@@ -440,3 +450,65 @@ async def test_unrelated_candidate_photo_is_not_serialized_behind_delete(
             release.set()
             await asyncio.wait_for(delete_task, 20)
     assert len(derived_files(photos)) == 1  # only the unrelated candidate's asset remains
+
+
+async def test_extraction_holds_no_pooled_connection_transaction_or_lock(
+    setup, monkeypatch
+):
+    """Real one-connection pool: while the isolated worker runs, the photo
+    operation owns no checkout, no SQL transaction and no row lock."""
+    from sqlalchemy import event
+
+    ctx, candidate_id, document_id, storage, photos = setup
+    engine = create_async_engine(
+        TEST_DATABASE_URL, pool_size=1, max_overflow=0, pool_timeout=5
+    )
+    checked_out = 0
+
+    @event.listens_for(engine.sync_engine.pool, "checkout")
+    def _out(*_args):  # noqa: ANN002
+        nonlocal checked_out
+        checked_out += 1
+
+    @event.listens_for(engine.sync_engine.pool, "checkin")
+    def _in(*_args):  # noqa: ANN002
+        nonlocal checked_out
+        checked_out -= 1
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    in_extraction, release = asyncio.Event(), asyncio.Event()
+    inner = candidate_photo_service._extract_isolated
+
+    async def paused(data: bytes, kind: str) -> dict:
+        in_extraction.set()
+        await release.wait()
+        return await inner(data, kind)
+
+    monkeypatch.setattr(candidate_photo_service, "_extract_isolated", paused)
+    try:
+        async with factory() as worker:
+            task = asyncio.create_task(
+                photo(worker, storage, photos, ctx, candidate_id, document_id)
+            )
+            try:
+                await asyncio.wait_for(in_extraction.wait(), 10)
+                assert not worker.in_transaction()
+                assert checked_out == 0
+                async with factory() as other:  # bounded pool is available
+                    assert await other.scalar(text("SELECT 1")) == 1
+                    # No Tenant/Candidate lock: candidate UPDATE authority is free.
+                    got = await other.scalar(
+                        select(Candidate.id).where(Candidate.id == candidate_id)
+                        .with_for_update(nowait=True)
+                    )
+                    assert got == candidate_id
+                    await other.rollback()
+                release.set()
+                row = await asyncio.wait_for(task, 20)
+            finally:
+                release.set()
+                await stop(task)
+            assert row is not None and row.status == "AVAILABLE"
+            assert not worker.in_transaction() and checked_out == 0
+    finally:
+        await engine.dispose()

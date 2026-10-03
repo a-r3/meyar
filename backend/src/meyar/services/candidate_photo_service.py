@@ -100,7 +100,8 @@ async def process_photo_for_document(
     A terminal result is reused for this exact document/extractor. Failure
     never changes the original CV or professional processing state.
 
-    Isolated extraction holds no DB lock. Persistence is a short
+    Isolated extraction (storage read, worker, output validation) holds no
+    SQL transaction, pooled DB connection or row lock. Persistence is a short
     fresh phase: Tenant SHARE -> Candidate SHARE -> exact document revalidation,
     held through derived save, row insert and commit, so candidate hard-delete
     (Candidate UPDATE) either completes first (nothing is saved) or waits and
@@ -113,6 +114,7 @@ async def process_photo_for_document(
             db, tenant_id=tenant_id, candidate_id=candidate_id, document_id=document_id
         )
         if document is None:
+            await db.commit()
             return None
         existing = await get_photo_for_document(
             db,
@@ -122,10 +124,13 @@ async def process_photo_for_document(
             extractor_version=PHOTO_EXTRACTOR_VERSION,
         )
         if existing is not None:
+            await db.commit()
             return existing
         storage_key, mime_type = document.storage_key, document.mime_type
-        # The read-only transaction so far holds no row locks (READ COMMITTED);
-        # it is not rolled back here so callers' loaded ORM state stays valid.
+        # Phase A ends here: commit the read-only transaction (releases the pooled
+        # connection; expire_on_commit=False keeps caller ORM state valid). The
+        # tenant commit guard briefly SHARE-locks the Tenant row, then releases.
+        await db.commit()
         original = await document_storage.read(storage_key=storage_key)
         kind = "PDF" if mime_type == "application/pdf" else "DOCX"
         outcome = await _extract_isolated(original, kind)
