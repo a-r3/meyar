@@ -66,11 +66,25 @@ def _identity(result: os.stat_result) -> tuple[int, int, int, int, int]:
     )
 
 
+def _read_bounded(fd: int, max_bytes: int) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while total <= max_bytes:
+        chunk = os.read(fd, min(_READ_CHUNK_BYTES, max_bytes + 1 - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    return b"".join(chunks)
+
+
 def _read_bounded_stable(path: Path, relative_path: str, max_bytes: int) -> ScanEntry:
     """Open once, decide from that descriptor's metadata, read at most
-    ``max_bytes + 1`` bytes, then re-check the same descriptor. Never an
-    unbounded read; the hash is computed only from bytes accepted as a
-    stable snapshot."""
+    ``max_bytes + 1`` bytes per pass, then verify the same descriptor with
+    one further bounded read. Metadata alone can miss same-size mmap writes
+    (or restored mtime within the filesystem's ctime resolution). Accept only
+    matching byte observations and stable metadata; hash those actual bytes.
+    At most two passes, no retry loop or weakening of the stability window."""
     # A FIFO named like a CV would block a plain open() until a writer
     # appears. Defense in depth, none of it sufficient alone:
     #   1. non-following lstat() rejects an entry that is already special;
@@ -110,24 +124,24 @@ def _read_bounded_stable(path: Path, relative_path: str, max_bytes: int) -> Scan
             return OversizedFile(
                 relative_path=relative_path, byte_size=before.st_size, mtime=before.st_mtime
             )
-        chunks: list[bytes] = []
-        total = 0
-        while total <= max_bytes:
-            chunk = os.read(fd, min(_READ_CHUNK_BYTES, max_bytes + 1 - total))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            total += len(chunk)
+        data = _read_bounded(fd, max_bytes)
         after = os.fstat(fd)
+        if (
+            len(data) > max_bytes or len(data) != before.st_size
+            or _identity(before) != _identity(after)
+        ):
+            return UnstableFile(relative_path=relative_path)
+        os.lseek(fd, 0, os.SEEK_SET)
+        verified = _read_bounded(fd, max_bytes)
+        final = os.fstat(fd)
+        if verified != data or _identity(before) != _identity(final):
+            return UnstableFile(relative_path=relative_path)
     finally:
         os.close(fd)
-    if total > max_bytes or total != before.st_size or _identity(before) != _identity(after):
-        return UnstableFile(relative_path=relative_path)
-    data = b"".join(chunks)
     return DiscoveredFile(
         relative_path=relative_path,
         data=data,
-        byte_size=total,
+        byte_size=len(data),
         sha256_hash=hashlib.sha256(data).hexdigest(),
         mtime=before.st_mtime,
     )
@@ -151,8 +165,8 @@ def scan_source_root(root_path: str, *, max_bytes: int) -> Iterator[ScanEntry]:
     escape the configured root via a symlink (see docs/DECISIONS.md).
     Unsupported extensions are silently skipped, not reported as
     failures. Raises InvalidSourceRootError if root_path is missing or
-    not a directory. Every file is opened once and read at most
-    ``max_bytes + 1`` bytes (see ``_read_bounded_stable``); an oversized
+    not a directory. Every file is opened once and read in at most two
+    passes of ``max_bytes + 1`` bytes (see ``_read_bounded_stable``); an oversized
     file is reported as ``OversizedFile`` without being read, and a file
     that changes during the read as ``UnstableFile``."""
     root = resolve_source_root(root_path)

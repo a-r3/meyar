@@ -1180,7 +1180,10 @@ second ingestion pipeline:
    actually gone. No atomic-rename producer convention is required
    (MEYAR does not control how the bank's own systems write into the
    folder), no OS-specific dependency, no busy-wait inside the scan.
-   **Accepted bounded limitation (independent-audit item, 2026-08-31):**
+   **Historical bounded limitation (independent-audit item, 2026-08-31):**
+   The acquisition limitation below was superseded by issue #46 PR-1's
+   bounded descriptor pre/post metadata checks; S8 / D-108 documents the remaining
+   metadata-only defect and adds bounded byte verification. The stability window is unchanged.
    mtime is read immediately before the bytes, so a writer still actively
    appending to a file *after* it happens to pass the stability check can
    still produce a torn read on that pass. This is not corruption-prone —
@@ -9192,7 +9195,11 @@ extraction; delete or suspension during extraction is handled by Phase B.
 
 ## D-107 — Issue #46 S7: folder reconciliation / same-content dedup serialization
 
-Status: implemented, independent acceptance pending; Refs #46, M9 milestone 10.
+Status: **ACCEPTED + MERGED through PR #122**; Refs #46, M9 milestone 10.
+Accepted exact head `c74cb32169cdb0b1a38aba20198e390601bd0014`;
+exact-head CI 37151559386, attempt 1, SUCCESS. Squash/main
+`1a4e0ce95991fe43449d0d45d9da1b28b4d10ada`; accepted and merged tree
+`54570e9711fe4354aaedd08e559efad27486c3c5` (identical), live-verified before S8.
 Starts from accepted/merged S6 (PR #121): squash/main `3582189fbb6d4e462f346bc094ccd996a0d8423b`,
 tree `14b3199d64797b739ec26dcd89d34210c48124db`.
 
@@ -9231,3 +9238,56 @@ transaction-lifetime (inference) refactor, downstream extraction/photo concurren
 same-source runs after ingestion commits, S4 hard-kill residuals, retention/orphan sweeping,
 schema drift. A folder re-ingest of a *changed* file for a candidate being deleted keeps its
 existing (unreproduced-here) ordering and is deferred with the changed-file slice.
+
+## D-108 — Issue #46 S8: changed-file acquisition and candidate-delete authority
+
+Status: implemented proposal; independent acceptance pending. Refs #46 under
+existing M9 milestone 10. Starts from ACCEPTED + MERGED S7 / PR #122:
+squash/main `1a4e0ce95991fe43449d0d45d9da1b28b4d10ada`, tree
+`54570e9711fe4354aaedd08e559efad27486c3c5`; accepted head/CI in D-107.
+
+Proof on exact S7 production source (real PostgreSQL and synthetic local storage,
+Events / server wait graph; 13 targeted baseline failures):
+
+- S7 hashed its acquired bytes correctly, and its pre/post descriptor metadata
+  rejected ordinary growth/truncation. However, a writable mmap page established
+  before acquisition could change between 64-byte chunks with ALL checked metadata
+  unchanged. A valid PDF containing the old header and new comment tail, matching
+  neither complete source generation, was parsed and persisted. Timestamp resolution
+  can also coalesce same-size rewrites with restored mtime. Metadata alone is insufficient.
+- A changed-file re-ingest retained an existing candidate across its parser gap,
+  saved an original before Candidate authority, then waited at the document FK.
+  Delete commit/ambiguous commit produced an unhandled FK IntegrityError; S4
+  compensated the new original, but no truthful summary returned. If storage had
+  saved first but not yet returned, delete could enumerate only the old document.
+
+Decision: one open descriptor, pre-stat -> capped read -> post-stat -> one further
+capped read from offset zero -> final stat. Accept only matching byte observations,
+expected length and equal size/mtime-ns/ctime-ns/device/inode; hash those actual
+immutable bytes. Each pass reads at most max_bytes + 1; at most two passes, no
+in-scan retry loop. Oversized metadata remains zero-read. Unstable files are skipped
+without FAILED/MISSING changes; the existing stability window remains mandatory
+for production callers. This is a bounded consistency protocol, not a claim that
+uncooperative filesystem writers are excluded by an OS lock.
+
+Changed-file persistence reuses S5/S6 Candidate SHARE before storage.save, refreshes
+the source-locked FolderIndexedFile after any wait and rechecks its exact candidate
+and live tenant before persisting. Delete still takes Candidate UPDATE before asset
+enumeration. Delete wins -> no save, no recreation in that attempt, candidate-less
+FAILED/INDEX_AUTHORITY_INVALID with observed hash/size; a later M-5 retry may attach a
+fresh identity to the same path row. Re-ingest wins -> delete waits for its durable
+outcome and then stages the new document too. Rollback and ambiguous outcomes use S4.
+
+Order stays S7: Tenant live check (non-locking; SHARE commit guard) -> FolderSource
+-> content where new-path dedup applies -> Candidate SHARE -> exact revalidation
+-> storage/document -> folder row -> guarded commit. Changed paths with an existing
+candidate preserve D-013 identity and do not introduce content dedup or a content
+lock after Candidate. Suspension takes no source/content/candidate lock; its prompt
+commit and S1 refusal/compensation remain tested. No key/user lock is added after
+Candidate. Locks last to caller commit/rollback; scan transaction lifetime remains
+deferred. S7's bounded deadlock-victim recovery is unchanged.
+
+No migration/dependency/parser/scoring/evidence/PII-log policy change. No downstream
+extraction/photo concurrency work, retention/orphan sweep, S4 hard-kill recovery,
+embedding readiness, deployment, Target-Mac, or #45/#35/#36/#50 work.
+`docs/ISSUE_46_S8_VALIDATION.md` records outcomes and gates; #46 remains OPEN.

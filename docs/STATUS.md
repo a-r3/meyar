@@ -36,7 +36,11 @@ attempt 1 **SUCCESS**; squash/main `dd4b4d0ce8b48b9948f948182094a5b1a50482f1`;
 accepted and merged tree `721438a6cbccedd54443bc5ba57cdb8718b03bf7` (identical).
 
 **Issue #46 S7 — folder reconciliation / same-content dedup concurrency correction
-implemented; independent acceptance pending.** Starts from verified main
+ACCEPTED + MERGED (PR #122).** Accepted exact head
+`c74cb32169cdb0b1a38aba20198e390601bd0014`; [exact-head CI 37151559386](https://github.com/a-r3/meyar/actions/runs/37151559386),
+attempt 1 **SUCCESS**; squash/main `1a4e0ce95991fe43449d0d45d9da1b28b4d10ada`;
+accepted and merged tree `54570e9711fe4354aaedd08e559efad27486c3c5` (identical).
+Implementation started from verified main
 `3582189fbb6d4e462f346bc094ccd996a0d8423b` (tree `14b3199d64797b739ec26dcd89d34210c48124db`).
 Reproduced before any production change (real PostgreSQL, real synthetic storage,
 events/`pg_blocking_pids`): two runs of one source failed with an unhandled
@@ -47,7 +51,22 @@ sources minted two Candidates; a duplicate link racing a candidate delete raised
 advisory lock around the dedup decision, a Candidate SHARE lock before linking a
 duplicate, and a bounded deadlock-victim retry now give one authoritative state.
 No migration, no new dependency. D-107 and `docs/ISSUE_46_S7_VALIDATION.md`. Changed-file
-read races and every other deferred scope stay open; #46/#35/#36/#45/#50 remain OPEN.
+authority is investigated in the bounded S8 proposal below; other deferred scope stays open.
+#46/#35/#36/#45/#50 remain OPEN.
+
+**Issue #46 S8 — changed-file snapshot / candidate-delete authority proposal;
+independent acceptance pending.** Exact S7's bounded descriptor reads and metadata
+checks missed a real mmap mutation: a valid mixed-generation PDF was stored despite
+unchanged size/mtime-ns/ctime-ns/device/inode. Acquisition now requires two matching
+bounded byte observations with stable metadata, hashing the acquired immutable
+bytes; the stability window is unchanged. Changed-file re-ingest was reproduced saving an
+original before candidate authority, then failing with an FK IntegrityError after
+delete won (S4 compensated bytes but the scan crashed). It now takes Candidate SHARE
+before saving and refreshes the source-locked folder row after any wait. A winning
+delete yields candidate-less FAILED/INDEX_AUTHORITY_INVALID with a truthful summary;
+a winning re-ingest is included in delete's later asset enumeration. D-108 and
+`docs/ISSUE_46_S8_VALIDATION.md` record proofs, outcomes and validation. No migration,
+dependency, deployment or Target-Mac work. #46/#35/#36/#45/#50 remain OPEN.
 
 **Issue #46 S6 — ACCEPTED + MERGED (PR #121).** Accepted head
 `8441392ab903433015942f6cb8dd553794addedc`; [exact-head CI 37142749403](https://github.com/a-r3/meyar/actions/runs/37142749403),
