@@ -95,3 +95,18 @@ async def get_latest_canonical_document(
         .limit(1)
     )
     return result.scalar_one_or_none()
+
+
+async def document_storage_key_referenced(
+    db: AsyncSession, *, tenant_id: uuid.UUID, storage_key: str
+) -> bool:
+    """True when a durable CandidateDocument of this tenant owns the key."""
+    row = await db.scalar(
+        select(CandidateDocument.id)
+        .where(
+            CandidateDocument.tenant_id == tenant_id,
+            CandidateDocument.storage_key == storage_key,
+        )
+        .limit(1)
+    )
+    return row is not None

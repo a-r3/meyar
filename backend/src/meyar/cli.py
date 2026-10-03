@@ -50,6 +50,7 @@ from meyar.services.demo_seed_service import DemoTenantAmbiguousError, reset_dem
 from meyar.services.folder_indexer_service import index_folder
 from meyar.services.folder_reconciliation_service import reconcile_folder
 from meyar.services.job_criteria_repo import get_current_criteria_version
+from meyar.services.storage_recovery import commit_with_recovery, recover_on_failure
 from meyar.services.tenant_authority import (
     TenantInactiveError,
     require_active_tenant,
@@ -449,16 +450,17 @@ async def _index_folder(tenant_id: str, root: str) -> None:
     try:
         async with factory() as db:
             await require_active_tenant(db, uuid.UUID(tenant_id))
-            summary = await index_folder(
-                db,
-                storage,
-                parser,
-                tenant_id=uuid.UUID(tenant_id),
-                root_path=root,
-                max_bytes=settings.max_upload_bytes,
-                stability_window_seconds=settings.folder_stability_seconds,
-            )
-            await db.commit()
+            async with recover_on_failure(db):
+                summary = await index_folder(
+                    db,
+                    storage,
+                    parser,
+                    tenant_id=uuid.UUID(tenant_id),
+                    root_path=root,
+                    max_bytes=settings.max_upload_bytes,
+                    stability_window_seconds=settings.folder_stability_seconds,
+                )
+                await db.commit()
     except InvalidSourceRootError:
         print("Invalid source folder: SOURCE_ROOT_INVALID")
         raise SystemExit(2) from None
@@ -626,25 +628,27 @@ async def _seed_demo(reset: bool) -> None:
     try:
         async with factory() as db:
             if reset:
-                deleted = await reset_demo(db)
-                await db.commit()
+                async with recover_on_failure(db):
+                    deleted = await reset_demo(db, storage, get_photo_storage())
+                    await commit_with_recovery(db)  # purges the staged originals/photos
                 print(
                     "Reset: existing demo tenant removed."
                     if deleted
                     else "Reset: no existing demo tenant found."
                 )
 
-            summary = await seed_demo(
-                db,
-                storage,
-                parser,
-                max_bytes=settings.max_upload_bytes,
-                max_profile_input_chars=settings.llm_max_input_chars,
-                max_identity_input_chars=settings.llm_max_input_chars,
-                max_embedding_input_chars=settings.embedding_max_input_chars,
-                evaluation_as_of_date=resolve_business_date(settings.business_timezone),
-            )
-            await db.commit()
+            async with recover_on_failure(db):
+                summary = await seed_demo(
+                    db,
+                    storage,
+                    parser,
+                    max_bytes=settings.max_upload_bytes,
+                    max_profile_input_chars=settings.llm_max_input_chars,
+                    max_identity_input_chars=settings.llm_max_input_chars,
+                    max_embedding_input_chars=settings.embedding_max_input_chars,
+                    evaluation_as_of_date=resolve_business_date(settings.business_timezone),
+                )
+                await db.commit()
             documents = await db.scalars(
                 select(CandidateDocument).where(CandidateDocument.tenant_id == summary.tenant_id)
             )

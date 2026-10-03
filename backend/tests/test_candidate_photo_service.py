@@ -478,12 +478,12 @@ async def test_failed_hard_delete_preserves_preexisting_broken_photo(
         expected_bytes = b"corrupt synthetic photo bytes"
         (tmp_path / "storage" / key).write_bytes(expected_bytes)
     original_bytes = await storage.read(storage_key=original_key)
-    original_delete = LocalFilesystemStorage.delete
+    original_delete = LocalFilesystemStorage.stage_delete
 
-    async def fail_original(self, *, storage_key: str) -> None:
+    async def fail_original(self, *, tenant_id: uuid.UUID, storage_key: str):
         raise OSError("synthetic original delete failure")
 
-    monkeypatch.setattr(LocalFilesystemStorage, "delete", fail_original)
+    monkeypatch.setattr(LocalFilesystemStorage, "stage_delete", fail_original)
     response = await client.delete(
         f"/api/v1/candidates/{document.candidate_id}",
         headers={"Authorization": f"Bearer {summary.api_key_plaintext}"},
@@ -510,7 +510,7 @@ async def test_failed_hard_delete_preserves_preexisting_broken_photo(
     route = f"/ui/candidates/{candidate_id}/photo"
     rendered = await client.get(route)
     assert rendered.status_code == 200 and rendered.content == PLACEHOLDER_JPEG
-    monkeypatch.setattr(LocalFilesystemStorage, "delete", original_delete)
+    monkeypatch.setattr(LocalFilesystemStorage, "stage_delete", original_delete)
 
 
 @pytest.mark.parametrize("broken_state", ["missing", "corrupt"])
@@ -543,10 +543,10 @@ async def test_mixed_photo_states_survive_later_delete_failure(
         broken_bytes = b"historical corrupt synthetic photo"
         (tmp_path / "storage" / broken_key).write_bytes(broken_bytes)
 
-    async def fail_original(self, *, storage_key: str) -> None:
+    async def fail_original(self, *, tenant_id: uuid.UUID, storage_key: str):
         raise OSError("synthetic later original delete failure")
 
-    monkeypatch.setattr(LocalFilesystemStorage, "delete", fail_original)
+    monkeypatch.setattr(LocalFilesystemStorage, "stage_delete", fail_original)
     response = await client.delete(
         f"/api/v1/candidates/{old.candidate_id}",
         headers={"Authorization": f"Bearer {summary.api_key_plaintext}"},
@@ -585,23 +585,23 @@ async def test_failed_hard_delete_preserves_valid_photo_and_retry(
     photo_key = row.derived_storage_key
     photo_bytes = await photos.read(tenant_id=tenant_id, storage_key=photo_key)
     original_bytes = await storage.read(storage_key=document_key)
-    original_delete = LocalFilesystemStorage.delete
-    photo_delete = LocalPhotoStorage.delete
+    original_delete = LocalFilesystemStorage.stage_delete
+    photo_delete = LocalPhotoStorage.stage_delete
     enabled = True
 
-    async def fail_original(self, *, storage_key: str) -> None:
+    async def fail_original(self, *, tenant_id: uuid.UUID, storage_key: str):
         if enabled:
             raise OSError("synthetic original delete failure")
-        await original_delete(self, storage_key=storage_key)
+        return await original_delete(self, tenant_id=tenant_id, storage_key=storage_key)
 
-    async def fail_photo(self, *, tenant_id: uuid.UUID, storage_key: str) -> None:
+    async def fail_photo(self, *, tenant_id: uuid.UUID, storage_key: str):
         if enabled:
             raise OSError("synthetic photo delete failure")
-        await photo_delete(self, tenant_id=tenant_id, storage_key=storage_key)
+        return await photo_delete(self, tenant_id=tenant_id, storage_key=storage_key)
 
     monkeypatch.setattr(
         LocalFilesystemStorage if fault == "original_delete" else LocalPhotoStorage,
-        "delete", fail_original if fault == "original_delete" else fail_photo,
+        "stage_delete", fail_original if fault == "original_delete" else fail_photo,
     )
     url = f"/api/v1/candidates/{candidate_id}"
     auth = {"Authorization": f"Bearer {summary.api_key_plaintext}"}
@@ -649,18 +649,18 @@ async def test_multi_photo_partial_delete_restores_every_available_asset(
         key: await photos.read(tenant_id=tenant_id, storage_key=key)
         for key in (first.derived_storage_key, second.derived_storage_key)
     }
-    original_delete = LocalPhotoStorage.delete
+    original_delete = LocalPhotoStorage.stage_delete
     attempts = 0
     enabled = True
 
-    async def fail_second(self, *, tenant_id: uuid.UUID, storage_key: str) -> None:
+    async def fail_second(self, *, tenant_id: uuid.UUID, storage_key: str):
         nonlocal attempts
         attempts += 1
         if enabled and attempts == 2:
             raise OSError("synthetic second photo delete failure")
-        await original_delete(self, tenant_id=tenant_id, storage_key=storage_key)
+        return await original_delete(self, tenant_id=tenant_id, storage_key=storage_key)
 
-    monkeypatch.setattr(LocalPhotoStorage, "delete", fail_second)
+    monkeypatch.setattr(LocalPhotoStorage, "stage_delete", fail_second)
     url = f"/api/v1/candidates/{candidate_id}"
     auth = {"Authorization": f"Bearer {summary.api_key_plaintext}"}
     response = await client.delete(url, headers=auth)
@@ -727,7 +727,8 @@ async def test_hard_delete_rejects_foreign_tenant_photo_key_before_any_delete(
     original = await storage.read(storage_key=document_key)
     foreign = await create_tenant(db_session, name="Foreign photo-key tenant")
     await db_session.commit()
-    foreign_key = await photos.save(tenant_id=foreign.id, content=b"foreign synthetic asset")
+    foreign_id = foreign.id
+    foreign_key = await photos.save(tenant_id=foreign_id, content=b"foreign synthetic asset")
     row.derived_storage_key = foreign_key
     await db_session.commit()
     response = await client.delete(
@@ -740,7 +741,7 @@ async def test_hard_delete_rejects_foreign_tenant_photo_key_before_any_delete(
     assert await db_session.get(Candidate, candidate_id) is not None
     assert await storage.read(storage_key=document_key) == original
     assert (
-        await photos.read(tenant_id=foreign.id, storage_key=foreign_key)
+        await photos.read(tenant_id=foreign_id, storage_key=foreign_key)
         == b"foreign synthetic asset"
     )
 

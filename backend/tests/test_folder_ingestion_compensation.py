@@ -364,7 +364,7 @@ async def test_preparation_and_candidate_creation_failure_never_save_original(
     assert not [p for p in (tmp_path / "storage").rglob("*") if p.is_file()]
 
 
-async def test_persistence_failure_rolls_back_candidate_but_storage_recovery_is_deferred(
+async def test_persistence_failure_rolls_back_candidate_and_removes_saved_original(
     db_session, tenant_and_key, tmp_path, monkeypatch
 ):
     from meyar.services import candidate_document_service
@@ -386,9 +386,8 @@ async def test_persistence_failure_rolls_back_candidate_but_storage_recovery_is_
     await db_session.rollback()
     assert await count_candidates_for_tenant(db_session, tenant_id=tenant_id) == 0
     assert await db_session.scalar(select(CandidateDocument)) is None
-    # Existing save-before-DB ordering, explicitly NOT solved by this M-5 slice.
-    saved = [p for p in (tmp_path / "storage").rglob("*") if p.is_file()]
-    assert len(saved) == 1 and saved[0].read_bytes() == VALID
+    # Issue #46 S4: the save-before-DB ordering is now compensated.
+    assert [p for p in (tmp_path / "storage").rglob("*") if p.is_file()] == []
 
 
 async def test_hr_readiness_uses_latest_document_not_historical_failure(

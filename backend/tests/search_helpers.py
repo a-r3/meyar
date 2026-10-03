@@ -108,7 +108,7 @@ async def seed_candidate_with_profile(
         mime_type="application/pdf",
         byte_size=100,
         sha256_hash="a" * 64,
-        storage_key=f"test/{uuid.uuid4().hex}",
+        storage_key=f"{tenant_id}/{uuid.uuid4().hex}",
     )
     canonical = await create_canonical_document(
         db_session,
@@ -156,7 +156,7 @@ async def seed_next_profile_version(
         mime_type="application/pdf",
         byte_size=100,
         sha256_hash="b" * 64,
-        storage_key=f"test/{uuid.uuid4().hex}",
+        storage_key=f"{tenant_id}/{uuid.uuid4().hex}",
     )
     canonical = await create_canonical_document(
         db_session,

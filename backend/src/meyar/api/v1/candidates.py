@@ -35,6 +35,7 @@ from meyar.services.candidate_document_service import (
 from meyar.services.candidate_photo_service import process_photo_for_document
 from meyar.services.candidate_repo import create_candidate, get_candidate
 from meyar.services.candidate_service import delete_candidate_cascade
+from meyar.services.storage_recovery import recover_on_failure
 from meyar.services.tenant_authority import require_active_tenant
 from meyar.storage.base import DocumentStorage
 from meyar.storage.dependency import get_document_storage, get_photo_storage
@@ -237,12 +238,15 @@ async def post_candidate_document(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=exc.public_message
         ) from None
 
-    await _revalidate_upload_authority(db, ctx, candidate_id)
-    document = await persist_candidate_document(
-        db, storage, prepared, tenant_id=ctx.tenant_id,
-        candidate_id=candidate_id, filename=file.filename or "",
-    )
-    await db.commit()
+    # Original bytes and DB authority are not one transaction: any failure up to
+    # and including the commit rolls back and removes the just-saved original.
+    async with recover_on_failure(db):
+        await _revalidate_upload_authority(db, ctx, candidate_id)
+        document = await persist_candidate_document(
+            db, storage, prepared, tenant_id=ctx.tenant_id,
+            candidate_id=candidate_id, filename=file.filename or "",
+        )
+        await db.commit()
     document_id = document.id
     try:
         await process_photo_for_document(

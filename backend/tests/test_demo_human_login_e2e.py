@@ -46,6 +46,14 @@ MAX_BYTES = 10 * 1024 * 1024
 MAX_INPUT_CHARS = 20000
 
 
+def _stores(tmp_path):
+    from meyar.storage.local import LocalFilesystemStorage
+    from meyar.storage.photo import LocalPhotoStorage
+
+    root = str(tmp_path / "storage")
+    return LocalFilesystemStorage(root), LocalPhotoStorage(root)
+
+
 @pytest.fixture
 def local_ui_settings() -> Settings:
     settings = Settings(ui_cookie_secure=False)
@@ -266,7 +274,7 @@ async def test_reset_then_reseed_cycle_produces_a_working_login(
     await _seed(db_session, tmp_path)
     await db_session.commit()
 
-    deleted = await reset_demo(db_session)
+    deleted = await reset_demo(db_session, *_stores(tmp_path))
     await db_session.commit()
     assert deleted is True
 

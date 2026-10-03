@@ -34,6 +34,16 @@ HUMAN_MARKER = "DEMO_HUMAN_BOOTSTRAPPED"
 PASSWORD = "synthetic-original-password"
 
 
+
+
+def _stores(tmp_path):
+    from meyar.storage.local import LocalFilesystemStorage
+    from meyar.storage.photo import LocalPhotoStorage
+
+    root = str(tmp_path / "storage")
+    return LocalFilesystemStorage(root), LocalPhotoStorage(root)
+
+
 async def _legacy(db, *, marked=False, shared=False):
     tenant = await create_tenant(db, name=DEMO_TENANT_NAME)
     await record_event(db, tenant_id=tenant.id, event_type=DEMO_TENANT_MARKER_EVENT)
@@ -131,7 +141,7 @@ async def test_inactive_other_membership_still_prevents_demo_user_mutation(db_se
     assert summary.human_username != user.username
     await db_session.refresh(user)
     assert _security(user) == before
-    assert await reset_demo(db_session)
+    assert await reset_demo(db_session, *_stores(tmp_path))
     await db_session.commit()
     assert await db_session.get(Tenant, tenant.id) is None
     assert await db_session.get(User, user.id) is not None
@@ -209,7 +219,7 @@ async def test_shared_demo_member_reseed_preserves_unrelated_session_and_identit
     repeated = await _seed(db_session, tmp_path)
     await db_session.commit()
     assert repeated.human_username == summary.human_username
-    assert await reset_demo(db_session)
+    assert await reset_demo(db_session, *_stores(tmp_path))
     await db_session.commit()
     assert await db_session.get(Tenant, tenant.id) is None
     assert await db_session.get(User, user.id) is not None
@@ -221,12 +231,12 @@ async def test_shared_demo_member_reseed_preserves_unrelated_session_and_identit
 
 @pytest.mark.parametrize("marked", [False, True])
 @pytest.mark.parametrize("shared", [False, True])
-async def test_reset_deletes_only_marked_exclusive_human(db_session, marked, shared):
+async def test_reset_deletes_only_marked_exclusive_human(db_session, tmp_path, marked, shared):
     tenant, _, user, _, _, other_membership, token = await _legacy(
         db_session, marked=marked, shared=shared
     )
     user_id, tenant_id, before = user.id, tenant.id, _security(user)
-    assert await reset_demo(db_session)
+    assert await reset_demo(db_session, *_stores(tmp_path))
     await db_session.commit()
     assert await db_session.get(Tenant, tenant_id) is None
     survivor = await db_session.get(User, user_id)
@@ -273,7 +283,7 @@ async def test_ambiguous_human_markers_fail_before_any_mutation(
         if operation == "seed":
             await _seed(db_session, tmp_path)
         else:
-            await reset_demo(db_session)
+            await reset_demo(db_session, *_stores(tmp_path))
     # Deliberately inspect without rollback: no partial destructive work is allowed.
     await db_session.refresh(user)
     await db_session.refresh(membership)
