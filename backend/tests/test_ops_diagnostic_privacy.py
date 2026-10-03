@@ -184,6 +184,31 @@ def test_internal_member_failure_does_not_echo_private_root(tmp_path, kind):
     assert_private_failure(builder.build(), code)
 
 
+def _semantic_inventory(rows):
+    """Compare expression structure; Python patch releases vary unparse quotes."""
+    import ast
+
+    return [
+        {
+            key: value
+            if key == "file" or value is None
+            else ast.dump(ast.parse(value, mode="eval"), include_attributes=False)
+            for key, value in row.items()
+        }
+        for row in rows
+    ]
+
+
+def test_inventory_compares_structure_and_still_rejects_private_path():
+    # The two f-strings are equivalent (PEP 701), but Python 3.12 patch
+    # releases choose different outer quotes when unparsing this same AST.
+    first = {"file": "synthetic.py", "message": "f\"keys: {', '.join(missing)}\""}
+    second = {"file": "synthetic.py", "message": "f'keys: {', '.join(missing)}'"}
+    private = {"file": "synthetic.py", "message": 'f"keys: {private_path}"'}
+    assert _semantic_inventory([first]) == _semantic_inventory([second])
+    assert _semantic_inventory([first]) != _semantic_inventory([private])
+
+
 def test_ops_failure_diagnostic_sink_inventory_requires_review():
     """Only nonliteral failure/conditional sinks need explicit source review.
 
@@ -253,7 +278,9 @@ def test_ops_failure_diagnostic_sink_inventory_requires_review():
     expected = json.loads(
         (Path(__file__).parent / "fixtures/ops_failure_diagnostic_sinks.json").read_text()
     )
-    assert observed == expected, "Review changed operational failure diagnostic sink inputs"
+    assert _semantic_inventory(observed) == _semantic_inventory(expected), (
+        "Review changed operational failure diagnostic sink inputs"
+    )
 
 
 async def test_readiness_schema_mismatch_does_not_echo_private_revision(monkeypatch):

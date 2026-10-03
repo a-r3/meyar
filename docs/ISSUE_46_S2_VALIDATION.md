@@ -205,6 +205,15 @@ exception types and closed code projections are reviewed allowed expressions.
 Delegated storage/lifecycle messages were traced to fixed producers. A separate
 AST guard refuses str/repr/args/cause/traceback and direct exception interpolation.
 This is an explicit sink manifest, not a global ban on string interpolation.
+Expressions are compared by semantic AST, not ast.unparse quote style. First
+remediation CI run `37114242183` on intermediate head
+`909c433f8f6cc78988847b9cb0a0d12f5076a27c` had **3631 passed / 1 failed**:
+Python 3.12.15 in CI and local 3.12.3 unparsed the same plist-key f-string with
+different outer quotes. The source expression was unchanged and private. The
+comparison now normalizes both expression ASTs; an added regression proves
+equivalent quote styles compare equal while a raw private_path expression still
+differs. No production correction or existing assertion was removed for this
+CI repair. The failed run is not the final gate.
 
 A second before-fix proof confirmed **2 failed in 0.81s**: status schema-valid
 manifest free strings were echoed as OK identity metadata. `release_identity_text`
@@ -222,7 +231,7 @@ identity/checksum fields and provisioning behavior remain unchanged; no #35
 artifact-lifecycle work is advanced.
 
 New regression functions in `backend/tests/test_ops_diagnostic_privacy.py`
-(**21 cases**, alongside the unchanged existing 43 S2 cases):
+(**22 cases**, alongside the unchanged existing 43 S2 cases):
 
 - `test_build_failure_paths_and_members_are_private` (3)
 - `test_checksum_filename_failures_are_private` (4)
@@ -234,6 +243,7 @@ New regression functions in `backend/tests/test_ops_diagnostic_privacy.py`
 - `test_host_config_failure_does_not_evaluate_exception_text`
 - `test_internal_member_failure_does_not_echo_private_root` (3)
 - `test_ops_failure_diagnostic_sink_inventory_requires_review`
+- `test_inventory_compares_structure_and_still_rejects_private_path`
 - `test_readiness_schema_mismatch_does_not_echo_private_revision`
 - `test_success_inventory_does_not_echo_arbitrary_manifest_identity` (2)
 
@@ -241,7 +251,11 @@ Before the final success-inventory correction, the focused gate passed
 **714 in 25.40s**, including all 43 existing S2 cases and the initial 19
 remediation cases. Final complete focused gate: **716 passed in 25.60s**, including all 43 existing
 S2 regressions, all 21 remediation cases, all ops suites and both no-exfiltration
-suites. Final full gate: **3632 passed in 833.92s (13:53)**. The prior affected-release/preflight/plist gate passed **174 in 4.72s**.
+suites. Intermediate-head full gate: **3632 passed in 833.92s (13:53)**.
+Final post-inventory portability gates: **717 focused passed in 30.95s**;
+**3633 full passed in 866.41s (14:26)**. Ruff/mypy(src) clean; unchanged
+single Alembic head, diff and tracked-tree scans clean. Exact delivered
+head/CI are recorded in delivery. The prior affected-release/preflight/plist gate passed **174 in 4.72s**.
 Final Ruff clean; mypy(src) clean on 229 files; unchanged single Alembic head
 `b88a2c4d6e10`. Final full-gate results and exact delivered head/CI are recorded in the
 operational delivery report. S1 accepted/merged history is unchanged.
