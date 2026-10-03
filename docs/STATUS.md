@@ -35,7 +35,26 @@ earlier rejected heads and their corrections in the validation record are histor
 attempt 1 **SUCCESS**; squash/main `dd4b4d0ce8b48b9948f948182094a5b1a50482f1`;
 accepted and merged tree `721438a6cbccedd54443bc5ba57cdb8718b03bf7` (identical).
 
-**Issue #46 S6 — post-upload photo persistence / candidate-delete concurrency
+**Issue #46 S7 — folder reconciliation / same-content dedup concurrency correction
+implemented; independent acceptance pending.** Starts from verified main
+`3582189fbb6d4e462f346bc094ccd996a0d8423b` (tree `14b3199d64797b739ec26dcd89d34210c48124db`).
+Reproduced before any production change (real PostgreSQL, real synthetic storage,
+events/`pg_blocking_pids`): two runs of one source failed with an unhandled
+`IntegrityError` (`uq_folder_indexed_files_path`, or `uq_folder_sources_tenant_root` for a
+new source) after the loser had already saved an original; identical bytes in different
+sources minted two Candidates; a duplicate link racing a candidate delete raised an FK
+`IntegrityError`. A FolderSource row lock (single-writer per source), a tenant+content
+advisory lock around the dedup decision, a Candidate SHARE lock before linking a
+duplicate, and a bounded deadlock-victim retry now give one authoritative state.
+No migration, no new dependency. D-107 and `docs/ISSUE_46_S7_VALIDATION.md`. Changed-file
+read races and every other deferred scope stay open; #46/#35/#36/#45/#50 remain OPEN.
+
+**Issue #46 S6 — ACCEPTED + MERGED (PR #121).** Accepted head
+`8441392ab903433015942f6cb8dd553794addedc`; [exact-head CI 37142749403](https://github.com/a-r3/meyar/actions/runs/37142749403),
+attempt 1 **SUCCESS**; squash/main `3582189fbb6d4e462f346bc094ccd996a0d8423b`;
+accepted and merged tree `14b3199d64797b739ec26dcd89d34210c48124db` (identical).
+
+**(historical) Issue #46 S6 — post-upload photo persistence / candidate-delete concurrency
 correction implemented; independent acceptance pending.** Reproduced on exact S5
 source (real PostgreSQL, real synthetic storage, events): an orphan derived JPEG
 after a delete that waited on an uncommitted photo row, a 500 `AssertionError` when

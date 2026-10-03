@@ -47,7 +47,7 @@ from meyar.services.candidate_embedding_service import (
 from meyar.services.candidate_photo_service import process_photo_for_document
 from meyar.services.candidate_profile_repo import get_effective_profile_version
 from meyar.services.demo_seed_service import DemoTenantAmbiguousError, reset_demo, seed_demo
-from meyar.services.folder_indexer_service import index_folder
+from meyar.services.folder_indexer_service import index_folder_and_commit
 from meyar.services.folder_reconciliation_service import reconcile_folder
 from meyar.services.job_criteria_repo import get_current_criteria_version
 from meyar.services.storage_recovery import commit_with_recovery, recover_on_failure
@@ -450,17 +450,15 @@ async def _index_folder(tenant_id: str, root: str) -> None:
     try:
         async with factory() as db:
             await require_active_tenant(db, uuid.UUID(tenant_id))
-            async with recover_on_failure(db):
-                summary = await index_folder(
-                    db,
-                    storage,
-                    parser,
-                    tenant_id=uuid.UUID(tenant_id),
-                    root_path=root,
-                    max_bytes=settings.max_upload_bytes,
-                    stability_window_seconds=settings.folder_stability_seconds,
-                )
-                await db.commit()
+            summary = await index_folder_and_commit(
+                db,
+                storage,
+                parser,
+                tenant_id=uuid.UUID(tenant_id),
+                root_path=root,
+                max_bytes=settings.max_upload_bytes,
+                stability_window_seconds=settings.folder_stability_seconds,
+            )
     except InvalidSourceRootError:
         print("Invalid source folder: SOURCE_ROOT_INVALID")
         raise SystemExit(2) from None

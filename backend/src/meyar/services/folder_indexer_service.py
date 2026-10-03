@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
 
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.ingestion.folder_scanner import (
@@ -32,6 +33,7 @@ from meyar.services.candidate_document_service import (
     prepare_candidate_document,
 )
 from meyar.services.candidate_repo import create_candidate, get_candidate
+from meyar.services.content_authority import lock_tenant_content
 from meyar.services.folder_indexed_file_repo import (
     create_folder_indexed_file,
     find_indexed_file_by_content_hash,
@@ -39,8 +41,12 @@ from meyar.services.folder_indexed_file_repo import (
     update_folder_indexed_file,
 )
 from meyar.services.folder_source_repo import get_or_create_folder_source
+from meyar.services.storage_recovery import recover_on_failure
 from meyar.services.tenant_authority import require_active_tenant
 from meyar.storage.base import DocumentStorage
+
+_DEADLOCK_SQLSTATE = "40P01"
+MAX_DEADLOCK_ATTEMPTS = 4
 
 
 @dataclass(frozen=True)
@@ -94,7 +100,13 @@ async def index_folder(
     await require_active_tenant(db, tenant_id)
     resolve_source_root(root_path)
 
+    # Folder/source authority (issue #46 S7): row-locked until the caller's
+    # transaction ends, so same-source reconciliation is single-writer. Both
+    # the tenant check and the existing-row snapshot are taken AFTER any wait,
+    # so a loser sees the winner's durable rows (or its rollback) and a tenant
+    # suspended while waiting is refused before anything is saved.
     source = await get_or_create_folder_source(db, tenant_id=tenant_id, root_path=root_path)
+    await require_active_tenant(db, tenant_id)
 
     existing_rows = await list_folder_indexed_files(
         db, tenant_id=tenant_id, folder_source_id=source.id
@@ -241,6 +253,50 @@ async def index_folder(
         },
     )
     return summary
+
+
+def _is_deadlock(exc: BaseException) -> bool:
+    orig = getattr(exc, "orig", None)
+    code = getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None)
+    return isinstance(exc, DBAPIError) and code == _DEADLOCK_SQLSTATE
+
+
+async def index_folder_and_commit(
+    db: AsyncSession,
+    storage: DocumentStorage,
+    parser: DocumentParser,
+    *,
+    tenant_id: uuid.UUID,
+    root_path: str,
+    max_bytes: int,
+    stability_window_seconds: float = 0.0,
+) -> FolderScanSummary:
+    """The one durable scan phase shared by every operator entry point.
+
+    Runs index_folder in a storage-recovery scope and commits. If PostgreSQL
+    aborts this transaction as a deadlock victim (two scans over different
+    sources holding the same contents in opposite order, see
+    content_authority), the rollback has already compensated every original it
+    saved; the whole scan is then repeated from durable truth, a bounded
+    number of times. Any other failure propagates unchanged."""
+    for attempt in range(1, MAX_DEADLOCK_ATTEMPTS + 1):
+        try:
+            async with recover_on_failure(db):
+                summary = await index_folder(
+                    db,
+                    storage,
+                    parser,
+                    tenant_id=tenant_id,
+                    root_path=root_path,
+                    max_bytes=max_bytes,
+                    stability_window_seconds=stability_window_seconds,
+                )
+                await db.commit()
+                return summary
+        except DBAPIError as exc:
+            if not _is_deadlock(exc) or attempt == MAX_DEADLOCK_ATTEMPTS:
+                raise
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
 async def _handle_new_file(
@@ -455,11 +511,28 @@ async def _prepare_new_path(
     entry: DiscoveredFile,
     max_bytes: int,
 ) -> tuple[PreparedDocument | None, FolderIndexedFile | None]:
-    """Dedup skips redundant parsing/storage, never this path's validation."""
+    """Dedup skips redundant parsing/storage, never this path's validation.
+
+    Issue #46 S7: the dedup decision is made under the tenant+content
+    authority lock (held to the caller's commit/rollback), so concurrent
+    identical content converges on one Candidate instead of every
+    transaction observing "not yet present". A linked duplicate's Candidate
+    is SHARE-locked before the link is written; if a delete of that
+    candidate won the race the lookup is repeated against durable truth."""
     filename = _synthetic_filename(entry.relative_path)
-    duplicate = await find_indexed_file_by_content_hash(
-        db, tenant_id=tenant_id, sha256_hash=entry.sha256_hash
-    )
+    await lock_tenant_content(db, tenant_id=tenant_id, sha256_hash=entry.sha256_hash)
+    duplicate = None
+    while True:
+        duplicate = await find_indexed_file_by_content_hash(
+            db, tenant_id=tenant_id, sha256_hash=entry.sha256_hash
+        )
+        if duplicate is None or duplicate.candidate_id is None:
+            break
+        owner = await get_candidate(
+            db, tenant_id=tenant_id, candidate_id=duplicate.candidate_id, share=True
+        )
+        if owner is not None:
+            break  # deletion is excluded until this transaction ends
     if duplicate is not None:
         await validate_upload_async(
             filename=filename, content_type="", data=entry.data, max_bytes=max_bytes
