@@ -12,6 +12,7 @@ import asyncio
 import os
 import sys
 from pathlib import Path
+from typing import Never
 
 from alembic.config import Config
 from alembic.script import ScriptDirectory
@@ -30,7 +31,12 @@ async def _revision(engine: object) -> str | None:
 
 
 async def _upgrade(config: Config, database_url: str, source: str, target: str) -> bool:
-    engine = create_async_engine(database_url, pool_pre_ping=True, connect_args={"timeout": 5.0})
+    engine = create_async_engine(
+        database_url,
+        hide_parameters=True,
+        pool_pre_ping=True,
+        connect_args={"timeout": 5.0},
+    )
     try:
         if await _revision(engine) != source:
             return False
@@ -49,8 +55,13 @@ async def _upgrade(config: Config, database_url: str, source: str, target: str) 
         await engine.dispose()
 
 
+class _PrivateArgumentParser(argparse.ArgumentParser):
+    def error(self, _message: str) -> Never:
+        raise ValueError("INVALID_INVOCATION")
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(add_help=False)
+    parser = _PrivateArgumentParser(add_help=False)
     parser.add_argument("--install-root", type=Path, required=True)
     parser.add_argument("--target-release-id", required=True)
     parser.add_argument("--from-head", required=True)

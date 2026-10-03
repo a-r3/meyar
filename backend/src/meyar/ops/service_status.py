@@ -57,7 +57,7 @@ def run_service_status(
             component="platform",
             status=FindingStatus.FAIL,
             code="PLATFORM_UNSUPPORTED",
-            message=f"service-status requires macOS (Darwin); running on {system}",
+            message="service-status requires macOS (Darwin)",
         )
         return builder.build()
 

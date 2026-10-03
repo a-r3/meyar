@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 import re
 import uuid
@@ -64,6 +65,21 @@ ADMIN_DATABASE_URL = "postgresql+asyncpg://meyar:meyar_dev_password@localhost:55
 TEST_DATABASE_URL = "postgresql+asyncpg://meyar:meyar_dev_password@localhost:55719/meyar_test"
 
 FIXTURES_DIR = Path(__file__).resolve().parent.parent.parent / "fixtures" / "synthetic_cvs"
+
+
+@pytest.fixture
+def enabled_diagnostic_loggers(monkeypatch) -> None:
+    """Observe real records even after in-process Alembic fileConfig tests.
+
+    Opt-in only; restore disabled flags afterward, keeping levels/handlers intact.
+    A fresh application server imports its loggers after server configuration.
+    """
+    for name, logger in list(logging.Logger.manager.loggerDict.items()):
+        if isinstance(logger, logging.Logger) and any(
+            name == prefix or name.startswith(prefix + ".")
+            for prefix in ("meyar", "sqlalchemy", "uvicorn", "httpx", "httpcore")
+        ):
+            monkeypatch.setattr(logger, "disabled", False)
 
 
 @pytest.fixture

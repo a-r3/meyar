@@ -8746,12 +8746,14 @@ Before-fix proof, corrected matrix, gates, acceptance and deferrals:
 
 ## D-101 — Issue #46 S1: live Tenant active authorization
 
-Status: implementation/correction on `fix/46-s1-tenant-authority` / PR #116,
-pending independent re-acceptance. Reviewed head
-`d253b3d12c2f86a7b5c417f7ee060131470de8cb` was acceptance-REJECTED for missing
-immediate tenant revalidation after non-agent query embedding. Its green CI
-was not acceptance. Only S1 under existing #46 / milestone M9 (10).
-#46/#35/#36/#45/#50 remain OPEN; no Target-Mac work.
+Status: independently **ACCEPTED + owner-MERGED**, PR #116. Accepted head
+`436e01589d86cc6db2d7926d2801525e9555b702`; exact-head CI `37106111151` SUCCESS.
+Verified squash/main `95b65313920463af6ee03d4eb0072244e25ff089` and accepted head
+have identical full tree `8c017e6eeae367fbb411e88e64a2faf4af2d9b32`.
+Historical reviewed head `d253b3d12c2f86a7b5c417f7ee060131470de8cb` remains
+acceptance-REJECTED for missing immediate tenant revalidation after non-agent
+query embedding; its green CI was not acceptance. Only S1 under existing #46 /
+milestone M9 (10). #46/#35/#36/#45/#50 remain OPEN; no Target-Mac work.
 
 `Tenant.is_active` is application authority, alongside existing tenant ownership,
 API-key scope/expiry/revocation and human user/membership/session authority. False
@@ -8837,3 +8839,70 @@ concurrency/source leases/dedup, folder inference transaction separation, #45,
 #35, #36 or #50. Existing runtime-storage rollback orphan risk is deferred;
 DB rollback does not imply filesystem compensation. Validation and delivery:
 `docs/ISSUE_46_S1_VALIDATION.md`. This decision does not complete #46.
+
+
+## D-102 — Issue #46 S2: closed diagnostic privacy boundary
+
+Status: PR #117 head `5e40f9f52a0b377741274a3d4f23724c1cb84a4c`
+acceptance-REJECTED: operator-controlled paths/member names remained in failure
+Findings. The corrected implementation requires independent re-acceptance,
+S2 only under
+existing #46 / M9 (10), from verified main
+`95b65313920463af6ee03d4eb0072244e25ff089`. #46/#35/#36/#45/#50 remain OPEN.
+The completed remaining-scope audit's B17/B18 / R04 / S2 is the scope authority;
+its SQL/exception leaks were re-reproduced on this post-S1 main with synthetic
+sentinels before correction. S1 is accepted/merged under D-101, not reopened.
+
+Operational diagnostic output carries closed component/reason codes, bounded
+exception class names, status/method/counts and opaque IDs where needed. Never
+candidate/identity/CV/query/JD text, prompts/output, credentials/tokens/headers,
+DB URLs/passwords, bound SQL values, original private paths or raw exception
+messages/args/causes/tracebacks. No debug bypass or candidate-text sanitizer.
+
+All seven app/operator/Alembic engine constructors use `hide_parameters=True`.
+That alone cannot hide driver detail, literal SQL, result-row DEBUG logs or pool
+tracebacks. A single idempotent record factory structurally projects SQLAlchemy,
+Uvicorn and HTTPX/HTTPCore records before present or future handlers format them.
+SQL text/parameters/rows, HTTP targets/client addresses and library exception
+payloads are discarded; levels/components/type remain, access method/status remain.
+Application-owned log calls use closed messages. Existing structural warnings
+remain intact; unexpected folder processing adds a closed component/code/type.
+
+Unexpected HTTP errors are consumed by an ASGI boundary and use the shared safe
+handler, rather than being re-raised to Uvicorn after sending a safe response.
+API 500 and request-validation 422 responses are generic; UI error rendering and
+its existing security headers are preserved. Typed domain/auth/tenant errors
+keep existing handling. Cancellation is not consumed; after a response starts,
+no second response or candidate-derived diagnostic is sent.
+
+Ops `safe_exception_text` returns only a bounded class name, never evaluates
+str/repr/args or formats a traceback. Existing Finding codes/components remain.
+Failure Findings use fixed structural copy, never arbitrary local paths, filenames,
+archive/source members, manifest names, model input or DB revision text. Counts,
+limits, exception types and closed reason codes remain. This diagnostic correction
+is owned by S2; it is not a #35 deferral. An AST-reviewed sink manifest protects
+nonliteral failure/conditional messages; invalid internal-worker argv is silent.
+Host-config reasons use a typed closed field without evaluating exception text.
+CLI diagnostics use
+codes/types rather than raw validation/persisted failure messages, source paths,
+argument values or planned filter text. Provisioning's explicit one-time secret
+output and authorized product data rendering are separate from operational logs.
+Intentional successful release identity/checksum metadata remains product inventory.
+Display accepts only bounded numeric/closed prerelease versions and an exact
+derived hex-commit identity; arbitrary manifest identity strings get fixed
+availability copy. Artifact identity/validation/lifecycle are unchanged.
+Arbitrary output paths/plist labels and unvalidated release/model values are omitted
+from success copy as well, because they can themselves contain sensitive input.
+Ollama typed failure codes and bounded retries remain; raw transport/schema causes
+and invalid HTTP envelope contents do not cross their diagnostic boundary.
+New profile/identity failure messages are structural types, including evidence
+failures that previously embedded model-authored labels. Existing stored rows
+are not rewritten, and CLI never prints their legacy raw error_message.
+
+No AuditEvent redesign, migration, dependency/lockfile change, cache/docs policy,
+demo ownership change, storage compensation, folder concurrency/leases/inference
+transaction refactor, readiness/config-range/retention implementation, S3+, #45,
+#35/#36/#50 advancement, deployment or Target-Mac work. Local-only AI, typed domain
+codes, search/ranking/provenance, auth/tenant boundaries and #85 DB release remain.
+Validation, sink inventory, before/after proof and remaining limitations:
+`docs/ISSUE_46_S2_VALIDATION.md`. Green gates/CI are not independent acceptance.

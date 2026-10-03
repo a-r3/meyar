@@ -541,7 +541,7 @@ remains the model-approval evidence boundary.
 ## Tenant isolation enforcement
 
 Issue #46 S1 / D-101 adds live tenant suspension authority to the existing
-ownership boundaries (pending independent acceptance). An inactive or absent
+ownership boundaries (independently accepted and merged in PR #116). An inactive or absent
 Tenant fails closed even with otherwise valid credentials. The supported
 `set_tenant_active` operation revokes only that tenant's BrowserSessions and
 rotates its membership security stamps; it leaves other memberships, their
@@ -616,9 +616,29 @@ file on disk.
 
 ## PII-safe logging
 
-Structured logs use ids/enums/durations only — see MASTER_SPEC.md §16.
-Enforced by convention + a lightweight log-call lint in `security-review`
-skill; CV text/PII must never be passed to the logger.
+Issue #46 S2 / D-102 proposes an executable diagnostic boundary (independent
+re-acceptance pending after PR #117 head `5e40f9f...` was rejected for operator
+path/member failure leaks), alongside MASTER_SPEC.md §19. Failure Findings use
+closed structural copy, never arbitrary operator paths/member names; this is S2
+ownership, not a #35 deferral. Application failures emit
+closed component/reason codes and bounded exception class names; no raw
+exception message, args, cause, traceback, request/model payload or source path.
+All application/operator/Alembic engines hide bind parameters. SQLAlchemy
+engine/pool, Uvicorn and HTTPX/HTTPCore records are projected to structural
+messages before handlers format them, even with verbose logging; SQL text,
+result rows and raw targets/addresses are excluded. Access logs retain the
+closed HTTP method and status. No debug bypass exists.
+
+Unexpected HTTP failures are consumed before server traceback reporting,
+with generic API/UI responses and existing UI security headers. API request
+validation reports a generic 422 rather than raw Pydantic input/context.
+Model failures retain typed codes but exclude raw transport/validation causes;
+new profile/identity failure records retain codes and exception types only.
+CLI diagnostics exclude raw validation input, paths, stored legacy failure
+messages and echoed argument values. Explicit one-time credential provisioning
+and authorized product data presentation remain separate from operational logs.
+AuditEvent structural metadata, local-only processing, tenant authority and
+inference DB release are unchanged. Details/proof: `docs/ISSUE_46_S2_VALIDATION.md`.
 
 ## Retention / deletion
 

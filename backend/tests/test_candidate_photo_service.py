@@ -51,6 +51,8 @@ from meyar.services.tenant_repo import create_tenant
 from meyar.storage.local import LocalFilesystemStorage
 from meyar.storage.photo import LocalPhotoStorage
 
+pytestmark = pytest.mark.usefixtures("enabled_diagnostic_loggers")
+
 MAX_BYTES = 10 * 1024 * 1024
 
 
@@ -455,7 +457,7 @@ async def test_hard_delete_accepts_preexisting_broken_photo(
 
 @pytest.mark.parametrize("photo_state", ["missing", "corrupt"])
 async def test_failed_hard_delete_preserves_preexisting_broken_photo(
-    client: AsyncClient, db_session: AsyncSession, tmp_path: Path,
+    client: AsyncClient, db_session: AsyncSession, tmp_path: Path, caplog,
     monkeypatch, photo_state: str,
 ) -> None:
     app.dependency_overrides[get_settings] = lambda: Settings(ui_cookie_secure=False)
@@ -482,11 +484,13 @@ async def test_failed_hard_delete_preserves_preexisting_broken_photo(
         raise OSError("synthetic original delete failure")
 
     monkeypatch.setattr(LocalFilesystemStorage, "delete", fail_original)
-    with pytest.raises(OSError, match="synthetic original delete failure"):
-        await client.delete(
-            f"/api/v1/candidates/{document.candidate_id}",
-            headers={"Authorization": f"Bearer {summary.api_key_plaintext}"},
-        )
+    response = await client.delete(
+        f"/api/v1/candidates/{document.candidate_id}",
+        headers={"Authorization": f"Bearer {summary.api_key_plaintext}"},
+    )
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Internal server error."}
+    assert "error_type=OSError" in caplog.text
     assert await db_session.get(Candidate, candidate_id) is not None
     retained = await db_session.get(CandidatePhotoVersion, photo_id)
     assert retained is not None and retained.derived_sha256 == expected_hash
@@ -511,7 +515,7 @@ async def test_failed_hard_delete_preserves_preexisting_broken_photo(
 
 @pytest.mark.parametrize("broken_state", ["missing", "corrupt"])
 async def test_mixed_photo_states_survive_later_delete_failure(
-    client: AsyncClient, db_session: AsyncSession, tmp_path: Path,
+    client: AsyncClient, db_session: AsyncSession, tmp_path: Path, caplog,
     monkeypatch, broken_state: str,
 ) -> None:
     summary, storage, old = await _seed(db_session, tmp_path)
@@ -543,11 +547,13 @@ async def test_mixed_photo_states_survive_later_delete_failure(
         raise OSError("synthetic later original delete failure")
 
     monkeypatch.setattr(LocalFilesystemStorage, "delete", fail_original)
-    with pytest.raises(OSError, match="synthetic later original delete failure"):
-        await client.delete(
-            f"/api/v1/candidates/{old.candidate_id}",
-            headers={"Authorization": f"Bearer {summary.api_key_plaintext}"},
-        )
+    response = await client.delete(
+        f"/api/v1/candidates/{old.candidate_id}",
+        headers={"Authorization": f"Bearer {summary.api_key_plaintext}"},
+    )
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Internal server error."}
+    assert "error_type=OSError" in caplog.text
     assert await db_session.get(Candidate, candidate_id) is not None
     assert await photos.read(tenant_id=tenant_id, storage_key=good_key) == good_bytes
     if broken_bytes is None:
@@ -563,7 +569,7 @@ async def test_mixed_photo_states_survive_later_delete_failure(
 
 @pytest.mark.parametrize("fault", ["original_delete", "photo_delete"])
 async def test_failed_hard_delete_preserves_valid_photo_and_retry(
-    client: AsyncClient, db_session: AsyncSession, tmp_path: Path, monkeypatch, fault: str
+    client: AsyncClient, db_session: AsyncSession, tmp_path: Path, caplog, monkeypatch, fault: str
 ) -> None:
     app.dependency_overrides[get_settings] = lambda: Settings(ui_cookie_secure=False)
     summary, storage, document = await _seed(db_session, tmp_path)
@@ -599,8 +605,10 @@ async def test_failed_hard_delete_preserves_valid_photo_and_retry(
     )
     url = f"/api/v1/candidates/{candidate_id}"
     auth = {"Authorization": f"Bearer {summary.api_key_plaintext}"}
-    with pytest.raises(OSError):
-        await client.delete(url, headers=auth)
+    response = await client.delete(url, headers=auth)
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Internal server error."}
+    assert "error_type=OSError" in caplog.text
     assert await db_session.get(Candidate, candidate_id) is not None
     assert await db_session.get(CandidatePhotoVersion, photo_id) is not None
     assert await photos.read(tenant_id=tenant_id, storage_key=photo_key) == photo_bytes
@@ -621,7 +629,7 @@ async def test_failed_hard_delete_preserves_valid_photo_and_retry(
 
 
 async def test_multi_photo_partial_delete_restores_every_available_asset(
-    client: AsyncClient, db_session: AsyncSession, tmp_path: Path, monkeypatch
+    client: AsyncClient, db_session: AsyncSession, tmp_path: Path, caplog, monkeypatch
 ) -> None:
     summary, storage, old = await _seed(db_session, tmp_path)
     photos = LocalPhotoStorage(str(tmp_path / "storage"))
@@ -655,8 +663,10 @@ async def test_multi_photo_partial_delete_restores_every_available_asset(
     monkeypatch.setattr(LocalPhotoStorage, "delete", fail_second)
     url = f"/api/v1/candidates/{candidate_id}"
     auth = {"Authorization": f"Bearer {summary.api_key_plaintext}"}
-    with pytest.raises(OSError):
-        await client.delete(url, headers=auth)
+    response = await client.delete(url, headers=auth)
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Internal server error."}
+    assert "error_type=OSError" in caplog.text
     assert await db_session.get(Candidate, candidate_id) is not None
     for key, content in expected.items():
         assert await photos.read(tenant_id=tenant_id, storage_key=key) == content
@@ -668,7 +678,7 @@ async def test_multi_photo_partial_delete_restores_every_available_asset(
 
 
 async def test_photo_assets_recover_when_candidate_db_commit_fails(
-    client: AsyncClient, db_session: AsyncSession, tmp_path: Path, monkeypatch
+    client: AsyncClient, db_session: AsyncSession, tmp_path: Path, caplog, monkeypatch
 ) -> None:
     summary, storage, document = await _seed(db_session, tmp_path)
     photos = LocalPhotoStorage(str(tmp_path / "storage"))
@@ -694,15 +704,17 @@ async def test_photo_assets_recover_when_candidate_db_commit_fails(
     monkeypatch.setattr(db_session, "commit", fail_commit)
     url = f"/api/v1/candidates/{candidate_id}"
     auth = {"Authorization": f"Bearer {summary.api_key_plaintext}"}
-    with pytest.raises(OSError):
-        await client.delete(url, headers=auth)
+    response = await client.delete(url, headers=auth)
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Internal server error."}
+    assert "error_type=OSError" in caplog.text
     assert await db_session.get(Candidate, candidate_id) is not None
     assert await photos.read(tenant_id=tenant_id, storage_key=photo_key) == photo_bytes
     assert (await client.delete(url, headers=auth)).status_code == 204
 
 
 async def test_hard_delete_rejects_foreign_tenant_photo_key_before_any_delete(
-    client: AsyncClient, db_session: AsyncSession, tmp_path: Path
+    client: AsyncClient, db_session: AsyncSession, tmp_path: Path, caplog
 ) -> None:
     summary, storage, document = await _seed(db_session, tmp_path)
     photos = LocalPhotoStorage(str(tmp_path / "storage"))
@@ -718,11 +730,13 @@ async def test_hard_delete_rejects_foreign_tenant_photo_key_before_any_delete(
     foreign_key = await photos.save(tenant_id=foreign.id, content=b"foreign synthetic asset")
     row.derived_storage_key = foreign_key
     await db_session.commit()
-    with pytest.raises(ValueError, match="Invalid derived photo key"):
-        await client.delete(
-            f"/api/v1/candidates/{candidate_id}",
-            headers={"Authorization": f"Bearer {summary.api_key_plaintext}"},
-        )
+    response = await client.delete(
+        f"/api/v1/candidates/{candidate_id}",
+        headers={"Authorization": f"Bearer {summary.api_key_plaintext}"},
+    )
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Internal server error."}
+    assert "error_type=ValueError" in caplog.text
     assert await db_session.get(Candidate, candidate_id) is not None
     assert await storage.read(storage_key=document_key) == original
     assert (

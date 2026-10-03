@@ -98,7 +98,7 @@ async def _inspect_database(engine: AsyncEngine) -> tuple[list[str], set[str]]:
 
 async def _run_database(config: Config, head: str, database_url: str) -> str:
     try:
-        engine = create_async_engine(database_url, pool_pre_ping=True)
+        engine = create_async_engine(database_url, hide_parameters=True, pool_pre_ping=True)
     except Exception as exc:  # noqa: BLE001 - driver errors may include credentials
         raise SchemaInitFailure("DATABASE_UNREACHABLE") from exc
     try:

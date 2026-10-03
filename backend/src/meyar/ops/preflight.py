@@ -143,7 +143,7 @@ def _check_required_paths(builder: OpsResultBuilder) -> None:
                 component="required_path",
                 status=FindingStatus.FAIL,
                 code="PATH_MISSING",
-                message=f"required path missing: {path.name}",
+                message="required application path missing",
             )
 
 
@@ -296,7 +296,7 @@ def _check_model_names(builder: OpsResultBuilder) -> None:
                 component=label,
                 status=FindingStatus.OK,
                 code="MODEL_NAME_PRESENT",
-                message=f"configured: {value}",
+                message="model name configured",
             )
         else:
             builder.add(

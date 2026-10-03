@@ -108,6 +108,15 @@ async def test_plan_cli_skill_duration_is_executable_without_model(
     tenant = await _tenant(db_session)
     llm = FakeLLMProvider()
     _patch_common(monkeypatch, db_session, llm)
+    plans = []
+    original = cli.plan_candidate_search
+
+    async def capture_plan(*args, **kwargs):
+        plan = await original(*args, **kwargs)
+        plans.append(plan)
+        return plan
+
+    monkeypatch.setattr(cli, "plan_candidate_search", capture_plan)
     await cli._plan_search(
         str(tenant.id),
         "Java üzrə ən azı 5 il təcrübəsi olan namizədləri göstər",
@@ -116,8 +125,10 @@ async def test_plan_cli_skill_duration_is_executable_without_model(
     )
     output = capsys.readouterr().out
     assert "Executable: True" in output
-    assert "'value': 'Java'" in output
-    assert "'min_years': 5.0" in output
+    assert "Java" not in output
+    assert "Required filters present: True" in output
+    requirement = plans[0].search_request.required_filters.skill_experience[0]
+    assert requirement.value == "Java" and requirement.min_years == 5.0
     assert llm.call_count == 0
 
 

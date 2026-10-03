@@ -95,7 +95,7 @@ from meyar.ops.alembic_static_metadata import (
 )
 from meyar.ops.archive_safety import ArchiveBoundExceededError, inspect_archive_members
 from meyar.ops.model_manifest import ModelApprovalStatus
-from meyar.ops.redact import safe_exception_text
+from meyar.ops.redact import release_identity_text, safe_exception_text
 from meyar.ops.release_manifest import (
     ModelManifestReference,
     ReleaseManifest,
@@ -163,22 +163,19 @@ def default_git_runner(argv: list[str], *, cwd: Path) -> subprocess.CompletedPro
 
 
 class GitCommandError(Exception):
-    """A `git` invocation exited non-zero. `stderr_text` is already
-    bounded — never the raw, unbounded stderr stream."""
+    """A Git invocation failed; retained internal fields are never diagnostic copy."""
 
     def __init__(self, argv: list[str], returncode: int, stderr_text: str) -> None:
         self.argv = argv
         self.returncode = returncode
         self.stderr_text = stderr_text
-        super().__init__(
-            f"git command failed (exit {returncode}): {' '.join(argv)}: {stderr_text}"
-        )
+        super().__init__(f"git command failed (exit {returncode})")
 
 
 class GitCommitNotFoundError(Exception):
     def __init__(self, source_sha: str) -> None:
         self.source_sha = source_sha
-        super().__init__(f"commit not found in local repository: {source_sha}")
+        super().__init__("commit not found in local repository")
 
 
 class UnsafeGitTreeEntryError(Exception):
@@ -189,8 +186,7 @@ class UnsafeGitTreeEntryError(Exception):
 
     def __init__(self, entries: list[GitTreeEntry]) -> None:
         self.entries = entries
-        summary = "; ".join(f"{e.path} (mode={e.mode}, type={e.obj_type})" for e in entries[:10])
-        super().__init__(f"{len(entries)} unsafe git tree entr(y/ies): {summary}")
+        super().__init__(f"{len(entries)} unsafe git tree entr(y/ies)")
 
 
 class UnsafeBuiltArchiveError(Exception):
@@ -213,7 +209,7 @@ class UnsafeBuiltArchiveError(Exception):
 class RequiredReleaseFileMissingError(Exception):
     def __init__(self, path: str) -> None:
         self.path = path
-        super().__init__(f"selected commit has no '{path}' — required for a release build")
+        super().__init__("selected commit is missing a required release file")
 
 
 class GitBlobTooLargeError(Exception):
@@ -229,7 +225,7 @@ class GitBlobTooLargeError(Exception):
         self.declared_size = declared_size
         self.limit = limit
         super().__init__(
-            f"blob for '{path}' has declared size {declared_size} bytes, exceeding the "
+            f"source blob has declared size {declared_size} bytes, exceeding the "
             f"release-artifact aggregate bound of {limit} bytes"
         )
 
@@ -248,20 +244,20 @@ class ReleaseIdentityUnsafeError(Exception):
         self.field = field
         self.value = value
         self.reason = reason
-        super().__init__(f"{field} is unsafe for filesystem use ({reason}): {value!r}")
+        super().__init__("release identity is unsafe for filesystem use")
 
 
 class OutputDirInvalidError(Exception):
     def __init__(self, output_dir: Path, reason: str) -> None:
         self.output_dir = output_dir
         self.reason = reason
-        super().__init__(f"--output-dir invalid ({reason}): {output_dir}")
+        super().__init__("--output-dir invalid")
 
 
 class OutputTargetExistsError(Exception):
     def __init__(self, path: Path) -> None:
         self.path = path
-        super().__init__(f"output target already exists: {path}")
+        super().__init__("output target already exists")
 
 
 class OutputIdentityUnavailableError(Exception):
@@ -286,7 +282,7 @@ class OutputIdentityUnavailableError(Exception):
         self.path = path
         super().__init__(
             "could not verify identity of the file just created (os.fstat failed) — "
-            f"left in place, un-cleaned, for operator inspection: {path}"
+            "left in place, un-cleaned, for operator inspection"
         )
 
 
@@ -450,9 +446,7 @@ def _fetch_all_blobs(
             raise GitBlobTooLargeError(
                 entry.path, declared_size, archive_safety.MAX_AGGREGATE_UNCOMPRESSED_SIZE
             )
-        content_by_path[entry.path] = _read_blob(
-            entry.blob_sha, repo_root=repo_root, runner=runner
-        )
+        content_by_path[entry.path] = _read_blob(entry.blob_sha, repo_root=repo_root, runner=runner)
     return content_by_path, aggregate_declared_size
 
 
@@ -508,9 +502,7 @@ class _CreatedFile:
     path: Path
 
 
-def _create_exclusive(
-    *, dir_fd: int, basename: str, data: bytes, output_dir: Path
-) -> _CreatedFile:
+def _create_exclusive(*, dir_fd: int, basename: str, data: bytes, output_dir: Path) -> _CreatedFile:
     """`O_CREAT | O_EXCL` create, with explicit raw-fd ownership discipline:
     this function owns the raw `fd` returned by `os.open()` until
     ownership is explicitly transferred to the `os.fdopen()`-wrapped file
@@ -668,7 +660,7 @@ def build_release(
             component="output_dir",
             status=FindingStatus.FAIL,
             code="OUTPUT_DIR_INVALID",
-            message=_bounded(f"--output-dir does not exist or is not a directory: {output_dir}"),
+            message="--output-dir does not exist or is not a directory",
         )
         return builder.build()
     builder.add(
@@ -805,7 +797,7 @@ def build_release(
         component="metadata_extraction",
         status=FindingStatus.OK,
         code="METADATA_EXTRACTED",
-        message=f"release_version={release_version} from the selected commit's pyproject.toml",
+        message="release metadata read from the selected commit",
     )
 
     # `release_version` is attacker-controlled content for any commit an
@@ -882,10 +874,9 @@ def build_release(
             component="member_name_length_bound",
             status=FindingStatus.FAIL,
             code="MEMBER_NAME_LENGTH_EXCEEDS_BOUND",
-            message=_bounded(
+            message=(
                 f"{len(too_long_names)} final archive member name(s) exceed the accepted "
-                f"bound of {archive_safety.MAX_MEMBER_NAME_LENGTH} characters, e.g. "
-                f"{too_long_names[0]!r} ({len(too_long_names[0])} characters)"
+                f"bound of {archive_safety.MAX_MEMBER_NAME_LENGTH} characters"
             ),
         )
         return builder.build()
@@ -906,7 +897,7 @@ def build_release(
                 component="output_targets",
                 status=FindingStatus.FAIL,
                 code="OUTPUT_TARGET_EXISTS",
-                message=_bounded(f"output target already exists: {output_dir / name}"),
+                message="release-bundle output target already exists",
             )
             return builder.build()
     builder.add(
@@ -945,7 +936,9 @@ def build_release(
         component="release_manifest_construction",
         status=FindingStatus.OK,
         code="RELEASE_MANIFEST_BUILT",
-        message=f"release_id={release_id}",
+        message=release_identity_text(
+            release_id=release_id, release_version=release_version, source_sha=request.source_sha
+        ),
     )
 
     manifest_bytes = manifest.model_dump_json().encode("utf-8")
@@ -1012,9 +1005,8 @@ def build_release(
                 safe_exception_text(exc), code="ARCHIVE_RESOURCE_BOUND_EXCEEDED"
             ) from exc
         if violations:
-            summary = "; ".join(f"{v.member_name}: {v.reason}" for v in violations[:5])
             raise UnsafeBuiltArchiveError(
-                _bounded(f"{len(violations)} unsafe archive member(s): {summary}"),
+                f"{len(violations)} unsafe archive member(s)",
                 code="UNSAFE_ARCHIVE_MEMBER",
             )
         builder.add(
@@ -1041,13 +1033,13 @@ def build_release(
             dir_fd=output_dir_fd, basename=sums_name, data=sums_bytes, output_dir=output_dir
         )
         created.append(sums_file)
-    except OutputTargetExistsError as exc:
+    except OutputTargetExistsError:
         _cleanup_all()
         builder.add(
             component="output_bundle_write",
             status=FindingStatus.FAIL,
             code="OUTPUT_TARGET_EXISTS",
-            message=safe_exception_text(exc),
+            message="release-bundle output target already exists",
         )
         return builder.build()
     except UnsafeBuiltArchiveError as exc:
@@ -1056,7 +1048,7 @@ def build_release(
             component="archive_self_check",
             status=FindingStatus.FAIL,
             code=exc.code,
-            message=str(exc),
+            message=safe_exception_text(exc),
         )
         return builder.build()
     except OutputIdentityUnavailableError as exc:
@@ -1089,6 +1081,9 @@ def build_release(
         component="build_complete",
         status=FindingStatus.OK,
         code="RELEASE_BUILT",
-        message=f"release_id={release_id} written to {output_dir}",
+        message=release_identity_text(
+            release_id=release_id, release_version=release_version, source_sha=request.source_sha
+        )
+        + " bundle written",
     )
     return builder.build()

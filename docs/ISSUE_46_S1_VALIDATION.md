@@ -1,15 +1,25 @@
 # Issue #46 S1 — Tenant Active Authorization
 
-Status: implemented, pending independent acceptance; #46 is NOT complete.
+Status: independently ACCEPTED + owner-MERGED in PR #116; #46 is NOT complete.
 Only S1 under existing #46 / **M9 — Deployment, Benchmark & Integration
 Readiness** (milestone 10). No merge or auto-merge by the agent.
 
-## PR #116 acceptance blocker correction
+## Independent acceptance and owner merge
+
+Accepted exact head: `436e01589d86cc6db2d7926d2801525e9555b702`.
+Exact-head CI [37106111151](https://github.com/a-r3/meyar/actions/runs/37106111151)
+completed SUCCESS. Owner squash/main: `95b65313920463af6ee03d4eb0072244e25ff089`.
+Accepted and merged full trees independently match:
+`8c017e6eeae367fbb411e88e64a2faf4af2d9b32`. PR #116 is MERGED;
+#46/#35/#36/#45/#50 remain OPEN. The record below describes historical S1 work;
+only the later S2 logging/privacy proposal has now started. No S1 semantics change.
+
+## PR #116 acceptance blocker correction (historical)
 
 Reviewed head `d253b3d12c2f86a7b5c417f7ee060131470de8cb` is
 **acceptance-REJECTED**, despite successful CI run 37102399674. The correction
-amends the same branch and PR #116; no new PR or merge. Re-acceptance must use
-its new exact head, published with exact-head CI in the delivery report.
+amended the same branch and PR #116. The corrected head was independently
+accepted and owner-merged as recorded above; no agent merge occurred.
 
 The rejected search checked authority at entry and at final response creation,
 but used the embedding result, queried compatible embeddings and built candidate
@@ -60,8 +70,8 @@ Correction gate: new regressions **25 passed in 7.66s**. Required focused suites
 **422 passed in 73.67s (0:01:13)**; full gate **3,568 passed in 799.21s
 (0:13:19)**. Ruff clean; mypy(src)
 clean (227 source files); unchanged single Alembic head `b88a2c4d6e10`. No migration/dependency/lockfile change. All S2+,
-other-issue and Target-Mac deferrals remain in force. Independent acceptance
-is pending; issue #46 remains OPEN.
+other-issue and Target-Mac deferrals remained in force at S1 delivery. S1
+acceptance/merge is now recorded above; issue #46 remains OPEN.
 
 The first correction full run had **1 failed, 3,567 passed in 816.54s**:
 existing unmodified `test_docx_tables.py::
@@ -284,4 +294,5 @@ full rerun passed all 3,543 tests.
 
 Exact delivered PR head and its exact-head CI run are published in the PR and
 operational delivery report, without attempting a self-referential Git commit.
-Independent acceptance remains pending; no acceptance or merge is claimed.
+These initial-head gates are historical. Corrected-head S1 acceptance and
+owner merge are recorded above; the initial head remains rejected.

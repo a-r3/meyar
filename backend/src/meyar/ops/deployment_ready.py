@@ -129,7 +129,9 @@ def _probe_application(port: int) -> str:
 
 async def _probe_database(database_url: str, head: str) -> tuple[str, str]:
     try:
-        engine = create_async_engine(database_url, connect_args={"timeout": 5.0})
+        engine = create_async_engine(
+            database_url, hide_parameters=True, connect_args={"timeout": 5.0},
+        )
     except Exception:  # noqa: BLE001 - driver errors may contain credentials
         return "DATABASE_UNREACHABLE", "PREREQUISITE_FAILED"
     try:
