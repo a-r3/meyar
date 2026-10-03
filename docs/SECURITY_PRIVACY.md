@@ -30,6 +30,15 @@
   untrusted input exactly like a direct upload — same MIME sniffing, size
   cap, opaque storage id, no filename-derived paths. A local file is not
   implicitly more trusted than an uploaded one.
+- Issue #46 M-5 proposal (D-099): new rejected/operationally failed folder
+  paths retain only candidate-less FAILED indexing state and closed safe failure
+  metadata. Candidate-less retries attach tenant-validated durable authority;
+  exact-content dedup also checks original-document hash and ownership.
+  Terminal failed originals keep existing authorized access without canonical
+  authority. Legacy empty candidates are not automatically deleted: current
+  provenance cannot prove exclusive failed-folder creation ownership. General
+  storage/DB rollback compensation and concurrent reconciliation remain separate
+  unresolved #46 items; see `docs/ISSUE_46_M5_VALIDATION.md`.
 - Any UI/API surface that exposes original CV bytes or `CandidateIdentity`
   fields requires the same authenticated/authorized access control as the
   rest of the API — there is no anonymous or public read path anywhere in

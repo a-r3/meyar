@@ -394,7 +394,7 @@ async def test_malformed_docx_isolated_scan_continues(
     broken = rows["b-broken.docx"]
     assert broken.index_status == INDEX_STATUS_FAILED
     assert broken.candidate_document_id is None
-    assert broken.candidate_id is not None  # identity still reserved for retry
+    assert broken.candidate_id is None  # validation failure reserves only path identity
     assert broken.failure_code == "UnsupportedDocumentError"
     assert rows["a-valid.pdf"].index_status == INDEX_STATUS_INDEXED
 
@@ -417,7 +417,8 @@ async def test_retry_previously_failed_file_then_fixed(
     assert first.new == 1
     assert first.failed == 1
     first_rows = await _rows(db_session, tenant.id, first.folder_source_id)
-    reserved_candidate_id = first_rows[0].candidate_id
+    original_row_id = first_rows[0].id
+    assert first_rows[0].candidate_id is None
 
     # Unchanged content, still broken: must be retried, not skipped.
     second = await index_folder(
@@ -438,7 +439,8 @@ async def test_retry_previously_failed_file_then_fixed(
     assert third.successful == 1
     rows = await _rows(db_session, tenant.id, first.folder_source_id)
     assert rows[0].index_status == INDEX_STATUS_INDEXED
-    assert rows[0].candidate_id == reserved_candidate_id
+    assert rows[0].id == original_row_id
+    assert rows[0].candidate_id is not None
     assert rows[0].candidate_document_id is not None
 
 

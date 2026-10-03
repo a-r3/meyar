@@ -14,7 +14,11 @@ from meyar.ingestion.folder_scanner import (
     scan_source_root,
 )
 from meyar.ingestion.parser import DocumentParser, ParseError
-from meyar.ingestion.validation import DocumentTooLargeError, UnsupportedDocumentError
+from meyar.ingestion.validation import (
+    DocumentTooLargeError,
+    UnsupportedDocumentError,
+    validate_upload_async,
+)
 from meyar.models.folder_indexed_file import (
     INDEX_STATUS_FAILED,
     INDEX_STATUS_INDEXED,
@@ -22,8 +26,12 @@ from meyar.models.folder_indexed_file import (
     FolderIndexedFile,
 )
 from meyar.services.audit_repo import record_event
-from meyar.services.candidate_document_service import ingest_candidate_document
-from meyar.services.candidate_repo import create_candidate
+from meyar.services.candidate_document_service import (
+    PreparedDocument,
+    persist_candidate_document,
+    prepare_candidate_document,
+)
+from meyar.services.candidate_repo import create_candidate, get_candidate
 from meyar.services.folder_indexed_file_repo import (
     create_folder_indexed_file,
     find_indexed_file_by_content_hash,
@@ -61,8 +69,8 @@ async def index_folder(
 ) -> FolderScanSummary:
     """Scans a local folder for supported CV files, ingests new/changed
     ones through the existing secure ingestion pipeline
-    (meyar.services.candidate_document_service.ingest_candidate_document
-    — no bypass), and persists idempotent per-file indexing state. Safe
+    (meyar.services.candidate_document_service.prepare_candidate_document
+    / persist_candidate_document — no bypass), and persists idempotent per-file indexing state. Safe
     to re-run: an unchanged file is a no-op, a changed file creates a new
     CandidateDocument version without destroying prior evidence, a file
     that disappears is tombstoned (MISSING), never hard-deleted. One
@@ -101,7 +109,7 @@ async def index_folder(
             # row (the row requires a content hash, which would need a full
             # read). The path is present, so an existing row is not
             # tombstoned. Reported via audit + summary; general
-            # rejected-file/orphan handling remains M-5 (#46).
+            # rejected read-sized files use candidate-less FAILED rows (#46 M-5).
             remaining.pop(entry.relative_path, None)
             skipped_oversized_count += 1
             await record_event(
@@ -159,7 +167,7 @@ async def index_folder(
                 entry=entry,
                 max_bytes=max_bytes,
             )
-        elif existing.index_status == INDEX_STATUS_FAILED:
+        elif existing.index_status == INDEX_STATUS_FAILED or existing.candidate_document_id is None:
             retried_count += 1
             outcome = await _handle_changed_or_retry(
                 db,
@@ -242,8 +250,8 @@ async def _handle_new_file(
     entry: DiscoveredFile,
     max_bytes: int,
 ) -> str:
-    """Creates a new Candidate for a never-before-seen path, attempts
-    ingestion, and persists the resulting index row. Returns the
+    """Prepares a never-before-seen path before creating its Candidate,
+    then persists the durable document outcome and index row. Returns the
     resulting index_status.
 
     Exact-content dedup (Slice 14): if this tenant already has a
@@ -253,9 +261,37 @@ async def _handle_new_file(
     Candidate and a duplicate stored copy — content dedup only, never
     an inference that two different-content candidates are the same
     person (see docs/DECISIONS.md D-021)."""
-    duplicate = await find_indexed_file_by_content_hash(
-        db, tenant_id=tenant_id, sha256_hash=entry.sha256_hash
-    )
+    filename = _synthetic_filename(entry.relative_path)
+    try:
+        prepared, duplicate = await _prepare_new_path(
+            db, parser, tenant_id=tenant_id, entry=entry, max_bytes=max_bytes
+        )
+    except (UnsupportedDocumentError, DocumentTooLargeError, ParseError) as exc:
+        await create_folder_indexed_file(
+            db,
+            tenant_id=tenant_id,
+            folder_source_id=source_id,
+            relative_path=entry.relative_path,
+            document_type=_extension_document_type(entry.relative_path),
+            byte_size=entry.byte_size,
+            sha256_hash=entry.sha256_hash,
+            index_status=INDEX_STATUS_FAILED,
+            candidate_id=None,
+            candidate_document_id=None,
+            failure_code=_failure_metadata(exc)[0],
+            failure_message=_failure_metadata(exc)[1],
+        )
+        await record_event(
+            db,
+            tenant_id=tenant_id,
+            event_type="FOLDER_FILE_IMPORT_FAILED",
+            metadata={
+                "folder_source_id": str(source_id),
+                "failure_code": _failure_metadata(exc)[0],
+            },
+        )
+        return INDEX_STATUS_FAILED
+
     if duplicate is not None:
         await create_folder_indexed_file(
             db,
@@ -281,42 +317,14 @@ async def _handle_new_file(
         )
         return INDEX_STATUS_INDEXED
 
+    assert prepared is not None
+
+    # Unexpected persistence errors propagate to caller rollback; never
+    # commit them as validation-level FAILED paths with empty candidates.
     candidate = await create_candidate(db, tenant_id=tenant_id)
-    filename = _synthetic_filename(entry.relative_path)
-    try:
-        document = await ingest_candidate_document(
-            db,
-            storage,
-            parser,
-            tenant_id=tenant_id,
-            candidate_id=candidate.id,
-            filename=filename,
-            content_type="",
-            data=entry.data,
-            max_bytes=max_bytes,
-        )
-    except (UnsupportedDocumentError, DocumentTooLargeError, ParseError) as exc:
-        await create_folder_indexed_file(
-            db,
-            tenant_id=tenant_id,
-            folder_source_id=source_id,
-            relative_path=entry.relative_path,
-            document_type=_extension_document_type(entry.relative_path),
-            byte_size=entry.byte_size,
-            sha256_hash=entry.sha256_hash,
-            index_status=INDEX_STATUS_FAILED,
-            candidate_id=candidate.id,
-            candidate_document_id=None,
-            failure_code=exc.code.value if isinstance(exc, ParseError) else type(exc).__name__,
-            failure_message=str(exc)[:500],
-        )
-        await record_event(
-            db,
-            tenant_id=tenant_id,
-            event_type="FOLDER_FILE_IMPORT_FAILED",
-            metadata={"folder_source_id": str(source_id), "failure_code": type(exc).__name__},
-        )
-        return INDEX_STATUS_FAILED
+    document = await persist_candidate_document(
+        db, storage, prepared, tenant_id=tenant_id, candidate_id=candidate.id, filename=filename
+    )
 
     await create_folder_indexed_file(
         db,
@@ -348,20 +356,33 @@ async def _handle_changed_or_retry(
     attempt previously FAILED. A failed re-import never clears a
     previously successful candidate_document_id — only the observed
     hash/status change. Returns the resulting index_status."""
-    assert row.candidate_id is not None  # every existing row was created with one
+    # A legacy relationship alone cannot prove folder-created ownership.
+    # Retain those candidates; automatic deletion would be speculative.
+    if row.candidate_id is not None:
+        candidate = await get_candidate(db, tenant_id=tenant_id, candidate_id=row.candidate_id)
+        if candidate is None:
+            await update_folder_indexed_file(
+                db, row, index_status=INDEX_STATUS_FAILED,
+                failure_code="INDEX_AUTHORITY_INVALID",
+                failure_message="The indexed candidate is unavailable for this tenant.",
+            )
+            await record_event(
+                db, tenant_id=tenant_id, event_type="FOLDER_FILE_IMPORT_FAILED",
+                metadata={"folder_source_id": str(row.folder_source_id),
+                          "failure_code": "INDEX_AUTHORITY_INVALID"},
+            )
+            return INDEX_STATUS_FAILED
     filename = _synthetic_filename(entry.relative_path)
     try:
-        document = await ingest_candidate_document(
-            db,
-            storage,
-            parser,
-            tenant_id=tenant_id,
-            candidate_id=row.candidate_id,
-            filename=filename,
-            content_type="",
-            data=entry.data,
-            max_bytes=max_bytes,
-        )
+        duplicate = None
+        if row.candidate_id is None:
+            prepared, duplicate = await _prepare_new_path(
+                db, parser, tenant_id=tenant_id, entry=entry, max_bytes=max_bytes
+            )
+        else:
+            prepared = await prepare_candidate_document(
+                parser, filename=filename, content_type="", data=entry.data, max_bytes=max_bytes
+            )
     except (UnsupportedDocumentError, DocumentTooLargeError, ParseError) as exc:
         await update_folder_indexed_file(
             db,
@@ -369,8 +390,8 @@ async def _handle_changed_or_retry(
             byte_size=entry.byte_size,
             sha256_hash=entry.sha256_hash,
             index_status=INDEX_STATUS_FAILED,
-            failure_code=exc.code.value if isinstance(exc, ParseError) else type(exc).__name__,
-            failure_message=str(exc)[:500],
+            failure_code=_failure_metadata(exc)[0],
+            failure_message=_failure_metadata(exc)[1],
         )
         await record_event(
             db,
@@ -378,10 +399,33 @@ async def _handle_changed_or_retry(
             event_type="FOLDER_FILE_IMPORT_FAILED",
             metadata={
                 "folder_source_id": str(row.folder_source_id),
-                "failure_code": type(exc).__name__,
+                "failure_code": _failure_metadata(exc)[0],
             },
         )
         return INDEX_STATUS_FAILED
+
+    if duplicate is not None:
+        await update_folder_indexed_file(
+            db, row, byte_size=entry.byte_size, sha256_hash=entry.sha256_hash,
+            index_status=INDEX_STATUS_INDEXED, candidate_id=duplicate.candidate_id,
+            candidate_document_id=duplicate.candidate_document_id,
+            failure_code=None, failure_message=None, last_seen_at=datetime.now(UTC),
+        )
+        await record_event(
+            db, tenant_id=tenant_id, event_type="FOLDER_FILE_DUPLICATE_CONTENT_LINKED",
+            metadata={"folder_source_id": str(row.folder_source_id),
+                      "candidate_id": str(duplicate.candidate_id)},
+        )
+        return INDEX_STATUS_INDEXED
+    assert prepared is not None
+
+    candidate_id = row.candidate_id
+    if candidate_id is None:
+        candidate = await create_candidate(db, tenant_id=tenant_id)
+        candidate_id = candidate.id
+    document = await persist_candidate_document(
+        db, storage, prepared, tenant_id=tenant_id, candidate_id=candidate_id, filename=filename
+    )
 
     await update_folder_indexed_file(
         db,
@@ -389,12 +433,48 @@ async def _handle_changed_or_retry(
         byte_size=entry.byte_size,
         sha256_hash=entry.sha256_hash,
         index_status=INDEX_STATUS_INDEXED,
+        candidate_id=candidate_id,
         candidate_document_id=document.id,
         failure_code=None,
         failure_message=None,
         last_seen_at=datetime.now(UTC),
     )
     return INDEX_STATUS_INDEXED
+
+
+async def _prepare_new_path(
+    db: AsyncSession,
+    parser: DocumentParser,
+    *,
+    tenant_id: uuid.UUID,
+    entry: DiscoveredFile,
+    max_bytes: int,
+) -> tuple[PreparedDocument | None, FolderIndexedFile | None]:
+    """Dedup skips redundant parsing/storage, never this path's validation."""
+    filename = _synthetic_filename(entry.relative_path)
+    duplicate = await find_indexed_file_by_content_hash(
+        db, tenant_id=tenant_id, sha256_hash=entry.sha256_hash
+    )
+    if duplicate is not None:
+        await validate_upload_async(
+            filename=filename, content_type="", data=entry.data, max_bytes=max_bytes
+        )
+        return None, duplicate
+    prepared = await prepare_candidate_document(
+        parser, filename=filename, content_type="", data=entry.data, max_bytes=max_bytes
+    )
+    return prepared, None
+
+
+def _failure_metadata(
+    exc: UnsupportedDocumentError | DocumentTooLargeError | ParseError,
+) -> tuple[str, str]:
+    """Closed metadata: never persist exception text from untrusted input."""
+    if isinstance(exc, ParseError):
+        return exc.code.value, exc.public_message
+    if isinstance(exc, DocumentTooLargeError):
+        return "DocumentTooLargeError", "The document exceeds the allowed size."
+    return "UnsupportedDocumentError", "The document is not a supported PDF or DOCX."
 
 
 def _synthetic_filename(relative_path: str) -> str:

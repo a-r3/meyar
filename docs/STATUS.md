@@ -1,5 +1,24 @@
 # MEYAR — Status
 
+**Issue #46 M-5 — implementation PROPOSAL awaiting independent acceptance.**
+Starts from verified accepted main `f1429c7309b1537fd8e94547a2f666995a80859a`
+(after merged PR #110 and docs PR #111). New rejected/operationally failed
+folder files reserve candidate-less FAILED path rows; successful retries
+attach durable same-tenant authority to the same row. Existing candidate/
+prior-document pointers survive changed-file rejection. Retained terminal
+parser-failed originals remain authorized and INDEXED; with no profile
+attempt, library/detail show “Diqqət tələb edir” instead of “Emal olunur”.
+D-099 and `docs/ISSUE_46_M5_VALIDATION.md` specify the contract and validation.
+No automatic legacy candidate deletion: persisted folder associations cannot
+prove exclusive creation ownership, so ambiguous/shared/manual empty candidates
+are retained. General storage/DB compensation, overlapping-scan locking and
+M-9 remain separately unresolved. No migration/dependency/parser-version
+change. #46 remains OPEN under **M9**, and #35/#36/#50 are not advanced.
+Local proposal gate: 185 focused passed; 3475 full pytest passed in 499.99s;
+Ruff/mypy(src) clean; unchanged single Alembic head `b88a2c4d6e10`.
+No merge, independent acceptance or Target-Mac acceptance is claimed.
+
+
 
 **Issue #46 PR-3 — independently ACCEPTED and MERGED through PR #110;
 PR-3 is COMPLETE, but #46 remains OPEN.** Owner-confirmed accepted exact head:
