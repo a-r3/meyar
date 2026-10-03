@@ -22,7 +22,12 @@ async def create_candidate(db: AsyncSession, *, tenant_id: uuid.UUID) -> Candida
 
 
 async def get_candidate(
-    db: AsyncSession, *, tenant_id: uuid.UUID, candidate_id: uuid.UUID, lock: bool = False
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    candidate_id: uuid.UUID,
+    lock: bool = False,
+    share: bool = False,
 ) -> Candidate | None:
     stmt = (
         select(Candidate).where(Candidate.id == candidate_id, Candidate.tenant_id == tenant_id)
@@ -31,6 +36,10 @@ async def get_candidate(
         # Deletion authority: excludes upload SHARE and FK KEY SHARE locks.
         # Callers acquire Tenant authority first and hold through commit/rollback.
         stmt = stmt.with_for_update().execution_options(populate_existing=True)
+    elif share:
+        # Persistence authority for derived data: a concurrent delete waits for
+        # the caller's commit instead of enumerating assets it cannot yet see.
+        stmt = stmt.with_for_update(read=True).execution_options(populate_existing=True)
     result = await db.execute(stmt)
     return result.scalar_one_or_none()
 

@@ -260,7 +260,10 @@ async def post_candidate_document(
     durable_document = await get_candidate_document(
         db, tenant_id=ctx.tenant_id, candidate_id=candidate_id, document_id=document_id
     )
-    assert durable_document is not None
+    if durable_document is None:
+        # A legitimate concurrent hard-delete committed after the upload did.
+        # Nothing remains to describe; report the truthful current state.
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Candidate not found.")
     return await _document_out(db, durable_document, tenant_id=ctx.tenant_id)
 
 

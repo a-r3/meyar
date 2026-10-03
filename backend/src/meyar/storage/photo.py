@@ -45,6 +45,10 @@ class LocalPhotoStorage:
     async def delete(self, *, tenant_id: uuid.UUID, storage_key: str) -> None:
         self._path_for(storage_key, tenant_id).unlink(missing_ok=True)
 
+    async def delete_owned(self, *, tenant_id: uuid.UUID, storage_key: str) -> None:
+        # Compensation protocol shared with DocumentStorage (storage_recovery).
+        await self.delete(tenant_id=tenant_id, storage_key=storage_key)
+
     async def stage_delete(
         self, *, tenant_id: uuid.UUID, storage_key: str
     ) -> StagedObject | None:

@@ -30,7 +30,25 @@ attempt 1 **SUCCESS**. Verified squash/starting main
 D-104 / `docs/ISSUE_46_S4_VALIDATION.md` record the accepted recovery contract;
 earlier rejected heads and their corrections in the validation record are historical.
 
-**Issue #46 S5 — candidate hard-delete / direct-upload concurrency correction
+**Issue #46 S5 — ACCEPTED + MERGED.** Accepted head
+`1c18bae1c75c64d419bd361e8dd08995764df47a`; [exact-head CI 37137376151](https://github.com/a-r3/meyar/actions/runs/37137376151),
+attempt 1 **SUCCESS**; squash/main `dd4b4d0ce8b48b9948f948182094a5b1a50482f1`;
+accepted and merged tree `721438a6cbccedd54443bc5ba57cdb8718b03bf7` (identical).
+
+**Issue #46 S6 — post-upload photo persistence / candidate-delete concurrency
+correction implemented; independent acceptance pending.** Reproduced on exact S5
+source (real PostgreSQL, real synthetic storage, events): an orphan derived JPEG
+after a delete that waited on an uncommitted photo row, a 500 `AssertionError` when
+delete won after the document commit, and a derived asset deleted despite a durable
+ambiguous commit. Photo persistence now takes Tenant SHARE -> Candidate SHARE ->
+exact document revalidation for only its short persistence phase (extraction stays
+lock-free) and reuses S4 compensation; the upload response is 404 when delete won.
+D-106 and `docs/ISSUE_46_S6_VALIDATION.md`. Head `f83dbb1d…` was independently rejected
+for holding a pooled connection during extraction; corrected with a Phase A commit
+and a real-pool regression (extraction holds no transaction, connection or lock). Deferred scope unchanged; #46/#35/#36/#45/#50
+remain OPEN. No deployment/Target-Mac work.
+
+**(historical) Issue #46 S5 — candidate hard-delete / direct-upload concurrency correction
 implemented; independent acceptance pending.** The accepted S4 code was first
 reproduced with real PostgreSQL connections, events and real synthetic storage:
 a new upload committed after old originals were staged; the later candidate

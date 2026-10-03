@@ -40,7 +40,6 @@ from sqlalchemy.orm import Session
 
 from meyar.services.candidate_document_repo import document_storage_key_referenced
 from meyar.services.candidate_photo_repo import photo_storage_key_referenced
-from meyar.storage.base import DocumentStorage
 from meyar.storage.staging import StagedObject, StorageStagingError
 
 logger = logging.getLogger(__name__)
@@ -89,6 +88,7 @@ class _Created:
     tenant_id: uuid.UUID
     storage_key: str
     state: _State = _State.PENDING
+    namespace: str = "document"
 
 
 @dataclass
@@ -140,9 +140,14 @@ def _after_rollback(session: Session) -> None:
 
 
 def track_created(
-    db: AsyncSession, storage: DocumentStorage, *, tenant_id: uuid.UUID, storage_key: str
+    db: AsyncSession,
+    storage: Any,
+    *,
+    tenant_id: uuid.UUID,
+    storage_key: str,
+    namespace: str = "document",
 ) -> _Created:
-    entry = _Created(storage, tenant_id, storage_key)
+    entry = _Created(storage, tenant_id, storage_key, namespace=namespace)
     _ledger(db).created.append(entry)
     return entry
 
@@ -159,8 +164,8 @@ async def _referenced(db: AsyncSession, namespace: str, tenant_id: uuid.UUID, ke
 
 
 async def _resolve_created(db: AsyncSession, entry: _Created) -> None:
-    if await _referenced(db, "document", entry.tenant_id, entry.storage_key):
-        return  # the commit did become durable: the original is legitimate authority
+    if await _referenced(db, entry.namespace, entry.tenant_id, entry.storage_key):
+        return  # the commit did become durable: the asset is legitimate authority
     await entry.storage.delete_owned(tenant_id=entry.tenant_id, storage_key=entry.storage_key)
 
 
