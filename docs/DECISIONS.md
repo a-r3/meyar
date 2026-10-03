@@ -9157,3 +9157,26 @@ inference separation, readiness, retention/orphan sweepers and schema drift rema
 pending. S4 process-kill and explicitly reported cleanup/purge/compensation failures
 remain observable residuals. No migration/dependency/lockfile, deployment/Target-Mac
 work, or changes to #35/#36/#45/#50. #46 remains OPEN and is not complete.
+
+
+## D-106 — Issue #46 S6: post-upload photo persistence / candidate-delete serialization
+
+Status: implemented, independent acceptance pending; Refs #46, M9 milestone 10.
+Starts from accepted/merged S5 (PR #120): head `1c18bae1c75c64d419bd361e8dd08995764df47a`,
+CI 37137376151 attempt 1 SUCCESS, squash/main `dd4b4d0ce8b48b9948f948182094a5b1a50482f1`,
+tree `721438a6cbccedd54443bc5ba57cdb8718b03bf7`.
+
+Proof (before the fix, exact S5 source): photo row flushed-uncommitted + candidate
+delete left an orphan derived JPEG; delete-after-document-commit made the upload
+endpoint raise an `AssertionError` (500); an ambiguous photo commit deleted a
+referenced derived asset. Delete-wins-early and photo-first cases were already safe.
+
+Decision: after lock-free isolated extraction, photo persistence runs one short
+`recover_on_failure` phase: Tenant SHARE -> Candidate SHARE (`get_candidate(share=True)`)
+-> exact document revalidation -> derived save tracked in the S4 ledger (new
+`namespace="photo"`) -> row insert -> commit. Lock order stays Tenant -> Candidate.
+Missing candidate/document returns None without writing. Compensation failure is
+logged by S4 and returns None; photo remains presentation-only. The upload endpoint
+returns 404 "Candidate not found." when a legitimate delete committed after the
+document did. No schema change, no new dependency, no new lock edge. Residuals
+(hard-kill window, trash/orphan sweeping, folder concerns) remain deferred.

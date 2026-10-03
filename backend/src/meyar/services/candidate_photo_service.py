@@ -24,7 +24,13 @@ from meyar.photo import policy
 from meyar.services.candidate_document_repo import get_candidate_document
 from meyar.services.candidate_identity_repo import get_current_identity_version
 from meyar.services.candidate_photo_repo import create_photo_version, get_photo_for_document
+from meyar.services.candidate_repo import get_candidate
 from meyar.services.identity_authority import authorize_identity_version
+from meyar.services.storage_recovery import (
+    StorageCompensationError,
+    recover_on_failure,
+    track_created,
+)
 from meyar.services.tenant_authority import TenantInactiveError, require_active_tenant
 from meyar.storage.base import DocumentStorage
 from meyar.storage.photo import LocalPhotoStorage
@@ -93,9 +99,15 @@ async def process_photo_for_document(
 
     A terminal result is reused for this exact document/extractor. Failure
     never changes the original CV or professional processing state.
+
+    Isolated extraction holds no DB lock. Persistence is a short
+    fresh phase: Tenant SHARE -> Candidate SHARE -> exact document revalidation,
+    held through derived save, row insert and commit, so candidate hard-delete
+    (Candidate UPDATE) either completes first (nothing is saved) or waits and
+    then enumerates the durable derived asset (issue #46 S6). Returns None when
+    the document/candidate no longer exists.
     """
     await require_active_tenant(db, tenant_id)
-    derived_key: str | None = None
     try:
         document = await get_candidate_document(
             db, tenant_id=tenant_id, candidate_id=candidate_id, document_id=document_id
@@ -111,10 +123,13 @@ async def process_photo_for_document(
         )
         if existing is not None:
             return existing
-        original = await document_storage.read(storage_key=document.storage_key)
-        kind = "PDF" if document.mime_type == "application/pdf" else "DOCX"
+        storage_key, mime_type = document.storage_key, document.mime_type
+        # The read-only transaction so far holds no row locks (READ COMMITTED);
+        # it is not rolled back here so callers' loaded ORM state stays valid.
+        original = await document_storage.read(storage_key=storage_key)
+        kind = "PDF" if mime_type == "application/pdf" else "DOCX"
         outcome = await _extract_isolated(original, kind)
-        await require_active_tenant(db, tenant_id)
+        jpeg: bytes | None = None
         if outcome["status"] == PHOTO_AVAILABLE:
             jpeg = base64.b64decode(outcome.pop("jpeg_base64"), validate=True)
             if (
@@ -122,31 +137,56 @@ async def process_photo_for_document(
                 or hashlib.sha256(jpeg).hexdigest() != outcome["derived_sha256"]
             ):
                 raise ValueError("Invalid sanitized output")
-            derived_key = await photo_storage.save(tenant_id=tenant_id, content=jpeg)
-        row = await create_photo_version(
-            db,
-            tenant_id=tenant_id,
-            candidate_id=candidate_id,
-            document_id=document_id,
-            extractor_version=PHOTO_EXTRACTOR_VERSION,
-            outcome=outcome,
-            derived_storage_key=derived_key,
-        )
-        await db.commit()
-        return row
+        async with recover_on_failure(db):
+            await require_active_tenant(db, tenant_id, lock=True)
+            if await get_candidate(
+                db, tenant_id=tenant_id, candidate_id=candidate_id, share=True
+            ) is None or await get_candidate_document(
+                db, tenant_id=tenant_id, candidate_id=candidate_id, document_id=document_id
+            ) is None:
+                await db.rollback()
+                return None  # deletion won; no derived asset was written
+            existing = await get_photo_for_document(
+                db,
+                tenant_id=tenant_id,
+                candidate_id=candidate_id,
+                document_id=document_id,
+                extractor_version=PHOTO_EXTRACTOR_VERSION,
+            )
+            if existing is not None:
+                await db.rollback()
+                return existing
+            derived_key: str | None = None
+            if jpeg is not None:
+                derived_key = await photo_storage.save(tenant_id=tenant_id, content=jpeg)
+                track_created(
+                    db, photo_storage, tenant_id=tenant_id, storage_key=derived_key,
+                    namespace="photo",
+                )
+            row = await create_photo_version(
+                db,
+                tenant_id=tenant_id,
+                candidate_id=candidate_id,
+                document_id=document_id,
+                extractor_version=PHOTO_EXTRACTOR_VERSION,
+                outcome=outcome,
+                derived_storage_key=derived_key,
+            )
+            await db.commit()
+            return row
     except Exception as exc:
+        # recover_on_failure already rolled back and removed any unreferenced
+        # derived asset against fresh DB truth (never after a durable commit).
+        if isinstance(exc, TenantInactiveError):
+            raise
+        if isinstance(exc, StorageCompensationError):
+            logger.warning("Photo derived-asset compensation incomplete")
+            return None
+        logger.warning("Photo processing failed for a stored candidate document")
         try:
             await db.rollback()
         except Exception:
             logger.warning("Photo transaction rollback failed")
-        if derived_key is not None:
-            try:
-                await photo_storage.delete(tenant_id=tenant_id, storage_key=derived_key)
-            except Exception:
-                logger.warning("New derived photo cleanup failed")
-        if isinstance(exc, TenantInactiveError):
-            raise
-        logger.warning("Photo processing failed for a stored candidate document")
         try:
             await require_active_tenant(db, tenant_id)
             row = await create_photo_version(
