@@ -8970,19 +8970,22 @@ other-issue or Target-Mac work. Evidence: docs/ISSUE_46_S3_VALIDATION.md.
 
 ## D-104 — Issue #46 S4: original-CV storage <-> PostgreSQL recovery
 
-Status: implementation proposed for independent acceptance, Refs #46 under
-existing M9 milestone 10. Starting main `df5264d869ba3810b857b77b7d9491b77b6f39c1`.
-PR #119 head `95b39467f16235129b06135634ea119d59dea362` is acceptance-REJECTED:
-source unlink failure after successful trash hardlink creation escaped before
-ledger tracking, leaving an untracked duplicate during a handled failure.
-The correction stays on the same branch/PR; new exact-head re-acceptance is pending.
-Subsequent head `977aaf34b4e67be3602d95df1cbc1eea0063fe49` is also
-acceptance-REJECTED: a handled rollback failure before the outer event left
-tracked effects PENDING, skipped DB-truth settlement and surfaced only the
-primary failure. Its CI `37130613061` succeeded on attempt 1; green CI did not
-establish acceptance. This follow-up corrects that window on the same branch/PR.
-S1-S3 are accepted/merged; #46/#35/#36/#45/#50 remain OPEN. No migration,
-dependency or lockfile change.
+**Issue #46 S4 — independently ACCEPTED + owner-MERGED through PR #119.**
+Accepted exact head `6325cbe507d01624d37683be6b96d10a769c71b4`;
+[exact-head CI 37133867521](https://github.com/a-r3/meyar/actions/runs/37133867521),
+attempt 1 **SUCCESS**. Verified squash/starting main
+`dc4b404fc3eec2ee0919b84016ea3466383c0c6f`; accepted and merged full tree
+`4692171ec09dda67f7e848e8c004f74c83afedf5`. S1-S3 remain accepted/merged.
+D-104 / `docs/ISSUE_46_S4_VALIDATION.md` record the accepted recovery contract;
+earlier rejected heads and their corrections below are historical.
+
+Historical starting main `df5264d869ba3810b857b77b7d9491b77b6f39c1`.
+Heads `95b39467f16235129b06135634ea119d59dea362` and
+`977aaf34b4e67be3602d95df1cbc1eea0063fe49` were independently rejected for
+partial-stage cleanup and rollback-outcome handling, respectively. The accepted
+head corrected both; historical proof remains in the S4 validation record.
+#46 remains OPEN under existing M9 milestone 10; #35/#36/#45/#50 remain OPEN.
+No migration, dependency or lockfile change.
 
 Problem. Filesystem and PostgreSQL cannot be one atomic transaction. Before S4,
 `persist_candidate_document` saved the original and then relied on a caller's
@@ -9090,10 +9093,67 @@ Out of scope and not started: folder reconciliation overlap/leases, readiness,
 retention sweepers, schema drift, #45/#35/#36/#50, Target-Mac. Evidence:
 docs/ISSUE_46_S4_VALIDATION.md.
 
-Separate audit finding, deferred to remaining #46 concurrency work: candidate
-delete reads the candidate/document list without an exclusive candidate-row
+Separate S4 audit finding, subsequently reproduced and corrected in S5 (D-105):
+at the accepted S4 baseline candidate delete read the candidate/document list without an exclusive candidate-row
 serialization point. Direct upload holds a shared candidate authority lock through
 commit. It can commit a new document after delete enumerates assets, then the later
-candidate DELETE can cascade that row without staging its new original. The
-rollback-state correction does not fix this interleaving; no candidate locking,
-upload behavior or concurrency slice was changed. #46 remains OPEN.
+candidate DELETE can cascade that row without staging its new original. The S4
+rollback-state correction did not fix this interleaving; S4 changed no candidate
+locking or upload serialization. D-105 below closes this bounded original-CV race. #46 remains OPEN.
+
+
+## D-105 — Issue #46 S5: candidate deletion / direct-upload serialization
+
+Status: implemented, independent acceptance pending; Refs #46 under existing
+M9 milestone 10. Starts from accepted/merged PR #119 squash/main
+`dc4b404fc3eec2ee0919b84016ea3466383c0c6f`, tree
+`4692171ec09dda67f7e848e8c004f74c83afedf5`. S4 acceptance/CI is recorded in D-104.
+
+Before production editing, an event-controlled real-PostgreSQL regression paused
+delete after enumeration/staging of its old original, then let direct upload's
+actual persistence authority helper + persist + commit execute on a separate
+connection. An independent observer proved the new document durable. The candidate
+DELETE then cascaded both document rows but purged only the staged old original.
+Final state: zero candidate/document rows, one unreferenced filesystem original.
+The same regression passes after correction. Exact evidence and gates:
+`docs/ISSUE_46_S5_VALIDATION.md`.
+
+Decision: deletion acquires Tenant FOR SHARE, then the tenant-scoped Candidate
+FOR UPDATE before listing documents/photos or mutating storage. Both locks last
+through DB commit/rollback. `get_candidate(..., lock=True)` opts into this deletion
+lock; ordinary reads remain unlocked. Missing/cross-tenant candidates return None.
+The Tenant lock precedes Candidate even for direct service callers, preventing
+inversion with S1's before-commit Tenant authority guard. The guard registration
+also preserves live tenant refusal through commit. No new inference-held lock.
+
+Upload is unchanged: DB-free preparation, then Tenant SHARE -> ApiKey SHARE ->
+Candidate SHARE -> original save -> document/canonical/audit writes in SAVEPOINT ->
+outer commit. Auth's earlier last-used key update commits/releases before this
+phase. Delete does not acquire ApiKey/User/Membership/BrowserSession locks after
+Candidate; its route's existing key/scope authorization semantics are preserved.
+This slice does not add a new live-key guard to deletion. Supported tenant
+suspension keeps User -> Tenant NO KEY UPDATE -> Membership -> BrowserSession;
+key revocation updates the key, without later acquiring Candidate. There is no
+new reverse edge from Candidate to those principals. Both Tenant SHARE holders
+coexist; suspension waits on them. PostgreSQL Candidate UPDATE conflicts with
+upload SHARE and FK KEY SHARE. No global or tenant-exclusive serialization.
+
+At PostgreSQL's existing READ COMMITTED isolation, if upload holds authority first,
+delete waits before enumeration; once upload commits the next document SELECT sees
+that durable original and stages it. If delete holds authority first, upload waits
+at its Candidate SHARE SELECT, then sees absence and returns the existing 404 before
+storage.save. On delete rollback, upload may proceed; S4 restores old exact keys
+and upload owns a distinct newly generated key. On upload rollback, S4 removes its
+uncommitted original and delete enumerates only durable documents. Ambiguous DB
+outcomes still use S4's fresh truth/invalidation protocol. Nothing changes recovery,
+no-overwrite restore, tenant isolation, local-only processing, original-CV reads,
+scoring/evidence or diagnostic privacy.
+
+Scope and residuals: only candidate hard-delete versus direct original-CV persistence.
+No photo-worker lease or post-upload response-liveness contract is claimed; the
+post-commit photo pass/response can race later deletion and remains deferred under
+#46. Folder overlap/content leases/dedup, source-read races, folder transaction/
+inference separation, readiness, retention/orphan sweepers and schema drift remain
+pending. S4 process-kill and explicitly reported cleanup/purge/compensation failures
+remain observable residuals. No migration/dependency/lockfile, deployment/Target-Mac
+work, or changes to #35/#36/#45/#50. #46 remains OPEN and is not complete.
