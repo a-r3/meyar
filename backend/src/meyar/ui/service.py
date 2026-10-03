@@ -278,6 +278,20 @@ def _library_profile_summary(
     return current_role, top_skills, languages
 
 
+def _latest_parser_status(documents: list[CandidateDocument]) -> str | None:
+    """Presentation only; timestamp ties cannot hide a terminal failure."""
+    if not documents:
+        return None
+    latest = max(documents, key=lambda document: (document.created_at, document.id))
+    if any(
+        document.created_at == latest.created_at
+        and document.parser_status == PARSER_STATUS_PARSE_FAILED
+        for document in documents
+    ):
+        return PARSER_STATUS_PARSE_FAILED
+    return latest.parser_status
+
+
 async def list_candidate_library(
     db: AsyncSession,
     *,
@@ -432,7 +446,9 @@ async def list_candidate_library(
     identities_by_candidate = {item.candidate_id: item for item in identities}
     parser_states: defaultdict[uuid.UUID, set[str]] = defaultdict(set)
     folder_states: defaultdict[uuid.UUID, set[str]] = defaultdict(set)
+    documents_by_candidate: defaultdict[uuid.UUID, list[CandidateDocument]] = defaultdict(list)
     for document in documents:
+        documents_by_candidate[document.candidate_id].append(document)
         parser_states[document.candidate_id].add(document.parser_status)
     for row in folder_rows:
         if row.candidate_id is not None:
@@ -472,6 +488,7 @@ async def list_candidate_library(
                         else profile_version.status
                     )
                 ),
+                latest_parser_status=_latest_parser_status(documents_by_candidate[candidate.id]),
                 parser_statuses=sorted(parser_states[candidate.id]),
                 folder_index_statuses=sorted(folder_states[candidate.id]),
             )
@@ -591,6 +608,7 @@ async def get_candidate_detail_view(
                 else profile_version.status
             )
         ),
+        latest_parser_status=_latest_parser_status(documents),
         profile_version=profile_version.version_number if profile_version else None,
         **facts,
         documents=[

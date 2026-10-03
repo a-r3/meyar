@@ -130,7 +130,8 @@ async def test_folder_busy_remains_failed_and_unchanged_retry_succeeds(
             db_session, tenant_id=tenant.id, folder_source_id=failed.folder_source_id
         )
     )[0]
-    candidate_id = row.candidate_id
+    row_id = row.id
+    assert row.candidate_id is None
     assert row.index_status == "FAILED" and row.candidate_document_id is None
     assert row.failure_code == ParseFailureCode.PARSER_BUSY
     assert await db_session.scalar(select(CandidateDocument)) is None
@@ -138,7 +139,7 @@ async def test_folder_busy_remains_failed_and_unchanged_retry_succeeds(
     retried = await index_folder(db_session, storage, LocalTextParser(), **kwargs)
     assert retried.retried == 1 and retried.successful == 1
     assert row.index_status == "INDEXED" and row.candidate_document_id is not None
-    assert row.candidate_id == candidate_id
+    assert row.id == row_id and row.candidate_id is not None
 
 
 @pytest.mark.parametrize("failures", [1, 2])

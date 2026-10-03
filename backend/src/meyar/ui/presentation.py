@@ -78,16 +78,20 @@ READINESS_LABELS: dict[str | None, str] = {
 }
 
 
-def readiness_label(profile_status: str | None) -> str:
+def readiness_label(profile_status: str | None, parser_status: str | None = None) -> str:
     """Coarse, HR-facing readiness for a candidate's current profile —
     collapses the underlying pipeline status into the three states the
     owner asked the candidate card/detail to communicate."""
-    return READINESS_LABELS.get(profile_status, "Emal olunur")
+    return READINESS_LABELS.get(readiness_state(profile_status, parser_status), "Emal olunur")
 
 
-def readiness_state(profile_status: str | None) -> str:
+def readiness_state(profile_status: str | None, parser_status: str | None = None) -> str:
     """The data-state value used to color the readiness badge — reuses
     the existing status-badge CSS instead of adding new rules."""
+    # Presentation only: never change current-profile/evidence authority.
+    # With no profile attempt, a retained terminal original is not processing.
+    if profile_status is None and parser_status == "PARSE_FAILED":
+        return "MANUAL_REVIEW_REQUIRED"
     return profile_status or "PENDING"
 
 

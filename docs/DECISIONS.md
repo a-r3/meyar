@@ -508,6 +508,10 @@ production embedding model can be adopted later without a migration.
 
 ## D-013 — Slice 6 folder-indexer semantics
 
+**M-5 proposal amendment:** D-099 specifies candidate-less FAILED rows, retry
+attachment, safe legacy retention and parser-aware HR fallback. D-013
+changed-document/history and terminal-original retention remain unchanged.
+
 **Date:** 2026-08-23
 **Decision:** Local CV Library & Folder Indexer (Slice 6) implementation
 choices, all reversible:
@@ -8586,3 +8590,55 @@ advanced by PR-3. The real Target-Mac benchmark has not been completed;
 no Target-Mac acceptance is claimed.
 Implementation contract, limits/rationale and verification:
 `docs/ISSUE_46_PR3_VALIDATION.md`.
+
+
+## D-099 — Issue #46 M-5 proposal: candidate-less failure and truthful HR state
+
+**Status:** Implementation proposal, independent acceptance pending. Base main:
+`f1429c7309b1537fd8e94547a2f666995a80859a` after merged PR #110/#111.
+Refs #46 under milestone M9; #46 stays OPEN. M-9 and #35/#36/#50 are not
+started or advanced. No Target-Mac claim.
+
+**Root cause:** new-path ingestion minted Candidate before validation or
+operational parser failure; the FAILED index row retained an empty candidate.
+Retry assumed that link always existed. Separately, HR readiness derived only
+from current profile status, so an intentionally retained terminal failed
+original with no profile was mislabeled “Emal olunur”.
+
+**Decision:** prepare through accepted secure validation/parser boundaries
+before minting a new candidate. Rejected read-sized paths persist FAILED with
+both candidate/document links NULL and closed safe error metadata. A corrected
+retry attaches newly persisted authority to that same path row, or reuses a
+same-tenant exact-content original. Candidate-less MISSING rows retry on
+reappearance. Dedup validates each path and requires retained document hash and
+tenant/candidate ownership to match; observed failed-change bytes cannot borrow
+an older retained document. Changed existing paths preserve candidate identity
+and their prior document on rejection. Invalid foreign links fail closed.
+
+PR-2/PR-3 terminal outcomes still retain CandidateDocument/PARSE_FAILED, original
+access and INDEXED semantics without canonical authority. Library/detail add a
+read-only latest-document parser fallback when there is no profile attempt:
+“Diqqət tələb edir”. Profile-status precedence and current factual/search/
+ranking authority remain unchanged; this does not implement M-9.
+
+**Legacy compensation:** no automatic delete or hidden zero-document filter.
+A FAILED relationship does not prove exclusive folder-created ownership:
+Candidate has no origin, create_candidate records no creation event, and the
+old import-failure audit does not attribute exclusive candidate/path creation.
+Even a single failed relationship with no document is insufficient. Retain
+ambiguous/shared/manual empty candidates; reuse a legacy same-tenant candidate
+on successful retry. Future cleanup requires positive ownership provenance,
+zero documents and absence of every other durable reference, including non-FK
+agent history/snapshots. Never infer provenance or delete across tenants.
+
+**Boundaries:** caller controls scan commit/rollback. Candidate creation failure
+occurs before storage; unexpected persistence errors propagate to rollback,
+not a committed empty-candidate failure row. Existing successful storage save
+followed by DB/commit failure still lacks guaranteed filesystem compensation;
+this is explicitly demonstrated and deferred as a separate #46 item. D-021's
+single-active-reconciler operational contract remains; concurrent path conflicts
+or unseen cross-source exact-content writes remain unresolved. No lock/storage
+redesign, migration, dependency, lockfile or parser-version change.
+
+Detailed contract, rollback/concurrency analysis, synthetic before-fix proof,
+verification and precise limits: `docs/ISSUE_46_M5_VALIDATION.md`.

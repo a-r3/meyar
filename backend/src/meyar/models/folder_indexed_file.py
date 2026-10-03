@@ -22,7 +22,9 @@ class FolderIndexedFile(Base):
     — document content lives in CandidateDocument/CanonicalDocument,
     reused unchanged from the direct-upload pipeline. A FAILED re-import
     never clears a previously successful candidate_document_id — the
-    last known valid evidence is preserved (see docs/DECISIONS.md)."""
+    last known valid evidence is preserved (see docs/DECISIONS.md). New
+    validation/operational failures reserve only path identity, with both
+    candidate links NULL; a successful retry attaches durable authority."""
 
     __tablename__ = "folder_indexed_files"
     __table_args__ = (

@@ -4,6 +4,8 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meyar.models.candidate import Candidate
+from meyar.models.candidate_document import CandidateDocument
 from meyar.models.folder_indexed_file import FolderIndexedFile
 
 
@@ -50,18 +52,25 @@ async def find_indexed_file_by_content_hash(
     crosses tenants — the tenant_id filter is not optional. Only rows
     with a candidate_document_id are eligible (a FAILED
     validation-level row has none, so it is never treated as an
-    ingested original to link against). The earliest-ingested match
+    ingested original to link against). The retained document must belong
+    to that candidate/tenant and match the observed hash; a FAILED changed
+    path can retain an older document with different bytes. The earliest-ingested match
     (created_at ascending) is the stable, deterministic owner a new
     duplicate path is linked to. This is document-content dedup only —
     it never implies the underlying candidates are the same person."""
     result = await db.execute(
         select(FolderIndexedFile)
+        .join(Candidate, Candidate.id == FolderIndexedFile.candidate_id)
+        .join(CandidateDocument, CandidateDocument.id == FolderIndexedFile.candidate_document_id)
         .where(
             FolderIndexedFile.tenant_id == tenant_id,
             FolderIndexedFile.sha256_hash == sha256_hash,
-            FolderIndexedFile.candidate_document_id.is_not(None),
+            Candidate.tenant_id == tenant_id,
+            CandidateDocument.tenant_id == tenant_id,
+            CandidateDocument.candidate_id == Candidate.id,
+            CandidateDocument.sha256_hash == sha256_hash,
         )
-        .order_by(FolderIndexedFile.created_at.asc())
+        .order_by(FolderIndexedFile.created_at.asc(), FolderIndexedFile.id.asc())
         .limit(1)
     )
     return result.scalar_one_or_none()
@@ -109,6 +118,7 @@ async def update_folder_indexed_file(
     byte_size: int | None = None,
     sha256_hash: str | None = None,
     index_status: str | None = None,
+    candidate_id: uuid.UUID | None = ...,  # type: ignore[assignment]
     candidate_document_id: uuid.UUID | None = ...,  # type: ignore[assignment]
     failure_code: str | None = ...,  # type: ignore[assignment]
     failure_message: str | None = ...,  # type: ignore[assignment]
@@ -125,6 +135,8 @@ async def update_folder_indexed_file(
         row.sha256_hash = sha256_hash
     if index_status is not None:
         row.index_status = index_status
+    if candidate_id is not ...:
+        row.candidate_id = candidate_id
     if candidate_document_id is not ...:
         row.candidate_document_id = candidate_document_id
     if failure_code is not ...:
