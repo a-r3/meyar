@@ -44,7 +44,7 @@
   rest of the API — there is no anonymous or public read path anywhere in
   MEYAR (it is internal HR tooling, not a public product).
 
-## Attempt versus effective fact authority (D-100, M-9 proposal)
+## Attempt versus effective fact authority (D-100, M-9 accepted and merged)
 
 Professional authority first resolves the latest tenant/candidate profile
 attempt's CandidateDocument, then selects newest COMPLETED in that same document

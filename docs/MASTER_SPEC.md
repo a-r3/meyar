@@ -109,7 +109,7 @@ tenant_id at the data-access layer (repository functions take tenant_id as a
 mandatory first argument) — never left to route-level filtering alone. See
 SECURITY_PRIVACY.md for isolation enforcement and tests.
 
-### Extraction attempts and effective facts (D-100, M-9 proposal)
+### Extraction attempts and effective facts (D-100, M-9 accepted and merged)
 
 Latest attempt means the newest immutable version regardless of extraction
 status, and governs operational status/per-document readiness/retry. Effective

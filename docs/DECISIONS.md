@@ -8657,10 +8657,23 @@ verification and precise limits: `docs/ISSUE_46_M5_VALIDATION.md`.
 ## D-100 — Issue #46 M-9: extraction attempts versus effective accepted facts
 
 **Date:** 2026-10-03
-**Status:** PR #114 reviewed head `d5984e779f7ec707e04f9bf3798c6d65da341a5a`
-independent acceptance FAIL. Document-boundary correction on the same branch;
-independent acceptance of the corrected head remains pending. Refs #46, M9;
-#46/#35/#36/#50 remain OPEN and unchanged. M-5 remains accepted/merged.
+**Status:** M-9 independently **ACCEPTED + MERGED** through PR #114.
+Owner-confirmed independent acceptance **PASS** at exact PR #114 head
+`ffc59eab3447b4a6ecb07017725751a8024fa062`; its
+[exact-head CI run 37097082007](https://github.com/a-r3/meyar/actions/runs/37097082007)
+completed **SUCCESS**. The owner manually **Squash and merged** PR #114 to
+`32f9cc9ed1a39c0a43ffe112dce2f641d6608cc4`, whose sole parent is
+`22cf6a5b0b46bc61841cae2d3a646a353b9889a9`. Live GitHub and local Git
+verification confirm the accepted head and squash have the identical full tree:
+`6459479c913c45f42410cc646fa4ad4e68f22b02`. Accepted and merged content
+are therefore identical.
+
+This supersedes the rejected `d5984e779f7ec707e04f9bf3798c6d65da341a5a`
+review status; historical failure/correction evidence remains in M-9 validation.
+Refs #46, M9. #46 is NOT complete and remains OPEN for unresolved hardening;
+#35/#36/#50 remain OPEN and unchanged. M-5 remains accepted/merged.
+No Target-Mac work was performed. This is a post-merge record only; the accepted
+D-100 contract below is unchanged and no next hardening item is started.
 
 **Decision:** latest extraction attempt = max immutable version_number regardless
 of status. Determine that row's CandidateDocument; select newest COMPLETED within
@@ -8724,5 +8737,9 @@ reconciliation concurrency races are not claimed solved.
 **Limits:** no database schema/dependency/lockfile/scoring policy/local-only AI/
 auth/CSRF change. No partial-fact persistence, automatic failure repair, photo
 fallback, historical recalculation, Target-Mac work or unrelated issue progression.
-Before-fix proof, corrected matrix, gates and deferrals:
+Remaining #46 scope includes concurrency/reconciliation overlap and same-content
+races; folder transaction lifetime/inference separation; storage-save/DB rollback
+compensation; retention/orphan cleanup; configured embedding readiness; and
+remaining ingestion/resource/runtime/config/security items owned by #46.
+Before-fix proof, corrected matrix, gates, acceptance and deferrals:
 `docs/ISSUE_46_M9_VALIDATION.md`.
