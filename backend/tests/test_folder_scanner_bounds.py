@@ -101,7 +101,8 @@ def test_within_limit_file_is_read_boundedly_with_correct_hash(
     assert isinstance(entry, DiscoveredFile)
     assert entry.data == data and entry.byte_size == len(data)
     assert entry.sha256_hash == hashlib.sha256(data).hexdigest()
-    assert sum(delivered) <= 3_000_000 + 1  # never more than max_bytes + 1
+    assert sum(delivered) == 2 * len(data)  # stable acquisition + bounded verification
+    assert sum(delivered) <= 2 * (3_000_000 + 1)
     assert max(requested) <= 1_048_576
 
 

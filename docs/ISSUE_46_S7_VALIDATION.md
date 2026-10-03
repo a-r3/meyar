@@ -1,6 +1,11 @@
 # Issue #46 S7 — folder reconciliation / same-content dedup concurrency
 
-Status: implemented; independent acceptance pending. Refs #46 under the existing
+Status: **ACCEPTED + MERGED through PR #122**. Accepted exact head
+`c74cb32169cdb0b1a38aba20198e390601bd0014`; exact-head CI run
+37151559386, attempt 1, SUCCESS. Owner squash/main
+`1a4e0ce95991fe43449d0d45d9da1b28b4d10ada`; accepted and merged full tree
+`54570e9711fe4354aaedd08e559efad27486c3c5` (identical), verified live before S8.
+Refs #46 under the existing
 **M9 — Deployment, Benchmark & Integration Readiness** milestone (10). Bounded
 concurrency slice, not completion of #46.
 

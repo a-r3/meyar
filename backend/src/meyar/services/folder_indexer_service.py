@@ -484,6 +484,29 @@ async def _handle_changed_or_retry(
     if candidate_id is None:
         candidate = await create_candidate(db, tenant_id=tenant_id)
         candidate_id = candidate.id
+    else:
+        # S8: existence before parsing is not persistence authority. S5
+        # deletion takes Candidate UPDATE before enumerating assets; SHARE
+        # here must precede even storage.save and survive through the caller's
+        # commit/rollback. A delete that wins can SET NULL the folder links
+        # while this session still has the pre-parse row in its identity map.
+        candidate = await get_candidate(
+            db, tenant_id=tenant_id, candidate_id=candidate_id, share=True
+        )
+        await db.refresh(row)
+        await require_active_tenant(db, tenant_id)
+        if candidate is None or row.candidate_id != candidate_id:
+            await update_folder_indexed_file(
+                db, row, byte_size=entry.byte_size, sha256_hash=entry.sha256_hash,
+                index_status=INDEX_STATUS_FAILED, failure_code="INDEX_AUTHORITY_INVALID",
+                failure_message="The indexed candidate is unavailable for this tenant.",
+            )
+            await record_event(
+                db, tenant_id=tenant_id, event_type="FOLDER_FILE_IMPORT_FAILED",
+                metadata={"folder_source_id": str(row.folder_source_id),
+                          "failure_code": "INDEX_AUTHORITY_INVALID"},
+            )
+            return INDEX_STATUS_FAILED
     document = await persist_candidate_document(
         db, storage, prepared, tenant_id=tenant_id, candidate_id=candidate_id, filename=filename
     )
