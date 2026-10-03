@@ -1,5 +1,27 @@
 # MEYAR — Status
 
+**Issue #46 M-9 — PR #114 independent acceptance FAIL at reviewed head;
+document-boundary correction pending independent acceptance.**
+Reviewed head: `d5984e779f7ec707e04f9bf3798c6d65da341a5a`; its successful
+CI run `37094854961` did not establish acceptance. Base/main verified live at
+`22cf6a5b0b46bc61841cae2d3a646a353b9889a9`. Existing task branch/PR only.
+Effective facts select the latest attempt's CandidateDocument, then that same
+tenant/candidate/document's newest COMPLETED, then unchanged current evidence.
+Same-document failures may preserve authorized facts; new-document failures with
+no accepted completion cannot reuse old facts or HR identity. Invalid selected
+COMPLETED fails closed without scanning backwards. ResultSets retain same-document
+snapshot authority only while it matches exactly; new-document failure, a new
+completion or evidence loss makes old members stale. Exact-document readiness
+and retry remain attempt-based. No migration/dependency/scoring-policy change.
+D-100 and `docs/ISSUE_46_M9_VALIDATION.md` record the correction and gates.
+#114/#46/#35/#36/#50 remain OPEN; M9 remains open. M-5 stays accepted/merged.
+Corrected local gate: M-9 separately 36 passed in 7.57s; affected boundaries
+374 passed in 89.72s; full 3511 passed in 819.97s. Ruff and mypy(src) clean
+(226 source files); unchanged single Alembic head `b88a2c4d6e10`; tracked-tree
+scan and diff check clean. Exact pushed head/CI are verified in the delivery
+report; independent acceptance remains pending.
+No merge, Target-Mac execution or acceptance is claimed.
+
 **Issue #46 M-5 — independently ACCEPTED and MERGED through PR #112;
 M-5 slice COMPLETE, but #46 remains OPEN.** Owner-confirmed independent
 acceptance at exact head `869415b7a08dba18e4c732b6c4f9d74baa1347cd`;
@@ -27,7 +49,8 @@ concurrent reconciliation/dedup, folder transaction lifetime, generic retention/
 orphan cleanup, M-9 and other unresolved #46 work remain pending.
 No migration/dependency/lockfile/parser behavior change in this docs-only
 follow-up. #46 remains OPEN under **M9**; #35/#36/#50 remain OPEN and unchanged.
-M-9 has NOT started; this follow-up starts no next implementation slice.
+At that M-5 docs-only follow-up M-9 had not started; the current M-9
+implementation proposal is recorded above.
 Historical local gate: 185 focused passed in 57.69s; 3475 full pytest passed in
 499.99s; Ruff/mypy(src) clean; unchanged single Alembic head `b88a2c4d6e10`.
 Accepted exact-head CI is the published delivery authority. No Target-Mac

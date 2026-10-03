@@ -44,6 +44,30 @@
   rest of the API — there is no anonymous or public read path anywhere in
   MEYAR (it is internal HR tooling, not a public product).
 
+## Attempt versus effective fact authority (D-100, M-9 proposal)
+
+Professional authority first resolves the latest tenant/candidate profile
+attempt's CandidateDocument, then selects newest COMPLETED in that same document
+and applies unchanged current canonical evidence validation.
+
+Fallback is permitted only inside the latest attempt's CandidateDocument boundary. Cross-document fallback is prohibited.
+
+Same-document FAILED/MANUAL_REVIEW_REQUIRED may preserve supported earlier facts.
+New-document failure without an accepted completion excludes old-document facts
+from current search, ranking, scoring, embeddings and agent/UI facts. Unsupported
+selected COMPLETED fails closed without searching older completions. Exact
+embedding/source/config compatibility, evaluation references and immutable
+ResultSet provenance remain mandatory. Same-document failure may preserve exact
+snapshot authority; new-document failure makes the old member STALE.
+Readiness still requires the exact document's successful latest attempt, and
+failed attempts remain retryable. Identity independently uses its latest identity
+attempt's document and unchanged HR evidence authorization; old-document contacts
+cannot become current after new-document identity failure. Identity never enters
+suitability. HR discloses preserved facts/contacts only for same-document fallback
+and shows latest processing state. No external candidate AI, historical mutation,
+mutable authority marker or auth/CSRF bypass.
+Contract, performance and limitations: `docs/ISSUE_46_M9_VALIDATION.md`.
+
 ## AI extraction (Slice 4)
 
 - `OllamaLLMProvider` refuses to construct against a non-loopback

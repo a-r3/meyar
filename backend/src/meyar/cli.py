@@ -41,7 +41,7 @@ from meyar.services.candidate_embedding_service import (
     embed_candidate_profile,
 )
 from meyar.services.candidate_photo_service import process_photo_for_document
-from meyar.services.candidate_profile_repo import get_current_profile_version
+from meyar.services.candidate_profile_repo import get_effective_profile_version
 from meyar.services.demo_seed_service import DemoTenantAmbiguousError, reset_demo, seed_demo
 from meyar.services.folder_indexer_service import index_folder
 from meyar.services.folder_reconciliation_service import reconcile_folder
@@ -279,7 +279,7 @@ async def _evaluate(
     try:
         factory = get_session_factory()
         async with factory() as db:
-            profile_version = await get_current_profile_version(
+            profile_version = await get_effective_profile_version(
                 db, tenant_id=parsed_tenant_id, candidate_id=parsed_candidate_id
             )
             if profile_version is None:
@@ -915,7 +915,7 @@ def main() -> None:
 
     evaluate_parser = sub.add_parser(
         "evaluate",
-        help="Evaluate a candidate's latest profile version against a job's latest criteria.",
+        help="Evaluate a candidate's effective accepted profile against a job's latest criteria.",
     )
     evaluate_parser.add_argument("--tenant-id", required=True)
     evaluate_parser.add_argument("--candidate-id", required=True)

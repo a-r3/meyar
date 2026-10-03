@@ -1,11 +1,11 @@
 import uuid
 from collections.abc import Collection
 
-from sqlalchemy import func, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.models.candidate import Candidate
-from meyar.models.candidate_profile_version import CandidateProfileVersion
+from meyar.models.candidate_profile_version import PROFILE_STATUS_COMPLETED, CandidateProfileVersion
 
 
 async def create_profile_version(
@@ -63,6 +63,7 @@ async def create_profile_version(
 async def get_current_profile_version(
     db: AsyncSession, *, tenant_id: uuid.UUID, candidate_id: uuid.UUID
 ) -> CandidateProfileVersion | None:
+    """Newest extraction attempt regardless of status; not fact authority."""
     result = await db.execute(
         select(CandidateProfileVersion)
         .where(
@@ -127,12 +128,12 @@ async def get_profile_version(
 async def list_current_profile_versions_for_tenant(
     db: AsyncSession, *, tenant_id: uuid.UUID
 ) -> list[CandidateProfileVersion]:
-    """Returns exactly one row per candidate that has at least one profile
-    version: their CURRENT CandidateProfileVersion (max version_number) —
-    never a superseded/historical version. Used by Slice 8 structured
-    search as the tenant-scoped "searchable professional state" set; a
-    candidate with no profile version at all is simply absent, not an
-    error. See docs/DECISIONS.md (search reads current profiles only)."""
+    """Diagnostic latest-attempt rows, max version_number regardless of status.
+
+    Legacy API retained for operational/history consumers. Professional search
+    and ranking MUST use list_effective_profile_versions_for_tenant and apply
+    current evidence authority (D-100).
+    """
     latest = (
         select(
             CandidateProfileVersion.candidate_id,
@@ -143,7 +144,8 @@ async def list_current_profile_versions_for_tenant(
         .subquery()
     )
     result = await db.execute(
-        select(CandidateProfileVersion).join(
+        select(CandidateProfileVersion)
+        .join(
             latest,
             (CandidateProfileVersion.candidate_id == latest.c.candidate_id)
             & (CandidateProfileVersion.version_number == latest.c.max_version),
@@ -183,3 +185,90 @@ async def get_current_profile_versions_for_candidates(
         .distinct(CandidateProfileVersion.candidate_id)
     )
     return {version.candidate_id: version for version in result.scalars().all()}
+
+
+# Explicit operational names; legacy "current" helpers retain attempt semantics.
+get_latest_profile_attempt = get_current_profile_version
+list_latest_profile_attempts_for_tenant = list_current_profile_versions_for_tenant
+get_latest_profile_attempts_for_candidates = get_current_profile_versions_for_candidates
+
+
+def _effective_profile_statement(
+    tenant_id: uuid.UUID, candidate_ids: Collection[uuid.UUID] | None = None
+) -> Select[tuple[CandidateProfileVersion]]:
+    """Select facts only inside each latest attempt's document boundary.
+
+    Both DISTINCT ON stages run in one tenant-scoped SQL statement. The first
+    projects only latest-attempt provenance (all statuses); the second selects
+    its document's newest COMPLETED, without loading historical content.
+    """
+    latest_query = select(
+        CandidateProfileVersion.tenant_id,
+        CandidateProfileVersion.candidate_id,
+        CandidateProfileVersion.candidate_document_id,
+    ).where(CandidateProfileVersion.tenant_id == tenant_id)
+    if candidate_ids is not None:
+        latest_query = latest_query.where(CandidateProfileVersion.candidate_id.in_(candidate_ids))
+    latest = (
+        latest_query.order_by(
+            CandidateProfileVersion.candidate_id, CandidateProfileVersion.version_number.desc()
+        )
+        .distinct(CandidateProfileVersion.candidate_id)
+        .subquery()
+    )
+    return (
+        select(CandidateProfileVersion)
+        .join(
+            latest,
+            (CandidateProfileVersion.tenant_id == latest.c.tenant_id)
+            & (CandidateProfileVersion.candidate_id == latest.c.candidate_id)
+            & (CandidateProfileVersion.candidate_document_id == latest.c.candidate_document_id),
+        )
+        .join(
+            Candidate,
+            (Candidate.id == CandidateProfileVersion.candidate_id)
+            & (Candidate.tenant_id == CandidateProfileVersion.tenant_id),
+        )
+        .where(
+            CandidateProfileVersion.tenant_id == tenant_id,
+            CandidateProfileVersion.status == PROFILE_STATUS_COMPLETED,
+        )
+        .order_by(
+            CandidateProfileVersion.candidate_id, CandidateProfileVersion.version_number.desc()
+        )
+        .distinct(CandidateProfileVersion.candidate_id)
+    )
+
+
+async def get_effective_profile_version(
+    db: AsyncSession, *, tenant_id: uuid.UUID, candidate_id: uuid.UUID
+) -> CandidateProfileVersion | None:
+    """Newest COMPLETED inside the latest attempt's document (D-100).
+
+    Caller MUST authorize_profile_version. Invalid selected evidence fails
+    closed without scanning older completions, including in the same document.
+    """
+    rows = await db.scalars(_effective_profile_statement(tenant_id, [candidate_id]))
+    return rows.one_or_none()
+
+
+async def get_effective_profile_versions_for_candidates(
+    db: AsyncSession, *, tenant_id: uuid.UUID, candidate_ids: Collection[uuid.UUID]
+) -> dict[uuid.UUID, CandidateProfileVersion]:
+    """One bounded query, same document rule as the single selector.
+
+    Consumers MUST authorize_profile_versions. No historical content loading
+    or cross-document fallback; candidate ownership remains tenant-scoped.
+    """
+    if not candidate_ids:
+        return {}
+    rows = await db.scalars(_effective_profile_statement(tenant_id, candidate_ids))
+    return {version.candidate_id: version for version in rows}
+
+
+async def list_effective_profile_versions_for_tenant(
+    db: AsyncSession, *, tenant_id: uuid.UUID
+) -> list[CandidateProfileVersion]:
+    """One set-based query, latest-attempt document only; MUST authorize on read."""
+    rows = await db.scalars(_effective_profile_statement(tenant_id))
+    return list(rows)

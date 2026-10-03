@@ -31,8 +31,12 @@ from meyar.search.schemas import (
 from meyar.search.structured import evaluate_preferred_filters, evaluate_required_filters
 from meyar.services.audit_repo import record_event
 from meyar.services.candidate_embedding_repo import search_compatible_embeddings
-from meyar.services.candidate_profile_repo import list_current_profile_versions_for_tenant
-from meyar.services.profile_authority import ProfileAuthorityError, authorize_profile_version
+from meyar.services.candidate_profile_repo import list_effective_profile_versions_for_tenant
+from meyar.services.profile_authority import ProfileAuthorityError, authorize_profile_versions
+
+# Bound canonical IN parameters and canonical-content memory, independent of
+# tenant history/size. ResultSet/page consumers already bound their own batches.
+AUTHORITY_BATCH_SIZE = 500
 
 
 class SearchRequestError(Exception):
@@ -63,33 +67,37 @@ async def search_candidates(
     needs_semantic = request.mode in (SearchMode.SEMANTIC_ONLY, SearchMode.HYBRID)
     as_of_year = request.as_of_date.year if request.as_of_date else None
 
-    profile_versions = await list_current_profile_versions_for_tenant(db, tenant_id=tenant_id)
+    profile_versions = await list_effective_profile_versions_for_tenant(db, tenant_id=tenant_id)
 
     # (candidate_id, profile_version_id, profile, profile_content, required_matches)
     eligible: list[tuple[uuid.UUID, uuid.UUID, CandidateProfileExtraction, dict, list]] = []
-    for version in profile_versions:
-        try:
-            profile = await authorize_profile_version(db, version=version)
-        except ProfileAuthorityError:
-            continue
-        assert version.profile_content is not None
-        required_result = evaluate_required_filters(
-            profile,
-            request.required_filters,
-            as_of_year=as_of_year,
-            as_of_date=request.as_of_date,
+    for start in range(0, len(profile_versions), AUTHORITY_BATCH_SIZE):
+        versions = profile_versions[start : start + AUTHORITY_BATCH_SIZE]
+        authorized = await authorize_profile_versions(
+            db, tenant_id=tenant_id, versions=versions
         )
-        if not required_result.satisfied:
-            continue
-        eligible.append(
-            (
-                version.candidate_id,
-                version.id,
+        for version in versions:
+            profile = authorized[version.id]
+            if isinstance(profile, ProfileAuthorityError):
+                continue
+            assert version.profile_content is not None
+            required_result = evaluate_required_filters(
                 profile,
-                version.profile_content,
-                required_result.matches,
+                request.required_filters,
+                as_of_year=as_of_year,
+                as_of_date=request.as_of_date,
             )
-        )
+            if not required_result.satisfied:
+                continue
+            eligible.append(
+                (
+                    version.candidate_id,
+                    version.id,
+                    profile,
+                    version.profile_content,
+                    required_result.matches,
+                )
+            )
 
     eligible_profile_count = len(eligible)
 

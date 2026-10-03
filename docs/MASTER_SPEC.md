@@ -109,6 +109,28 @@ tenant_id at the data-access layer (repository functions take tenant_id as a
 mandatory first argument) — never left to route-level filtering alone. See
 SECURITY_PRIVACY.md for isolation enforcement and tests.
 
+### Extraction attempts and effective facts (D-100, M-9 proposal)
+
+Latest attempt means the newest immutable version regardless of extraction
+status, and governs operational status/per-document readiness/retry. Effective
+professional selection takes that attempt's CandidateDocument and chooses the
+newest COMPLETED within the SAME tenant/candidate/document, then applies current
+canonical evidence authorization.
+
+Fallback is permitted only inside the latest attempt's CandidateDocument boundary. Cross-document fallback is prohibited.
+
+Same-document failed/manual refresh may preserve authorized facts; a failed
+new document with no completed profile means no effective facts. Unsupported
+selected COMPLETED fails closed without scanning older completions. Identity
+uses its own latest attempt's document and equivalent HR-only evidence boundary;
+name/contact values never enter suitability. Search/ranking/current evaluation/
+embeddings and agent facts use exact effective provenance. ResultSets survive
+same-document failures only while exact effective authority matches; new-document
+failure, a completed switch or evidence loss makes old members stale. History
+is immutable. Library status filters/badges show latest processing; preserved
+facts/contacts are disclosed only when same-document fallback applies.
+See `docs/ISSUE_46_M9_VALIDATION.md` for the correction and deferrals.
+
 ## 7. Internal API surface (`/api/v1`)
 
 Implemented:
@@ -262,7 +284,7 @@ the database. Slice 11 delegates to this accepted service unchanged.
 ## 16. Batch ranking (implemented, Slice 10)
 
 One `JobCriteriaVersion` → the tenant's active candidate library → exactly one
-current completed profile per candidate → score each (fit band + 0–100 score)
+effective evidence-authorized completed profile per candidate → score each (fit band + 0–100 score)
 → explicit fit-tier/score/UUID order with safe reasons/evidence references.
 It reuses the same evaluation/scoring path per candidate and has no semantic
 search, embedding, LLM, or CandidateIdentity dependency (D-017).

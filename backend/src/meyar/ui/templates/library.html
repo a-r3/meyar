@@ -4,7 +4,7 @@
 <div class="page-heading"><div><p class="eyebrow">Namizədlər</p><h1>Namizəd kitabxanası</h1><p class="lede">{{ library.total }} namizəd</p></div></div>
 <section class="panel">
   <form method="get" action="/ui/library" class="filter-grid">
-    <label>Hazırlıq vəziyyəti<select name="profile_status"><option value="">Hamısı</option>{% for value in profile_statuses %}<option value="{{ value }}"{% if profile_status == value %} selected{% endif %}>{{ state_label(value) }}</option>{% endfor %}</select></label>
+    <label>Son emalın vəziyyəti<select name="profile_status"><option value="">Hamısı</option>{% for value in profile_statuses %}<option value="{{ value }}"{% if profile_status == value %} selected{% endif %}>{{ state_label(value) }}</option>{% endfor %}</select></label>
     <label>Səhifə ölçüsü<select name="page_size"><option value="25"{% if library.page_size == 25 %} selected{% endif %}>25</option><option value="50"{% if library.page_size == 50 %} selected{% endif %}>50</option></select></label>
     <button class="button" type="submit">Filtrlə</button>
   </form>
@@ -16,8 +16,11 @@
     <img class="candidate-avatar" src="/ui/candidates/{{ item.candidate_id }}/photo" alt="Namizəd üçün təqdimat şəkli" loading="lazy">
     <div class="card-heading">
       <h2>{{ item.full_name or "Ad məlumatı yoxdur" }}</h2>
-      <span class="status-badge" data-state="{{ readiness_state(item.current_profile_status, item.latest_parser_status) }}">{{ readiness_label(item.current_profile_status, item.latest_parser_status) }}</span>
+      {% if item.latest_attempt_status %}<span class="status-badge" data-state="{{ item.latest_attempt_status }}">{{ state_label(item.latest_attempt_status) }}</span>{% else %}<span class="status-badge" data-state="{{ readiness_state(item.current_profile_status, item.latest_parser_status) }}">{{ readiness_label(item.current_profile_status, item.latest_parser_status) }}</span>{% endif %}
     </div>
+    {% if item.preserved_profile %}<p class="notice">Son yenilənmə tamamlanmadı. Əvvəlki təsdiqlənmiş profil göstərilir.</p>{% endif %}
+    {% if item.preserved_identity %}<p class="notice">Son əlaqə məlumatı yenilənmədi. Əvvəlki təsdiqlənmiş məlumat göstərilir.</p>{% endif %}
+    {% if item.current_profile_status == "UNAVAILABLE" %}<p class="notice">Təsdiqlənmiş peşə məlumatı hazırda əlçatan deyil.</p>{% endif %}
     {% if item.current_role %}<p class="candidate-role">{{ item.current_role }}</p>{% endif %}
     {% if item.top_skills %}<p class="meta"><strong>Bacarıqlar:</strong> {{ item.top_skills|join(", ") }}</p>{% endif %}
     {% if item.languages %}<p class="meta"><strong>Dillər:</strong> {{ item.languages|join(", ") }}</p>{% endif %}

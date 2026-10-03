@@ -65,8 +65,16 @@ from meyar.services.candidate_document_repo import (
     get_latest_canonical_document,
     list_candidate_documents,
 )
-from meyar.services.candidate_identity_repo import get_current_identity_version
-from meyar.services.candidate_profile_repo import get_current_profile_version
+from meyar.services.candidate_identity_repo import (
+    get_effective_identity_version,
+    get_effective_identity_versions_for_candidates,
+    get_latest_identity_attempt,
+)
+from meyar.services.candidate_profile_repo import (
+    get_effective_profile_version,
+    get_effective_profile_versions_for_candidates,
+    get_latest_profile_attempt,
+)
 from meyar.services.candidate_repo import get_candidate
 from meyar.services.identity_authority import (
     get_current_identity_values,
@@ -75,6 +83,7 @@ from meyar.services.identity_authority import (
 from meyar.services.profile_authority import (
     ProfileAuthorityError,
     authorize_profile_version,
+    authorize_profile_versions,
     get_authorized_profile_version_by_id,
 )
 from meyar.ui.presentation import (
@@ -163,7 +172,9 @@ async def _physical_evidence_pages(
 async def _current_physical_evidence_pages(
     db: AsyncSession, *, tenant_id: uuid.UUID, candidate_id: uuid.UUID
 ) -> bool:
-    version = await get_current_profile_version(db, tenant_id=tenant_id, candidate_id=candidate_id)
+    version = await get_effective_profile_version(
+        db, tenant_id=tenant_id, candidate_id=candidate_id
+    )
     return version is not None and await _physical_evidence_pages(
         db, tenant_id=tenant_id, candidate_document_id=version.candidate_document_id
     )
@@ -302,7 +313,12 @@ async def list_candidate_library(
     profile_status: str | None = None,
     folder_status: str | None = None,
 ) -> CandidateLibraryPageView:
-    """Read-only tenant library with operational browse ordering."""
+    """Read-only tenant library with operational browse ordering.
+
+    profile_status filters the latest persisted extraction attempt (D-100),
+    exactly the status badge. Independently authorized effective facts may be
+    older, with explicit disclosure; COMPLETED is not evidence authorization.
+    """
     page = max(page, 1)
     page_size = min(max(page_size, 1), MAX_LIBRARY_PAGE_SIZE)
     parser_status = _validated_filter(parser_status, ALLOWED_PARSER_STATUSES, "parser")
@@ -391,33 +407,28 @@ async def list_candidate_library(
         .scalars()
         .all()
     )
-    latest_identity = (
-        select(
-            CandidateIdentityVersion.candidate_id,
-            func.max(CandidateIdentityVersion.version_number).label("max_version"),
-        )
-        .where(CandidateIdentityVersion.tenant_id == tenant_id)
-        .group_by(CandidateIdentityVersion.candidate_id)
-        .subquery()
-    )
     identities = list(
         (
-            await db.execute(
-                select(CandidateIdentityVersion)
-                .join(
-                    latest_identity,
-                    (CandidateIdentityVersion.candidate_id == latest_identity.c.candidate_id)
-                    & (CandidateIdentityVersion.version_number == latest_identity.c.max_version),
-                )
-                .where(
-                    CandidateIdentityVersion.tenant_id == tenant_id,
-                    CandidateIdentityVersion.candidate_id.in_(candidate_ids),
-                )
+            await get_effective_identity_versions_for_candidates(
+                db, tenant_id=tenant_id, candidate_ids=candidate_ids
             )
-        )
-        .scalars()
-        .all()
+        ).values()
     )
+    latest_identity_rows = await db.execute(
+        select(CandidateIdentityVersion.candidate_id, CandidateIdentityVersion.version_number)
+        .where(
+            CandidateIdentityVersion.tenant_id == tenant_id,
+            CandidateIdentityVersion.candidate_id.in_(candidate_ids),
+        )
+        .order_by(
+            CandidateIdentityVersion.candidate_id,
+            CandidateIdentityVersion.version_number.desc(),
+        )
+        .distinct(CandidateIdentityVersion.candidate_id)
+    )
+    latest_identity_numbers = {
+        candidate_id: number for candidate_id, number in latest_identity_rows
+    }
     documents = list(
         (
             await db.execute(
@@ -442,7 +453,15 @@ async def list_candidate_library(
         .scalars()
         .all()
     )
+    # Operational display/filter remains the latest attempt. Facts come from
+    # the latest-attempt document's newest COMPLETED, batch-authorized source.
     profiles_by_candidate = {item.candidate_id: item for item in profiles}
+    effective_profiles = await get_effective_profile_versions_for_candidates(
+        db, tenant_id=tenant_id, candidate_ids=candidate_ids
+    )
+    authorized = await authorize_profile_versions(
+        db, tenant_id=tenant_id, versions=list(effective_profiles.values())
+    )
     identities_by_candidate = {item.candidate_id: item for item in identities}
     parser_states: defaultdict[uuid.UUID, set[str]] = defaultdict(set)
     folder_states: defaultdict[uuid.UUID, set[str]] = defaultdict(set)
@@ -457,16 +476,17 @@ async def list_candidate_library(
     items: list[CandidateLibraryItemView] = []
     for candidate in candidates:
         profile_version = profiles_by_candidate.get(candidate.id)
-        profile = None
-        profile_authorized = False
-        if profile_version is not None:
-            try:
-                profile = await authorize_profile_version(db, version=profile_version)
-                profile_authorized = True
-            except ProfileAuthorityError:
-                profile = None
+        effective = effective_profiles.get(candidate.id)
+        outcome = authorized.get(effective.id) if effective else None
+        profile = outcome if isinstance(outcome, CandidateProfileExtraction) else None
+        profile_authorized = profile is not None
         identity = await identity_values_from_version(
             db, version=identities_by_candidate.get(candidate.id)
+        )
+        effective_identity = identities_by_candidate.get(candidate.id)
+        preserved_identity = (
+            identity.full_name is not None and effective_identity is not None
+            and latest_identity_numbers.get(candidate.id) != effective_identity.version_number
         )
         current_role, top_skills, languages = _library_profile_summary(profile)
         items.append(
@@ -477,7 +497,15 @@ async def list_candidate_library(
                 current_role=current_role,
                 top_skills=top_skills,
                 languages=languages,
-                current_profile_version=profile_version.version_number if profile_version else None,
+                current_profile_version=(
+                    effective.version_number if profile_authorized and effective else None
+                ),
+                latest_attempt_status=profile_version.status if profile_version else None,
+                preserved_identity=preserved_identity,
+                preserved_profile=(
+                    profile_authorized and profile_version is not None
+                    and effective is not None and profile_version.id != effective.id
+                ),
                 current_profile_status=(
                     None
                     if profile_version is None
@@ -509,11 +537,17 @@ async def get_candidate_detail_view(
     candidate = await get_candidate(db, tenant_id=tenant_id, candidate_id=candidate_id)
     if candidate is None:
         return None
-    identity = await get_current_identity_version(
+    identity = await get_effective_identity_version(
         db, tenant_id=tenant_id, candidate_id=candidate_id
     )
     identity_values = await identity_values_from_version(db, version=identity)
-    profile_version = await get_current_profile_version(
+    latest_identity = await get_latest_identity_attempt(
+        db, tenant_id=tenant_id, candidate_id=candidate_id
+    )
+    profile_version = await get_effective_profile_version(
+        db, tenant_id=tenant_id, candidate_id=candidate_id
+    )
+    latest_attempt = await get_latest_profile_attempt(
         db, tenant_id=tenant_id, candidate_id=candidate_id
     )
     facts: dict[str, list[ProfileFactView]] = {
@@ -599,13 +633,23 @@ async def get_candidate_detail_view(
         professional_summary=professional_summary,
         identity_status=identity.status if identity else None,
         identity_version=identity.version_number if identity else None,
+        preserved_identity=(
+            identity is not None and latest_identity is not None
+            and latest_identity.id != identity.id
+            and any((identity_values.full_name, identity_values.email, identity_values.phone))
+        ),
+        latest_attempt_status=latest_attempt.status if latest_attempt else None,
+        preserved_profile=(
+            profile_authorized and latest_attempt is not None
+            and profile_version is not None and latest_attempt.id != profile_version.id
+        ),
         profile_status=(
             None
-            if profile_version is None
+            if latest_attempt is None
             else (
                 "UNAVAILABLE"
-                if profile_version.status == PROFILE_STATUS_COMPLETED and not profile_authorized
-                else profile_version.status
+                if latest_attempt.status == PROFILE_STATUS_COMPLETED and not profile_authorized
+                else latest_attempt.status
             )
         ),
         latest_parser_status=_latest_parser_status(documents),
@@ -793,7 +837,7 @@ async def _agent_candidate_profile_view(
     candidate_id: uuid.UUID,
     profile: CandidateProfileExtraction,
 ) -> AgentCandidateProfileView:
-    identity = await get_current_identity_version(
+    identity = await get_effective_identity_version(
         db, tenant_id=tenant_id, candidate_id=candidate_id
     )
     identity_values = await identity_values_from_version(db, version=identity)
@@ -909,7 +953,7 @@ async def build_agent_turn_view(
                     )
                 )
                 continue
-            identity = await get_current_identity_version(
+            identity = await get_effective_identity_version(
                 db, tenant_id=tenant_id, candidate_id=evidence_result.candidate_id
             )
             identity_values = await identity_values_from_version(db, version=identity)

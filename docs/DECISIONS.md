@@ -8652,3 +8652,77 @@ redesign, migration, dependency, lockfile or parser-version change.
 
 Detailed contract, rollback/concurrency analysis, synthetic before-fix proof,
 verification and precise limits: `docs/ISSUE_46_M5_VALIDATION.md`.
+
+
+## D-100 — Issue #46 M-9: extraction attempts versus effective accepted facts
+
+**Date:** 2026-10-03
+**Status:** PR #114 reviewed head `d5984e779f7ec707e04f9bf3798c6d65da341a5a`
+independent acceptance FAIL. Document-boundary correction on the same branch;
+independent acceptance of the corrected head remains pending. Refs #46, M9;
+#46/#35/#36/#50 remain OPEN and unchanged. M-5 remains accepted/merged.
+
+**Decision:** latest extraction attempt = max immutable version_number regardless
+of status. Determine that row's CandidateDocument; select newest COMPLETED within
+that SAME tenant + candidate + document; then apply unchanged current evidence
+authorization. Selection never grants evidence authority by itself.
+
+**Fallback is permitted only inside the latest attempt's CandidateDocument boundary. Cross-document fallback is prohibited.**
+
+D1/v1 COMPLETED → same-D1/v2 FAILED or MANUAL_REVIEW_REQUIRED may preserve v1
+only while its evidence remains valid. D1/v1 → new-D2/v2 FAILED/manual means
+no effective profile when D2 has no COMPLETED; D1 remains immutable history.
+D2/v3 COMPLETED becomes effective subject to current evidence. Within the
+latest-attempt document, unsupported newest COMPLETED fails closed without
+scanning older completions, even in that same document. No migration, mutable
+current flag, history rewrite or automatic rescore.
+
+This amends chronology-only current-profile semantics in D-014,
+D-015/D-017/D-018/D-019 and D-090. D-049/D-050 evidence authorization remains
+mandatory. Explicit effective selectors are shared by search, current scoring,
+embedding, agent/member checks and HR facts. Legacy current repository helpers
+retain diagnostic latest-attempt semantics. Historical evaluations remain
+readable against their exact stored profile version; they never become current
+facts solely because a newer document failed.
+
+Identity independently uses its latest identity ATTEMPT's document, then that
+document's newest COMPLETED and unchanged identity evidence checks. Same-document
+failure may preserve authorized HR contacts; new-document failure cannot reuse
+old-document name/email/phone. Identity never enters professional inputs.
+Photos retain their conservative exact latest-document rule.
+
+D-021 readiness remains exact-document and latest-attempt based. Failed D2
+remains not READY and retryable; accepted same-document fallback cannot suppress
+retry. M-5 ingestion/path/retention behavior is unchanged.
+
+HR shows preserved facts/contacts with separate unsuccessful-refresh disclosure
+only for same-document fallback. New-document failure shows attention/unavailable
+state and no old current facts/contacts. Documents and evaluations remain history.
+Library's “Son emalın vəziyyəti” filter/badge use latest processing status.
+No UUIDs, error codes or model internals become normal HR text. REST detail keeps
+the additive latest_attempt_status/preserved_profile/preserved_identity fields;
+no existing field is removed.
+
+ResultSet v1/D1 remains valid after same-D1 FAILED/manual only if effective
+profile and current evidence are still exactly v1. New-D2 failure with no accepted
+D2 profile, a new effective completion, or evidence loss makes it STALE. Stored
+member-snapshot-v1 records, embeddings, scores and ordinals remain immutable.
+Bounded subset refinement and issue #86 query contracts remain mandatory.
+
+**Query / performance:** one shared profile statement drives single, bounded
+candidate and tenant-wide selectors. Its tenant-scoped DISTINCT ON provenance
+subquery chooses the latest attempt regardless of status; a tenant/candidate/
+document join selects newest COMPLETED using a second DISTINCT ON. Requested
+candidate IDs bound the inner query; candidate ownership is checked in the join.
+Only selected content is returned. Identity single/page-bounded queries use the
+analogous statement; library uses it rather than separate candidate-wide SQL.
+No per-candidate selector or historical evidence scan. Search evidence batches
+remain capped at 500; ranking retains its existing exact-evaluation cost.
+Immutable version constraints remain the write backstop. Existing extraction/
+reconciliation concurrency races are not claimed solved.
+
+**Limits:** no database schema/dependency/lockfile/scoring policy/local-only AI/
+auth/CSRF change. No partial-fact persistence, automatic failure repair, photo
+fallback, historical recalculation, Target-Mac work or unrelated issue progression.
+Before-fix proof, corrected matrix, gates and deferrals:
+`docs/ISSUE_46_M9_VALIDATION.md`.

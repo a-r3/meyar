@@ -453,7 +453,9 @@ async def test_library_pagination_order_filters_and_current_profile_authority(
         db_session, tenant_id=tenant.id, profile_status="FAILED", page_size=50
     )
     item = next(item for item in failed.items if item.candidate_id == candidate.id)
-    assert item.current_profile_version == profile_v2.version_number
+    assert item.current_profile_version == profile_v1.version_number
+    assert item.latest_attempt_status == profile_v2.status
+    assert item.preserved_profile
     assert item.current_profile_status == "FAILED"
 
 
@@ -918,7 +920,7 @@ async def test_candidate_detail_does_not_expose_version_identifiers(
     assert response.status_code == 200
     assert "Cari identiklik" not in response.text
     assert "Cari peşəkar profil" not in response.text
-    assert "Hazır" in response.text  # readiness badge, derived from profile_status
+    assert "Tamamlanıb" in response.text  # latest processing attempt status
 
 
 async def test_candidate_detail_groups_photo_and_name_before_status(

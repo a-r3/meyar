@@ -19,14 +19,15 @@
       {% if candidate.current_role %}<p class="lede">{{ candidate.current_role }}</p>{% endif %}
     </div>
   </div>
-  <span class="status-badge" data-state="{{ readiness_state(candidate.profile_status, candidate.latest_parser_status) }}">{{ readiness_label(candidate.profile_status, candidate.latest_parser_status) }}</span>
+  {% if candidate.latest_attempt_status %}<span class="status-badge" data-state="{{ candidate.latest_attempt_status }}">{{ state_label(candidate.latest_attempt_status) }}</span>{% else %}<span class="status-badge" data-state="{{ readiness_state(candidate.profile_status, candidate.latest_parser_status) }}">{{ readiness_label(candidate.profile_status, candidate.latest_parser_status) }}</span>{% endif %}
 </div>
 {% if candidate.documents|selectattr("partial_extraction")|list %}<p class="notice">Sənədin bəzi hissələri hələ şərh edilə bilmir. Orijinal CV-ni yoxlayın.</p>{% endif %}
 <section class="panel identity-panel">
   <h2>Əlaqə məlumatı</h2>
+  {% if candidate.preserved_identity %}<p class="notice">Son əlaqə məlumatı yenilənmədi. Əvvəlki təsdiqlənmiş məlumat göstərilir.</p>{% endif %}
   <dl class="detail-list"><dt>E-poçt</dt><dd>{{ candidate.email or "Məlumat yoxdur" }}</dd><dt>Telefon</dt><dd>{{ candidate.phone or "Məlumat yoxdur" }}</dd></dl>
   {% if candidate.professional_summary %}<p class="meta">{{ candidate.professional_summary }}</p>{% endif %}
-  {% if candidate.profile_status and candidate.profile_status != "COMPLETED" %}<div class="alert alert-warning">Cari profil tamamlanmayıb. Köhnə tamamlanmış profil avtomatik göstərilmir.</div>{% endif %}
+  {% if candidate.preserved_profile %}<div class="alert alert-warning">Son yenilənmə tamamlanmadı. Əvvəlki təsdiqlənmiş profil göstərilir.</div>{% elif candidate.profile_status and candidate.profile_status != "COMPLETED" %}<div class="alert alert-warning">Təsdiqlənmiş peşə məlumatı hazırda əlçatan deyil.</div>{% endif %}
 </section>
 <div class="two-column">
   {{ fact_section("Bacarıqlar", candidate.skills) }}

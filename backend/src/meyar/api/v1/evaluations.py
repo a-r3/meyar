@@ -21,7 +21,7 @@ from meyar.schemas.api_evaluation import (
 )
 from meyar.scoring.batch import BatchRankingError, rank_candidates_for_job
 from meyar.scoring.schemas import ScoreExplanation
-from meyar.services.candidate_profile_repo import get_current_profile_version
+from meyar.services.candidate_profile_repo import get_effective_profile_version
 from meyar.services.job_criteria_repo import get_criteria_version
 from meyar.services.job_repo import get_job
 from meyar.ui.service import build_ranked_candidate_views
@@ -57,7 +57,7 @@ async def post_score_candidate(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Criteria version not found."
         )
-    profile_version = await get_current_profile_version(
+    profile_version = await get_effective_profile_version(
         db, tenant_id=ctx.tenant_id, candidate_id=body.candidate_id
     )
     if profile_version is None:

@@ -27,6 +27,9 @@ class CandidateLibraryItemView(BaseModel):
     languages: list[str] = Field(default_factory=list)
     current_profile_version: int | None
     current_profile_status: str | None
+    latest_attempt_status: str | None = None
+    preserved_profile: bool = False
+    preserved_identity: bool = False
     latest_parser_status: str | None = None
     parser_statuses: list[str]
     folder_index_statuses: list[str]
@@ -75,6 +78,9 @@ class CandidateDetailView(BaseModel):
     professional_summary: str | None = None
     identity_status: str | None
     identity_version: int | None
+    latest_attempt_status: str | None = None
+    preserved_profile: bool = False
+    preserved_identity: bool = False
     latest_parser_status: str | None = None
     profile_status: str | None
     profile_version: int | None

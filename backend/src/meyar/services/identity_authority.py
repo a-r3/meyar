@@ -13,7 +13,7 @@ from meyar.models.candidate_identity_version import (
 )
 from meyar.models.canonical_document import CanonicalDocument
 from meyar.schemas.candidate_identity import CandidateIdentityExtraction
-from meyar.services.candidate_identity_repo import get_current_identity_version
+from meyar.services.candidate_identity_repo import get_effective_identity_version
 
 
 @dataclass(frozen=True)
@@ -55,9 +55,7 @@ async def authorize_identity_version(
         view = build_identity_document_view(canonical)
         verify_identity_evidence(view, identity)
     except (ValidationError, KeyError, TypeError, AttributeError) as exc:
-        raise EvidenceValidationError(
-            "IDENTITY_CANONICAL_CONTENT_UNSUPPORTED", str(exc)
-        ) from exc
+        raise EvidenceValidationError("IDENTITY_CANONICAL_CONTENT_UNSUPPORTED", str(exc)) from exc
     return identity
 
 
@@ -80,5 +78,7 @@ async def identity_values_from_version(
 async def get_current_identity_values(
     db: AsyncSession, *, tenant_id: uuid.UUID, candidate_id: uuid.UUID
 ) -> IdentityValues:
-    version = await get_current_identity_version(db, tenant_id=tenant_id, candidate_id=candidate_id)
+    version = await get_effective_identity_version(
+        db, tenant_id=tenant_id, candidate_id=candidate_id
+    )
     return await identity_values_from_version(db, version=version)
