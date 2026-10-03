@@ -1,5 +1,21 @@
 # Issue #46 S4 — Original-CV storage <-> PostgreSQL recovery
 
+**Issue #46 S4 — independently ACCEPTED + owner-MERGED through PR #119.**
+Accepted exact head `6325cbe507d01624d37683be6b96d10a769c71b4`;
+[exact-head CI 37133867521](https://github.com/a-r3/meyar/actions/runs/37133867521),
+attempt 1 **SUCCESS**. Verified squash/starting main
+`dc4b404fc3eec2ee0919b84016ea3466383c0c6f`; accepted and merged full tree
+`4692171ec09dda67f7e848e8c004f74c83afedf5`. S1-S3 remain accepted/merged.
+D-104 / `docs/ISSUE_46_S4_VALIDATION.md` record the accepted recovery contract;
+earlier rejected heads and their corrections below are historical.
+
+Live merge/head/tree, issue/milestone and CI verification was repeated before S5.
+This acceptance record supersedes the historical pending/rejected delivery reports
+below. The separate delete/upload finding is now reproduced and corrected by S5;
+see `ISSUE_46_S5_VALIDATION.md`. S4 recovery and its residual limits are unchanged.
+
+## Historical S4 implementation and rejection record
+
 Implementation proposed for independent acceptance. Refs #46, existing M9
 milestone 10. #46 is not complete; #46/#35/#36/#45/#50 remain OPEN. D-104 records
 the architecture. PR #119 head `95b39467f16235129b06135634ea119d59dea362`
@@ -384,7 +400,7 @@ reproduction or correction is claimed here. This finding remains owned by the
 remaining #46 concurrency work; no candidate lock, API upload or deletion behavior
 was modified in this correction. #46 stays OPEN.
 
-## HUMAN ACTION REQUIRED
+## Historical S4 re-audit request (superseded by acceptance above)
 
 Independently re-audit the NEW exact PR #119 head after its fresh CI is verified.
 Do not merge, enable auto-merge, close #46 or begin a later slice. Reply with audit

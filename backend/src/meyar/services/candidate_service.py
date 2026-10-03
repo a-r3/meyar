@@ -12,6 +12,7 @@ from meyar.services.storage_recovery import (
     rollback_with_recovery,
     track_staged,
 )
+from meyar.services.tenant_authority import require_active_tenant
 from meyar.storage.base import DocumentStorage
 from meyar.storage.photo import LocalPhotoStorage
 
@@ -29,8 +30,15 @@ async def delete_candidate_cascade(
     request operation. Asset deletes are staged and only made permanent after
     the DB commit; on any failure every previously existing asset is restored
     byte-for-byte to its exact key (services.storage_recovery).
+    Lock order: Tenant SHARE -> Candidate UPDATE, before asset enumeration.
+    Upload takes Tenant SHARE -> ApiKey SHARE -> Candidate SHARE. No key/user
+    lock is acquired after Candidate. A preceding upload must end before this
+    lock succeeds; a later upload rechecks absence after deletion commits.
     Returns None only if the candidate does not exist for this tenant."""
-    candidate = await get_candidate(db, tenant_id=tenant_id, candidate_id=candidate_id)
+    await require_active_tenant(db, tenant_id, lock=True)
+    candidate = await get_candidate(
+        db, tenant_id=tenant_id, candidate_id=candidate_id, lock=True
+    )
     if candidate is None:
         return None
 

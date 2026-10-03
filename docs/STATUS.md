@@ -21,30 +21,31 @@ S3 Runtime Security is independently **ACCEPTED + MERGED**. Accepted head
 [37122628841](https://github.com/a-r3/meyar/actions/runs/37122628841) **SUCCESS**.
 Squash/main `df5264d869ba3810b857b77b7d9491b77b6f39c1`; accepted and merged
 tree `9970ce5ad3b2835335df1d2ef1fd205869445945` (D-103).
-Only S4 original-CV storage <-> PostgreSQL recovery is now proposed under D-104 /
-`docs/ISSUE_46_S4_VALIDATION.md`: bounded compensation for handled failures of
-original-document save/create and candidate/tenant deletion, with staged
-(reversible) deletes. PR #119 head `95b39467f16235129b06135634ea119d59dea362`
-is acceptance-REJECTED: successful trash link plus failed source unlink left an
-untracked duplicate before ledger tracking. The same-PR correction cleans that
-partial link before propagating; failed cleanup raises a closed staging error and
-logs only a structural unresolved code. New exact-head re-acceptance is pending.
-Subsequent head `977aaf34b4e67be3602d95df1cbc1eea0063fe49` is also
-acceptance-REJECTED for a handled rollback-failure window: effects stayed PENDING
-and were skipped without DB-truth reconciliation or a closed compensation failure.
-Its CI `37130613061` passed attempt 1; S4 was not accepted. The same-PR follow-up
-marks unknown outcomes explicitly, invalidates uncertain connections before fresh
-authority checks, and retains/fails closed on unresolved reset/query failures.
-The separate candidate-delete/direct-upload enumeration race is documented for
-remaining #46 concurrency work, not implemented here. New exact-head re-audit is pending.
-Rejected-head CI run `37126184791` failed its S3 scoring assertion on attempt 1
-(404 vs 200), then passed at the identical SHA on attempt 2; cause unexplained.
-A hard process kill between a filesystem mutation and its compensation is a
-documented residual window owned by the later #46 orphan-reconciliation work.
-Explicitly reported cleanup/compensation/purge failures can also leave
-observable residuals; ordinary source-unlink failure with successful cleanup cannot.
-#46/#35/#36/#45/#50 remain OPEN. No folder-concurrency, readiness, retention, schema-drift or
-Target-Mac work.
+**Issue #46 S4 — independently ACCEPTED + owner-MERGED through PR #119.**
+Accepted exact head `6325cbe507d01624d37683be6b96d10a769c71b4`;
+[exact-head CI 37133867521](https://github.com/a-r3/meyar/actions/runs/37133867521),
+attempt 1 **SUCCESS**. Verified squash/starting main
+`dc4b404fc3eec2ee0919b84016ea3466383c0c6f`; accepted and merged full tree
+`4692171ec09dda67f7e848e8c004f74c83afedf5`. S1-S3 remain accepted/merged.
+D-104 / `docs/ISSUE_46_S4_VALIDATION.md` record the accepted recovery contract;
+earlier rejected heads and their corrections in the validation record are historical.
+
+**Issue #46 S5 — candidate hard-delete / direct-upload concurrency correction
+implemented; independent acceptance pending.** The accepted S4 code was first
+reproduced with real PostgreSQL connections, events and real synthetic storage:
+a new upload committed after old originals were staged; the later candidate
+cascade left zero candidate/document rows but one original on disk. No production
+change preceded that proof. Delete now takes Tenant FOR SHARE -> tenant-scoped
+Candidate FOR UPDATE before enumerating assets, held through its DB outcome.
+Upload's existing Tenant -> ApiKey -> Candidate FOR SHARE order is unchanged.
+D-105 and `docs/ISSUE_46_S5_VALIDATION.md` record the proof, ordering and gates.
+
+Only this original-CV delete/upload boundary is addressed. Folder overlap/content
+leases/dedup, changed-file reads, readiness, retention/orphan sweeping, schema
+drift, derived-photo/post-upload response concurrency and Target-Mac work remain
+outside this slice. S4 hard-kill and reported compensation/purge failure residuals
+remain; no durable journal is added. #46/#35/#36/#45/#50 remain OPEN; #46 is not
+complete. No deployment/Target-Mac work or milestone reorganization.
 The accepted/merged M-9 and M-5 records below remain valid.
 
 **Issue #46 M-9 — independently ACCEPTED and MERGED through PR #114;

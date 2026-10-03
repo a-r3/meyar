@@ -22,11 +22,16 @@ async def create_candidate(db: AsyncSession, *, tenant_id: uuid.UUID) -> Candida
 
 
 async def get_candidate(
-    db: AsyncSession, *, tenant_id: uuid.UUID, candidate_id: uuid.UUID
+    db: AsyncSession, *, tenant_id: uuid.UUID, candidate_id: uuid.UUID, lock: bool = False
 ) -> Candidate | None:
-    result = await db.execute(
+    stmt = (
         select(Candidate).where(Candidate.id == candidate_id, Candidate.tenant_id == tenant_id)
     )
+    if lock:
+        # Deletion authority: excludes upload SHARE and FK KEY SHARE locks.
+        # Callers acquire Tenant authority first and hold through commit/rollback.
+        stmt = stmt.with_for_update().execution_options(populate_existing=True)
+    result = await db.execute(stmt)
     return result.scalar_one_or_none()
 
 
