@@ -4,6 +4,8 @@ import os
 import uuid
 from pathlib import Path
 
+from meyar.storage.staging import StagedObject, purge_staged, restore_staged, stage_file
+
 
 class LocalPhotoStorage:
     def __init__(self, root: str) -> None:
@@ -43,19 +45,18 @@ class LocalPhotoStorage:
     async def delete(self, *, tenant_id: uuid.UUID, storage_key: str) -> None:
         self._path_for(storage_key, tenant_id).unlink(missing_ok=True)
 
-    async def restore_exact(
-        self, *, tenant_id: uuid.UUID, storage_key: str, content: bytes
-    ) -> None:
-        """Compensate a failed hard delete without changing immutable provenance."""
+    async def stage_delete(
+        self, *, tenant_id: uuid.UUID, storage_key: str
+    ) -> StagedObject | None:
         path = self._path_for(storage_key, tenant_id)
-        if path.exists():
-            if path.read_bytes() != content:
-                raise OSError("Derived photo key contains different bytes")
-            return
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
-        try:
-            temporary.write_bytes(content)
-            os.replace(temporary, path)
-        finally:
-            temporary.unlink(missing_ok=True)
+        return stage_file(
+            self._root, path, namespace="photo", tenant_id=tenant_id, storage_key=storage_key
+        )
+
+    async def purge_staged(self, staged: StagedObject) -> None:
+        self._path_for(staged.storage_key, staged.tenant_id)  # tenant/shape validation
+        purge_staged(self._root, staged)
+
+    async def restore_staged(self, staged: StagedObject) -> None:
+        path = self._path_for(staged.storage_key, staged.tenant_id)
+        restore_staged(self._root, path, staged)

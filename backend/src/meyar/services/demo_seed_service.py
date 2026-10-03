@@ -46,6 +46,8 @@ from meyar.extraction.view import ProfessionalDocumentView
 from meyar.ingestion.parser import DocumentParser
 from meyar.llm.provider import LLMResultProvenance
 from meyar.models.audit_event import AuditEvent
+from meyar.models.candidate_document import CandidateDocument
+from meyar.models.candidate_photo_version import CandidatePhotoVersion
 from meyar.models.tenant import Tenant
 from meyar.models.tenant_membership import TenantMembership
 from meyar.models.user import User
@@ -72,10 +74,12 @@ from meyar.services.candidate_repo import count_candidates_for_tenant, create_ca
 from meyar.services.job_criteria_repo import create_criteria_version
 from meyar.services.job_repo import create_job
 from meyar.services.profile_authority import get_current_authorized_profile
+from meyar.services.storage_recovery import track_staged
 from meyar.services.tenant_membership_repo import create_membership
 from meyar.services.tenant_repo import create_tenant
 from meyar.services.user_repo import create_user, get_user_by_id, get_user_by_username, set_password
 from meyar.storage.base import DocumentStorage
+from meyar.storage.photo import LocalPhotoStorage
 
 # The display name every demo tenant is created with. NEVER sufficient
 # proof of demo ownership by itself — an ordinary tenant could share this
@@ -1012,16 +1016,41 @@ async def _marked_demo_human(
     return user, current, memberships
 
 
-async def reset_demo(db: AsyncSession) -> bool:
+async def reset_demo(
+    db: AsyncSession, storage: DocumentStorage, photo_storage: LocalPhotoStorage
+) -> bool:
     """Delete the marked demo tenant and only a marked, exclusive current User.
 
     Unmarked/shared identities survive; only tenant-owned rows cascade away.
     Ambiguous human markers abort before deletion. No operator-supplied IDs.
+
+    The tenant's original CVs and derived photos are staged (reversible) here
+    and become permanent only via storage_recovery.commit_with_recovery; the
+    caller owns the transaction and must finish it that way (issue #46 S4).
     """
     tenant = await _find_demo_tenant(db)
     if tenant is None:
         return False
     demo_user, _, memberships = await _marked_demo_human(db, tenant.id)
+    original_keys = await db.scalars(
+        select(CandidateDocument.storage_key).where(CandidateDocument.tenant_id == tenant.id)
+    )
+    for key in original_keys.all():
+        track_staged(
+            db, storage, await storage.stage_delete(tenant_id=tenant.id, storage_key=key)
+        )
+    photo_keys = await db.scalars(
+        select(CandidatePhotoVersion.derived_storage_key).where(
+            CandidatePhotoVersion.tenant_id == tenant.id,
+            CandidatePhotoVersion.derived_storage_key.is_not(None),
+        )
+    )
+    for photo_key in photo_keys.all():
+        assert photo_key is not None
+        track_staged(
+            db, photo_storage,
+            await photo_storage.stage_delete(tenant_id=tenant.id, storage_key=photo_key),
+        )
     if demo_user is not None and all(m.tenant_id == tenant.id for m in memberships):
         await db.delete(demo_user)
     await db.delete(tenant)

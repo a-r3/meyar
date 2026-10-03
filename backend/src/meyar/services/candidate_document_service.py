@@ -17,6 +17,7 @@ from meyar.services.candidate_document_repo import (
     create_candidate_document,
     create_canonical_document,
 )
+from meyar.services.storage_recovery import abandon_created, settle_leftovers, track_created
 from meyar.services.tenant_authority import require_active_tenant
 from meyar.storage.base import DocumentStorage
 
@@ -88,6 +89,11 @@ async def persist_candidate_document(
 ) -> CandidateDocument:
     """Persist a prepared success/terminal outcome; never commits or parses.
 
+    The saved original is tracked in the session's storage-recovery ledger: a
+    failure here compensates immediately; a later caller rollback or failed
+    commit is compensated by storage_recovery.commit_with_recovery /
+    rollback_with_recovery / recover_on_failure.
+
     Request callers revalidate and lock live authority first. Operational
     failures never reach storage.save or CandidateDocument creation.
     """
@@ -95,75 +101,84 @@ async def persist_candidate_document(
     detected, data, outcome = prepared.detected, prepared.data, prepared.outcome
     if isinstance(outcome, ParseError) and not outcome.is_terminal:
         raise outcome
+    await settle_leftovers(db)  # compensate any earlier direct db.rollback()
     storage_key = await storage.save(tenant_id=tenant_id, content=data)
+    created = track_created(db, storage, tenant_id=tenant_id, storage_key=storage_key)
+    try:
+        # Savepoint: if any DB step fails, this call's rows are rolled back here,
+        # so deleting the just-saved original can never strand a surviving row.
+        async with db.begin_nested():
+            # original_filename is retained for display only — truncated, never
+            # used to build a path or influence storage/parsing behavior.
+            safe_original_filename = (filename or "upload")[:255]
 
-    # original_filename is retained for display only — truncated, never
-    # used to build a path or influence storage/parsing behavior.
-    safe_original_filename = (filename or "upload")[:255]
+            document = await create_candidate_document(
+                db,
+                tenant_id=tenant_id,
+                candidate_id=candidate_id,
+                original_filename=safe_original_filename,
+                mime_type=detected.mime_type,
+                byte_size=len(data),
+                sha256_hash=prepared.sha256_hash,
+                storage_key=storage_key,
+            )
+            await record_event(
+                db,
+                tenant_id=tenant_id,
+                event_type="CANDIDATE_DOCUMENT_UPLOADED",
+                metadata={
+                    "candidate_id": str(candidate_id),
+                    "document_id": str(document.id),
+                    "byte_size": len(data),
+                    "mime_type": detected.mime_type,
+                },
+            )
 
-    document = await create_candidate_document(
-        db,
-        tenant_id=tenant_id,
-        candidate_id=candidate_id,
-        original_filename=safe_original_filename,
-        mime_type=detected.mime_type,
-        byte_size=len(data),
-        sha256_hash=prepared.sha256_hash,
-        storage_key=storage_key,
-    )
-    await record_event(
-        db,
-        tenant_id=tenant_id,
-        event_type="CANDIDATE_DOCUMENT_UPLOADED",
-        metadata={
-            "candidate_id": str(candidate_id),
-            "document_id": str(document.id),
-            "byte_size": len(data),
-            "mime_type": detected.mime_type,
-        },
-    )
+            if isinstance(outcome, ParseError):
+                exc = outcome
+                document.parser_status = PARSER_STATUS_PARSE_FAILED
+                document.parse_error_code = exc.code.value
+                document.parse_error_message = exc.public_message
+                await record_event(
+                    db,
+                    tenant_id=tenant_id,
+                    event_type="CANDIDATE_DOCUMENT_PARSE_FAILED",
+                    metadata={
+                        "candidate_id": str(candidate_id),
+                        "document_id": str(document.id),
+                        "error_code": exc.code.value,
+                    },
+                )
+            else:
+                result = outcome
+                document.parser_status = PARSER_STATUS_PARSED
+                document.parser_name = result.parser_name
+                document.parser_version = result.parser_version
+                document.parsed_at = datetime.now(UTC)
+                await create_canonical_document(
+                    db,
+                    tenant_id=tenant_id,
+                    candidate_document_id=document.id,
+                    parser_name=result.parser_name,
+                    parser_version=result.parser_version,
+                    language=result.content.language,
+                    content=result.content.model_dump(mode="json"),
+                )
+                await record_event(
+                    db,
+                    tenant_id=tenant_id,
+                    event_type="CANDIDATE_DOCUMENT_PARSED",
+                    metadata={
+                        "candidate_id": str(candidate_id),
+                        "document_id": str(document.id),
+                        "parser_name": result.parser_name,
+                        "parser_version": result.parser_version,
+                        "page_count": len(result.content.pages),
+                    },
+                )
 
-    if isinstance(outcome, ParseError):
-        exc = outcome
-        document.parser_status = PARSER_STATUS_PARSE_FAILED
-        document.parse_error_code = exc.code.value
-        document.parse_error_message = exc.public_message
-        await record_event(
-            db,
-            tenant_id=tenant_id,
-            event_type="CANDIDATE_DOCUMENT_PARSE_FAILED",
-            metadata={
-                "candidate_id": str(candidate_id),
-                "document_id": str(document.id),
-                "error_code": exc.code.value,
-            },
-        )
-    else:
-        result = outcome
-        document.parser_status = PARSER_STATUS_PARSED
-        document.parser_name = result.parser_name
-        document.parser_version = result.parser_version
-        document.parsed_at = datetime.now(UTC)
-        await create_canonical_document(
-            db,
-            tenant_id=tenant_id,
-            candidate_document_id=document.id,
-            parser_name=result.parser_name,
-            parser_version=result.parser_version,
-            language=result.content.language,
-            content=result.content.model_dump(mode="json"),
-        )
-        await record_event(
-            db,
-            tenant_id=tenant_id,
-            event_type="CANDIDATE_DOCUMENT_PARSED",
-            metadata={
-                "candidate_id": str(candidate_id),
-                "document_id": str(document.id),
-                "parser_name": result.parser_name,
-                "parser_version": result.parser_version,
-                "page_count": len(result.content.pages),
-            },
-        )
+    except BaseException as exc:
+        await abandon_created(db, created, exc)
+        raise
 
     return document

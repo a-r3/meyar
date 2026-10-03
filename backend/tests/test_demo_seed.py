@@ -45,6 +45,16 @@ MAX_BYTES = 10 * 1024 * 1024
 MAX_INPUT_CHARS = 20000
 
 
+
+
+def _stores(tmp_path):
+    from meyar.storage.local import LocalFilesystemStorage
+    from meyar.storage.photo import LocalPhotoStorage
+
+    root = str(tmp_path / "storage")
+    return LocalFilesystemStorage(root), LocalPhotoStorage(root)
+
+
 def _storage(tmp_path: Path) -> LocalFilesystemStorage:
     return LocalFilesystemStorage(root=str(tmp_path / "storage"))
 
@@ -353,7 +363,7 @@ async def test_reset_cannot_affect_non_demo_tenant(
     await _seed(db_session, tmp_path)
     await db_session.commit()
 
-    deleted = await reset_demo(db_session)
+    deleted = await reset_demo(db_session, *_stores(tmp_path))
     await db_session.commit()
     assert deleted is True
 
@@ -370,8 +380,10 @@ async def test_reset_cannot_affect_non_demo_tenant(
     assert len(other_candidates.scalars().all()) == 1
 
 
-async def test_reset_with_no_demo_tenant_is_a_safe_noop(db_session: AsyncSession) -> None:
-    deleted = await reset_demo(db_session)
+async def test_reset_with_no_demo_tenant_is_a_safe_noop(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    deleted = await reset_demo(db_session, *_stores(tmp_path))
     assert deleted is False
 
 
@@ -397,7 +409,7 @@ async def test_no_real_pii_or_secrets_in_demo_fixtures() -> None:
 
 
 async def test_reset_refuses_unmarked_same_name_tenant_and_leaves_it_untouched(
-    db_session: AsyncSession,
+    db_session: AsyncSession, tmp_path: Path,
 ) -> None:
     """Requirement 1: an ordinary tenant that merely happens to be named
     exactly DEMO_TENANT_NAME, with no real demo tenant anywhere, must
@@ -407,7 +419,7 @@ async def test_reset_refuses_unmarked_same_name_tenant_and_leaves_it_untouched(
     await db_session.commit()
 
     with pytest.raises(DemoTenantAmbiguousError):
-        await reset_demo(db_session)
+        await reset_demo(db_session, *_stores(tmp_path))
 
     # Completely untouched: same id, same name, candidate still present.
     survivor = await db_session.get(Tenant, ordinary.id)
@@ -457,7 +469,7 @@ async def test_reset_refuses_when_marked_and_unmarked_tenants_share_name(
     await db_session.commit()
 
     with pytest.raises(DemoTenantAmbiguousError):
-        await reset_demo(db_session)
+        await reset_demo(db_session, *_stores(tmp_path))
 
     # Both tenants survive, completely unmodified.
     real_tenant = await db_session.get(Tenant, real_summary.tenant_id)
@@ -489,7 +501,7 @@ async def test_seed_with_one_valid_marked_demo_tenant_works_normally(
     )
     assert len(marker.scalars().all()) == 2
 
-    deleted = await reset_demo(db_session)
+    deleted = await reset_demo(db_session, *_stores(tmp_path))
     await db_session.commit()
     assert deleted is True
 
@@ -513,7 +525,7 @@ async def test_repeated_seed_reset_cycle_remains_idempotent(
         )
         assert len(tenants.scalars().all()) == 1
 
-        deleted = await reset_demo(db_session)
+        deleted = await reset_demo(db_session, *_stores(tmp_path))
         await db_session.commit()
         assert deleted is True
 

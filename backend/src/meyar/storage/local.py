@@ -1,6 +1,11 @@
 import os
+import re
 import uuid
 from pathlib import Path
+
+from meyar.storage.staging import StagedObject, purge_staged, restore_staged, stage_file
+
+_KEY_TAIL = re.compile(r"[0-9a-f]{32}")
 
 
 class LocalFilesystemStorage:
@@ -23,13 +28,26 @@ class LocalFilesystemStorage:
     def _path_for(self, storage_key: str) -> Path:
         return self._root / storage_key
 
+    def _owned_path(self, tenant_id: uuid.UUID, storage_key: str) -> Path:
+        pieces = storage_key.split("/")
+        if (
+            len(pieces) != 2
+            or pieces[0] != str(tenant_id)
+            or not _KEY_TAIL.fullmatch(pieces[1])
+        ):
+            raise ValueError("Invalid document key for tenant")
+        return self._path_for(storage_key)
+
     async def save(self, *, tenant_id: uuid.UUID, content: bytes) -> str:
         storage_key = f"{tenant_id}/{uuid.uuid4().hex}"
         path = self._path_for(storage_key)
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
-        tmp_path.write_bytes(content)
-        os.replace(tmp_path, path)  # atomic on the same filesystem
+        try:
+            tmp_path.write_bytes(content)
+            os.replace(tmp_path, path)  # atomic on the same filesystem
+        finally:
+            tmp_path.unlink(missing_ok=True)  # no-op after a successful replace
         return storage_key
 
     async def read(self, *, storage_key: str) -> bytes:
@@ -37,3 +55,22 @@ class LocalFilesystemStorage:
 
     async def delete(self, *, storage_key: str) -> None:
         self._path_for(storage_key).unlink(missing_ok=True)
+
+    async def delete_owned(self, *, tenant_id: uuid.UUID, storage_key: str) -> None:
+        self._owned_path(tenant_id, storage_key).unlink(missing_ok=True)
+
+    async def stage_delete(
+        self, *, tenant_id: uuid.UUID, storage_key: str
+    ) -> StagedObject | None:
+        path = self._owned_path(tenant_id, storage_key)
+        return stage_file(
+            self._root, path, namespace="document", tenant_id=tenant_id, storage_key=storage_key
+        )
+
+    async def purge_staged(self, staged: StagedObject) -> None:
+        self._owned_path(staged.tenant_id, staged.storage_key)  # tenant/shape validation
+        purge_staged(self._root, staged)
+
+    async def restore_staged(self, staged: StagedObject) -> None:
+        path = self._owned_path(staged.tenant_id, staged.storage_key)
+        restore_staged(self._root, path, staged)

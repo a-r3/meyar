@@ -8912,8 +8912,11 @@ Validation, sink inventory, before/after proof and remaining limitations:
 
 ## D-103 — Issue #46 S3: synthetic human ownership and HTTP response policy
 
-Status: implementation proposed for independent acceptance, Refs #46 under
-existing M9 milestone 10. Starting main `a470305df37bfc952f74446834bfae6615b9bc00`.
+Status: independently ACCEPTED + MERGED (accepted head
+`d97ac9feec9a47c25dcd19617246e475d46995b1`, exact-head CI 37122628841 SUCCESS,
+squash/main `df5264d869ba3810b857b77b7d9491b77b6f39c1`, tree
+`9970ce5ad3b2835335df1d2ef1fd205869445945`). Refs #46 under existing M9
+milestone 10. Starting main was `a470305df37bfc952f74446834bfae6615b9bc00`.
 S1 and S2 are accepted/merged; #46/#35/#36/#45/#50 remain OPEN.
 
 A User is a cross-tenant identity. Username or demo membership alone never
@@ -8964,3 +8967,82 @@ Production REST routes and SSR/Jinja are unchanged.
 No migration, dependency/lockfile change, scoring/tenant-authority weakening,
 storage recovery, folder concurrency, readiness, retention, schema drift,
 other-issue or Target-Mac work. Evidence: docs/ISSUE_46_S3_VALIDATION.md.
+
+## D-104 — Issue #46 S4: original-CV storage <-> PostgreSQL recovery
+
+Status: implementation proposed for independent acceptance, Refs #46 under
+existing M9 milestone 10. Starting main `df5264d869ba3810b857b77b7d9491b77b6f39c1`.
+S1-S3 are accepted/merged; #46/#35/#36/#45/#50 remain OPEN. No migration,
+dependency or lockfile change.
+
+Problem. Filesystem and PostgreSQL cannot be one atomic transaction. Before S4,
+`persist_candidate_document` saved the original and then relied on a caller's
+later commit (orphaned original on any DB/commit failure), local `save` left a
+`.tmp` on failure, and candidate deletion removed originals permanently before
+the DB commit (an authorized CV could be gone while rollback restored its row).
+`reset_demo` removed all DB document authority without touching any original or
+derived photo.
+
+Design (explicit, bounded compensation; no new durable journal).
+1. `meyar.services.storage_recovery` keeps a per-session ledger (`session.info`),
+   updated only by synchronous SQLAlchemy `after_commit`/`after_rollback` events
+   (outermost transaction only; SAVEPOINT events ignored) and settled by awaited
+   helpers. `persist_candidate_document` stays commit-free: it runs its DB work in
+   a SAVEPOINT, so its own failure compensates immediately and a surviving row can
+   never lose its bytes. Caller-owned transactions use `recover_on_failure(db)`
+   (rollback + compensate on any exception, incl. commit failure) or
+   `commit_with_recovery(db)`. Wired into direct upload, `reconcile_folder`, the
+   `index-folder`/`seed-demo` CLIs; folder ingestion is covered because it uses the
+   same persist path. A caller that bypasses the helpers and calls `db.rollback()`
+   directly is still compensated lazily by the next persist, never silently lost.
+2. The database is the arbiter. Before any compensating action, in a fresh
+   transaction the ledger checks whether a durable CandidateDocument (or photo
+   version) still references the key. An ambiguous COMMIT (applied server-side but
+   the client saw an error) therefore never deletes a referenced original and never
+   restores bytes of a deleted candidate. If that check itself fails nothing is
+   deleted; the entry stays unresolved.
+3. Deletes are staged, not performed. `DocumentStorage` gains tenant-validated
+   `delete_owned`, `stage_delete`, `purge_staged`, `restore_staged`
+   (`LocalPhotoStorage` gains the staging trio and loses the in-memory
+   `restore_exact`). Staging is an atomic same-filesystem link+unlink into
+   `.trash/<tenant>/<random>`: constant memory, no CV bytes read, no unbounded
+   snapshots for candidates with many historical documents. Purge happens only
+   after the DB deletion is durable; restore returns the object to its exact key
+   using a no-overwrite link; an occupied key with identical bytes is idempotent,
+   with different bytes fails closed (`StorageRestoreConflictError`) and the staged
+   object is kept. Already-absent objects stage to `None` and are never fabricated.
+   Existing hash/absent-photo semantics are unchanged (staging never reads photos).
+4. `LocalFilesystemStorage.save` now removes its temporary file in `finally`
+   (parity with `LocalPhotoStorage`); `os.replace` atomicity is unchanged. Keys
+   remain opaque UUID keys; no filename becomes a path; new primitives validate the
+   `<tenant-uuid>/<32 hex>` shape and tenant ownership before touching disk.
+5. `reset_demo(db, storage, photo_storage)` (same defect class: DB authority removed
+   without original semantics) stages every original and derived photo of the demo
+   tenant and is finished by `commit_with_recovery`.
+6. Failure reporting. Compensation that cannot complete raises
+   `StorageCompensationError` (closed message, primary failure as `__cause__`;
+   never success) and logs only `component/code/unresolved_count/error_type`
+   (`STORAGE_COMPENSATION_UNRESOLVED`; `STORAGE_PURGE_UNRESOLVED` when the DB
+   deletion is durable but a purge failed, which does not fail the operation). No
+   keys, paths, tenant or candidate data are logged; unresolved objects remain on
+   disk (document key or `.trash`) for operator reconciliation.
+
+Reviewed and unchanged: `ui/router` only reads originals; `candidate_photo_service`
+already owns derived-photo save/compensation; tests/CLI use the helpers above.
+Existing photo-recovery tests now inject faults at `stage_delete` (the destructive
+primitive) instead of `delete`; their assertions are unchanged.
+
+Residual hard-crash window (not closed here, by design). A process kill (power
+loss, SIGKILL) after `storage.save` but before commit leaves an unreferenced
+original; a kill after `stage_delete` leaves the object under `.trash` while the
+DB either kept (object missing at its key but recoverable from `.trash`) or deleted
+(orphan in `.trash`) the rows. Nothing is lost irrecoverably, but no automatic
+repair exists. A durable journal/migration was judged unjustified for S4; the
+later #46 orphan/retention reconciliation owns a DB-vs-storage sweep (including
+purging/restoring `.trash`). Demo `reset_demo` of an already-deleted tenant has no
+rows to enumerate, so a crash mid-reset can strand originals under that tenant's
+directory until that sweep.
+
+Out of scope and not started: folder reconciliation overlap/leases, readiness,
+retention sweepers, schema drift, #45/#35/#36/#50, Target-Mac. Evidence:
+docs/ISSUE_46_S4_VALIDATION.md.

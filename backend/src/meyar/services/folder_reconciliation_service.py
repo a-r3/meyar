@@ -31,6 +31,7 @@ from meyar.services.folder_indexed_file_repo import list_folder_indexed_files
 from meyar.services.folder_indexer_service import FolderScanSummary, index_folder
 from meyar.services.identity_authority import authorize_identity_version
 from meyar.services.profile_authority import get_current_authorized_profile
+from meyar.services.storage_recovery import recover_on_failure
 from meyar.services.tenant_authority import TenantInactiveError, require_active_tenant
 from meyar.storage.base import DocumentStorage
 from meyar.storage.dependency import get_photo_storage
@@ -369,19 +370,21 @@ async def reconcile_folder(
     repeatable reconciliation — safe to re-run at any point, including
     after a partial/interrupted prior run, since every step underneath
     is idempotent by construction."""
-    scan_summary = await index_folder(
-        db,
-        storage,
-        parser,
-        tenant_id=tenant_id,
-        root_path=root_path,
-        max_bytes=max_bytes,
-        stability_window_seconds=stability_window_seconds,
-    )
-    # Committed before downstream processing starts so discovery/ingestion
-    # results are durable even if a later candidate's processing fails
-    # unexpectedly before its own commit.
-    await db.commit()
+    async with recover_on_failure(db):
+        scan_summary = await index_folder(
+            db,
+            storage,
+            parser,
+            tenant_id=tenant_id,
+            root_path=root_path,
+            max_bytes=max_bytes,
+            stability_window_seconds=stability_window_seconds,
+        )
+        # Committed before downstream processing starts so discovery/ingestion
+        # results are durable even if a later candidate's processing fails
+        # unexpectedly before its own commit. A failure up to here removes every
+        # original saved by this scan (their DB authority rolls back with it).
+        await db.commit()
 
     # Independent, idempotent photo pass. Every document has its own commit;
     # any image failure is terminal and cannot make professional readiness fail.

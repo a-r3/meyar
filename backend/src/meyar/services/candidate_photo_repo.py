@@ -62,3 +62,17 @@ async def create_photo_version(
     db.add(row)
     await db.flush()
     return row
+
+
+async def photo_storage_key_referenced(
+    db: AsyncSession, *, tenant_id: uuid.UUID, storage_key: str
+) -> bool:
+    row = await db.scalar(
+        select(CandidatePhotoVersion.id)
+        .where(
+            CandidatePhotoVersion.tenant_id == tenant_id,
+            CandidatePhotoVersion.derived_storage_key == storage_key,
+        )
+        .limit(1)
+    )
+    return row is not None

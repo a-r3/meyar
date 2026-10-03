@@ -16,11 +16,19 @@ Accepted head `4ee99cbcd68faffbb820c8726ca0631f9f58e06b`; exact-head CI
 Owner squash/main `a470305df37bfc952f74446834bfae6615b9bc00`; accepted and
 merged full tree `0d4b8271af3db366f605495b35de83764ec315b4`.
 The earlier rejected S2 head and its remediation are historical.
-Only S3 runtime-security is now proposed under D-103 /
-`docs/ISSUE_46_S3_VALIDATION.md`: positive demo-human ownership, centralized API
-privacy headers, and production docs/OpenAPI routing. Independent acceptance
-is pending. #46/#35/#36/#45/#50 remain OPEN. No later-slice, storage recovery,
-folder concurrency, readiness, retention, schema-drift or Target-Mac work.
+S3 Runtime Security is independently **ACCEPTED + MERGED**. Accepted head
+`d97ac9feec9a47c25dcd19617246e475d46995b1`; exact-head CI
+[37122628841](https://github.com/a-r3/meyar/actions/runs/37122628841) **SUCCESS**.
+Squash/main `df5264d869ba3810b857b77b7d9491b77b6f39c1`; accepted and merged
+tree `9970ce5ad3b2835335df1d2ef1fd205869445945` (D-103).
+Only S4 original-CV storage <-> PostgreSQL recovery is now proposed under D-104 /
+`docs/ISSUE_46_S4_VALIDATION.md`: bounded compensation for handled failures of
+original-document save/create and candidate/tenant deletion, with staged
+(reversible) deletes. Independent acceptance is pending. A hard process kill
+between a filesystem mutation and its compensation is a documented residual
+window owned by the later #46 orphan-reconciliation work. #46/#35/#36/#45/#50
+remain OPEN. No folder-concurrency, readiness, retention, schema-drift or
+Target-Mac work.
 The accepted/merged M-9 and M-5 records below remain valid.
 
 **Issue #46 M-9 — independently ACCEPTED and MERGED through PR #114;
