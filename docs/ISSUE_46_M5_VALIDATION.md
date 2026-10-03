@@ -1,5 +1,48 @@
 # Issue #46 M-5 — ingestion compensation and truthful library state
 
+M-5 is independently ACCEPTED and MERGED through PR #112; the M-5 slice is
+COMPLETE. Issue #46 remains OPEN under **M9 — Deployment, Benchmark &
+Integration Readiness**. M-5 is the audit finding, not milestone M5.
+The final delivery record below supersedes pre-merge delivery/status wording;
+all historical reproduction/test evidence and measured numbers are preserved.
+
+## Final acceptance and post-merge delivery
+
+- Independent acceptance of exact head
+  `869415b7a08dba18e4c732b6c4f9d74baa1347cd` was confirmed by the owner before
+  merge.
+- [Accepted exact-head CI run 37081927902](https://github.com/a-r3/meyar/actions/runs/37081927902)
+  completed SUCCESS for that exact head and remains the published delivery
+  authority. Historical local measurements are not replaced by a new claim.
+- The owner manually Squash and merged
+  [PR #112](https://github.com/a-r3/meyar/pull/112). Live verification confirmed
+  PR #112 is MERGED and current main/squash is
+  `d14ab1a5b4e25bd7d012bada4041ea59aaf55b61`.
+- Its sole parent is previous main
+  `f1429c7309b1537fd8e94547a2f666995a80859a`; the squash is exactly one commit
+  ahead (`git rev-list --count previous-main..squash` = 1).
+- Accepted head and merged squash have identical complete trees/content,
+  tree SHA `9c832498875f61a8c3df5313bce9424872e4ca1c` on both commits. The
+  full-tree comparison returned no differences, including production and tests.
+- Only the M-5 slice is COMPLETE. #46 remains OPEN. Storage-save/DB rollback
+  orphan recovery, legacy cleanup without provable ownership, concurrent
+  reconciliation/dedup, folder transaction lifetime, generic retention/orphan
+  cleanup, M-9 and other unresolved #46 work remain pending. The accepted
+  behavioral contract, legacy-retention policy and explicit deferrals below
+  remain unchanged; none of those unresolved scopes is marked solved.
+- M-9 failed re-extraction has NOT started; existing profile-status precedence
+  and M-9 semantics remain unchanged. This documentation-only follow-up starts
+  no next implementation slice. #35/#36/#50 remain OPEN and unchanged.
+- No Target-Mac execution, model/benchmark acceptance or Target-Mac acceptance
+  is claimed.
+- This follow-up changes only governance documentation: no production code,
+  tests, migrations, dependencies, lockfiles or parser behavior changes.
+
+## Historical pre-merge delivery status
+
+The following pre-merge status and implementation evidence are preserved as
+written at the time and superseded by the final delivery record above.
+
 Status: implementation proposal awaiting independent acceptance. Refs #46;
 GitHub milestone **M9 — Deployment, Benchmark & Integration Readiness**.
 M-5 is the audit finding, not milestone M5. Issue #46 stays OPEN.

@@ -508,7 +508,7 @@ production embedding model can be adopted later without a migration.
 
 ## D-013 — Slice 6 folder-indexer semantics
 
-**M-5 proposal amendment:** D-099 specifies candidate-less FAILED rows, retry
+**Accepted M-5 amendment (PR #112):** D-099 specifies candidate-less FAILED rows, retry
 attachment, safe legacy retention and parser-aware HR fallback. D-013
 changed-document/history and terminal-original retention remain unchanged.
 
@@ -8592,12 +8592,22 @@ Implementation contract, limits/rationale and verification:
 `docs/ISSUE_46_PR3_VALIDATION.md`.
 
 
-## D-099 — Issue #46 M-5 proposal: candidate-less failure and truthful HR state
+## D-099 — Issue #46 M-5 implementation record: candidate-less failure and truthful HR state
 
-**Status:** Implementation proposal, independent acceptance pending. Base main:
-`f1429c7309b1537fd8e94547a2f666995a80859a` after merged PR #110/#111.
-Refs #46 under milestone M9; #46 stays OPEN. M-9 and #35/#36/#50 are not
-started or advanced. No Target-Mac claim.
+**Status:** independently ACCEPTED and MERGED through PR #112; M-5 slice
+COMPLETE. Owner-confirmed independent acceptance at exact head
+`869415b7a08dba18e4c732b6c4f9d74baa1347cd`; accepted exact-head CI run
+`37081927902` completed SUCCESS. The owner manually Squash and merged PR #112
+as verified main `d14ab1a5b4e25bd7d012bada4041ea59aaf55b61`. Its sole parent
+is previous main `f1429c7309b1537fd8e94547a2f666995a80859a` (after PR #110/#111):
+exactly one commit ahead. Accepted head and squash have identical complete
+trees/content, tree SHA `9c832498875f61a8c3df5313bce9424872e4ca1c`.
+Refs #46 under milestone M9; #46 remains OPEN. Completion applies only to this
+M-5 slice, not all phantom/orphan/storage recovery work. The technical contract,
+legacy-retention decision and explicit deferrals below remain unchanged.
+M-9 and other unresolved #46 work remain pending; M-9 has NOT started.
+#35/#36/#50 remain OPEN and unchanged; this docs-only follow-up starts no next
+implementation slice. No Target-Mac execution, benchmark or acceptance claim.
 
 **Root cause:** new-path ingestion minted Candidate before validation or
 operational parser failure; the FAILED index row retained an empty candidate.
