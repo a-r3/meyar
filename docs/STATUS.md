@@ -29,6 +29,14 @@ is acceptance-REJECTED: successful trash link plus failed source unlink left an
 untracked duplicate before ledger tracking. The same-PR correction cleans that
 partial link before propagating; failed cleanup raises a closed staging error and
 logs only a structural unresolved code. New exact-head re-acceptance is pending.
+Subsequent head `977aaf34b4e67be3602d95df1cbc1eea0063fe49` is also
+acceptance-REJECTED for a handled rollback-failure window: effects stayed PENDING
+and were skipped without DB-truth reconciliation or a closed compensation failure.
+Its CI `37130613061` passed attempt 1; S4 was not accepted. The same-PR follow-up
+marks unknown outcomes explicitly, invalidates uncertain connections before fresh
+authority checks, and retains/fails closed on unresolved reset/query failures.
+The separate candidate-delete/direct-upload enumeration race is documented for
+remaining #46 concurrency work, not implemented here. New exact-head re-audit is pending.
 Rejected-head CI run `37126184791` failed its S3 scoring assertion on attempt 1
 (404 vs 200), then passed at the identical SHA on attempt 2; cause unexplained.
 A hard process kill between a filesystem mutation and its compensation is a

@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 from httpx import AsyncClient
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.ingestion.parsers.local_text_parser import LocalTextParser
@@ -253,6 +253,217 @@ async def test_partial_stage_cascade_later_source_unlink_failure_restores_earlie
 
 
 # ---------------------------------------------------------------- create / save
+
+
+@pytest.mark.parametrize("kind", ["created", "staged"])
+@pytest.mark.parametrize("durable", [False, True], ids=["uncommitted", "durable"])
+async def test_rollback_failure_reconciles_pending_effects_using_fresh_db_truth(
+    db_session, tenant_and_key, storage, tmp_path, monkeypatch, caplog, kind, durable
+):
+    from meyar.services import storage_recovery as recovery
+
+    tenant, _, _ = tenant_and_key
+    tenant_id = tenant.id
+    candidate_id, docs = await candidate_with_documents(db_session, storage, tenant_id)
+    original_key = docs[0][1]
+    primary = RuntimeError("synthetic later primary failure")
+    queries = []
+    real_referenced = recovery._referenced
+    writer_pid = None
+    key = original_key
+
+    async def fresh_truth(db, namespace, owner, storage_key):
+        # A verification transaction must not inherit the failed writer's view.
+        if not queries:
+            assert not db.in_transaction()
+        pid = await db.scalar(text("SELECT pg_backend_pid()"))
+        assert pid != writer_pid
+        queries.append(pid)
+        return await real_referenced(db, namespace, owner, storage_key)
+
+    async def fail_rollback():
+        raise OSError(f"SYNTHETIC_PRIVATE_ROLLBACK {tmp_path} {key} {tenant_id}")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(db_session, "rollback", fail_rollback)
+        patch.setattr(recovery, "_referenced", fresh_truth)
+        with caplog.at_level(logging.ERROR):
+            with pytest.raises((RuntimeError, recovery.StorageCompensationError)) as info:
+                async with recovery.recover_on_failure(db_session):
+                    if kind == "created":
+                        document = await add_document(db_session, storage, tenant_id, candidate_id)
+                        key = document.storage_key
+                    else:
+                        staged = await storage.stage_delete(
+                            tenant_id=tenant_id, storage_key=original_key
+                        )
+                        assert staged is not None
+                        recovery.track_staged(db_session, storage, staged)
+                        await db_session.execute(delete(CandidateDocument).where(
+                            CandidateDocument.id == docs[0][0]
+                        ))
+                    ledger = recovery._ledger(db_session)
+                    entries = [*ledger.created, *ledger.staged]
+                    assert entries and all(e.state is recovery._State.PENDING for e in entries)
+                    writer_pid = await db_session.scalar(text("SELECT pg_backend_pid()"))
+                    if durable:
+                        # Real COMMIT without the Session's after_commit event: outcome
+                        # is durable but the storage ledger still cannot know that.
+                        connection = await db_session.connection()
+                        await connection.commit()
+                        assert all(e.state is recovery._State.PENDING for e in entries)
+                    raise primary
+    ledger = recovery._ledger(db_session)
+    pending = [e for e in [*ledger.created, *ledger.staged] if e.state is recovery._State.PENDING]
+    assert info.value is primary
+    assert pending == [], (
+        f"primary escaped with PENDING storage effects; durable-truth queries={len(queries)}"
+    )
+    assert queries  # no silent skip, even if an earlier event was missed
+    assert not ledger.created and not ledger.staged
+    if (kind == "created" and durable) or (kind == "staged" and not durable):
+        assert await storage.read(storage_key=key) == VALID_PDF
+    else:
+        assert not (tmp_path / "storage" / key).exists()
+    assert files_under(tmp_path / "storage" / ".trash") == []
+    emitted = caplog.text + "".join(traceback.format_exception(info.value))
+    for private in ("SYNTHETIC_PRIVATE_ROLLBACK", str(tmp_path), key, str(tenant_id)):
+        assert private not in emitted
+    # Safe retry after the injected failure, followed by an idempotent repeat.
+    await recovery.rollback_with_recovery(db_session)
+    await recovery.rollback_with_recovery(db_session)
+
+
+@pytest.mark.parametrize("kind", ["created", "staged"])
+@pytest.mark.parametrize("fault", ["truth", "invalidation", "no_reset"])
+async def test_rollback_failure_unresolved_effects_fail_closed_and_retry_safely(
+    db_session, tenant_and_key, storage, tmp_path, monkeypatch, caplog, kind, fault
+):
+    from meyar.services import storage_recovery as recovery
+    from meyar.storage.staging import StorageStagingError
+
+    tenant, _, _ = tenant_and_key
+    tenant_id = tenant.id
+    candidate_id, docs = await candidate_with_documents(db_session, storage, tenant_id)
+    primary = RuntimeError("synthetic later primary failure")
+    key = docs[0][1]
+    private = ""
+    queries = []
+    writer_pid = None
+
+    async def fail_rollback():
+        raise OSError(private)
+
+    async def fail_invalidation():
+        if fault == "invalidation":
+            raise OSError(private)
+        # A reset that leaves the writer active cannot authorize compensation.
+
+    async def fail_truth(db, namespace, owner, storage_key):
+        assert not db.in_transaction()
+        pid = await db.scalar(text("SELECT pg_backend_pid()"))
+        assert pid != writer_pid
+        queries.append(pid)
+        raise OSError(private)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(db_session, "rollback", fail_rollback)
+        patch.setattr(recovery, "_referenced", fail_truth)
+        if fault != "truth":
+            patch.setattr(db_session, "invalidate", fail_invalidation)
+        with caplog.at_level(logging.ERROR):
+            with pytest.raises(recovery.StorageCompensationError) as info:
+                async with recovery.recover_on_failure(db_session):
+                    if kind == "created":
+                        document = await add_document(db_session, storage, tenant_id, candidate_id)
+                        key = document.storage_key
+                    else:
+                        staged = await storage.stage_delete(
+                            tenant_id=tenant_id, storage_key=key
+                        )
+                        assert staged is not None
+                        recovery.track_staged(db_session, storage, staged)
+                        await db_session.execute(delete(CandidateDocument).where(
+                            CandidateDocument.id == docs[0][0]
+                        ))
+                    writer_pid = await db_session.scalar(text("SELECT pg_backend_pid()"))
+                    private = f"SYNTHETIC_PRIVATE_CV_TEXT {tmp_path} {key} {tenant_id}"
+                    primary = (
+                        StorageStagingError() if fault == "no_reset" else RuntimeError(private)
+                    )
+                    raise primary
+            ledger = recovery._ledger(db_session)
+            entries = [*ledger.created, *ledger.staged]
+            assert len(entries) == 1 and entries[0].state is recovery._State.UNKNOWN
+            assert ledger.needs_invalidation
+            # Neither a best-effort settle nor the lazy persist path can query
+            # through the failed reset or silently forget the unresolved effect.
+            with pytest.raises(recovery.StorageCompensationError):
+                await recovery.settle_leftovers(db_session)
+            assert [*ledger.created, *ledger.staged] == entries
+    assert str(info.value) == "Storage compensation incomplete."
+    assert info.value.unresolved == 1 and info.value.primary is primary
+    if fault == "no_reset":
+        assert info.value.__cause__ is primary  # an already closed cause is preserved
+    else:
+        assert str(info.value.__cause__) == "Primary storage operation failed."
+    assert len(queries) == (1 if fault == "truth" else 0)
+    observable = (tmp_path / "storage" / key) if kind == "created" else (
+        tmp_path / "storage" / ledger.staged[0].staged.trash_ref
+    )
+    assert observable.read_bytes() == VALID_PDF
+    emitted = caplog.text + "".join(traceback.format_exception(info.value))
+    for value in (private, "SYNTHETIC_PRIVATE_CV_TEXT", str(tmp_path), key, str(tenant_id)):
+        assert value not in emitted
+    records = [r for r in caplog.records if r.name == "meyar.services.storage_recovery"]
+    assert records and all(r.exc_info is None and r.stack_info is None for r in records)
+    await recovery.rollback_with_recovery(db_session)
+    assert not ledger.created and not ledger.staged and not ledger.needs_invalidation
+    if kind == "staged":
+        assert await storage.read(storage_key=key) == VALID_PDF
+        assert await db_session.get(CandidateDocument, docs[0][0]) is not None
+    else:
+        assert not (tmp_path / "storage" / key).exists()
+    assert files_under(tmp_path / "storage" / ".trash") == []
+    await recovery.rollback_with_recovery(db_session)  # already reconciled: idempotent
+
+
+async def test_savepoint_failure_preserves_other_pending_original_and_outer_commit(
+    db_session, tenant_and_key, storage, tmp_path, monkeypatch
+):
+    from meyar.services import storage_recovery as recovery
+
+    tenant, _, _ = tenant_and_key
+    tenant_id = tenant.id
+    candidate = await create_candidate(db_session, tenant_id=tenant_id)
+    candidate_id = candidate.id
+    await db_session.commit()
+    first = await add_document(db_session, storage, tenant_id, candidate_id)
+    first_id, key = first.id, first.storage_key
+    ledger = recovery._ledger(db_session)
+    assert len(ledger.created) == 1 and ledger.created[0].state is recovery._State.PENDING
+    # Released SAVEPOINT is not durable to an independent DB connection.
+    async with AsyncSession(db_session.bind) as observer:
+        assert await observer.get(CandidateDocument, first_id) is None
+
+    async def fail_second_canonical(*args, **kwargs):
+        raise RuntimeError("synthetic second savepoint failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(doc_service, "create_canonical_document", fail_second_canonical)
+        with pytest.raises(RuntimeError):
+            await add_document(db_session, storage, tenant_id, candidate_id)
+    assert len(ledger.created) == 1 and ledger.created[0].state is recovery._State.PENDING
+    assert ledger.created[0].storage_key == key
+    assert await count(db_session, CandidateDocument) == 1
+    assert [p.relative_to(tmp_path / "storage").as_posix() for p in files_under(
+        tmp_path / "storage"
+    )] == [key]
+    await recovery.commit_with_recovery(db_session)
+    assert not ledger.created
+    assert await storage.read(storage_key=key) == VALID_PDF
+    async with AsyncSession(db_session.bind) as observer:
+        assert await observer.get(CandidateDocument, first_id) is not None
 
 
 async def test_1_document_creation_failure_removes_saved_original(

@@ -8976,6 +8976,11 @@ PR #119 head `95b39467f16235129b06135634ea119d59dea362` is acceptance-REJECTED:
 source unlink failure after successful trash hardlink creation escaped before
 ledger tracking, leaving an untracked duplicate during a handled failure.
 The correction stays on the same branch/PR; new exact-head re-acceptance is pending.
+Subsequent head `977aaf34b4e67be3602d95df1cbc1eea0063fe49` is also
+acceptance-REJECTED: a handled rollback failure before the outer event left
+tracked effects PENDING, skipped DB-truth settlement and surfaced only the
+primary failure. Its CI `37130613061` succeeded on attempt 1; green CI did not
+establish acceptance. This follow-up corrects that window on the same branch/PR.
 S1-S3 are accepted/merged; #46/#35/#36/#45/#50 remain OPEN. No migration,
 dependency or lockfile change.
 
@@ -8989,8 +8994,8 @@ derived photo.
 
 Design (explicit, bounded compensation; no new durable journal).
 1. `meyar.services.storage_recovery` keeps a per-session ledger (`session.info`),
-   updated only by synchronous SQLAlchemy `after_commit`/`after_rollback` events
-   (outermost transaction only; SAVEPOINT events ignored) and settled by awaited
+   normally updated by synchronous SQLAlchemy `after_commit`/`after_rollback`
+   events (outermost transaction only; SAVEPOINT events ignored) and settled by awaited
    helpers. `persist_candidate_document` stays commit-free: it runs its DB work in
    a SAVEPOINT, so its own failure compensates immediately and a surviving row can
    never lose its bytes. Caller-owned transactions use `recover_on_failure(db)`
@@ -9005,6 +9010,16 @@ Design (explicit, bounded compensation; no new durable journal).
    the client saw an error) therefore never deletes a referenced original and never
    restores bytes of a deleted candidate. If that check itself fails nothing is
    deleted; the entry stays unresolved.
+   Recovery also marks still-PENDING effects UNKNOWN when rollback returned without
+   an outcome event. UNKNOWN does not assert rollback: both created and staged effects
+   are resolved by the reference query. If rollback raises or the writer remains
+   active, `AsyncSession.invalidate()` discards unsafe connections/ORM state while
+   retaining `session.info`; only a reset with no active transaction enables fresh
+   authority queries. Failed reset/query raises `StorageCompensationError`, retaining
+   effects/bytes for retry. A retained `needs_invalidation` flag prevents lazy
+   `settle_leftovers` from querying through an uncertain writer. Successful retry
+   resets before reconciliation; unrelated pending SAVEPOINT work remains unaffected
+   by nested rollback/release. No journal or database schema change.
 3. Deletes are staged, not performed. `DocumentStorage` gains tenant-validated
    `delete_owned`, `stage_delete`, `purge_staged`, `restore_staged`
    (`LocalPhotoStorage` gains the staging trio and loses the in-memory
@@ -9031,12 +9046,18 @@ Design (explicit, bounded compensation; no new durable journal).
    without original semantics) stages every original and derived photo of the demo
    tenant and is finished by `commit_with_recovery`.
 6. Failure reporting. Compensation that cannot complete raises
-   `StorageCompensationError` (closed message, primary failure as `__cause__`;
-   never success) and logs only `component/code/unresolved_count/error_type`
+   `StorageCompensationError` (closed message; never success) and logs only
+   `component/code/unresolved_count/error_type`
    (`STORAGE_COMPENSATION_UNRESOLVED`; `STORAGE_PURGE_UNRESOLVED` when the DB
    deletion is durable but a purge failed, which does not fail the operation). No
    keys, paths, tenant or candidate data are logged; unresolved objects remain on
    disk (document key or `.trash`) for operator reconciliation.
+   The original primary failure is retained on `error.primary`. An already closed
+   `StorageStagingError` remains the exact cause; arbitrary primary messages use
+   the closed `Primary storage operation failed.` traceback cause. No formatting
+   or payload inspection of the original is performed. This preserves the primary
+   object while preventing raw primary/rollback/reset/query payloads in emitted
+   logs and default chained tracebacks.
 
 Reviewed and unchanged: `ui/router` only reads originals; `candidate_photo_service`
 already owns derived-photo save/compensation; tests/CLI use the helpers above.
@@ -9068,3 +9089,11 @@ pre-fix proof and correction gates are recorded in `docs/ISSUE_46_S4_VALIDATION.
 Out of scope and not started: folder reconciliation overlap/leases, readiness,
 retention sweepers, schema drift, #45/#35/#36/#50, Target-Mac. Evidence:
 docs/ISSUE_46_S4_VALIDATION.md.
+
+Separate audit finding, deferred to remaining #46 concurrency work: candidate
+delete reads the candidate/document list without an exclusive candidate-row
+serialization point. Direct upload holds a shared candidate authority lock through
+commit. It can commit a new document after delete enumerates assets, then the later
+candidate DELETE can cascade that row without staging its new original. The
+rollback-state correction does not fix this interleaving; no candidate locking,
+upload behavior or concurrency slice was changed. #46 remains OPEN.

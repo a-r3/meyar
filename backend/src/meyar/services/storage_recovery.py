@@ -14,6 +14,9 @@ The database is always the arbiter: before any compensating action the ledger
 re-checks, in a fresh transaction, whether a durable row still references the
 key. A COMMIT whose outcome is ambiguous therefore never deletes a referenced
 original and never leaves a deleted candidate's bytes behind.
+If rollback fails before its event, PENDING effects become UNKNOWN. The failed
+Session connections must be invalidated before a fresh transaction can resolve
+them; failed reset or verification retains the ledger and fails closed.
 
 Residual window (documented in docs/DECISIONS.md D-S4): a hard process kill
 between a filesystem mutation and its compensation cannot be recovered here
@@ -29,7 +32,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any
+from typing import Any, NoReturn
 
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,14 +41,14 @@ from sqlalchemy.orm import Session
 from meyar.services.candidate_document_repo import document_storage_key_referenced
 from meyar.services.candidate_photo_repo import photo_storage_key_referenced
 from meyar.storage.base import DocumentStorage
-from meyar.storage.staging import StagedObject
+from meyar.storage.staging import StagedObject, StorageStagingError
 
 logger = logging.getLogger(__name__)
 _LEDGER_KEY = "meyar.storage_recovery"
 
 
 class StorageCompensationError(Exception):
-    """Compensation could not be completed; the primary failure is __cause__.
+    """Compensation failed; primary retains the original without emitting its payload.
 
     The message is a closed constant — never a key, path or exception payload.
     """
@@ -53,12 +56,31 @@ class StorageCompensationError(Exception):
     def __init__(self, unresolved: int) -> None:
         super().__init__("Storage compensation incomplete.")
         self.unresolved = unresolved
+        self.primary: BaseException | None = None
+
+
+class _PrimaryStorageFailure(RuntimeError):
+    """Closed traceback cause for a primary exception with no safe message contract."""
+
+    def __init__(self) -> None:
+        super().__init__("Primary storage operation failed.")
+
+
+def _raise_compensation(error: StorageCompensationError, primary: BaseException | None) -> NoReturn:
+    error.primary = primary
+    # The staging error has a fixed, zero-argument message and suppresses raw
+    # cleanup context. Arbitrary primary exceptions cannot safely be formatted.
+    cause = primary if primary is None or type(primary) is StorageStagingError else (
+        _PrimaryStorageFailure()
+    )
+    raise error from cause
 
 
 class _State(StrEnum):
     PENDING = "PENDING"
     COMMITTED = "COMMITTED"
     ROLLED_BACK = "ROLLED_BACK"
+    UNKNOWN = "UNKNOWN"  # outcome must be established by fresh DB authority
 
 
 @dataclass
@@ -80,6 +102,7 @@ class _Ledger:
     def __init__(self) -> None:
         self.created: list[_Created] = []
         self.staged: list[_Staged] = []
+        self.needs_invalidation = False
 
     def mark(self, state: _State) -> None:
         if state is _State.COMMITTED:
@@ -160,12 +183,17 @@ def _log_unresolved(code: str, count: int, exc: BaseException) -> None:
 async def settle(db: AsyncSession, *, raise_on_unresolved: bool) -> None:
     """Resolve every non-pending ledger entry against current DB truth."""
     ledger = _ledger(db)
+    if ledger.needs_invalidation:
+        # Never query an uncertain writer transaction, including on a lazy retry.
+        error = StorageCompensationError(len(ledger.created) + len(ledger.staged))
+        _log_unresolved("STORAGE_COMPENSATION_UNRESOLVED", error.unresolved, error)
+        raise error
     failures: list[BaseException] = []
     remaining_created: list[_Created] = []
     for created in ledger.created:
         if created.state is _State.PENDING:
             remaining_created.append(created)
-        elif created.state is _State.ROLLED_BACK:
+        elif created.state in (_State.ROLLED_BACK, _State.UNKNOWN):
             try:
                 await _resolve_created(db, created)
             except Exception as exc:
@@ -206,26 +234,48 @@ async def settle(db: AsyncSession, *, raise_on_unresolved: bool) -> None:
 async def settle_leftovers(db: AsyncSession) -> None:
     """Best-effort pass for a caller that rolled back without this module."""
     ledger = db.sync_session.info.get(_LEDGER_KEY)
-    if ledger is not None and any(
+    if ledger is not None and (ledger.needs_invalidation or any(
         e.state is not _State.PENDING for e in [*ledger.created, *ledger.staged]
-    ):
+    )):
         await settle(db, raise_on_unresolved=False)
 
 
 async def _quiet_rollback(db: AsyncSession) -> None:
     try:
         await db.rollback()
-    except Exception as exc:  # connection loss: verification below then fails closed
-        _log_unresolved("DB_ROLLBACK_FAILED_DURING_COMPENSATION", 0, exc)
+    except Exception as exc:
+        ledger = _ledger(db)
+        ledger.needs_invalidation = True
+        _log_unresolved(
+            "DB_ROLLBACK_FAILED_DURING_COMPENSATION",
+            len(ledger.created) + len(ledger.staged), exc,
+        )
 
 
 async def rollback_with_recovery(db: AsyncSession, primary: BaseException | None = None) -> None:
-    """Roll back, then undo every filesystem effect tied to this transaction."""
+    """End the writer transaction, then resolve its effects against fresh DB truth."""
     await _quiet_rollback(db)
+    ledger = _ledger(db)
+    # An absent rollback event is not proof of rollback or commit. Do not skip
+    # these effects: UNKNOWN means query authority, never assume an outcome.
+    ledger.mark(_State.UNKNOWN)
     try:
+        if ledger.needs_invalidation or db.in_transaction():
+            ledger.needs_invalidation = True
+            try:
+                # Supported SQLAlchemy reset: discard unsafe connections and
+                # expunge ORM state. Session.info (the ledger) is retained.
+                await db.invalidate()
+                if db.in_transaction():
+                    raise StorageCompensationError(len(ledger.created) + len(ledger.staged))
+            except Exception as exc:
+                count = len(ledger.created) + len(ledger.staged)
+                _log_unresolved("STORAGE_COMPENSATION_UNRESOLVED", count, exc)
+                raise StorageCompensationError(count) from None
+            ledger.needs_invalidation = False
         await settle(db, raise_on_unresolved=True)
     except StorageCompensationError as exc:
-        raise exc from primary
+        _raise_compensation(exc, primary)
     finally:
         await _quiet_rollback(db)  # release the verification read transaction
 
@@ -259,4 +309,4 @@ async def abandon_created(db: AsyncSession, entry: _Created, primary: BaseExcept
     try:
         await settle(db, raise_on_unresolved=True)
     except StorageCompensationError as exc:
-        raise exc from primary
+        _raise_compensation(exc, primary)
