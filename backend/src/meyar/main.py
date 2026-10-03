@@ -6,8 +6,9 @@ from fastapi import FastAPI
 
 from meyar.api.body_limit import DocumentUploadBodyLimitMiddleware
 from meyar.api.docs import mount_docs_assets
+from meyar.api.response_policy import APIResponsePolicyMiddleware
 from meyar.api.v1.router import api_router
-from meyar.config import get_settings
+from meyar.config import Settings, get_settings
 from meyar.ops.host_config import load_runtime_host_settings
 from meyar.ui.router import install_ui
 
@@ -59,20 +60,33 @@ OPENAPI_TAGS = [
     },
 ]
 
-app = FastAPI(
-    title="MEYAR",
-    description=(
-        "Internal AI Candidate Intelligence & CV Search Platform — internal HR REST "
-        "API for an approved internal bank-controlled system."
-    ),
-    version="1.0.0",
-    openapi_tags=OPENAPI_TAGS,
-    docs_url=None,
-    lifespan=_lifespan,
-)
-app.include_router(api_router)
-mount_docs_assets(app)
-install_ui(app)
-# Added last so it is the outermost layer: the document-upload request body
-# is bounded before any other middleware or multipart parsing consumes it.
-app.add_middleware(DocumentUploadBodyLimitMiddleware)
+def create_app(settings: Settings | None = None) -> FastAPI:
+    """Fix documentation exposure at construction, from trusted runtime config."""
+    settings = settings or get_settings()
+    docs_enabled = settings.env != "production"
+    application = FastAPI(
+        title="MEYAR",
+        description=(
+            "Internal AI Candidate Intelligence & CV Search Platform — internal HR REST "
+            "API for an approved internal bank-controlled system."
+        ),
+        version="1.0.0",
+        openapi_tags=OPENAPI_TAGS,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url="/openapi.json" if docs_enabled else None,
+        lifespan=_lifespan,
+    )
+    application.include_router(api_router)
+    if docs_enabled:
+        mount_docs_assets(application)
+    # Bound before multipart parsing, inside the existing safe-error boundary.
+    # Response policies do not consume the request body.
+    application.add_middleware(DocumentUploadBodyLimitMiddleware)
+    install_ui(application)
+    # Covers early body-limit refusals as well as normal and safe-error responses.
+    application.add_middleware(APIResponsePolicyMiddleware)
+    return application
+
+
+app = create_app()

@@ -8843,9 +8843,12 @@ DB rollback does not imply filesystem compensation. Validation and delivery:
 
 ## D-102 — Issue #46 S2: closed diagnostic privacy boundary
 
-Status: PR #117 head `5e40f9f52a0b377741274a3d4f23724c1cb84a4c`
-acceptance-REJECTED: operator-controlled paths/member names remained in failure
-Findings. The corrected implementation requires independent re-acceptance,
+S2 Diagnostic Privacy is independently **ACCEPTED + MERGED** through PR #117.
+Accepted head `4ee99cbcd68faffbb820c8726ca0631f9f58e06b`; exact-head CI
+[37115861862](https://github.com/a-r3/meyar/actions/runs/37115861862) **SUCCESS**.
+Owner squash/main `a470305df37bfc952f74446834bfae6615b9bc00`; accepted and
+merged full tree `0d4b8271af3db366f605495b35de83764ec315b4`.
+The earlier rejected S2 head and its remediation are historical.
 S2 only under
 existing #46 / M9 (10), from verified main
 `95b65313920463af6ee03d4eb0072244e25ff089`. #46/#35/#36/#45/#50 remain OPEN.
@@ -8906,3 +8909,58 @@ transaction refactor, readiness/config-range/retention implementation, S3+, #45,
 codes, search/ranking/provenance, auth/tenant boundaries and #85 DB release remain.
 Validation, sink inventory, before/after proof and remaining limitations:
 `docs/ISSUE_46_S2_VALIDATION.md`. Green gates/CI are not independent acceptance.
+
+## D-103 — Issue #46 S3: synthetic human ownership and HTTP response policy
+
+Status: implementation proposed for independent acceptance, Refs #46 under
+existing M9 milestone 10. Starting main `a470305df37bfc952f74446834bfae6615b9bc00`.
+S1 and S2 are accepted/merged; #46/#35/#36/#45/#50 remain OPEN.
+
+A User is a cross-tenant identity. Username or demo membership alone never
+permits rotating/deleting/disabling a User. `DEMO_HUMAN_BOOTSTRAPPED` is written
+only when seed-demo itself creates a human, with exact `user_id` metadata.
+Before key/dataset/identity mutation, seed validates the complete immutable
+creation-marker chain. The current User is locked before querying/locking ALL
+memberships, including inactive memberships. Rotation/deletion requires no other
+tenant membership. Reset deletes the positively marked tenant, preserves
+unmarked/shared Users and unrelated memberships/sessions, and may delete only the
+current marked exclusive User. Tenant bootstrap authority is unchanged.
+
+Legacy unmarked demo.hr and marked shared/disabled/non-usable accounts are
+never adopted or mutated. Seed preserves the dataset and creates a new marked
+exclusive HR_USER, using demo.hr when free or a server-derived tenant UUID plus
+random UUID username on collision. A replacement creation marker links the
+previous marker ID; exactly one root and one unbranched chain of unique User IDs
+is required. Duplicate/forked/conflicting/malformed/dangling markers or missing
+current User/demo membership abort before destructive work. Audit markers are
+not updated/deleted to manufacture ownership. Previous Users survive.
+Only stale memberships on the synthetic demo tenant are disabled/stamped and
+only their sessions revoked; User stamps and unrelated authority are unchanged.
+The generic membership setter is inappropriate here because it stamps the User.
+Human plaintext and the single newly issued API key remain one-time output only.
+API-key revocation stays exclusive to the marked demo tenant, including a marked
+empty dataset. No production/general tenant key mutation.
+
+`APIResponsePolicyMiddleware` wraps ASGI http.response.start for exact /api/v1
+and /api/v1/ paths with Cache-Control: no-store and X-Content-Type-Options:
+nosniff. It is outside the upload limiter and safe-error boundary, covers JSON,
+file/stream transports, 204, safe errors and early 413, and neither consumes
+nor buffers bodies. The limiter is inside the existing safe-error boundary so
+unexpected limiter failures also have safe private 500 transport. Pragma is
+omitted: no legacy HTTP/1.0 compatibility need was identified. Existing UI
+CSP/frame/referrer/cache headers remain unchanged; non-API assets retain their
+current behavior (UI static was already no-store; vendored Swagger retains ETag
+behavior). Current original CV bytes are delivered by the authenticated UI
+route; REST document routes return metadata. No new API endpoint under #45.
+
+At application construction, trusted MEYAR_ENV=production sets openapi_url=None
+and omits the /docs router and /docs-assets mount. All return ordinary generic
+404, without a configuration explanation or schema. Development/test keep local
+Swagger JS/CSS/favicon and /openapi.json with zero runtime external assets.
+FastAPI's default CDN-backed /redoc is disabled in every environment; offline
+Swagger is the sole interactive docs surface. No docs authentication subsystem.
+Production REST routes and SSR/Jinja are unchanged.
+
+No migration, dependency/lockfile change, scoring/tenant-authority weakening,
+storage recovery, folder concurrency, readiness, retention, schema drift,
+other-issue or Target-Mac work. Evidence: docs/ISSUE_46_S3_VALIDATION.md.

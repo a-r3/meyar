@@ -583,8 +583,11 @@ async def test_demo_human_login_never_touches_an_unrelated_same_named_user(
     )
     await db_session.commit()
 
-    with pytest.raises(DemoTenantAmbiguousError):
-        await _seed(db_session, tmp_path)
+    summary = await _seed(db_session, tmp_path)
+    assert summary.human_username != DEMO_USER_USERNAME
+    demo_user = await get_user_by_username(db_session, summary.human_username)
+    assert demo_user is not None
+    assert verify_password(demo_user.password_hash, summary.human_temp_password)
 
     survivor = await get_user_by_username(db_session, DEMO_USER_USERNAME)
     assert survivor is not None
