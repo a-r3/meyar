@@ -48,8 +48,8 @@ def get_code_alembic_heads(alembic_ini_path: Path) -> list[str]:
     try:
         script = ScriptDirectory.from_config(config)
         heads = list(script.get_heads())
-    except Exception as exc:  # noqa: BLE001 - normalize every failure mode
-        raise AlembicIntrospectionError(f"could not read Alembic script directory: {exc}") from exc
+    except Exception:  # noqa: BLE001 - normalize every failure mode
+        raise AlembicIntrospectionError("could not read Alembic script directory") from None
     if not heads:
         raise AlembicIntrospectionError("Alembic script directory has no heads.")
     return heads
@@ -78,6 +78,6 @@ async def get_db_alembic_revision(engine: AsyncEngine) -> DbAlembicRevisionResul
                 return DbAlembicRevisionResult(table_exists=False, revisions=[])
             rows = await conn.execute(text("SELECT version_num FROM alembic_version"))
             revisions = [str(row[0]) for row in rows.fetchall()]
-        except SQLAlchemyError as exc:
-            raise AlembicRevisionQueryError(str(exc)) from exc
+        except SQLAlchemyError:
+            raise AlembicRevisionQueryError("Alembic revision query failed") from None
     return DbAlembicRevisionResult(table_exists=True, revisions=revisions)

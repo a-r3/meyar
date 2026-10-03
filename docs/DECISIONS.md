@@ -8843,7 +8843,10 @@ DB rollback does not imply filesystem compensation. Validation and delivery:
 
 ## D-102 — Issue #46 S2: closed diagnostic privacy boundary
 
-Status: implementation proposed for independent acceptance, S2 only under
+Status: PR #117 head `5e40f9f52a0b377741274a3d4f23724c1cb84a4c`
+acceptance-REJECTED: operator-controlled paths/member names remained in failure
+Findings. The corrected implementation requires independent re-acceptance,
+S2 only under
 existing #46 / M9 (10), from verified main
 `95b65313920463af6ee03d4eb0072244e25ff089`. #46/#35/#36/#45/#50 remain OPEN.
 The completed remaining-scope audit's B17/B18 / R04 / S2 is the scope authority;
@@ -8874,10 +8877,22 @@ no second response or candidate-derived diagnostic is sent.
 
 Ops `safe_exception_text` returns only a bounded class name, never evaluates
 str/repr/args or formats a traceback. Existing Finding codes/components remain.
-The release archive failure sink uses the same helper. CLI diagnostics use
+Failure Findings use fixed structural copy, never arbitrary local paths, filenames,
+archive/source members, manifest names, model input or DB revision text. Counts,
+limits, exception types and closed reason codes remain. This diagnostic correction
+is owned by S2; it is not a #35 deferral. An AST-reviewed sink manifest protects
+nonliteral failure/conditional messages; invalid internal-worker argv is silent.
+Host-config reasons use a typed closed field without evaluating exception text.
+CLI diagnostics use
 codes/types rather than raw validation/persisted failure messages, source paths,
 argument values or planned filter text. Provisioning's explicit one-time secret
 output and authorized product data rendering are separate from operational logs.
+Intentional successful release identity/checksum metadata remains product inventory.
+Display accepts only bounded numeric/closed prerelease versions and an exact
+derived hex-commit identity; arbitrary manifest identity strings get fixed
+availability copy. Artifact identity/validation/lifecycle are unchanged.
+Arbitrary output paths/plist labels and unvalidated release/model values are omitted
+from success copy as well, because they can themselves contain sensitive input.
 Ollama typed failure codes and bounded retries remain; raw transport/schema causes
 and invalid HTTP envelope contents do not cross their diagnostic boundary.
 New profile/identity failure messages are structural types, including evidence

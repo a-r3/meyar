@@ -1,6 +1,7 @@
 # Issue #46 S2 — Logging / Privacy Hardening
 
-Status: proposed for independent acceptance; #46 remains OPEN. Only S2 under
+Status: PR #117 head `5e40f9f52a0b377741274a3d4f23724c1cb84a4c`
+acceptance-REJECTED. Corrected S2 requires independent re-acceptance; #46 remains OPEN. Only S2 under
 existing M9 milestone 10. Branch `fix/46-s2-diagnostic-privacy`.
 
 ## Verified starting state and scope authority
@@ -103,7 +104,8 @@ The engine-constructor inventory protects all seven production call sites.
 
 ## Quality gates
 
-Final local gates, on the frozen S2 implementation:
+Historical gates for the acceptance-REJECTED `5e40f9f...` implementation
+(they do not establish acceptance):
 
 | Gate | Result |
 |---|---|
@@ -158,6 +160,92 @@ fresh-server subprocess remains separately tested. The final full gate follows
 a focused run with the real migration deliberately first.
 No test exclusions, CI bypass, real PII or unrelated source fixes are used.
 
+## PR #117 acceptance blocker remediation
+
+Rejected exact head: `5e40f9f52a0b377741274a3d4f23724c1cb84a4c`.
+Green original CI did not establish acceptance. That head left raw operator
+paths/member names in failure Findings, and the previous #35 deferral claim
+was incorrect. Operational FAILURE/ERROR privacy is owned by S2.
+
+Before production editing, the new synthetic tests ran against that rejected
+source: **11 failed, 1 passed in 1.27s**. All 11 failures were the serialized
+sentinel-absence assertion: missing output directory, existing output target,
+selected overlong source member, missing/ambiguous artifact and manifest checksum
+entries (four cases), unsafe archive member, unavailable configured LLM/embedding
+identities in readiness/status (two cases), and missing preflight path. The
+storage non-directory failure was already private and passed. An initial invalid
+storage test fixture was corrected before this proof; provisional fixture errors
+are not evidence of production leakage. No real operator path/data was used.
+
+| Reviewed family / exact old sink | Correction / retained structure |
+|---|---|
+| `build_release`: OUTPUT_DIR_INVALID / OUTPUT_TARGET_EXISTS | Fixed copy; code/component/status unchanged, including exclusive-create race refusal. |
+| `build_release`: MEMBER_NAME_LENGTH_EXCEEDS_BOUND | Remove example member/repr; preserve offending count and numeric limit. |
+| Build/Git/output failure constructors and unsafe archive self-check | Fixed structural exception copy; no source/member/argv/stderr/value/path summaries. Internal attributes needed for processing remain private and are never serialized. |
+| `verify_release`: CHECKSUM_ENTRY_MISSING/AMBIGUOUS; MANIFEST_CHECKSUM_ENTRY_MISSING/AMBIGUOUS | Fixed artifact/manifest role, no supplied filename; ambiguity/missing codes unchanged. |
+| `verify_release`: UNSAFE_ARCHIVE_MEMBER / ARCHIVE_RESOURCE_BOUND_EXCEEDED | Count-only violations / fixed resource-bound copy; no member names, reason payload or exception rendering. |
+| `verify_release`: UV_LOCK_MEMBER_MISSING/AMBIGUOUS/NOT_REGULAR_FILE/TOO_LARGE, lockfile ARCHIVE_UNREADABLE | Fixed member role; preserve duplicate count, declared size/limit and bounded exception type where applicable. No release-root/member-path echo. |
+| `verify_release`: INTERNAL_MANIFEST_AMBIGUOUS/NOT_REGULAR_FILE/TOO_LARGE | Fixed role plus count/size/limit; no internal manifest path. |
+| Readiness SCHEMA_MISMATCH; status stale/multiple revisions | Fixed mismatch/stale state or head count; no DB-supplied revision strings. |
+| Readiness/status LLM_MODEL_UNAVAILABLE / EMBEDDING_MODEL_UNAVAILABLE | Presence/availability booleans, no arbitrary configured model text, including WARN cases. |
+| Preflight PATH_MISSING; service-status PLATFORM_UNSUPPORTED | Fixed missing/platform refusal; no path name or injected platform string. Required path names came from a closed built-in tuple, but failure copy no longer depends on it. |
+| Host configuration failure reasons | `HostConfigFailure(ValueError)` carries the existing closed code; allowlisted `.code` replaces forbidden `str(exc)` evaluation. Untyped/Pydantic/OS failures keep CONFIG_VALUES_INVALID. |
+| Offline bundle failure; Alembic introspection/static parse; UTF-8 sidecar decoding | Bounded exception type / fixed copy; no exception message evaluation or raw parse/driver payload. |
+| Internal update worker argparse | Silent structural refusal/exit 1, no argparse argv echo. Public ops/offline-install parsers already had private refusals. |
+| Backup/restore/update/install/schema-init/AI/service-lifecycle/cleanup/edge/reboot/diagnostics/deployment-ready | Reviewed fixed result copy or closed-code projection; existing numeric counts and typed reason fields retained. No lifecycle, subprocess, storage or readiness-policy redesign. |
+| Storage probe/status/preflight; plist failure keys/argv | Existing fixed messages or bounded exception type; interpolated plist keys/tool names are closed module constants, not supplied values. Existing structural assertions retained. |
+
+The automated AST inventory records **106 nonliteral failure/conditional or
+result-helper sinks** in `backend/tests/fixtures/ops_failure_diagnostic_sinks.json`.
+It includes OpsResultBuilder/Finding/result-helper calls, storage delegates and
+standalone install JSON messages. Fixed string messages and explicit OK inventory
+are allowed; changing or adding a nonliteral sink requires reviewed source
+classification. Numeric counts/limits, booleans, fixed module constants, safe
+exception types and closed code projections are reviewed allowed expressions.
+Delegated storage/lifecycle messages were traced to fixed producers. A separate
+AST guard refuses str/repr/args/cause/traceback and direct exception interpolation.
+This is an explicit sink manifest, not a global ban on string interpolation.
+
+A second before-fix proof confirmed **2 failed in 0.81s**: status schema-valid
+manifest free strings were echoed as OK identity metadata. `release_identity_text`
+now displays only a bounded numeric/closed a/b/rc version plus exact derived
+hex-commit release identity; other metadata gets fixed availability copy. This
+is output classification, not a secret detector or a new artifact validator.
+Existing valid-release identity assertions remain unchanged. The provisional
+full run was stopped for this additional correction and is not a gate.
+
+Intentional successful release identity/checksum metadata remains product
+inventory. Arbitrary output locations/plist labels and unvalidated release/model
+values are omitted from success messages as well, because those values can
+contain sensitive input. Release artifacts/manifests, one-time credentials,
+identity/checksum fields and provisioning behavior remain unchanged; no #35
+artifact-lifecycle work is advanced.
+
+New regression functions in `backend/tests/test_ops_diagnostic_privacy.py`
+(**21 cases**, alongside the unchanged existing 43 S2 cases):
+
+- `test_build_failure_paths_and_members_are_private` (3)
+- `test_checksum_filename_failures_are_private` (4)
+- `test_unsafe_archive_member_failure_is_private`
+- `test_unavailable_configured_model_diagnostics_are_private` (2)
+- `test_preflight_missing_path_diagnostic_is_private`
+- `test_preflight_storage_failure_is_private`
+- `test_update_worker_invalid_argv_does_not_echo_private_input`
+- `test_host_config_failure_does_not_evaluate_exception_text`
+- `test_internal_member_failure_does_not_echo_private_root` (3)
+- `test_ops_failure_diagnostic_sink_inventory_requires_review`
+- `test_readiness_schema_mismatch_does_not_echo_private_revision`
+- `test_success_inventory_does_not_echo_arbitrary_manifest_identity` (2)
+
+Before the final success-inventory correction, the focused gate passed
+**714 in 25.40s**, including all 43 existing S2 cases and the initial 19
+remediation cases. Final complete focused gate: **716 passed in 25.60s**, including all 43 existing
+S2 regressions, all 21 remediation cases, all ops suites and both no-exfiltration
+suites. Final full gate: **3632 passed in 833.92s (13:53)**. The prior affected-release/preflight/plist gate passed **174 in 4.72s**.
+Final Ruff clean; mypy(src) clean on 229 files; unchanged single Alembic head
+`b88a2c4d6e10`. Final full-gate results and exact delivered head/CI are recorded in the
+operational delivery report. S1 accepted/merged history is unchanged.
+
 ## Scope and limitations
 
 S1 accepted/merged wording is corrected minimally in STATUS, D-101,
@@ -170,10 +258,13 @@ deployment or Target-Mac work. `.aws` was neither inspected nor modified.
 
 The application-owned diagnostics are the tested boundary. Independently
 configured Ollama/OS/DB daemon logs and host-level policy remain separate;
-physical deployed-host/Target-Mac log behavior is not claimed. Existing explicit
-operator artifact/location inventory output remains governed by #35; this slice
-does not claim arbitrary operator-supplied release manifests or artifact names
-are a safe logging input. Existing accepted
+physical deployed-host/Target-Mac log behavior is not claimed. Failure/error
+diagnostic privacy belongs to S2, including operator-supplied inputs; it is not
+deferred to #35. Intentional successful release identity and checksum metadata
+remain explicit product inventory. Arbitrary output locations/plist labels and
+unvalidated release/model values are omitted from messages, including success
+copy, while release files/manifests and one-time provisioning are unchanged.
+Existing accepted
 folder transaction lifetime and unrelated DOCX ZIP serialization timestamp-test
 flakiness remain deferred. Stored legacy failure rows are not rewritten.
 

@@ -365,7 +365,7 @@ def run_service_render(spec: ServiceSpec, output_path: Path) -> OpsResult:
         component="service_plist",
         status=FindingStatus.OK,
         code="SERVICE_PLIST_RENDERED",
-        message=f"wrote LaunchDaemon plist for label '{spec.label}' to {output_path}",
+        message="LaunchDaemon plist written",
     )
     return builder.build()
 

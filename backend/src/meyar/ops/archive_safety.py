@@ -41,8 +41,7 @@ class ArchiveSafetyViolation:
 class UnsafeArchiveError(ValueError):
     def __init__(self, violations: list[ArchiveSafetyViolation]) -> None:
         self.violations = violations
-        summary = "; ".join(f"{v.member_name}: {v.reason}" for v in violations[:10])
-        super().__init__(f"unsafe archive ({len(violations)} violation(s)): {summary}")
+        super().__init__(f"unsafe archive ({len(violations)} violation(s))")
 
 
 class ArchiveBoundExceededError(ValueError):

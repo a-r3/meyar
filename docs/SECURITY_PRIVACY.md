@@ -617,7 +617,10 @@ file on disk.
 ## PII-safe logging
 
 Issue #46 S2 / D-102 proposes an executable diagnostic boundary (independent
-acceptance pending), alongside MASTER_SPEC.md §19. Application failures emit
+re-acceptance pending after PR #117 head `5e40f9f...` was rejected for operator
+path/member failure leaks), alongside MASTER_SPEC.md §19. Failure Findings use
+closed structural copy, never arbitrary operator paths/member names; this is S2
+ownership, not a #35 deferral. Application failures emit
 closed component/reason codes and bounded exception class names; no raw
 exception message, args, cause, traceback, request/model payload or source path.
 All application/operator/Alembic engines hide bind parameters. SQLAlchemy

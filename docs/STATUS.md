@@ -11,7 +11,9 @@ session/pending-claim invalidation, guarded commits and immediate post-query
 embedding revalidation while preserving DB release. No schema change.
 #46/#35/#36/#45/#50 remain OPEN; #46 is not complete. Only S2 logging/privacy
 is now proposed under D-102 / `docs/ISSUE_46_S2_VALIDATION.md`; independent
-acceptance pending. No S3+, other-issue advancement or Target-Mac work.
+acceptance of PR #117 head `5e40f9f52a0b377741274a3d4f23724c1cb84a4c` was
+REJECTED for operator path/member failure leaks. Corrected S2 re-acceptance is
+pending. No S3+, other-issue advancement or Target-Mac work.
 The accepted/merged M-9 and M-5 records below remain valid.
 
 **Issue #46 M-9 — independently ACCEPTED and MERGED through PR #114;

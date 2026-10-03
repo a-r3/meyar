@@ -156,7 +156,7 @@ async def _check_db_migration(builder: OpsResultBuilder, *, database_ok: bool) -
             status=FindingStatus.FAIL,
             code="SCHEMA_MISMATCH",
             message=(
-                f"database revision {db_result.revisions[0]} does not match code head {code_head}"
+                "database revision does not match the code head"
             ),
         )
 
@@ -181,7 +181,6 @@ async def _check_ollama_and_models(builder: OpsResultBuilder) -> None:
     `UNCAUGHT_EXCEPTION` at the CLI boundary. The LLM and embedding
     providers are checked independently so one crashing never prevents the
     other from running."""
-    settings = get_settings()
 
     try:
         llm_health = await get_llm_provider().health()
@@ -214,7 +213,7 @@ async def _check_ollama_and_models(builder: OpsResultBuilder) -> None:
             code=(
                 "LLM_MODEL_AVAILABLE" if (reachable and llm_available) else "LLM_MODEL_UNAVAILABLE"
             ),
-            message=f"model={settings.ollama_model} available={llm_available}",
+            message=f"configured LLM model available={llm_available}",
         )
 
     try:
@@ -241,5 +240,5 @@ async def _check_ollama_and_models(builder: OpsResultBuilder) -> None:
                 if (embedding_reachable and embedding_available)
                 else "EMBEDDING_MODEL_UNAVAILABLE"
             ),
-            message=f"model={settings.ollama_embedding_model} available={embedding_available}",
+            message=f"configured embedding model available={embedding_available}",
         )

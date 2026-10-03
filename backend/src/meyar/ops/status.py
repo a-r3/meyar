@@ -27,7 +27,7 @@ from meyar.ops.alembic_introspect import (
     get_db_alembic_revision,
 )
 from meyar.ops.config import resolve_alembic_ini_path
-from meyar.ops.redact import safe_exception_text
+from meyar.ops.redact import release_identity_text, safe_exception_text
 from meyar.ops.release_manifest import ReleaseManifest
 from meyar.ops.result import FindingStatus, OpsResult, OpsResultBuilder
 
@@ -97,7 +97,11 @@ def _check_release_identity(builder: OpsResultBuilder, manifest_path: Path | Non
         component="release_identity",
         status=FindingStatus.OK,
         code="RELEASE_IDENTITY",
-        message=f"release_id={manifest.release_id} release_version={manifest.release_version}",
+        message=release_identity_text(
+            release_id=manifest.release_id,
+            release_version=manifest.release_version,
+            source_sha=manifest.source_sha,
+        ),
     )
 
 
@@ -144,7 +148,7 @@ def _check_code_alembic_head(builder: OpsResultBuilder) -> list[str] | None:
         component="code_alembic_head",
         status=status,
         code="ALEMBIC_HEADS" if len(heads) == 1 else "MULTIPLE_ALEMBIC_HEADS",
-        message=", ".join(sorted(heads)),
+        message=f"{len(heads)} code Alembic head(s)",
     )
     return heads
 
@@ -200,7 +204,7 @@ async def _check_db_revision(builder: OpsResultBuilder, code_heads: list[str] | 
         component="db_current_revision",
         status=FindingStatus.OK if matches_code else FindingStatus.WARN,
         code="DB_REVISION_CURRENT" if matches_code else "DB_REVISION_STALE",
-        message=revision,
+        message="database revision matches code" if matches_code else "database revision is stale",
     )
 
 
@@ -228,7 +232,6 @@ async def _check_ollama_and_models(builder: OpsResultBuilder) -> None:
     exception from provider construction or `.health()` never discards the
     package/version/platform/DB findings already collected above, and one
     broken provider never prevents the other's check from running."""
-    settings = get_settings()
 
     try:
         llm_health = await get_llm_provider().health()
@@ -258,7 +261,7 @@ async def _check_ollama_and_models(builder: OpsResultBuilder) -> None:
             component="configured_llm_identity",
             status=FindingStatus.OK if llm_available else FindingStatus.WARN,
             code="LLM_MODEL_AVAILABLE" if llm_available else "LLM_MODEL_UNAVAILABLE",
-            message=f"model={settings.ollama_model} available={llm_available}",
+            message=f"configured LLM model available={llm_available}",
         )
 
     try:
@@ -280,5 +283,5 @@ async def _check_ollama_and_models(builder: OpsResultBuilder) -> None:
                 if embedding_available
                 else "EMBEDDING_MODEL_UNAVAILABLE"
             ),
-            message=f"model={settings.ollama_embedding_model} available={embedding_available}",
+            message=f"configured embedding model available={embedding_available}",
         )

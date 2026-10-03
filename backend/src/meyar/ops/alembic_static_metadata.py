@@ -133,10 +133,8 @@ def _parse_revision_file(path: str, content: bytes) -> _RevisionMeta:
         raise AlembicStaticMetadataError(f"{path}: not valid UTF-8") from exc
     try:
         module = ast.parse(source, filename=path)
-    except SyntaxError as exc:
-        raise AlembicStaticMetadataError(
-            f"{path}: could not parse as Python source: {exc}"
-        ) from exc
+    except SyntaxError:
+        raise AlembicStaticMetadataError("could not parse migration Python source") from None
 
     revision_value = _extract_literal_assignment(module, "revision", path=path)
     if revision_value is _MISSING:

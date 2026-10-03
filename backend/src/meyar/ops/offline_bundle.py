@@ -26,6 +26,7 @@ from packaging.utils import canonicalize_name, parse_wheel_filename
 from pydantic import BaseModel, Field, field_validator
 
 from meyar.ops.archive_safety import inspect_archive_members
+from meyar.ops.redact import release_identity_text, safe_exception_text
 from meyar.ops.release_manifest import ReleaseManifest
 from meyar.ops.result import FindingStatus, OpsResult, OpsResultBuilder
 from meyar.ops.verify_release import verify_release
@@ -440,7 +441,12 @@ def build_deployment_bundle(request: BundleBuildRequest) -> OpsResult:
             component="bundle",
             status=FindingStatus.OK,
             code="BUNDLE_BUILT",
-            message=f"Verified offline deployment bundle built for {release.release_id}.",
+            message="Verified offline deployment bundle built; "
+            + release_identity_text(
+                release_id=release.release_id,
+                release_version=release.release_version,
+                source_sha=release.source_sha,
+            ),
         )
     except (OSError, ValueError, tarfile.TarError, zipfile.BadZipFile) as exc:
         # Inputs and paths are deliberately not echoed: they may contain secrets.
@@ -448,6 +454,6 @@ def build_deployment_bundle(request: BundleBuildRequest) -> OpsResult:
             component="bundle",
             status=FindingStatus.FAIL,
             code="BUNDLE_BUILD_FAILED",
-            message=f"Offline bundle construction failed ({type(exc).__name__}).",
+            message=f"Offline bundle construction failed ({safe_exception_text(exc)}).",
         )
     return builder.build()

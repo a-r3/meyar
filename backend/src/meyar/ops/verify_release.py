@@ -106,8 +106,8 @@ def _read_bounded_text(path: Path, limit: int) -> str:
         data = _read_bounded_from_stream(fh, limit)
     try:
         return data.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise OSError(f"could not decode as UTF-8: {exc}") from exc
+    except UnicodeDecodeError:
+        raise OSError("could not decode as UTF-8") from None
 
 
 @dataclass(frozen=True)
@@ -354,9 +354,7 @@ def _check_artifact_checksum(
             component="artifact_checksum",
             status=FindingStatus.FAIL,
             code="CHECKSUM_ENTRY_AMBIGUOUS",
-            message=_bounded(
-                f"multiple SHA256SUMS entries for '{artifact_name}' — ambiguous, not resolved"
-            ),
+            message="multiple artifact SHA256SUMS entries — ambiguous, not resolved",
         )
         return FindingStatus.FAIL
 
@@ -366,7 +364,7 @@ def _check_artifact_checksum(
             component="artifact_checksum",
             status=FindingStatus.FAIL,
             code="CHECKSUM_ENTRY_MISSING",
-            message=_bounded(f"no SHA256SUMS entry for '{artifact_name}'"),
+            message="no artifact SHA256SUMS entry",
         )
         return FindingStatus.FAIL
 
@@ -422,9 +420,7 @@ def _check_manifest_checksum(
             component="manifest_checksum",
             status=FindingStatus.FAIL,
             code="MANIFEST_CHECKSUM_ENTRY_AMBIGUOUS",
-            message=_bounded(
-                f"multiple SHA256SUMS entries for '{manifest_name}' — ambiguous, not resolved"
-            ),
+            message="multiple manifest SHA256SUMS entries — ambiguous, not resolved",
         )
         return FindingStatus.FAIL
 
@@ -434,7 +430,7 @@ def _check_manifest_checksum(
             component="manifest_checksum",
             status=FindingStatus.FAIL,
             code="MANIFEST_CHECKSUM_ENTRY_MISSING",
-            message=_bounded(f"no SHA256SUMS entry for '{manifest_name}'"),
+            message="no manifest SHA256SUMS entry",
         )
         return FindingStatus.FAIL
 
@@ -492,8 +488,7 @@ def _check_release_bundle_integrity(
             status=FindingStatus.OK,
             code="RELEASE_BUNDLE_INTEGRITY_OK",
             message=(
-                "artifact and external release manifest checksums both verified "
-                "against SHA256SUMS"
+                "artifact and external release manifest checksums both verified against SHA256SUMS"
             ),
         )
         return
@@ -517,12 +512,12 @@ def _check_archive_safety(
 
     try:
         violations = inspect_archive_members(artifact_path, expected_root=expected_root)
-    except ArchiveBoundExceededError as exc:
+    except ArchiveBoundExceededError:
         builder.add(
             component="archive_safety",
             status=FindingStatus.FAIL,
             code="ARCHIVE_RESOURCE_BOUND_EXCEEDED",
-            message=_bounded(f"archive exceeded a resource bound: {exc.reason}"),
+            message="archive exceeded a resource bound",
         )
         return False
     except (tarfile.TarError, OSError) as exc:
@@ -535,12 +530,11 @@ def _check_archive_safety(
         return False
 
     if violations:
-        summary = "; ".join(f"{v.member_name}: {v.reason}" for v in violations[:5])
         builder.add(
             component="archive_safety",
             status=FindingStatus.FAIL,
             code="UNSAFE_ARCHIVE_MEMBER",
-            message=_bounded(f"{len(violations)} unsafe archive member(s): {summary}"),
+            message=f"{len(violations)} unsafe archive member(s)",
         )
         return False
 
@@ -594,7 +588,7 @@ def _check_uv_lock_binding(
                     component="uv_lock_binding",
                     status=FindingStatus.FAIL,
                     code="UV_LOCK_MEMBER_MISSING",
-                    message=_bounded(f"no '{member_path}' member found in archive"),
+                    message="required dependency lockfile member missing from archive",
                 )
                 return
             if len(matches) > 1:
@@ -602,9 +596,7 @@ def _check_uv_lock_binding(
                     component="uv_lock_binding",
                     status=FindingStatus.FAIL,
                     code="UV_LOCK_MEMBER_AMBIGUOUS",
-                    message=_bounded(
-                        f"{len(matches)} archive members found at '{member_path}' — ambiguous"
-                    ),
+                    message=f"{len(matches)} dependency lockfile members found — ambiguous",
                 )
                 return
             member = matches[0]
@@ -613,7 +605,7 @@ def _check_uv_lock_binding(
                     component="uv_lock_binding",
                     status=FindingStatus.FAIL,
                     code="UV_LOCK_MEMBER_NOT_REGULAR_FILE",
-                    message=_bounded(f"'{member_path}' is not a regular file"),
+                    message="dependency lockfile member is not a readable regular file",
                 )
                 return
             if member.size > _MAX_UV_LOCK_SIZE:
@@ -621,8 +613,8 @@ def _check_uv_lock_binding(
                     component="uv_lock_binding",
                     status=FindingStatus.FAIL,
                     code="UV_LOCK_MEMBER_TOO_LARGE",
-                    message=_bounded(
-                        f"'{member_path}' declared size {member.size} exceeds bound of "
+                    message=(
+                        f"dependency lockfile declared size {member.size} exceeds bound of "
                         f"{_MAX_UV_LOCK_SIZE} bytes"
                     ),
                 )
@@ -633,7 +625,7 @@ def _check_uv_lock_binding(
                     component="uv_lock_binding",
                     status=FindingStatus.FAIL,
                     code="UV_LOCK_MEMBER_NOT_REGULAR_FILE",
-                    message=_bounded(f"'{member_path}' has no readable file content"),
+                    message="dependency lockfile member is not a readable regular file",
                 )
                 return
             hasher = hashlib.sha256()
@@ -645,7 +637,7 @@ def _check_uv_lock_binding(
             component="uv_lock_binding",
             status=FindingStatus.FAIL,
             code="ARCHIVE_UNREADABLE",
-            message=_bounded(f"could not read '{member_path}': {safe_exception_text(exc)}"),
+            message=_bounded(f"could not read dependency lockfile: {safe_exception_text(exc)}"),
         )
         return
 
@@ -655,8 +647,7 @@ def _check_uv_lock_binding(
             status=FindingStatus.OK,
             code="UV_LOCK_SHA256_MATCHES",
             message=(
-                f"'{UV_LOCK_MEMBER_RELATIVE_PATH}' content matches "
-                "ReleaseManifest.uv_lock_sha256"
+                f"'{UV_LOCK_MEMBER_RELATIVE_PATH}' content matches ReleaseManifest.uv_lock_sha256"
             ),
         )
     else:
@@ -726,9 +717,7 @@ def _check_internal_manifest(
                     component="internal_manifest_consistency",
                     status=FindingStatus.FAIL,
                     code="INTERNAL_MANIFEST_AMBIGUOUS",
-                    message=_bounded(
-                        f"{len(matches)} archive members found at '{member_path}' — ambiguous"
-                    ),
+                    message=f"{len(matches)} embedded manifest members found — ambiguous",
                 )
                 return
             member = matches[0]
@@ -737,7 +726,7 @@ def _check_internal_manifest(
                     component="internal_manifest_consistency",
                     status=FindingStatus.FAIL,
                     code="INTERNAL_MANIFEST_NOT_REGULAR_FILE",
-                    message=_bounded(f"'{member_path}' is not a regular file"),
+                    message="embedded manifest member is not a regular file",
                 )
                 return
             if member.size > _MAX_EMBEDDED_MANIFEST_SIZE:
@@ -745,8 +734,8 @@ def _check_internal_manifest(
                     component="internal_manifest_consistency",
                     status=FindingStatus.FAIL,
                     code="INTERNAL_MANIFEST_TOO_LARGE",
-                    message=_bounded(
-                        f"'{member_path}' declared size {member.size} exceeds bound of "
+                    message=(
+                        f"embedded manifest declared size {member.size} exceeds bound of "
                         f"{_MAX_EMBEDDED_MANIFEST_SIZE} bytes"
                     ),
                 )
