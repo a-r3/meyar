@@ -1,13 +1,18 @@
 # MEYAR — Status
 
-**Issue #46 S1 — Tenant Active Authorization: implementation proposed on
-`fix/46-s1-tenant-authority`; independent acceptance pending.** Starts from
-verified local/origin/live GitHub main `41833a91aaa1a57643a5020737d5574a80114cd5`
-(PR #115 merged). D-101 and `docs/ISSUE_46_S1_VALIDATION.md` record live tenant
-suspension across API/UI/agent/background processing, tenant-only session and
-pending-claim invalidation, and transactionally serialized commits. No schema
-change. #46/#35/#36/#45/#50 remain OPEN; #46 is not complete. S2+ and Target-Mac
-work were not started. The accepted/merged M-9 and M-5 records below remain valid.
+**Issue #46 S1 — Tenant Active Authorization: independently ACCEPTED and
+owner-MERGED through PR #116.** Accepted exact head
+`436e01589d86cc6db2d7926d2801525e9555b702`; exact-head CI
+[37106111151](https://github.com/a-r3/meyar/actions/runs/37106111151) **SUCCESS**.
+Verified squash/main `95b65313920463af6ee03d4eb0072244e25ff089` and accepted head
+have the identical full tree `8c017e6eeae367fbb411e88e64a2faf4af2d9b32`.
+D-101 and `docs/ISSUE_46_S1_VALIDATION.md` record tenant suspension, tenant-only
+session/pending-claim invalidation, guarded commits and immediate post-query
+embedding revalidation while preserving DB release. No schema change.
+#46/#35/#36/#45/#50 remain OPEN; #46 is not complete. Only S2 logging/privacy
+is now proposed under D-102 / `docs/ISSUE_46_S2_VALIDATION.md`; independent
+acceptance pending. No S3+, other-issue advancement or Target-Mac work.
+The accepted/merged M-9 and M-5 records below remain valid.
 
 **Issue #46 M-9 — independently ACCEPTED and MERGED through PR #114;
 M-9 slice COMPLETE, but #46 itself is NOT complete and remains OPEN.**

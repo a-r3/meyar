@@ -30,7 +30,9 @@ async def _revision(engine: object) -> str | None:
 
 
 async def _upgrade(config: Config, database_url: str, source: str, target: str) -> bool:
-    engine = create_async_engine(database_url, pool_pre_ping=True, connect_args={"timeout": 5.0})
+    engine = create_async_engine(
+        database_url, hide_parameters=True, pool_pre_ping=True, connect_args={"timeout": 5.0},
+    )
     try:
         if await _revision(engine) != source:
             return False

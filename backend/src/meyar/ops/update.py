@@ -458,7 +458,7 @@ def _service_absent(label: str, runner: LaunchctlRunner | None) -> None:
 
 
 async def _query_db(database_url: str) -> str | None:
-    engine = create_async_engine(database_url, connect_args={"timeout": 5.0})
+    engine = create_async_engine(database_url, hide_parameters=True, connect_args={"timeout": 5.0})
     try:
         async with asyncio.timeout(10):
             result = await get_db_alembic_revision(engine)

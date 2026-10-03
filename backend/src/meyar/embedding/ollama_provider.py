@@ -74,17 +74,20 @@ class OllamaEmbeddingProvider:
                     resp = await client.post(f"{self._base_url}/api/embeddings", json=payload)
         except InferenceAdmissionError as exc:
             raise EmbeddingBusyError(exc.reason.value) from None
-        except httpx.TimeoutException as exc:
+        except httpx.TimeoutException:
             raise EmbeddingTimeoutError(
                 f"Ollama embedding request timed out after {self._timeout_seconds}s."
-            ) from exc
-        except httpx.HTTPError as exc:
-            raise EmbeddingUnavailableError(f"Ollama unreachable: {exc}") from exc
+            ) from None
+        except httpx.HTTPError:
+            raise EmbeddingUnavailableError("Ollama is unavailable.") from None
 
         if resp.status_code != 200:
             raise EmbeddingUnavailableError(f"Ollama returned HTTP {resp.status_code}.")
 
-        raw_vector = resp.json().get("embedding")
+        try:
+            raw_vector = resp.json().get("embedding")
+        except (ValueError, AttributeError):
+            raise EmbeddingInvalidOutputError("Ollama embedding response is invalid.") from None
         if not isinstance(raw_vector, list) or len(raw_vector) == 0:
             raise EmbeddingInvalidOutputError("Empty or missing embedding vector.")
         if not all(isinstance(v, int | float) and math.isfinite(v) for v in raw_vector):

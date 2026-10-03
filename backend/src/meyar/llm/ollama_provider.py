@@ -107,10 +107,10 @@ class OllamaLLMProvider:
         )
         try:
             extraction = CandidateProfileExtraction.model_validate(json.loads(content))
-        except (json.JSONDecodeError, ValidationError) as exc:
+        except (json.JSONDecodeError, ValidationError):
             raise ModelSchemaInvalidError(
-                f"Model output failed structured-schema validation: {exc}"
-            ) from exc
+                "Model output failed structured-schema validation."
+            ) from None
         return extraction, provenance.model_name
 
     async def extract_candidate_identity(
@@ -123,10 +123,10 @@ class OllamaLLMProvider:
         )
         try:
             extraction = CandidateIdentityExtraction.model_validate(json.loads(content))
-        except (json.JSONDecodeError, ValidationError) as exc:
+        except (json.JSONDecodeError, ValidationError):
             raise ModelSchemaInvalidError(
-                f"Model output failed structured-schema validation: {exc}"
-            ) from exc
+                "Model output failed structured-schema validation."
+            ) from None
         return extraction, provenance.model_name
 
     async def plan_candidate_search(
@@ -139,10 +139,10 @@ class OllamaLLMProvider:
         )
         try:
             draft = PlannerDraft.model_validate(json.loads(content))
-        except (json.JSONDecodeError, ValidationError) as exc:
+        except (json.JSONDecodeError, ValidationError):
             raise ModelSchemaInvalidError(
                 "Model output failed PlannerDraft structured-schema validation."
-            ) from exc
+            ) from None
         return draft, provenance
 
     async def propose_agent_plan(
@@ -164,10 +164,10 @@ class OllamaLLMProvider:
         )
         try:
             proposal = AgentPlanProposal.model_validate_json(content)
-        except ValidationError as exc:
+        except ValidationError:
             raise ModelSchemaInvalidError(
                 "Model output failed agent-plan-v1 structured-schema validation."
-            ) from exc
+            ) from None
         return proposal, provenance
 
     async def select_grounded_facts(
@@ -189,10 +189,10 @@ class OllamaLLMProvider:
         )
         try:
             selection = GroundedSelection.model_validate(json.loads(content))
-        except (json.JSONDecodeError, ValidationError) as exc:
+        except (json.JSONDecodeError, ValidationError):
             raise ModelSchemaInvalidError(
                 "Model output failed GroundedSelection structured-schema validation."
-            ) from exc
+            ) from None
         return selection, provenance
 
     async def draft_job_criteria(
@@ -220,10 +220,10 @@ class OllamaLLMProvider:
         )
         try:
             draft = JDCriteriaDraft.model_validate(json.loads(content))
-        except (json.JSONDecodeError, ValidationError) as exc:
+        except (json.JSONDecodeError, ValidationError):
             raise ModelSchemaInvalidError(
                 "Model output failed JDCriteriaDraft structured-schema validation."
-            ) from exc
+            ) from None
         return draft, provenance
 
     async def resolve_clarification_answer(
@@ -247,10 +247,10 @@ class OllamaLLMProvider:
         )
         try:
             proposal = ClarificationAnswerProposal.model_validate(json.loads(content))
-        except (json.JSONDecodeError, ValidationError) as exc:
+        except (json.JSONDecodeError, ValidationError):
             raise ModelSchemaInvalidError(
                 "Model output failed ClarificationAnswerProposal structured-schema validation."
-            ) from exc
+            ) from None
         return proposal, provenance
 
     async def _chat(
@@ -293,21 +293,32 @@ class OllamaLLMProvider:
                     resp = await client.post(f"{self._base_url}/api/chat", json=payload)
         except InferenceAdmissionError as exc:
             raise InferenceBusyError(exc.reason.value) from None
-        except httpx.TimeoutException as exc:
+        except httpx.TimeoutException:
             raise ModelTimeoutError(
                 f"Ollama request timed out after {self._timeout_seconds}s."
-            ) from exc
-        except httpx.HTTPError as exc:
-            raise ModelUnavailableError(f"Ollama unreachable: {exc}") from exc
+            ) from None
+        except httpx.HTTPError:
+            raise ModelUnavailableError("Ollama is unavailable.") from None
 
         if resp.status_code != 200:
             raise ModelUnavailableError(f"Ollama returned HTTP {resp.status_code}.")
 
-        response_payload = resp.json()
-        actual_model = str(response_payload.get("model") or self.model_name)
-        provenance = LLMResultProvenance(
-            provider=self.provider_name,
-            model_name=actual_model,
-            model_revision=self.model_revision,
-        )
-        return str(response_payload.get("message", {}).get("content", "")), provenance
+        try:
+            response_payload = resp.json()
+            if not isinstance(response_payload, dict):
+                raise ValueError
+            actual_model = str(response_payload.get("model") or self.model_name)
+            provenance = LLMResultProvenance(
+                provider=self.provider_name,
+                model_name=actual_model,
+                model_revision=self.model_revision,
+            )
+            message = response_payload.get("message", {})
+            if not isinstance(message, dict):
+                raise ValueError
+            content = message.get("content", "")
+            if not isinstance(content, str):
+                raise ValueError
+        except (ValueError, TypeError):
+            raise ModelSchemaInvalidError("Ollama response is invalid.") from None
+        return content, provenance

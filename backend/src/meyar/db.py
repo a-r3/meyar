@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.orm import DeclarativeBase
 
 from meyar.config import get_settings
+from meyar.diagnostics import configure_private_logging
 
 
 class Base(DeclarativeBase):
@@ -17,8 +18,10 @@ def make_engine(database_url: str | None = None):
     inference wait/call (meyar.agent.turn_boundary), so pool size bounds
     concurrent DB work, never concurrent AI work."""
     settings = get_settings()
+    configure_private_logging()
     return create_async_engine(
         database_url or settings.database_url,
+        hide_parameters=True,
         pool_pre_ping=True,
         pool_size=settings.db_pool_size,
         max_overflow=settings.db_max_overflow,

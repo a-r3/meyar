@@ -2,6 +2,7 @@ import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meyar.diagnostics import exception_type
 from meyar.extraction.deferral import defer_extraction
 from meyar.extraction.evidence import EvidenceValidationError, verify_identity_evidence
 from meyar.extraction.identity_prompts import IDENTITY_PROMPT_VERSION
@@ -134,7 +135,7 @@ async def extract_candidate_identity(
                 model_name="n/a",
                 status=IDENTITY_STATUS_FAILED,
                 error_code="MODEL_UNAVAILABLE",
-                error_message=str(exc),
+                error_message=exception_type(exc),
             )
         except ModelTimeoutError as exc:
             return await _persist_failure(
@@ -147,10 +148,10 @@ async def extract_candidate_identity(
                 model_name="n/a",
                 status=IDENTITY_STATUS_FAILED,
                 error_code="MODEL_TIMEOUT",
-                error_message=str(exc),
+                error_message=exception_type(exc),
             )
         except ModelSchemaInvalidError as exc:
-            last_error_code, last_error_message = "MODEL_SCHEMA_INVALID", str(exc)
+            last_error_code, last_error_message = "MODEL_SCHEMA_INVALID", exception_type(exc)
             continue
 
         try:
@@ -166,7 +167,7 @@ async def extract_candidate_identity(
                 model_name=model_name,
                 status=IDENTITY_STATUS_FAILED,
                 error_code=exc.code,
-                error_message=str(exc),
+                error_message=exception_type(exc),
             )
 
         await require_active_tenant(db, tenant_id)

@@ -8,13 +8,12 @@ from __future__ import annotations
 
 import re
 
+from meyar.diagnostics import exception_type
+
 # Matches the credential portion of any "<scheme>://user:pass@host" URL
 # (asyncpg/psycopg DSNs, and defensively any other URL-shaped secret that
 # might appear inside a driver exception message).
 _CREDENTIAL_IN_URL = re.compile(r"://[^/@\s]+@")
-
-_MAX_MESSAGE_CHARS = 300
-
 
 def redact_database_url(url: str) -> str:
     """Host/port/database name only — never the scheme's user:password."""
@@ -23,11 +22,9 @@ def redact_database_url(url: str) -> str:
 
 
 def safe_exception_text(exc: BaseException) -> str:
-    """Bounded, credential-stripped text safe to place in a Finding
-    message or CLI error output. Never the exception's full repr/args,
-    which for a DB/HTTP driver can embed a DSN or response body."""
-    text = _CREDENTIAL_IN_URL.sub("://<redacted>@", str(exc))
-    text = " ".join(text.split())  # collapse newlines/whitespace
-    if len(text) > _MAX_MESSAGE_CHARS:
-        text = text[: _MAX_MESSAGE_CHARS - 1] + "…"
-    return text or exc.__class__.__name__
+    """Exception class only. URL redaction cannot remove arbitrary PII/secrets.
+
+    Never evaluate str/repr/args or format a cause/traceback. The calling
+    Finding supplies its existing closed component and reason code.
+    """
+    return exception_type(exc)

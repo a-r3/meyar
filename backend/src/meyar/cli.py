@@ -5,7 +5,7 @@ import uuid
 from collections.abc import Callable, Coroutine
 from datetime import date
 from functools import wraps
-from typing import Any
+from typing import Any, Never
 
 from sqlalchemy import select
 
@@ -13,6 +13,7 @@ from meyar.config import get_settings
 from meyar.core.business_date import resolve_business_date
 from meyar.core.roles import VALID_ROLES
 from meyar.db import get_session_factory
+from meyar.diagnostics import exception_type
 from meyar.embedding.dependency import get_embedding_provider, get_embedding_search_config
 from meyar.embedding.provider import EmbeddingProviderError
 from meyar.evaluation.service import EvaluationInputError, evaluate_and_score_candidate
@@ -275,7 +276,7 @@ async def _extract_profile(tenant_id: str, candidate_id: str, document_id: str) 
             )
         except ExtractionPreconditionError as exc:
             await db.commit()
-            print(f"Extraction could not run: {exc.code} — {exc}")
+            print(f"Extraction could not run: {exc.code}")
             return
         except ExtractionDeferredError as exc:
             await db.commit()
@@ -294,7 +295,7 @@ async def _extract_profile(tenant_id: str, candidate_id: str, document_id: str) 
         print(f"Skills extracted: {len(content.get('skills', []))}")
         print(f"Employment entries: {len(content.get('employment_history', []))}")
     else:
-        print(f"Error: {version.error_code} — {version.error_message}")
+        print(f"Error: {version.error_code}")
 
 
 @_safe_tenant_cli
@@ -309,9 +310,9 @@ async def _evaluate(
         parsed_candidate_id = uuid.UUID(candidate_id)
         parsed_job_id = uuid.UUID(job_id)
         evaluation_as_of_date = date.fromisoformat(as_of_date_text)
-    except ValueError as exc:
+    except ValueError:
         print("Invalid tenant/candidate/job id or as-of date (expected UUID and YYYY-MM-DD).")
-        raise SystemExit(2) from exc
+        raise SystemExit(2) from None
 
     try:
         factory = get_session_factory()
@@ -346,18 +347,18 @@ async def _evaluate(
                 raise
             await db.commit()
     except EvaluationInputError as exc:
-        print(f"Evaluation could not run: {exc.code} — {exc}")
-        raise SystemExit(2) from exc
+        print(f"Evaluation could not run: {exc.code}")
+        raise SystemExit(2) from None
     except ScoringPolicyError as exc:
-        print(f"Scoring policy failed: {exc.code} — {exc}")
-        raise SystemExit(3) from exc
+        print(f"Scoring policy failed: {exc.code}")
+        raise SystemExit(3) from None
     except SystemExit:
         raise
     except TenantInactiveError:
         raise
     except Exception as exc:
         print(f"Evaluation infrastructure failure: {type(exc).__name__}")
-        raise SystemExit(4) from exc
+        raise SystemExit(4) from None
 
     evaluation = scored.evaluation
     if evaluation.status == "FAILED":
@@ -391,9 +392,9 @@ async def _rank_job(
         parsed_tenant_id = uuid.UUID(tenant_id)
         parsed_criteria_id = uuid.UUID(job_criteria_version_id)
         evaluation_as_of_date = date.fromisoformat(as_of_date_text)
-    except ValueError as exc:
+    except ValueError:
         print("Invalid tenant/criteria id or as-of date (expected UUID and YYYY-MM-DD).")
-        raise SystemExit(2) from exc
+        raise SystemExit(2) from None
 
     try:
         factory = get_session_factory()
@@ -407,16 +408,16 @@ async def _rank_job(
             )
             await db.commit()
     except BatchRankingError as exc:
-        print(f"Batch input rejected: {exc.code} — {exc}")
-        raise SystemExit(2) from exc
+        print(f"Batch input rejected: {exc.code}")
+        raise SystemExit(2) from None
     except ScoringPolicyError as exc:
-        print(f"Scoring policy failed: {exc.code} — {exc}")
-        raise SystemExit(3) from exc
+        print(f"Scoring policy failed: {exc.code}")
+        raise SystemExit(3) from None
     except TenantInactiveError:
         raise
     except Exception as exc:
         print(f"Batch ranking infrastructure failure: {type(exc).__name__}")
-        raise SystemExit(4) from exc
+        raise SystemExit(4) from None
 
     print(f"Criteria version: {result.job_criteria_version_id}")
     print(f"As-of date: {result.evaluation_as_of_date}")
@@ -458,14 +459,14 @@ async def _index_folder(tenant_id: str, root: str) -> None:
                 stability_window_seconds=settings.folder_stability_seconds,
             )
             await db.commit()
-    except InvalidSourceRootError as exc:
-        print(f"Invalid source folder: {exc}")
-        raise SystemExit(2) from exc
+    except InvalidSourceRootError:
+        print("Invalid source folder: SOURCE_ROOT_INVALID")
+        raise SystemExit(2) from None
     except TenantInactiveError:
         raise
     except Exception as exc:  # infrastructure/database failure
         print(f"Folder indexing failed: {type(exc).__name__}")
-        raise SystemExit(3) from exc
+        raise SystemExit(3) from None
 
     print(f"Source: {summary.folder_source_id}")
     print(f"Discovered: {summary.discovered}")
@@ -520,14 +521,14 @@ async def _reconcile_folder(tenant_id: str, root: str, limit: int | None) -> Non
                 max_embedding_input_chars=settings.embedding_max_input_chars,
                 limit=limit,
             )
-    except InvalidSourceRootError as exc:
-        print(f"Invalid source folder: {exc}")
-        raise SystemExit(2) from exc
+    except InvalidSourceRootError:
+        print("Invalid source folder: SOURCE_ROOT_INVALID")
+        raise SystemExit(2) from None
     except TenantInactiveError:
         raise
     except Exception as exc:  # infrastructure/database failure
         print(f"Folder reconciliation failed: {type(exc).__name__}")
-        raise SystemExit(3) from exc
+        raise SystemExit(3) from None
 
     print(f"Source: {scan_summary.folder_source_id}")
     print(f"Discovered: {scan_summary.discovered}")
@@ -567,9 +568,9 @@ async def _retire_result_sets(tenant_id: str, max_batches: int) -> None:
     tenant, 3 = infrastructure/database failure."""
     try:
         parsed_tenant_id = uuid.UUID(tenant_id)
-    except ValueError as exc:
+    except ValueError:
         print("Invalid tenant id (expected UUID).")
-        raise SystemExit(2) from exc
+        raise SystemExit(2) from None
     factory = get_session_factory()
     batches = retired = 0
     pending = True
@@ -597,7 +598,7 @@ async def _retire_result_sets(tenant_id: str, max_batches: int) -> None:
         raise
     except Exception as exc:  # infrastructure/database failure
         print(f"Result set retirement failed: {type(exc).__name__}")
-        raise SystemExit(3) from exc
+        raise SystemExit(3) from None
     print(f"Batches: {batches}")
     print(f"Retired: {retired}")
     print(f"Pending: {'yes' if pending else 'no'}")
@@ -653,9 +654,9 @@ async def _seed_demo(reset: bool) -> None:
                     db, storage, photo_storage, tenant_id=summary.tenant_id,
                     candidate_id=document.candidate_id, document_id=document.id,
                 )
-    except DemoTenantAmbiguousError as exc:
-        print(f"Refusing to proceed: {exc}")
-        raise SystemExit(2) from exc
+    except DemoTenantAmbiguousError:
+        print("Refusing to proceed: DEMO_TENANT_AMBIGUOUS")
+        raise SystemExit(2) from None
 
     print(f"Demo tenant: {summary.tenant_id}")
     if summary.already_seeded:
@@ -727,7 +728,7 @@ async def _extract_identity(tenant_id: str, candidate_id: str, document_id: str)
             )
         except IdentityExtractionPreconditionError as exc:
             await db.commit()
-            print(f"Identity extraction could not run: {exc.code} — {exc}")
+            print(f"Identity extraction could not run: {exc.code}")
             return
         except ExtractionDeferredError as exc:
             await db.commit()
@@ -744,7 +745,7 @@ async def _extract_identity(tenant_id: str, candidate_id: str, document_id: str)
     print(f"Source document: {version.candidate_document_id}")
     print(f"Status: {version.status}")
     if version.status != "COMPLETED":
-        print(f"Error: {version.error_code} — {version.error_message}")
+        print(f"Error: {version.error_code}")
 
 
 @_safe_tenant_cli
@@ -768,11 +769,11 @@ async def _embed_candidate(tenant_id: str, candidate_id: str) -> None:
             )
             await db.commit()
     except EmbeddingPreconditionError as exc:
-        print(f"Embedding could not run: {exc.code} — {exc}")
-        raise SystemExit(2) from exc
+        print(f"Embedding could not run: {exc.code}")
+        raise SystemExit(2) from None
     except EmbeddingProviderError as exc:
         print(f"Embedding provider failed: {exc.code}")
-        raise SystemExit(3) from exc
+        raise SystemExit(3) from None
 
     print(f"Embedding version: {version.id}")
     print(f"Candidate: {version.candidate_id}")
@@ -797,9 +798,9 @@ async def _search_candidates(tenant_id: str, request_file: str) -> None:
         with open(request_file, encoding="utf-8") as fh:
             raw = fh.read()
         request = CandidateSearchRequest.model_validate_json(raw)
-    except (OSError, ValidationError) as exc:
-        print(f"Invalid search request: {exc}")
-        raise SystemExit(2) from exc
+    except (OSError, ValidationError):
+        print("Invalid search request: REQUEST_INVALID")
+        raise SystemExit(2) from None
 
     embedding_provider = None
     if request.mode != SearchMode.STRUCTURED_ONLY:
@@ -817,11 +818,11 @@ async def _search_candidates(tenant_id: str, request_file: str) -> None:
             )
             await db.commit()
     except SearchRequestError as exc:
-        print(f"Search request rejected: {exc.code} — {exc}")
-        raise SystemExit(2) from exc
+        print(f"Search request rejected: {exc.code}")
+        raise SystemExit(2) from None
     except EmbeddingProviderError as exc:
         print(f"Embedding provider failed: {exc.code}")
-        raise SystemExit(3) from exc
+        raise SystemExit(3) from None
 
     print(f"Mode: {response.mode.value}")
     print(f"Policy version: {response.policy_version}")
@@ -846,9 +847,9 @@ async def _plan_search(
     try:
         parsed_tenant_id = uuid.UUID(tenant_id)
         trusted_as_of_date = date.fromisoformat(as_of_date_text)
-    except ValueError as exc:
+    except ValueError:
         print("Invalid tenant id or as-of date (expected UUID and YYYY-MM-DD).")
-        raise SystemExit(2) from exc
+        raise SystemExit(2) from None
 
     llm = get_llm_provider()
     embedding_config = get_embedding_search_config()
@@ -880,12 +881,12 @@ async def _plan_search(
             await db.commit()
     except (SearchRequestError, EmbeddingProviderError) as exc:
         print(f"Natural-language search execution failed: {exc.code}")
-        raise SystemExit(4) from exc
+        raise SystemExit(4) from None
     except TenantInactiveError:
         raise
     except Exception as exc:
         print(f"Natural-language search infrastructure failure: {type(exc).__name__}")
-        raise SystemExit(4) from exc
+        raise SystemExit(4) from None
 
     print(f"Executable: {plan.executable}")
     print(f"Outcome: {plan.outcome.value}")
@@ -905,8 +906,8 @@ async def _plan_search(
     request = plan.search_request
     print(f"Mode: {request.mode.value}")
     print(f"Limit: {request.limit}")
-    print(f"Required filters: {request.required_filters.model_dump(mode='json')}")
-    print(f"Preferred filters: {request.preferred_filters.model_dump(mode='json')}")
+    print(f"Required filters present: {bool(request.required_filters.model_fields_set)}")
+    print(f"Preferred filters present: {bool(request.preferred_filters.model_fields_set)}")
     print(f"Semantic intent present: {request.semantic_query is not None}")
 
     if execute:
@@ -922,8 +923,26 @@ async def _plan_search(
             )
 
 
+def _safe_cli(fn: Callable[[], None]) -> Callable[[], None]:
+    @wraps(fn)
+    def run() -> None:
+        try:
+            fn()
+        except Exception as exc:
+            print(f"component=cli code=UNEXPECTED_ERROR error_type={exception_type(exc)}")
+            raise SystemExit(1) from None
+    return run
+
+
+class _PrivateArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> Never:
+        # argparse otherwise echoes arbitrary values from argv on mistakes.
+        super().error("Invalid CLI arguments (CLI_ARGUMENTS_INVALID).")
+
+
+@_safe_cli
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="meyar")
+    parser = _PrivateArgumentParser(prog="meyar")
     sub = parser.add_subparsers(dest="command", required=True)
 
     create_tenant_parser = sub.add_parser(

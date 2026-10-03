@@ -1056,7 +1056,7 @@ def build_release(
             component="archive_self_check",
             status=FindingStatus.FAIL,
             code=exc.code,
-            message=str(exc),
+            message=safe_exception_text(exc),
         )
         return builder.build()
     except OutputIdentityUnavailableError as exc:

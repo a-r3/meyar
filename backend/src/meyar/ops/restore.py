@@ -288,7 +288,7 @@ def _extract_storage(archive_path: Path, storage: Path, expected_count: int) -> 
 
 async def _inspect_target(url: URL, *, expected_head: str | None) -> None:
     try:
-        engine = create_async_engine(url, connect_args={"timeout": 10})
+        engine = create_async_engine(url, hide_parameters=True, connect_args={"timeout": 10})
     except Exception as exc:  # noqa: BLE001 - driver messages may include credentials
         raise RestoreFailure("RESTORE_TARGET_UNAVAILABLE") from exc
     try:

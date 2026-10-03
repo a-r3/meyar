@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meyar.diagnostics import log_failure
 from meyar.embedding.provider import EmbeddingBusyError, EmbeddingProvider, EmbeddingProviderError
 from meyar.extraction.deferral import ExtractionDeferredError
 from meyar.extraction.evidence import EvidenceValidationError
@@ -314,6 +315,10 @@ async def process_pending_candidates(
             continue
         except Exception as exc:
             await db.rollback()
+            log_failure(
+                logger, component="folder_reconciliation",
+                code="CANDIDATE_PROCESSING_FAILED", exc=exc,
+            )
             await require_active_tenant(db, tenant_id)
             await record_event(
                 db,

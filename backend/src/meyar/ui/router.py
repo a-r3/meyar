@@ -7,7 +7,7 @@ from importlib import resources
 from fastapi import APIRouter, Depends, FastAPI, Form, Query, Request, status
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -18,10 +18,12 @@ from starlette.responses import Response
 from starlette.templating import Jinja2Templates
 
 from meyar.agent.service import normalize_message_newlines
+from meyar.api.diagnostic_errors import DiagnosticErrorMiddleware
 from meyar.config import Settings, get_settings
 from meyar.core.business_date import resolve_business_date
 from meyar.core.password import hash_password, needs_rehash, verify_password
 from meyar.db import get_db
+from meyar.diagnostics import log_failure
 from meyar.embedding.db_release import DbReleasingEmbeddingProvider
 from meyar.embedding.dependency import get_embedding_provider, get_embedding_search_config
 from meyar.embedding.provider import (
@@ -2210,7 +2212,6 @@ async def rank_job(
 
 
 def install_ui(app: FastAPI) -> None:
-    app.add_middleware(UISecurityHeadersMiddleware)
     app.mount("/ui/static", StaticFiles(directory=str(_static_dir)), name="ui-static")
     app.include_router(router)
 
@@ -2271,9 +2272,8 @@ def install_ui(app: FastAPI) -> None:
                 ),
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             )
-        from fastapi.exception_handlers import request_validation_exception_handler
-
-        return await request_validation_exception_handler(request, exc)
+        # Pydantic's default errors include raw input and exception context.
+        return JSONResponse({"detail": "Invalid request."}, status_code=422)
 
     @app.exception_handler(StarletteHTTPException)
     async def _http_error(request: Request, exc: StarletteHTTPException) -> Response:
@@ -2291,8 +2291,8 @@ def install_ui(app: FastAPI) -> None:
 
     @app.exception_handler(Exception)
     async def _unexpected_error(request: Request, exc: Exception) -> Response:
+        log_failure(logger, component="http", code="UNEXPECTED_ERROR", exc=exc)
         if request.url.path == "/ui" or request.url.path.startswith("/ui/"):
-            logger.exception("Unhandled internal UI error")
             return _render(
                 request,
                 "error.html",
@@ -2302,4 +2302,8 @@ def install_ui(app: FastAPI) -> None:
                 ),
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
-        raise exc
+        return JSONResponse({"detail": "Internal server error."}, status_code=500)
+
+    app.add_middleware(DiagnosticErrorMiddleware, handler=_unexpected_error)
+    # Keep UI headers around both successful responses and safe failures.
+    app.add_middleware(UISecurityHeadersMiddleware)
