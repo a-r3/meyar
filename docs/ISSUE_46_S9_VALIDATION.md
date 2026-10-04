@@ -1,6 +1,10 @@
 # Issue #46 S9 — downstream folder-reconciliation concurrency authority
 
-Status: implemented; independent acceptance pending. Refs #46 under the existing
+Status: implemented; independent acceptance pending. **PR #124 was merged (main
+`e7dd38e00e86b01e476706e7feca5bbbec44c12c`, head `7f9d2c3f043c0b293d78f0dfda0116272dd358d5`, tree
+`55177475458d6f1152bb36f03f3eb0e3177da9ee`) before final independent acceptance; a post-hoc audit found the
+candidate-global newest-document rule below to be wrong for folder reconciliation. S9 acceptance stays
+PENDING until the corrective (D-110) is independently accepted.** The rest of the S9 design is preserved. Refs #46 under the existing
 **M9 — Deployment, Benchmark & Integration Readiness** milestone (10). Bounded
 concurrency slice, not completion of #46.
 
@@ -68,9 +72,10 @@ inference.
   Embedding Phase B additionally re-derives the effective profile and binds only to the same profile
   version. A failed/deferred provider outcome is recorded in Phase B (deferral raises the existing typed
   outcome after its audit).
-- `get_newest_candidate_document` (current-document rule, same ordering as the presentable-photo rule).
+- ~~`get_newest_candidate_document` current-document rule~~ — **REJECTED by the post-hoc audit and removed
+  by the D-110 corrective**: folder authority is the exact FolderIndexedFile pair, see the corrective section.
 - `ReconciliationSummary.superseded` + CLI line + audit `FOLDER_RECONCILE_CANDIDATE_SUPERSEDED`
-  (closed reason codes `CANDIDATE_DELETED`, `DOCUMENT_NOT_CURRENT`, `PROFILE_NOT_CURRENT`; ids only).
+  (closed reason codes `CANDIDATE_DELETED`, `DOCUMENT_NOT_CURRENT` (now `DOCUMENT_NOT_TRACKED`), `PROFILE_NOT_CURRENT`; ids only).
 - No migration (`alembic heads` unchanged `b88a2c4d6e10`), no dependency change, no new table, no
   process-local lock, no reservation/queue.
 
@@ -126,3 +131,49 @@ API/CLI single-transaction extraction (still spans inference); the tie-break of 
 `created_at` (transaction start time) for two documents created in the same transaction; retention/
 orphan sweeper and S4 hard-kill residuals; configured embedding readiness; schema drift. #46/#35/#36/#45/#50
 remain OPEN.
+
+
+## Corrective (D-110): folder document authority
+
+Starting state (live-verified): main `e7dd38e00e86b01e476706e7feca5bbbec44c12c`, tree
+`55177475458d6f1152bb36f03f3eb0e3177da9ee` (= PR #124 head tree); #46/#35/#36/#45/#50 OPEN.
+
+Reproduced on exact merged main (`test_folder_downstream_concurrency.py`; 4 failed / 1 passed, three
+identical runs):
+- **A, dedup-linked paths diverge** (two byte-identical paths share Candidate + document; a.docx -> Python,
+  b.docx -> Go, both INDEXED, same Candidate, distinct documents): `candidates_considered=2, processed=2,
+  ready_after=1, superseded=1` — one tracked document discarded solely because the other has later
+  `created_at`/id ordering. Same-scan and separate-scan variants both fail.
+- **B, direct upload:** a separate direct-upload document on the same Candidate (folder row untouched) made the
+  legitimate folder document `superseded` (`ready_after=0, superseded=1`).
+- **Shared document:** an in-flight run for a document still tracked by b.docx was superseded when a.docx advanced.
+- **C, same-transaction tie:** two documents created in one transaction have equal `created_at`
+  (PostgreSQL transaction timestamp); UUID id order has no path meaning (characterization test, passes).
+  Secondary to A/B.
+
+Fix: `_authority()` (both phases) now takes `folder_source_id` and requires candidate exists + document exists
+for that candidate + `folder_tracks_document` (a FolderIndexedFile of the tenant/source still points at exactly
+that candidate and document). `get_newest_candidate_document` is removed; the work item carries the
+folder source id from `process_pending_candidates`. Reason code `DOCUMENT_NOT_TRACKED`.
+
+After the fix (asserted): diverged dedup-linked paths — `superseded=0`, both documents get one COMPLETED profile
+and identity, embedding provenance valid, effective profile is one of the tracked documents (D-100: a Candidate
+has a single effective profile; the other tracked document is processed but not effective — pre-existing); direct
+upload leaves the folder document authoritative (`ready_after=1`, effective = folder document); shared document
+stays authoritative while path b tracks it; a path that truly advanced D1 -> D2 still discards the stale result
+(old-document tests unchanged, including the held-scan direction); candidate delete, tenant suspension,
+commit-failure and non-serialization tests unchanged and green; zero backends idle in transaction and zero
+relation locks during profile/identity/embedding inference.
+
+Lock order unchanged (Tenant SHARE -> Candidate UPDATE, Phase B only). New test: a scan holding Candidate SHARE
+(S8) with the persister waiting behind it, then discarding the stale result; and the earlier test of a scan
+waiting behind a persister — both directions, no cycle (the persister takes no FolderSource lock).
+
+Residual: the effective-profile limit for Candidates with several diverged tracked documents (D-100, a product
+decision, untouched); API/CLI single-transaction extraction; retention/orphan sweeper and S4 hard-kill;
+embedding readiness; schema drift. #46/#35/#36/#45/#50 remain OPEN.
+
+Corrective gates (actual output): full `pytest -q` 3844 passed; `ruff check .` clean; `mypy src` clean (233 files);
+`alembic heads` `b88a2c4d6e10 (head)` (unchanged); `git diff --check` and `scripts/scan-tracked-tree.sh` clean;
+focused (S9 incl. 6 new corrective tests, S4, S5/S6, S7, S8, folder reconciliation + CLI, tenant authority/
+isolation, effective-profile, no-exfiltration/privacy, busy deferral, docs policy): 287 passed.

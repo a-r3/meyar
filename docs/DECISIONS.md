@@ -9295,7 +9295,8 @@ embedding readiness, deployment, Target-Mac, or #45/#35/#36/#50 work.
 
 ## D-109 — Issue #46 S9: downstream folder reconciliation concurrency authority
 
-Status: implemented, independent acceptance pending; Refs #46, M9 milestone 10.
+Status: PR #124 was merged (main `e7dd38e00e86b01e476706e7feca5bbbec44c12c`, head `7f9d2c3f043c0b293d78f0dfda0116272dd358d5`, tree `55177475458d6f1152bb36f03f3eb0e3177da9ee`) BEFORE final independent
+acceptance; acceptance remains PENDING on the D-110 correction. Refs #46, M9 milestone 10.
 Starts from ACCEPTED + MERGED S8 / PR #123: squash/main
 `a1841768fca2cd92d733852a71d42087e51341be`, tree `e988994d5befd7610dff1fa6e03e72c23f613a73`.
 
@@ -9330,7 +9331,7 @@ Decision (no migration, no new dependency, no new table):
    effective profile and binds only to the same profile version.
 3. Superseded outcome (`ReconciliationSummary.superseded`, audit
    `FOLDER_RECONCILE_CANDIDATE_SUPERSEDED`, closed reason codes CANDIDATE_DELETED /
-   DOCUMENT_NOT_CURRENT / PROFILE_NOT_CURRENT): nothing is persisted for the stale authority
+   DOCUMENT_NOT_CURRENT (corrected to DOCUMENT_NOT_TRACKED by D-110) / PROFILE_NOT_CURRENT): nothing is persisted for the stale authority
    and it is not counted failed. A stale document's result is never written, so it can never
    become current/searchable authority. Duplicate inference between concurrent runs remains
    possible (wasted local work) but never duplicate authority; a durable reservation was not
@@ -9343,3 +9344,42 @@ Decision (no migration, no new dependency, no new table):
 Out of scope and unchanged: API/CLI single-transaction extraction (still spans inference),
 photo path (no change), changed-file/dedup authority (S7/S8), retention/orphan sweeper,
 S4 hard-kill residuals, configured embedding readiness, schema drift.
+
+
+## D-110 — Issue #46 S9 corrective: folder document authority is per FolderIndexedFile
+
+Status: implemented, independent acceptance pending (S9 as a whole stays PENDING until this
+corrective is independently accepted); Refs #46, M9 milestone 10. Starts from main
+`e7dd38e00e86b01e476706e7feca5bbbec44c12c`, tree `55177475458d6f1152bb36f03f3eb0e3177da9ee`
+(PR #124, merged before final independent acceptance).
+
+Defect (post-hoc audit, reproduced on exact merged main): S9's Phase B treated "the document
+being processed is the Candidate's newest CandidateDocument" (`created_at DESC, id DESC`) as
+folder authority. That is a candidate-global concept no accepted decision defines for folder
+reconciliation. D-013: a changed file creates a new document for the SAME Candidate and updates
+THAT FolderIndexedFile; D-021: readiness/downstream work derives from each tracked
+FolderIndexedFile's own current document. Reproduced (4 failures, stable x3): dedup-linked paths
+whose documents diverged -> one of two tracked documents reported `superseded` (for same-scan
+changes by a created_at tie broken by random UUID id, otherwise by chronology); a newer
+direct-upload document superseded the folder document; and a shared document still tracked by
+path b was superseded when path a advanced. PostgreSQL `now()` is the transaction start time, so
+documents created together tie (characterization test) and UUID order has no path meaning.
+
+Corrected definition: work scheduled by (folder_source_id, candidate_id, candidate_document_id) is
+authoritative while (a) the candidate exists, (b) the document row exists for that candidate, and
+(c) some FolderIndexedFile of that tenant/source still points at exactly that candidate+document
+(`folder_tracks_document`). Dedup-linked paths sharing one document keep it authoritative while any
+still tracks it; direct-upload documents never rewrite a path's authority; if every path that
+scheduled it advanced (D1 -> D2) the result is discarded as `superseded`
+(reason `DOCUMENT_NOT_TRACKED`, replacing `DOCUMENT_NOT_CURRENT`). `get_newest_candidate_document`
+was removed. D-100 effective-profile semantics are untouched (latest attempt's document boundary,
+no cross-document fallback); a Candidate still has ONE effective profile, so with two diverged
+tracked documents only the latest attempt's document is effective/ready (pre-existing, unchanged).
+
+Lock order: unchanged from S9 (Tenant SHARE -> Candidate UPDATE in Phase B; nothing across
+inference). The folder-row check is a plain read under the Candidate UPDATE lock: every writer
+that repoints a row at a candidate (S7 duplicate link, S8 changed-file persist) takes Candidate
+SHARE BEFORE updating the row and holds it to commit, and candidate delete is Candidate UPDATE, so
+under our lock the row is either already committed-advanced or its writer is waiting behind us. No
+FolderSource lock is taken in Phase B, so S7/S8 FolderSource -> Candidate is never inverted
+(tested in both directions).
