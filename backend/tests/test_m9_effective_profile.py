@@ -521,7 +521,9 @@ async def test_m9_changed_document_failure_then_retry_restores_authority(
         tenant_id=tenant.id,
         profile_content=profile_content(),
     )
-    # Independent new source, with a real failure persisted by extraction.
+    # Independent new source, with a real failure persisted by extraction. The first
+    # document is committed so the new one is strictly newer (current-document rule).
+    await db_session.commit()
     document = await create_candidate_document(
         db_session,
         tenant_id=tenant.id,

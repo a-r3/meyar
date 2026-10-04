@@ -1,8 +1,8 @@
 # Issue #46 S8 — changed-file acquisition / candidate-delete authority
 
-Status: implemented proposal, **independent acceptance pending**. Refs #46 under
+Status: **ACCEPTED + MERGED (PR #123, accepted head `7d87f9d160886f99fa4eb85e3b4b4481562c0f2d`, squash/main `a1841768fca2cd92d733852a71d42087e51341be`, tree `e988994d5befd7610dff1fa6e03e72c23f613a73`, parent S7 main `1a4e0ce95991fe43449d0d45d9da1b28b4d10ada`)**. Independently accepted and merged; recorded in S9. Refs #46 under
 existing **M9 — Deployment, Benchmark & Integration Readiness** (10).
-This slice does not complete #46. No merge/auto-merge authorization.
+This slice did not complete #46; #46/#35/#36/#45/#50 remain OPEN.
 
 ## Verified baseline
 

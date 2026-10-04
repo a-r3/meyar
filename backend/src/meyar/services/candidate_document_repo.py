@@ -59,6 +59,24 @@ async def list_candidate_documents(
     return list(result.scalars().all())
 
 
+async def get_newest_candidate_document(
+    db: AsyncSession, *, tenant_id: uuid.UUID, candidate_id: uuid.UUID
+) -> CandidateDocument | None:
+    """The candidate's current document: newest by creation, id as tie-break
+    (the same rule the presentable-photo authority uses)."""
+    result = await db.execute(
+        select(CandidateDocument)
+        .where(
+            CandidateDocument.candidate_id == candidate_id,
+            CandidateDocument.tenant_id == tenant_id,
+        )
+        .order_by(CandidateDocument.created_at.desc(), CandidateDocument.id.desc())
+        .limit(1)
+        .execution_options(populate_existing=True)
+    )
+    return result.scalar_one_or_none()
+
+
 async def create_canonical_document(
     db: AsyncSession,
     *,

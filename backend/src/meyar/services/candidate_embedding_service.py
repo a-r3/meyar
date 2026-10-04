@@ -1,8 +1,14 @@
 import uuid
+from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meyar.embedding.provider import EmbeddingBusyError, EmbeddingProvider, EmbeddingProviderError
+from meyar.embedding.provider import (
+    EmbeddingBusyError,
+    EmbeddingProvider,
+    EmbeddingProviderError,
+    EmbeddingResult,
+)
 from meyar.embedding.serializer import (
     SERIALIZER_VERSION,
     build_professional_embedding_text,
@@ -33,39 +39,27 @@ class EmbeddingPreconditionError(Exception):
         super().__init__(message)
 
 
-async def embed_candidate_profile(
+@dataclass(frozen=True)
+class EmbeddingPlan:
+    """DB-derived, immutable input to embedding (issue #46 S9)."""
+
+    profile_version_id: uuid.UUID
+    text: str
+    source_sha256: str
+    existing: CandidateEmbeddingVersion | None
+
+
+async def prepare_embedding(
     db: AsyncSession,
     provider: EmbeddingProvider,
     *,
     tenant_id: uuid.UUID,
     candidate_id: uuid.UUID,
     max_input_chars: int,
-) -> tuple[CandidateEmbeddingVersion, bool]:
-    """Embeds the candidate's CURRENT CandidateProfileVersion's
-    professional content — never CandidateIdentity, which this function
-    never even queries. "Current" is derived from
-    get_effective_profile_version (latest-attempt document's newest COMPLETED,
-    then current evidence verification) at call time. Only same-document
-    failed/manual-review attempts may preserve accepted facts; an embedding stays
-    bound to the exact selected version.
-
-    Idempotent: if a CandidateEmbeddingVersion already exists for the
-    exact seven-field identity (profile version, provider, model,
-    revision, serializer_version, source_sha256), that row is returned
-    unchanged and the embedding provider is never called again — see
-    candidate_embedding_repo.get_embedding_version_by_source and the
-    table's unique constraint (the concurrency backstop). A serializer
-    revision, or any change to the serialized professional text under
-    an unchanged serializer_version, always produces a distinct
-    embedding — it is never silently masked by an older row (see
-    docs/DECISIONS.md D-014). Returns (version, was_reused).
-
-    Raises EmbeddingPreconditionError if there is no completed profile
-    version yet, or if the serialized professional text exceeds
-    max_input_chars. Raises EmbeddingProviderError (after an audit
-    event) if the provider itself fails — never persists a partial/
-    invalid vector; a failed attempt produces no CandidateEmbeddingVersion
-    row at all."""
+) -> EmbeddingPlan:
+    """Short DB phase: select/authorize the effective profile, serialize its
+    professional text and look up an identical existing embedding. Raises
+    EmbeddingPreconditionError when there is nothing embeddable."""
     await require_active_tenant(db, tenant_id)
     profile_version = await get_effective_profile_version(
         db, tenant_id=tenant_id, candidate_id=candidate_id
@@ -107,7 +101,6 @@ async def embed_candidate_profile(
             f"maximum ({max_input_chars} chars).",
         )
     source_sha256 = compute_source_sha256(text)
-
     existing = await get_embedding_version_by_source(
         db,
         tenant_id=tenant_id,
@@ -118,51 +111,71 @@ async def embed_candidate_profile(
         serializer_version=SERIALIZER_VERSION,
         source_sha256=source_sha256,
     )
-    if existing is not None:
-        await record_event(
-            db,
-            tenant_id=tenant_id,
-            event_type="CANDIDATE_EMBEDDING_REUSED",
-            metadata={
-                "candidate_id": str(candidate_id),
-                "embedding_version_id": str(existing.id),
-                "profile_version_id": str(profile_version.id),
-            },
-        )
-        return existing, True
+    return EmbeddingPlan(profile_version.id, text, source_sha256, existing)
 
-    try:
-        result = await provider.embed(text)
-    except EmbeddingProviderError as exc:
-        await record_event(
-            db,
-            tenant_id=tenant_id,
-            # Issue #85: a busy shared inference gate is a transient
-            # deferral (no embedding attempted), not a provider failure.
-            event_type=(
-                "CANDIDATE_EMBEDDING_DEFERRED"
-                if isinstance(exc, EmbeddingBusyError)
-                else "CANDIDATE_EMBEDDING_FAILED"
-            ),
-            metadata={
-                "candidate_id": str(candidate_id),
-                "profile_version_id": str(profile_version.id),
-                "error_code": exc.code,
-            },
-        )
-        raise
 
+async def record_embedding_reused(
+    db: AsyncSession, *, tenant_id: uuid.UUID, candidate_id: uuid.UUID, plan: EmbeddingPlan
+) -> None:
+    assert plan.existing is not None
+    await record_event(
+        db,
+        tenant_id=tenant_id,
+        event_type="CANDIDATE_EMBEDDING_REUSED",
+        metadata={
+            "candidate_id": str(candidate_id),
+            "embedding_version_id": str(plan.existing.id),
+            "profile_version_id": str(plan.profile_version_id),
+        },
+    )
+
+
+async def record_embedding_failure(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    candidate_id: uuid.UUID,
+    plan: EmbeddingPlan,
+    exc: EmbeddingProviderError,
+) -> None:
+    await record_event(
+        db,
+        tenant_id=tenant_id,
+        # Issue #85: a busy shared inference gate is a transient
+        # deferral (no embedding attempted), not a provider failure.
+        event_type=(
+            "CANDIDATE_EMBEDDING_DEFERRED"
+            if isinstance(exc, EmbeddingBusyError)
+            else "CANDIDATE_EMBEDDING_FAILED"
+        ),
+        metadata={
+            "candidate_id": str(candidate_id),
+            "profile_version_id": str(plan.profile_version_id),
+            "error_code": exc.code,
+        },
+    )
+
+
+async def persist_embedding(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    candidate_id: uuid.UUID,
+    plan: EmbeddingPlan,
+    result: EmbeddingResult,
+) -> CandidateEmbeddingVersion:
+    """Short DB phase: the immutable embedding row + audit."""
     await require_active_tenant(db, tenant_id)
     version = await create_embedding_version(
         db,
         tenant_id=tenant_id,
         candidate_id=candidate_id,
-        candidate_profile_version_id=profile_version.id,
+        candidate_profile_version_id=plan.profile_version_id,
         provider=result.provider,
         model_name=result.model_name,
         model_revision=result.model_revision,
         serializer_version=SERIALIZER_VERSION,
-        source_sha256=source_sha256,
+        source_sha256=plan.source_sha256,
         embedding_dimensions=result.dimensions,
         embedding=result.vector,
     )
@@ -173,10 +186,67 @@ async def embed_candidate_profile(
         metadata={
             "candidate_id": str(candidate_id),
             "embedding_version_id": str(version.id),
-            "profile_version_id": str(profile_version.id),
+            "profile_version_id": str(plan.profile_version_id),
             "dimensions": result.dimensions,
             "provider": result.provider,
             "model": result.model_name,
         },
+    )
+    return version
+
+
+async def embed_candidate_profile(
+    db: AsyncSession,
+    provider: EmbeddingProvider,
+    *,
+    tenant_id: uuid.UUID,
+    candidate_id: uuid.UUID,
+    max_input_chars: int,
+) -> tuple[CandidateEmbeddingVersion, bool]:
+    """Embeds the candidate's CURRENT CandidateProfileVersion's
+    professional content — never CandidateIdentity, which this function
+    never even queries. "Current" is derived from
+    get_effective_profile_version (latest-attempt document's newest COMPLETED,
+    then current evidence verification) at call time. Only same-document
+    failed/manual-review attempts may preserve accepted facts; an embedding stays
+    bound to the exact selected version.
+
+    Idempotent: if a CandidateEmbeddingVersion already exists for the
+    exact seven-field identity (profile version, provider, model,
+    revision, serializer_version, source_sha256), that row is returned
+    unchanged and the embedding provider is never called again — see
+    candidate_embedding_repo.get_embedding_version_by_source and the
+    table's unique constraint (the concurrency backstop). A serializer
+    revision, or any change to the serialized professional text under
+    an unchanged serializer_version, always produces a distinct
+    embedding — it is never silently masked by an older row (see
+    docs/DECISIONS.md D-014). Returns (version, was_reused).
+
+    Raises EmbeddingPreconditionError if there is no completed profile
+    version yet, or if the serialized professional text exceeds
+    max_input_chars. Raises EmbeddingProviderError (after an audit
+    event) if the provider itself fails — never persists a partial/
+    invalid vector; a failed attempt produces no CandidateEmbeddingVersion
+    row at all."""
+    plan = await prepare_embedding(
+        db, provider, tenant_id=tenant_id, candidate_id=candidate_id,
+        max_input_chars=max_input_chars,
+    )
+    if plan.existing is not None:
+        await record_embedding_reused(
+            db, tenant_id=tenant_id, candidate_id=candidate_id, plan=plan
+        )
+        return plan.existing, True
+
+    try:
+        result = await provider.embed(plan.text)
+    except EmbeddingProviderError as exc:
+        await record_embedding_failure(
+            db, tenant_id=tenant_id, candidate_id=candidate_id, plan=plan, exc=exc
+        )
+        raise
+
+    version = await persist_embedding(
+        db, tenant_id=tenant_id, candidate_id=candidate_id, plan=plan, result=result
     )
     return version, False
