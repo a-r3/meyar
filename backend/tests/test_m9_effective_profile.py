@@ -510,10 +510,12 @@ async def test_m9_changed_document_failure_then_retry_restores_authority(
         create_canonical_document,
     )
     from meyar.services.candidate_profile_repo import get_latest_profile_version_for_document
+    from meyar.services.folder_indexed_file_repo import create_folder_indexed_file
     from meyar.services.folder_reconciliation_service import (
         _is_ready,
         _process_one_candidate_document,
     )
+    from meyar.services.folder_source_repo import get_or_create_folder_source
 
     tenant, _, _ = tenant_and_key
     candidate, _ = await seed_candidate_with_profile(
@@ -521,9 +523,7 @@ async def test_m9_changed_document_failure_then_retry_restores_authority(
         tenant_id=tenant.id,
         profile_content=profile_content(),
     )
-    # Independent new source, with a real failure persisted by extraction. The first
-    # document is committed so the new one is strictly newer (current-document rule).
-    await db_session.commit()
+    # Independent new source, with a real failure persisted by extraction.
     document = await create_candidate_document(
         db_session,
         tenant_id=tenant.id,
@@ -578,11 +578,24 @@ async def test_m9_changed_document_failure_then_retry_restores_authority(
         extraction=CandidateProfileExtraction.model_validate(profile_content("Rust")),
         identity_extraction=CandidateIdentityExtraction(),
     )
+    # Folder authority: the work item exists because a tracked path points at this exact
+    # document (D-013 / D-021).
+    source = await get_or_create_folder_source(
+        db_session, tenant_id=tenant.id, root_path="synthetic-m9-source"
+    )
+    await create_folder_indexed_file(
+        db_session, tenant_id=tenant.id, folder_source_id=source.id,
+        relative_path="synthetic-new.pdf", document_type="PDF", byte_size=100,
+        sha256_hash="b" * 64, index_status="INDEXED", candidate_id=candidate.id,
+        candidate_document_id=document.id,
+    )
+    await db_session.commit()
     outcome = await _process_one_candidate_document(
         db_session,
         provider,
         FakeEmbeddingProvider(),
         tenant_id=tenant.id,
+        folder_source_id=source.id,
         candidate_id=candidate.id,
         candidate_document_id=document.id,
         model_provider_name="fake",

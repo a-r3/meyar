@@ -54,8 +54,29 @@ No migration, no new dependency. D-107 and `docs/ISSUE_46_S7_VALIDATION.md`. Cha
 authority is investigated in the bounded S8 proposal below; other deferred scope stays open.
 #46/#35/#36/#45/#50 remain OPEN.
 
-**Issue #46 S9 — downstream folder-reconciliation concurrency authority implemented;
-independent acceptance pending.** Starts from verified main
+**Issue #46 S9 corrective 2 — folder READY is document-level (D-111); independent acceptance
+pending.** An acceptance audit of PR #125 head `752a11a6a7d1a1c26de7bcbb850918fcc41e2a6f` found that
+with several tracked documents per Candidate, repeated no-change reconciliation never quiesced
+(one tracked document stayed "not ready" because only one profile is D-100 effective): reproduced as
+`already_ready=1, processed=1, failed=1` on run 2. Readiness is now the tracked document's own
+authorized profile + identity + embedding bound to that profile version; D-100 effective-profile
+search/evaluation authority is unchanged. CI history of the audited head: run 37207985516 attempt 1
+failed on one unrelated DOCX footer byte-equality test (3843 passed), attempt 2 passed (3844).
+S9 remains NOT accepted. #46/#35/#36/#45/#50 remain OPEN.
+
+**Issue #46 S9 corrective — folder document authority (D-110); independent acceptance
+pending.** PR #124 was merged (main `e7dd38e00e86b01e476706e7feca5bbbec44c12c`, head
+`7f9d2c3f043c0b293d78f0dfda0116272dd358d5`, tree `55177475458d6f1152bb36f03f3eb0e3177da9ee`)
+BEFORE final independent acceptance, so **S9 is NOT accepted**. A post-hoc audit found that its
+candidate-global "newest CandidateDocument" rule violated D-013/D-021 (reproduced: diverged
+dedup-linked paths and direct-upload documents were wrongly `superseded`). Folder downstream work is
+now authoritative while a FolderIndexedFile of its source still points at exactly its
+candidate+document; the valid S9 parts (two-phase persistence, no connection/lock across inference,
+candidate/tenant revalidation, duplicate suppression, stale-result discard) are preserved. No
+migration. `docs/ISSUE_46_S9_VALIDATION.md`. #46/#35/#36/#45/#50 remain OPEN.
+
+**Issue #46 S9 — downstream folder-reconciliation concurrency authority implemented
+(merged via PR #124 before independent acceptance; see the corrective above).** Starts from verified main
 `a1841768fca2cd92d733852a71d42087e51341be` (tree `e988994d5befd7610dff1fa6e03e72c23f613a73`).
 Reproduced before the fix: concurrent runs for one candidate each committed a COMPLETED
 profile/identity version (or failed on the embedding unique key); an in-flight run for an

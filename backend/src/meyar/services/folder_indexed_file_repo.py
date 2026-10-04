@@ -147,3 +147,29 @@ async def update_folder_indexed_file(
         row.last_seen_at = last_seen_at
     await db.flush()
     return row
+
+
+async def folder_tracks_document(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    folder_source_id: uuid.UUID,
+    candidate_id: uuid.UUID,
+    candidate_document_id: uuid.UUID,
+) -> bool:
+    """Does any currently tracked FolderIndexedFile of this tenant's source still
+    point at exactly this candidate + document? This is the folder-reconciliation
+    authority for downstream work (D-013 / D-021): a path's current document, never
+    a candidate-global ordering of documents. Dedup-linked paths may share one
+    document; it stays authoritative while any of them still tracks it."""
+    row = await db.scalar(
+        select(FolderIndexedFile.id)
+        .where(
+            FolderIndexedFile.tenant_id == tenant_id,
+            FolderIndexedFile.folder_source_id == folder_source_id,
+            FolderIndexedFile.candidate_id == candidate_id,
+            FolderIndexedFile.candidate_document_id == candidate_document_id,
+        )
+        .limit(1)
+    )
+    return row is not None

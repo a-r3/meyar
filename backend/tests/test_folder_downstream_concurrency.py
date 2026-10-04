@@ -796,3 +796,353 @@ async def test_unsynchronized_runs_same_candidate_converge(env, factory, repetit
         assert await completed(observer, CandidateIdentityVersion, tenant.id) == 1
         assert final["embeddings"] == 1 and final["candidates"] == 1
         await assert_embedding_provenance(observer, tenant.id)
+
+
+# ---------------------------------------------------------------------------
+# S9 corrective: FOLDER document authority is per FolderIndexedFile, never
+# "newest CandidateDocument of the Candidate" (D-013 / D-021)
+# ---------------------------------------------------------------------------
+
+
+async def folder_rows(observer, tenant_id, source_id):
+    await observer.rollback()
+    return await list_folder_indexed_files(
+        observer, tenant_id=tenant_id, folder_source_id=source_id
+    )
+
+
+@pytest.mark.parametrize("scans", ["same-scan", "separate-scans"])
+async def test_dedup_linked_paths_that_diverge_are_both_authoritative(env, factory, scans):
+    tenant, _, storage, base = env
+    root = base / "cvs"
+    source_id, candidate_id, shared_doc = await seed(
+        factory, storage, tenant.id, root, "a.docx", "Java"
+    )
+    (root / "b.docx").write_bytes((root / "a.docx").read_bytes())  # identical bytes: dedup link
+    await rescan(factory, storage, tenant.id, root)
+    async with factory() as observer:
+        rows = await folder_rows(observer, tenant.id, source_id)
+        assert {r.relative_path for r in rows} == {"a.docx", "b.docx"}
+        assert {r.candidate_id for r in rows} == {candidate_id}
+        assert {r.candidate_document_id for r in rows} == {shared_doc}
+
+    write_docx(root / "a.docx", "Skills: Python")
+    if scans == "separate-scans":
+        await rescan(factory, storage, tenant.id, root)
+    write_docx(root / "b.docx", "Skills: Go")
+    scan = await rescan(factory, storage, tenant.id, root)
+    assert scan.successful >= 1
+    async with factory() as observer, factory() as db:
+        rows = await folder_rows(observer, tenant.id, source_id)
+        docs = {r.relative_path: r.candidate_document_id for r in rows}
+        assert len(set(docs.values())) == 2 and shared_doc not in docs.values()
+        assert {r.candidate_id for r in rows} == {candidate_id}  # retained identity
+
+        summary = await run_pending(db, GateLLM(), GateEmbedding(), tenant.id, source_id)
+        # Both tracked documents are authoritative for their own path: neither is
+        # superseded merely because the Candidate has another, newer CandidateDocument.
+        assert summary.superseded == 0, summary
+        assert summary.candidates_considered == 2
+        final = await truth(observer, tenant.id)
+        assert final["failed_events"] == 0
+        for document_id in docs.values():
+            for model in (CandidateProfileVersion, CandidateIdentityVersion):
+                done = await observer.scalar(
+                    select(func.count()).select_from(model).where(
+                        model.tenant_id == tenant.id,
+                        model.candidate_document_id == document_id,
+                        model.status == "COMPLETED",
+                    )
+                )
+                assert done == 1, (model.__name__, document_id)
+        await assert_embedding_provenance(observer, tenant.id)
+        effective = await get_effective_profile_version(
+            observer, tenant_id=tenant.id, candidate_id=candidate_id
+        )
+        assert effective is not None and effective.candidate_document_id in docs.values()
+
+
+async def test_direct_upload_document_does_not_supersede_folder_document(env, factory):
+    from meyar.services.candidate_document_service import (
+        persist_candidate_document,
+        prepare_candidate_document,
+    )
+
+    tenant, _, storage, base = env
+    source_id, candidate_id, folder_doc = await seed(
+        factory, storage, tenant.id, base / "cvs", "a.docx", "Java"
+    )
+    upload = base / "upload.docx"
+    write_docx(upload, "Skills: Rust")
+    prepared = await prepare_candidate_document(
+        LocalTextParser(), filename="upload.docx", content_type="", data=upload.read_bytes(),
+        max_bytes=MAX_BYTES,
+    )
+    async with factory() as db:  # a separate direct-upload document, newer by created_at
+        await persist_candidate_document(
+            db, storage, prepared, tenant_id=tenant.id, candidate_id=candidate_id,
+            filename="upload.docx",
+        )
+        await db.commit()
+    async with factory() as observer, factory() as db:
+        rows = await folder_rows(observer, tenant.id, source_id)
+        assert [r.candidate_document_id for r in rows] == [folder_doc]  # path authority intact
+        summary = await run_pending(db, GateLLM(), GateEmbedding(), tenant.id, source_id)
+        assert summary.superseded == 0 and summary.failed == 0 and summary.ready_after == 1
+        effective = await get_effective_profile_version(
+            observer, tenant_id=tenant.id, candidate_id=candidate_id
+        )
+        assert effective is not None and effective.candidate_document_id == folder_doc
+        await assert_embedding_provenance(observer, tenant.id)
+
+
+async def test_shared_document_stays_authoritative_while_another_path_advances(env, factory):
+    tenant, _, storage, base = env
+    root = base / "cvs"
+    source_id, candidate_id, shared_doc = await seed(
+        factory, storage, tenant.id, root, "a.docx", "Java"
+    )
+    (root / "b.docx").write_bytes((root / "a.docx").read_bytes())  # byte-identical
+    await rescan(factory, storage, tenant.id, root)
+    llm = GateLLM(gate="profile")
+    async with factory() as run_db, factory() as observer:
+        running = asyncio.create_task(
+            run_pending(run_db, llm, GateEmbedding(), tenant.id, source_id)
+        )
+        try:
+            await asyncio.wait_for(llm.first.wait(), 15)  # inference for the shared document
+            write_docx(root / "a.docx", "Skills: Python")  # path a advances; path b keeps it
+            await rescan(factory, storage, tenant.id, root)
+            llm.release.set()
+            summary = await asyncio.wait_for(running, 30)
+            rows = {r.relative_path: r for r in await folder_rows(observer, tenant.id, source_id)}
+            assert rows["b.docx"].candidate_document_id == shared_doc
+            assert rows["a.docx"].candidate_document_id != shared_doc
+            assert summary.superseded == 0, summary
+            done = await observer.scalar(
+                select(func.count()).select_from(CandidateProfileVersion).where(
+                    CandidateProfileVersion.candidate_document_id == shared_doc,
+                    CandidateProfileVersion.status == "COMPLETED",
+                )
+            )
+            assert done == 1
+        finally:
+            llm.release.set()
+            await stop(running)
+
+
+async def test_documents_created_in_one_transaction_share_created_at(env, factory):
+    """Characterization: PostgreSQL now() is the transaction start time, so created_at
+    ties for documents created together and the random UUID id has no path meaning."""
+    from meyar.services.candidate_document_service import (
+        persist_candidate_document,
+        prepare_candidate_document,
+    )
+    from meyar.services.candidate_repo import create_candidate
+
+    tenant, _, storage, base = env
+    async with factory() as db:
+        candidate = await create_candidate(db, tenant_id=tenant.id)
+        ids = []
+        for name in ("one", "two"):
+            path = base / f"{name}.docx"
+            write_docx(path, f"Skills: {name}")
+            prepared = await prepare_candidate_document(
+                LocalTextParser(), filename=path.name, content_type="", data=path.read_bytes(),
+                max_bytes=MAX_BYTES,
+            )
+            document = await persist_candidate_document(
+                db, storage, prepared, tenant_id=tenant.id, candidate_id=candidate.id,
+                filename=path.name,
+            )
+            ids.append(document.id)
+        await db.commit()
+    async with factory() as observer:
+        from meyar.models.candidate_document import CandidateDocument
+
+        stamps = (
+            await observer.scalars(
+                select(CandidateDocument.created_at).where(CandidateDocument.id.in_(ids))
+            )
+        ).all()
+        assert len(stamps) == 2 and stamps[0] == stamps[1]
+
+
+async def test_persistence_waits_for_inflight_path_change_then_discards_stale_work(
+    env, factory, monkeypatch
+):
+    """Opposite lock direction (S7/S8 FolderSource -> Candidate SHARE held by a scan,
+    S9 Candidate UPDATE wanted by the persister): the persister waits for the scan's
+    commit, then revalidates the path row and discards the old document's result. No
+    cycle: the persister never requests a FolderSource lock."""
+    from meyar.services import folder_indexer_service as indexer
+
+    tenant, _, storage, base = env
+    root = base / "cvs"
+    source_id, candidate_id, doc_a = await seed(factory, storage, tenant.id, root, "c.docx", "Java")
+    held, release = asyncio.Event(), asyncio.Event()
+    real_persist = indexer.persist_candidate_document
+
+    async def held_persist(*args, **kwargs):
+        held.set()  # Candidate SHARE (S8) is already held by this scan transaction
+        await release.wait()
+        return await real_persist(*args, **kwargs)
+
+    monkeypatch.setattr(indexer, "persist_candidate_document", held_persist)
+    write_docx(root / "c.docx", "Skills: Python")
+    llm = GateLLM()
+    async with factory() as scan_db, factory() as run_db, factory() as observer:
+        scanning = asyncio.create_task(
+            index_folder_and_commit(
+                scan_db, storage, LocalTextParser(), tenant_id=tenant.id,
+                root_path=str(root), max_bytes=MAX_BYTES,
+            )
+        )
+        running = None
+        try:
+            await asyncio.wait_for(held.wait(), 15)
+            running = asyncio.create_task(
+                run_pending(run_db, llm, GateEmbedding(), tenant.id, source_id)
+            )
+            assert await settled(observer, running) == "blocked"
+            release.set()
+            scan = await asyncio.wait_for(scanning, 30)
+            summary = await asyncio.wait_for(running, 30)
+            assert scan.changed == 1 and scan.successful == 1
+            rows = await folder_rows(observer, tenant.id, source_id)
+            assert rows[0].candidate_document_id != doc_a
+            # The run snapshotted A before the scan; its persistence is discarded.
+            assert summary.failed == 0 and summary.superseded == 1, summary
+            old = await observer.scalar(
+                select(func.count()).select_from(CandidateProfileVersion).where(
+                    CandidateProfileVersion.candidate_document_id == doc_a
+                )
+            )
+            assert old == 0
+        finally:
+            release.set()
+            await stop(scanning, running)
+
+
+# ---------------------------------------------------------------------------
+# S9 corrective 2: repeated no-change reconciliation must quiesce
+# ---------------------------------------------------------------------------
+
+
+async def diverge_dedup_linked_paths(factory, storage, tenant_id, base, scans):
+    root = base / "cvs"
+    source_id, candidate_id, shared_doc = await seed(
+        factory, storage, tenant_id, root, "a.docx", "Java"
+    )
+    (root / "b.docx").write_bytes((root / "a.docx").read_bytes())  # byte-identical
+    await rescan(factory, storage, tenant_id, root)
+    write_docx(root / "a.docx", "Skills: Python")
+    if scans == "separate-scans":
+        await rescan(factory, storage, tenant_id, root)
+    write_docx(root / "b.docx", "Skills: Go")
+    await rescan(factory, storage, tenant_id, root)
+    return source_id, candidate_id, shared_doc
+
+
+async def version_snapshot(observer, tenant_id):
+    await observer.rollback()
+    ids = {}
+    for model in (CandidateProfileVersion, CandidateIdentityVersion, CandidateEmbeddingVersion):
+        ids[model.__name__] = sorted(
+            (await observer.scalars(select(model.id).where(model.tenant_id == tenant_id))).all()
+        )
+    return ids
+
+
+@pytest.mark.parametrize("scans", ["same-scan", "separate-scans"])
+async def test_diverged_documents_quiesce_on_repeated_no_change_reconciliation(
+    env, factory, scans
+):
+    tenant, _, storage, base = env
+    source_id, candidate_id, _ = await diverge_dedup_linked_paths(
+        factory, storage, tenant.id, base, scans
+    )
+    async with factory() as db, factory() as observer:
+        first = await run_pending(db, GateLLM(), GateEmbedding(), tenant.id, source_id)
+        assert first.superseded == 0 and first.candidates_considered == 2, first
+        assert first.failed == 0, f"first run: {first}"
+        snapshot = await version_snapshot(observer, tenant.id)
+        effective = await get_effective_profile_version(
+            observer, tenant_id=tenant.id, candidate_id=candidate_id
+        )
+        assert effective is not None
+        for run in (2, 3):
+            llm, embedder = GateLLM(), GateEmbedding()
+            summary = await run_pending(db, llm, embedder, tenant.id, source_id)
+            assert summary.failed == 0 and summary.superseded == 0 and summary.deferred == 0, (
+                f"run {run} did not quiesce: {summary}"
+            )
+            assert summary.already_ready == summary.candidates_considered == 2, summary
+            assert llm.calls == {"profile": 0, "identity": 0}, "unnecessary local inference"
+            assert embedder.call_count == 0, "unnecessary embedding inference"
+            assert await version_snapshot(observer, tenant.id) == snapshot
+            await observer.rollback()
+            again = await get_effective_profile_version(
+                observer, tenant_id=tenant.id, candidate_id=candidate_id
+            )
+            assert again is not None and again.id == effective.id
+            await assert_embedding_provenance(observer, tenant.id)
+
+
+async def test_diverged_documents_keep_d100_search_authority_and_own_embeddings(env, factory):
+    """READY is document-level (D-111); search/evaluation authority stays D-100: exactly
+    one effective profile per Candidate, no cross-document fallback. Each tracked document
+    owns an evidence-authorized profile + identity + embedding; only the effective
+    profile's facts are searchable."""
+    tenant, _, storage, base = env
+    source_id, candidate_id, _ = await diverge_dedup_linked_paths(
+        factory, storage, tenant.id, base, "separate-scans"
+    )
+    async with factory() as db, factory() as observer:
+        await run_pending(db, GateLLM(), GateEmbedding(), tenant.id, source_id)
+        rows = {
+            r.relative_path: r.candidate_document_id
+            for r in await folder_rows(observer, tenant.id, source_id)
+        }
+        effective = await get_effective_profile_version(
+            observer, tenant_id=tenant.id, candidate_id=candidate_id
+        )
+        assert effective is not None
+        effective_document = effective.candidate_document_id
+        skills = {"a.docx": "Python", "b.docx": "Go"}
+        effective_path = next(
+            path for path, document_id in rows.items() if document_id == effective_document
+        )
+        other_path = next(path for path in rows if path != effective_path)
+        assert candidate_id in await skills_found(observer, tenant.id, skills[effective_path])
+        assert candidate_id not in await skills_found(observer, tenant.id, skills[other_path])
+        assert candidate_id not in await skills_found(observer, tenant.id, "Java")
+        # Every tracked document has exactly one embedding bound to its own profile.
+        for document_id in rows.values():
+            profile_id = await observer.scalar(
+                select(CandidateProfileVersion.id).where(
+                    CandidateProfileVersion.candidate_document_id == document_id,
+                    CandidateProfileVersion.status == "COMPLETED",
+                )
+            )
+            count = await observer.scalar(
+                select(func.count()).select_from(CandidateEmbeddingVersion).where(
+                    CandidateEmbeddingVersion.candidate_profile_version_id == profile_id
+                )
+            )
+            assert count == 1
+        await assert_embedding_provenance(observer, tenant.id)
+
+        # A later change of one path is processed alone, then reconciliation quiesces again.
+        write_docx(base / "cvs" / other_path, "Skills: Rust")
+        await rescan(factory, storage, tenant.id, base / "cvs")
+        changed = await run_pending(db, GateLLM(), GateEmbedding(), tenant.id, source_id)
+        assert changed.failed == 0 and changed.superseded == 0
+        assert (changed.processed, changed.already_ready) == (1, 1), changed
+        quiet_llm, quiet_embedding = GateLLM(), GateEmbedding()
+        quiet = await run_pending(db, quiet_llm, quiet_embedding, tenant.id, source_id)
+        assert quiet.failed == 0 and quiet.already_ready == quiet.candidates_considered == 2
+        assert quiet_llm.calls == {"profile": 0, "identity": 0}
+        assert quiet_embedding.call_count == 0
+        # The newly processed document is the latest attempt, hence the effective one.
+        assert candidate_id in await skills_found(observer, tenant.id, "Rust")
