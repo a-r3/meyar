@@ -281,6 +281,14 @@ def test_cropped_numeric_quote_uses_canonical_context(source, quote, value, acce
             verify_identity_evidence(view(source), identity)
 
 
+def _compat():
+    from fakes import FakeEmbeddingProvider as _Provider
+
+    from meyar.services.folder_reconciliation_service import resolve_embedding_compatibility
+
+    return resolve_embedding_compatibility(_Provider(), None)
+
+
 @pytest.mark.parametrize("cached", [False, True])
 async def test_invalid_legacy_profile_cannot_embed_or_reuse(db_session, tenant_and_user, cached):
     tenant, *_ = tenant_and_user
@@ -792,6 +800,7 @@ async def test_folder_readiness_revalidates_legacy_profile(db_session, tenant_an
         tenant_id=tenant.id,
         candidate_id=seeded.candidate.id,
         candidate_document_id=seeded.document.id,
+        compatibility=_compat(),
     )
     assert ready is accepted
     await db_session.refresh(seeded.profile)

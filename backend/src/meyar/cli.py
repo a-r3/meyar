@@ -520,6 +520,7 @@ async def _reconcile_folder(tenant_id: str, root: str, limit: int | None) -> Non
                 max_identity_input_chars=settings.llm_max_input_chars,
                 max_embedding_input_chars=settings.embedding_max_input_chars,
                 limit=limit,
+                embedding_config=get_embedding_search_config(),
             )
     except InvalidSourceRootError:
         print("Invalid source folder: SOURCE_ROOT_INVALID")

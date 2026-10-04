@@ -9107,7 +9107,9 @@ locking or upload serialization. D-105 below closes this bounded original-CV rac
 
 ## D-105 — Issue #46 S5: candidate deletion / direct-upload serialization
 
-Status: implemented, independent acceptance pending; Refs #46 under existing
+Status: ACCEPTED + MERGED (PR #120, head `1c18bae1c75c64d419bd361e8dd08995764df47a`, CI 37137376151 attempt 1
+SUCCESS, squash/main `dd4b4d0ce8b48b9948f948182094a5b1a50482f1`, tree
+`721438a6cbccedd54443bc5ba57cdb8718b03bf7`); Refs #46 under existing
 M9 milestone 10. Starts from accepted/merged PR #119 squash/main
 `dc4b404fc3eec2ee0919b84016ea3466383c0c6f`, tree
 `4692171ec09dda67f7e848e8c004f74c83afedf5`. S4 acceptance/CI is recorded in D-104.
@@ -9296,7 +9298,7 @@ embedding readiness, deployment, Target-Mac, or #45/#35/#36/#50 work.
 ## D-109 — Issue #46 S9: downstream folder reconciliation concurrency authority
 
 Status: PR #124 was merged (main `e7dd38e00e86b01e476706e7feca5bbbec44c12c`, head `7f9d2c3f043c0b293d78f0dfda0116272dd358d5`, tree `55177475458d6f1152bb36f03f3eb0e3177da9ee`) BEFORE final independent
-acceptance; acceptance remains PENDING on the D-110 correction. Refs #46, M9 milestone 10.
+acceptance and was later found defective (kept as history). Final S9 state: **ACCEPTED + MERGED through corrective PR #125**: accepted head `6f6f49dada7c62614c84a8f340096a3f95426ef4`, exact-head CI 37214484572 attempt 1 SUCCESS (3847 passed), owner squash/main `51ae314a74585902a5aecb164004b52cf00a0df9` (parent `e7dd38e00e86b01e476706e7feca5bbbec44c12c`), merged tree `952d97102a69fa15c9055ee0e0e1850518e704a2` (identical to the accepted-head tree), via the D-110/D-111 corrections. Refs #46, M9 milestone 10.
 Starts from ACCEPTED + MERGED S8 / PR #123: squash/main
 `a1841768fca2cd92d733852a71d42087e51341be`, tree `e988994d5befd7610dff1fa6e03e72c23f613a73`.
 
@@ -9348,8 +9350,8 @@ S4 hard-kill residuals, configured embedding readiness, schema drift.
 
 ## D-110 — Issue #46 S9 corrective: folder document authority is per FolderIndexedFile
 
-Status: implemented, independent acceptance pending (S9 as a whole stays PENDING until this
-corrective is independently accepted); Refs #46, M9 milestone 10. Starts from main
+Status: ACCEPTED + MERGED as part of corrective PR #125 (see D-109 for the accepted head, CI and merge
+SHA; S9 was pending until then); Refs #46, M9 milestone 10. Starts from main
 `e7dd38e00e86b01e476706e7feca5bbbec44c12c`, tree `55177475458d6f1152bb36f03f3eb0e3177da9ee`
 (PR #124, merged before final independent acceptance).
 
@@ -9387,7 +9389,8 @@ FolderSource lock is taken in Phase B, so S7/S8 FolderSource -> Candidate is nev
 
 ## D-111 — Issue #46 S9 corrective 2: folder READY is document-level, not "effective"
 
-Status: implemented, independent acceptance pending (S9 / PR #125 still NOT accepted); Refs #46,
+Status: ACCEPTED + MERGED as part of PR #125 (head `6f6f49dada7c62614c84a8f340096a3f95426ef4`, CI 37214484572
+attempt 1 SUCCESS, squash/main `51ae314a74585902a5aecb164004b52cf00a0df9`); Refs #46,
 M9 milestone 10. Audited head of PR #125: `752a11a6a7d1a1c26de7bcbb850918fcc41e2a6f`; base main
 `e7dd38e00e86b01e476706e7feca5bbbec44c12c`. CI history of that head: run 37207985516 attempt 1 failed
 (exactly one unrelated existing DOCX footer byte-equality test; 3843 passed), attempt 2 passed (3844).
@@ -9428,3 +9431,43 @@ candidate; each tracked document has exactly one embedding for its own version.
 
 Concurrency: unchanged (Phase A short -> inference with no transaction/connection/lock -> Phase B Tenant
 SHARE -> Candidate UPDATE -> revalidate -> commit; no FolderSource lock after Candidate).
+
+
+## D-112 — Issue #46 S10: folder READY requires an embedding compatible with the ACTIVE config
+
+Status: implemented, independent acceptance pending; Refs #46, M9 milestone 10. Starts from accepted/
+merged S9 (PR #125): squash/main `51ae314a74585902a5aecb164004b52cf00a0df9`, tree
+`952d97102a69fa15c9055ee0e0e1850518e704a2`.
+
+Defect (reproduced before the fix, real PostgreSQL): D-111's `_is_ready` accepted ANY embedding bound to
+the document's profile version. Semantic/hybrid search is stricter (D-014/D-015): it matches only
+`(profile_version_id, source_sha256)` of the current canonical serialization AND the configured provider,
+model_name, model_revision, serializer_version and embedding_dimensions. After a model/revision/serializer
+change (or a stale source hash) the document was reported READY with no usable embedding and periodic
+reconciliation quiesced instead of re-embedding (`already_ready=1, processed=0`, no provider call).
+
+Invariant: folder READY for a tracked document = (1) its own latest profile COMPLETED, (2) evidence-
+authorized, (3) its own latest identity COMPLETED, (4) evidence-authorized, (5) at least one embedding bound
+to THAT profile version that is compatible with the ACTIVE embedding configuration and the current canonical
+professional source hash. Existence of one exact compatible row suffices; row order/created_at is never
+consulted. D-100/D-110/D-111 are unchanged: READY stays document-level, search still uses only the effective
+authorized profile, and an embedding of a non-effective version stays inert for search.
+
+Change (no migration): `EmbeddingCompatibility` + `find_compatible_embedding` in `candidate_embedding_repo`
+is the single compatibility predicate — `search_compatible_embeddings` now builds its WHERE from the same
+`conditions()`, so they cannot drift (reused, not duplicated). `embedding_source()` is the shared source
+text/hash derivation. `process_pending_candidates` / `reconcile_folder` take an explicit
+`embedding_config` (the CLI passes the trusted `get_embedding_search_config()`); it is resolved once per
+invocation and authoritative for the run. Without one only the provider identity + serializer are
+constrained (dimensions unconstrained). `_is_ready` and the embedding stage use it. The provider must equal
+the active config or the stage fails (`EMBEDDING_PROVIDER_CONFIG_MISMATCH`). An embedding RESULT whose
+provider/model/revision differs from the config or whose dimensions differ from the configured/own length
+is rejected fail-closed (nothing persisted, failure audit), mirroring search's result check. A stored row
+that occupies the same immutable identity but has other dimensions cannot be replaced (D-014) and is never
+deleted: the document stays truthfully not ready (`EMBEDDING_IDENTITY_INCOMPATIBLE`, no provider call).
+Only the embedding is redone: profile/identity versions are untouched and historical embeddings are kept.
+
+Concurrency (unchanged S9 architecture): Phase A short -> embedding inference with no transaction,
+connection or lock -> Phase B Tenant SHARE -> Candidate UPDATE -> folder/document/profile revalidation ->
+reuse-or-persist -> commit. Concurrent runs converge on one compatible row; delete/changed-document/tenant
+suspension discard or refuse stale output as in S9.

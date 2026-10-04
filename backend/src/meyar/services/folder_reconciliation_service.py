@@ -7,7 +7,13 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.diagnostics import log_failure
-from meyar.embedding.provider import EmbeddingBusyError, EmbeddingProvider, EmbeddingProviderError
+from meyar.embedding.provider import (
+    EmbeddingBusyError,
+    EmbeddingInvalidOutputError,
+    EmbeddingProvider,
+    EmbeddingProviderError,
+)
+from meyar.embedding.serializer import SERIALIZER_VERSION
 from meyar.extraction.deferral import ExtractionDeferredError
 from meyar.extraction.evidence import EvidenceValidationError
 from meyar.extraction.identity_service import (
@@ -28,11 +34,16 @@ from meyar.llm.provider import LLMProvider
 from meyar.models.candidate_document import CandidateDocument
 from meyar.models.candidate_identity_version import IDENTITY_STATUS_COMPLETED
 from meyar.models.candidate_profile_version import PROFILE_STATUS_COMPLETED, CandidateProfileVersion
+from meyar.search.schemas import EmbeddingSearchConfig
 from meyar.services.audit_repo import record_event
 from meyar.services.candidate_document_repo import get_candidate_document
-from meyar.services.candidate_embedding_repo import list_embedding_versions_for_candidate
+from meyar.services.candidate_embedding_repo import (
+    EmbeddingCompatibility,
+    find_compatible_embedding,
+)
 from meyar.services.candidate_embedding_service import (
     EmbeddingPreconditionError,
+    embedding_source,
     persist_embedding,
     prepare_embedding,
     record_embedding_failure,
@@ -83,6 +94,7 @@ async def _is_ready(
     tenant_id: uuid.UUID,
     candidate_id: uuid.UUID,
     candidate_document_id: uuid.UUID,
+    compatibility: EmbeddingCompatibility,
 ) -> tuple[bool, CandidateProfileVersion | None]:
     """Read-only readiness derivation from existing provenance — no
     processing-status column/migration needed (see docs/DECISIONS.md D-021).
@@ -90,10 +102,14 @@ async def _is_ready(
     READY is DOCUMENT-level processing completion (issue #46 S9, D-111): this exact
     tracked document has a COMPLETED CandidateProfileVersion AND a COMPLETED
     CandidateIdentityVersion, BOTH passing current evidence authority, AND an
-    embedding bound to that exact profile version. It is deliberately NOT "this
-    document's profile is the Candidate's single D-100 effective profile": a
-    Candidate may have several tracked documents (dedup-linked paths that diverged)
-    while search/evaluation still use exactly one effective profile (D-100, unchanged).
+    embedding bound to that exact profile version that is COMPATIBLE with the active
+    embedding configuration and the current canonical professional serialization
+    (issue #46 S10; the same `EmbeddingCompatibility` predicate semantic retrieval uses:
+    provider, model, revision, serializer, dimensions, source hash — never "any row").
+    It is deliberately NOT "this document's profile is the Candidate's single D-100
+    effective profile": a Candidate may have several tracked documents (dedup-linked
+    paths that diverged) while search/evaluation still use exactly one effective
+    profile (D-100, unchanged).
     Requiring effectiveness made every non-latest tracked document permanently
     "not ready" so repeated no-change reconciliation never quiesced. Returns the
     profile row too so callers that must proceed don't re-query it."""
@@ -110,16 +126,46 @@ async def _is_ready(
         return False, profile
 
     try:
-        await authorize_profile_version(db, version=profile)
+        authorized = await authorize_profile_version(db, version=profile)
         await authorize_identity_version(db, version=identity)
     except (ProfileAuthorityError, EvidenceValidationError):
         return False, profile
 
-    embeddings = await list_embedding_versions_for_candidate(
-        db, tenant_id=tenant_id, candidate_id=candidate_id
+    _, source_sha256 = embedding_source(authorized.model_dump(mode="json"))
+    compatible = await find_compatible_embedding(
+        db,
+        tenant_id=tenant_id,
+        candidate_profile_version_id=profile.id,
+        source_sha256=source_sha256,
+        compatibility=compatibility,
     )
-    has_embedding = any(e.candidate_profile_version_id == profile.id for e in embeddings)
-    return has_embedding, profile
+    return compatible is not None, profile
+
+
+def resolve_embedding_compatibility(
+    embedding_provider: EmbeddingProvider, config: EmbeddingSearchConfig | None
+) -> EmbeddingCompatibility:
+    """The explicit active embedding configuration for one reconciliation invocation.
+
+    Production callers pass the trusted application config (the same object semantic
+    search uses). Without one, only the provider's own identity and the serializer are
+    constrained and dimensions are unconstrained: tests/embedded callers that have no
+    configured dimension. The provider itself is validated against it when embedding."""
+    if config is None:
+        return EmbeddingCompatibility(
+            embedding_provider.provider_name,
+            embedding_provider.model_name,
+            embedding_provider.model_revision,
+            SERIALIZER_VERSION,
+            None,
+        )
+    return EmbeddingCompatibility(
+        config.provider,
+        config.model_name,
+        config.model_revision,
+        config.serializer_version,
+        config.embedding_dimensions,
+    )
 
 
 SUPERSEDED_CANDIDATE_DELETED = "CANDIDATE_DELETED"
@@ -241,6 +287,7 @@ async def _embedding_stage(
     candidate_id: uuid.UUID,
     document_id: uuid.UUID,
     profile_version: CandidateProfileVersion,
+    compatibility: EmbeddingCompatibility,
     max_input_chars: int,
 ) -> tuple[_StageResult, bool]:
     """Same two-phase shape for embedding of THIS tracked document's own COMPLETED
@@ -256,6 +303,7 @@ async def _embedding_stage(
         plan = await prepare_embedding(
             db, embedding_provider, tenant_id=tenant_id, candidate_id=candidate_id,
             max_input_chars=max_input_chars, profile_version=profile_version,
+            compatibility=compatibility,
         )
     except EmbeddingPreconditionError:
         await db.commit()
@@ -272,6 +320,19 @@ async def _embedding_stage(
         result = await embedding_provider.embed(plan.text)
     except EmbeddingProviderError as exc:
         failure = exc
+    if failure is None and result is not None and (
+        (result.provider, result.model_name, result.model_revision)
+        != (compatibility.provider, compatibility.model_name, compatibility.model_revision)
+        or result.dimensions != len(result.vector)
+        or (
+            compatibility.embedding_dimensions is not None
+            and result.dimensions != compatibility.embedding_dimensions
+        )
+    ):
+        # Fail closed (mirrors the search-side result provenance check): never persist a
+        # vector the active configuration's semantic retrieval could not use.
+        failure = EmbeddingInvalidOutputError("Embedding result does not match active config.")
+        result = None
 
     document, reason = await _authority(
         db, tenant_id=tenant_id, folder_source_id=folder_source_id,
@@ -300,6 +361,7 @@ async def _embedding_stage(
         current = await prepare_embedding(
             db, embedding_provider, tenant_id=tenant_id, candidate_id=candidate_id,
             max_input_chars=max_input_chars, profile_version=latest,
+            compatibility=compatibility,
         )
     except EmbeddingPreconditionError:
         await db.commit()
@@ -352,6 +414,7 @@ async def _process_one_candidate_document(
     max_profile_input_chars: int,
     max_identity_input_chars: int,
     max_embedding_input_chars: int,
+    compatibility: EmbeddingCompatibility,
 ) -> tuple[bool, str | None]:
     """Drives one candidate's CURRENT document through whichever of profile
     extraction / identity extraction / embedding is not yet COMPLETE.
@@ -419,7 +482,7 @@ async def _process_one_candidate_document(
     if profile_ok:
         assert profile is not None
         embedding_stage, embedded = await _embedding_stage(
-            db, embedding_provider, profile_version=profile,
+            db, embedding_provider, profile_version=profile, compatibility=compatibility,
             max_input_chars=max_embedding_input_chars, **common,
         )
         if embedding_stage.superseded:
@@ -429,7 +492,7 @@ async def _process_one_candidate_document(
         return False, None
     ready, _ = await _is_ready(
         db, tenant_id=tenant_id, candidate_id=candidate_id,
-        candidate_document_id=candidate_document_id,
+        candidate_document_id=candidate_document_id, compatibility=compatibility,
     )
     return ready, None
 
@@ -446,6 +509,7 @@ async def process_pending_candidates(
     max_identity_input_chars: int,
     max_embedding_input_chars: int,
     limit: int | None = None,
+    embedding_config: EmbeddingSearchConfig | None = None,
 ) -> ReconciliationSummary:
     """Slice 14 orchestration: for every currently-tracked FolderIndexedFile
     in this folder_source whose current document is not yet fully
@@ -479,6 +543,9 @@ async def process_pending_candidates(
     provenance, no separate scheduling state needed. See
     docs/DECISIONS.md D-021."""
     await require_active_tenant(db, tenant_id)
+    # The active embedding configuration is resolved ONCE per invocation and is
+    # authoritative for this whole run (issue #46 S10).
+    compatibility = resolve_embedding_compatibility(embedding_provider, embedding_config)
     rows = await list_folder_indexed_files(
         db, tenant_id=tenant_id, folder_source_id=folder_source_id
     )
@@ -505,6 +572,7 @@ async def process_pending_candidates(
             tenant_id=tenant_id,
             candidate_id=candidate_id,
             candidate_document_id=candidate_document_id,
+            compatibility=compatibility,
         )
         if ready:
             already_ready += 1
@@ -543,6 +611,7 @@ async def process_pending_candidates(
                 max_profile_input_chars=max_profile_input_chars,
                 max_identity_input_chars=max_identity_input_chars,
                 max_embedding_input_chars=max_embedding_input_chars,
+                compatibility=compatibility,
             )
             if superseded_reason is not None:
                 # Deleted, or a newer document is current: nothing was persisted
@@ -616,6 +685,7 @@ async def reconcile_folder(
     max_identity_input_chars: int,
     max_embedding_input_chars: int,
     limit: int | None,
+    embedding_config: EmbeddingSearchConfig | None = None,
 ) -> tuple[FolderScanSummary, ReconciliationSummary]:
     """Slice 14 entry point: the unchanged Slice 6 index_folder (with the
     Slice 14 stability window applied) followed by downstream candidate
@@ -673,5 +743,6 @@ async def reconcile_folder(
         max_identity_input_chars=max_identity_input_chars,
         max_embedding_input_chars=max_embedding_input_chars,
         limit=limit,
+        embedding_config=embedding_config,
     )
     return scan_summary, reconciliation_summary

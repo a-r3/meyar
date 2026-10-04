@@ -10,9 +10,11 @@ from fakes import FakeEmbeddingProvider, FakeLLMProvider
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar import cli
+from meyar.embedding.serializer import SERIALIZER_VERSION
 from meyar.ingestion.parsers.local_text_parser import LocalTextParser
 from meyar.schemas.candidate_identity import CandidateIdentityExtraction
 from meyar.schemas.candidate_profile import CandidateProfileExtraction, EvidenceRef, SkillItem
+from meyar.search.schemas import EmbeddingSearchConfig
 from meyar.services.tenant_repo import create_tenant
 from meyar.storage.local import LocalFilesystemStorage
 
@@ -66,7 +68,20 @@ def _patch_cli_dependencies(
         extraction=_profile_extraction(), identity_extraction=_identity_extraction()
     )
     monkeypatch.setattr(cli, "get_llm_provider", lambda: llm or default_llm)
-    monkeypatch.setattr(cli, "get_embedding_provider", lambda: embedder or FakeEmbeddingProvider())
+    active = embedder or FakeEmbeddingProvider()
+    monkeypatch.setattr(cli, "get_embedding_provider", lambda: active)
+    # The CLI hands the trusted active embedding config to reconciliation (issue #46 S10).
+    monkeypatch.setattr(
+        cli,
+        "get_embedding_search_config",
+        lambda: EmbeddingSearchConfig(
+            provider=active.provider_name,
+            model_name=active.model_name,
+            model_revision=active.model_revision,
+            serializer_version=SERIALIZER_VERSION,
+            embedding_dimensions=len(active._vector),
+        ),
+    )
 
 
 async def test_cli_reconcile_folder_happy_path(
