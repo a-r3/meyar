@@ -177,3 +177,34 @@ Corrective gates (actual output): full `pytest -q` 3844 passed; `ruff check .` c
 `alembic heads` `b88a2c4d6e10 (head)` (unchanged); `git diff --check` and `scripts/scan-tracked-tree.sh` clean;
 focused (S9 incl. 6 new corrective tests, S4, S5/S6, S7, S8, folder reconciliation + CLI, tenant authority/
 isolation, effective-profile, no-exfiltration/privacy, busy deferral, docs policy): 287 passed.
+
+## Corrective 2 (D-111): repeated no-change reconciliation must quiesce
+
+Audited head `752a11a6a7d1a1c26de7bcbb850918fcc41e2a6f` (PR #125), base main `e7dd38e00e86b01e476706e7feca5bbbec44c12c`;
+both verified live, PR open/unmerged, #46/#35/#36/#45/#50 OPEN. CI history of that head: run 37207985516 attempt 1
+failed on exactly one unrelated existing DOCX footer byte-equality test (3843 passed), attempt 2 passed (3844).
+
+Before-fix reproduction (test `test_diverged_documents_quiesce_on_repeated_no_change_reconciliation`, same-scan and
+separate-scan variants, identical in repeated runs): run 1 passes (`superseded=0`, both documents processed), run 2 of
+the SAME unchanged folder fails: `ReconciliationSummary(candidates_considered=2, already_ready=1, processed=1,
+ready_after=1, failed=1, skipped_due_to_limit=0, deferred=0, superseded=0)`; assertion `failed == 0`
+("run 2 did not quiesce").
+
+Root cause: `_is_ready` required the document's profile to be the Candidate's single D-100 effective profile, and
+`_embedding_stage` embedded the Candidate's effective profile. Run 1 leaves exactly the last-processed document
+effective, so the other tracked document is "not ready" forever, re-enters the stages every run, and is counted failed
+(CLI exit 1). See D-111 for the A-E distinction. Fix: document-level READY and per-document embedding; search/evaluation
+authority (D-100) untouched.
+
+After the fix: runs 2 and 3 report `already_ready == candidates_considered == 2`, `failed=0, superseded=0, deferred=0`,
+make no profile/identity inference call and no embedding call, add no profile/identity/embedding rows, and leave the
+effective profile unchanged; only the effective document's skill is searchable (original shared and other-document skills
+are not); each tracked document has exactly one embedding for its own profile version; a later change of one path
+processes only that document (`processed=1, already_ready=1`) and the next run quiesces again. All S9/D-110 regressions
+(direct upload, shared document, stale all-paths-advance, both lock directions, same-document concurrency, delete both
+directions, tenant suspension, zero transaction/connection/lock during profile/identity/embedding inference) remain green.
+
+Corrective 2 gates (actual output): full `pytest -q` 3847 passed; `ruff check .` clean; `mypy src` clean (233 files);
+`alembic heads` `b88a2c4d6e10 (head)` (unchanged); `git diff --check` and `scripts/scan-tracked-tree.sh` clean; focused
+(S9 incl. corrective regressions, S4, S5/S6, S7, S8, folder reconciliation + CLI, tenant authority/isolation, effective-profile,
+embedding + semantic search, no-exfiltration/privacy, busy deferral, docs policy): 338 passed.

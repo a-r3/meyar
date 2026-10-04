@@ -9383,3 +9383,48 @@ SHARE BEFORE updating the row and holds it to commit, and candidate delete is Ca
 under our lock the row is either already committed-advanced or its writer is waiting behind us. No
 FolderSource lock is taken in Phase B, so S7/S8 FolderSource -> Candidate is never inverted
 (tested in both directions).
+
+
+## D-111 — Issue #46 S9 corrective 2: folder READY is document-level, not "effective"
+
+Status: implemented, independent acceptance pending (S9 / PR #125 still NOT accepted); Refs #46,
+M9 milestone 10. Audited head of PR #125: `752a11a6a7d1a1c26de7bcbb850918fcc41e2a6f`; base main
+`e7dd38e00e86b01e476706e7feca5bbbec44c12c`. CI history of that head: run 37207985516 attempt 1 failed
+(exactly one unrelated existing DOCX footer byte-equality test; 3843 passed), attempt 2 passed (3844).
+
+Defect (P1, reproduced on that head): D-110 correctly lets one Candidate have several tracked folder
+documents, but `_is_ready` still required the document's profile to be the Candidate's single D-100
+effective profile and `_embedding_stage` embedded the effective profile. After dedup-linked paths diverged
+and run 1 processed both, only the LAST processed document was effective; every later no-change run
+reported `candidates_considered=2, already_ready=1, processed=1, ready_after=1, failed=1`, re-entered the
+stages for the other tracked document and never quiesced (CLI exit 1 indefinitely).
+
+Derived distinction (D-013 / D-021 / D-100):
+- A. folder-current: a FolderIndexedFile of the source points at the exact candidate+document (D-110).
+- B. processed: that document's own latest profile and identity are COMPLETED and pass current evidence
+  authority (`authorize_profile_version` / `authorize_identity_version`), and an embedding is bound to that
+  exact profile version. This is the folder-reconciliation READY.
+- C. effective profile: D-100, exactly one per Candidate (latest attempt's document, newest COMPLETED, no
+  cross-document fallback). Consumed by search/evaluation/agent. UNCHANGED.
+- D. embedding eligibility in reconciliation: the tracked document's own authorized COMPLETED profile
+  version (`prepare_embedding(profile_version=...)`); API/CLI `embed_candidate_profile` still embeds the
+  effective version. An embedding of a non-effective version is inert for search: semantic retrieval only
+  matches `(profile_version_id, source_sha256)` pairs of effective profiles.
+- E. READY = B. It is not C. Effectiveness is an output of D-100 attempt ordering, which flips whenever any
+  new attempt is persisted, so tying readiness to it can never be stable with several tracked documents.
+
+Change: `_is_ready` drops the "profile is the Candidate's effective profile" equality (keeping profile and
+identity authorization and the embedding-for-this-profile requirement); `_embedding_stage` embeds the
+document's own profile version and its Phase B re-reads that document's latest profile (must be the same
+COMPLETED version, else superseded `PROFILE_NOT_CURRENT`); `prepare_embedding` gained an optional
+`profile_version` (default unchanged). No migration, no CLI-exit change, no D-100 change.
+
+Why search authority is not weakened: search/evaluation still read only the D-100 effective, evidence-
+authorized profile (tested: only the effective document's skill matches; the other tracked document's and
+the original shared document's skills do not). No cross-document fallback was added; stale/untracked
+documents are never evaluated (they are not folder rows); an unauthorized profile is never ready and never
+embedded. Embedding provenance: every embedding points at a COMPLETED profile of the same tenant and
+candidate; each tracked document has exactly one embedding for its own version.
+
+Concurrency: unchanged (Phase A short -> inference with no transaction/connection/lock -> Phase B Tenant
+SHARE -> Candidate UPDATE -> revalidate -> commit; no FolderSource lock after Candidate).

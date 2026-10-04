@@ -1022,3 +1022,127 @@ async def test_persistence_waits_for_inflight_path_change_then_discards_stale_wo
         finally:
             release.set()
             await stop(scanning, running)
+
+
+# ---------------------------------------------------------------------------
+# S9 corrective 2: repeated no-change reconciliation must quiesce
+# ---------------------------------------------------------------------------
+
+
+async def diverge_dedup_linked_paths(factory, storage, tenant_id, base, scans):
+    root = base / "cvs"
+    source_id, candidate_id, shared_doc = await seed(
+        factory, storage, tenant_id, root, "a.docx", "Java"
+    )
+    (root / "b.docx").write_bytes((root / "a.docx").read_bytes())  # byte-identical
+    await rescan(factory, storage, tenant_id, root)
+    write_docx(root / "a.docx", "Skills: Python")
+    if scans == "separate-scans":
+        await rescan(factory, storage, tenant_id, root)
+    write_docx(root / "b.docx", "Skills: Go")
+    await rescan(factory, storage, tenant_id, root)
+    return source_id, candidate_id, shared_doc
+
+
+async def version_snapshot(observer, tenant_id):
+    await observer.rollback()
+    ids = {}
+    for model in (CandidateProfileVersion, CandidateIdentityVersion, CandidateEmbeddingVersion):
+        ids[model.__name__] = sorted(
+            (await observer.scalars(select(model.id).where(model.tenant_id == tenant_id))).all()
+        )
+    return ids
+
+
+@pytest.mark.parametrize("scans", ["same-scan", "separate-scans"])
+async def test_diverged_documents_quiesce_on_repeated_no_change_reconciliation(
+    env, factory, scans
+):
+    tenant, _, storage, base = env
+    source_id, candidate_id, _ = await diverge_dedup_linked_paths(
+        factory, storage, tenant.id, base, scans
+    )
+    async with factory() as db, factory() as observer:
+        first = await run_pending(db, GateLLM(), GateEmbedding(), tenant.id, source_id)
+        assert first.superseded == 0 and first.candidates_considered == 2, first
+        assert first.failed == 0, f"first run: {first}"
+        snapshot = await version_snapshot(observer, tenant.id)
+        effective = await get_effective_profile_version(
+            observer, tenant_id=tenant.id, candidate_id=candidate_id
+        )
+        assert effective is not None
+        for run in (2, 3):
+            llm, embedder = GateLLM(), GateEmbedding()
+            summary = await run_pending(db, llm, embedder, tenant.id, source_id)
+            assert summary.failed == 0 and summary.superseded == 0 and summary.deferred == 0, (
+                f"run {run} did not quiesce: {summary}"
+            )
+            assert summary.already_ready == summary.candidates_considered == 2, summary
+            assert llm.calls == {"profile": 0, "identity": 0}, "unnecessary local inference"
+            assert embedder.call_count == 0, "unnecessary embedding inference"
+            assert await version_snapshot(observer, tenant.id) == snapshot
+            await observer.rollback()
+            again = await get_effective_profile_version(
+                observer, tenant_id=tenant.id, candidate_id=candidate_id
+            )
+            assert again is not None and again.id == effective.id
+            await assert_embedding_provenance(observer, tenant.id)
+
+
+async def test_diverged_documents_keep_d100_search_authority_and_own_embeddings(env, factory):
+    """READY is document-level (D-111); search/evaluation authority stays D-100: exactly
+    one effective profile per Candidate, no cross-document fallback. Each tracked document
+    owns an evidence-authorized profile + identity + embedding; only the effective
+    profile's facts are searchable."""
+    tenant, _, storage, base = env
+    source_id, candidate_id, _ = await diverge_dedup_linked_paths(
+        factory, storage, tenant.id, base, "separate-scans"
+    )
+    async with factory() as db, factory() as observer:
+        await run_pending(db, GateLLM(), GateEmbedding(), tenant.id, source_id)
+        rows = {
+            r.relative_path: r.candidate_document_id
+            for r in await folder_rows(observer, tenant.id, source_id)
+        }
+        effective = await get_effective_profile_version(
+            observer, tenant_id=tenant.id, candidate_id=candidate_id
+        )
+        assert effective is not None
+        effective_document = effective.candidate_document_id
+        skills = {"a.docx": "Python", "b.docx": "Go"}
+        effective_path = next(
+            path for path, document_id in rows.items() if document_id == effective_document
+        )
+        other_path = next(path for path in rows if path != effective_path)
+        assert candidate_id in await skills_found(observer, tenant.id, skills[effective_path])
+        assert candidate_id not in await skills_found(observer, tenant.id, skills[other_path])
+        assert candidate_id not in await skills_found(observer, tenant.id, "Java")
+        # Every tracked document has exactly one embedding bound to its own profile.
+        for document_id in rows.values():
+            profile_id = await observer.scalar(
+                select(CandidateProfileVersion.id).where(
+                    CandidateProfileVersion.candidate_document_id == document_id,
+                    CandidateProfileVersion.status == "COMPLETED",
+                )
+            )
+            count = await observer.scalar(
+                select(func.count()).select_from(CandidateEmbeddingVersion).where(
+                    CandidateEmbeddingVersion.candidate_profile_version_id == profile_id
+                )
+            )
+            assert count == 1
+        await assert_embedding_provenance(observer, tenant.id)
+
+        # A later change of one path is processed alone, then reconciliation quiesces again.
+        write_docx(base / "cvs" / other_path, "Skills: Rust")
+        await rescan(factory, storage, tenant.id, base / "cvs")
+        changed = await run_pending(db, GateLLM(), GateEmbedding(), tenant.id, source_id)
+        assert changed.failed == 0 and changed.superseded == 0
+        assert (changed.processed, changed.already_ready) == (1, 1), changed
+        quiet_llm, quiet_embedding = GateLLM(), GateEmbedding()
+        quiet = await run_pending(db, quiet_llm, quiet_embedding, tenant.id, source_id)
+        assert quiet.failed == 0 and quiet.already_ready == quiet.candidates_considered == 2
+        assert quiet_llm.calls == {"profile": 0, "identity": 0}
+        assert quiet_embedding.call_count == 0
+        # The newly processed document is the latest attempt, hence the effective one.
+        assert candidate_id in await skills_found(observer, tenant.id, "Rust")

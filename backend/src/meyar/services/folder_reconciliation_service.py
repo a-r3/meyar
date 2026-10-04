@@ -48,7 +48,7 @@ from meyar.services.folder_indexed_file_repo import (
 )
 from meyar.services.folder_indexer_service import FolderScanSummary, index_folder_and_commit
 from meyar.services.identity_authority import authorize_identity_version
-from meyar.services.profile_authority import get_current_authorized_profile
+from meyar.services.profile_authority import ProfileAuthorityError, authorize_profile_version
 from meyar.services.tenant_authority import TenantInactiveError, require_active_tenant
 from meyar.storage.base import DocumentStorage
 from meyar.storage.dependency import get_photo_storage
@@ -85,13 +85,18 @@ async def _is_ready(
     candidate_document_id: uuid.UUID,
 ) -> tuple[bool, CandidateProfileVersion | None]:
     """Read-only readiness derivation from existing provenance — no
-    processing-status column/migration needed (see docs/DECISIONS.md
-    D-021). READY means: this exact current document has a COMPLETED
-    CandidateProfileVersion AND a COMPLETED CandidateIdentityVersion,
-    both passing current evidence authority, AND at least one
-    CandidateEmbeddingVersion exists for that profile
-    version. Returns the profile row too so callers that must proceed
-    to extraction/embedding don't re-query it."""
+    processing-status column/migration needed (see docs/DECISIONS.md D-021).
+
+    READY is DOCUMENT-level processing completion (issue #46 S9, D-111): this exact
+    tracked document has a COMPLETED CandidateProfileVersion AND a COMPLETED
+    CandidateIdentityVersion, BOTH passing current evidence authority, AND an
+    embedding bound to that exact profile version. It is deliberately NOT "this
+    document's profile is the Candidate's single D-100 effective profile": a
+    Candidate may have several tracked documents (dedup-linked paths that diverged)
+    while search/evaluation still use exactly one effective profile (D-100, unchanged).
+    Requiring effectiveness made every non-latest tracked document permanently
+    "not ready" so repeated no-change reconciliation never quiesced. Returns the
+    profile row too so callers that must proceed don't re-query it."""
     profile = await get_latest_profile_version_for_document(
         db, tenant_id=tenant_id, candidate_document_id=candidate_document_id
     )
@@ -104,14 +109,10 @@ async def _is_ready(
     if identity is None or identity.status != IDENTITY_STATUS_COMPLETED:
         return False, profile
 
-    authorized = await get_current_authorized_profile(
-        db, tenant_id=tenant_id, candidate_id=candidate_id
-    )
-    if authorized is None or authorized[0].id != profile.id:
-        return False, profile
     try:
+        await authorize_profile_version(db, version=profile)
         await authorize_identity_version(db, version=identity)
-    except EvidenceValidationError:
+    except (ProfileAuthorityError, EvidenceValidationError):
         return False, profile
 
     embeddings = await list_embedding_versions_for_candidate(
@@ -239,9 +240,12 @@ async def _embedding_stage(
     folder_source_id: uuid.UUID,
     candidate_id: uuid.UUID,
     document_id: uuid.UUID,
+    profile_version: CandidateProfileVersion,
     max_input_chars: int,
 ) -> tuple[_StageResult, bool]:
-    """Same two-phase shape for embedding. Returns (stage result, embedded)."""
+    """Same two-phase shape for embedding of THIS tracked document's own COMPLETED
+    profile version (D-111; not the Candidate's effective profile). Returns
+    (stage result, embedded)."""
     document, reason = await _authority(
         db, tenant_id=tenant_id, folder_source_id=folder_source_id,
         candidate_id=candidate_id, document_id=document_id, persist=False,
@@ -251,7 +255,7 @@ async def _embedding_stage(
     try:
         plan = await prepare_embedding(
             db, embedding_provider, tenant_id=tenant_id, candidate_id=candidate_id,
-            max_input_chars=max_input_chars,
+            max_input_chars=max_input_chars, profile_version=profile_version,
         )
     except EmbeddingPreconditionError:
         await db.commit()
@@ -284,16 +288,21 @@ async def _embedding_stage(
             raise failure  # transient: defer the candidate, never count it failed
         return _StageResult(), False
     assert result is not None
+    latest = await get_latest_profile_version_for_document(
+        db, tenant_id=tenant_id, candidate_document_id=document_id
+    )
+    if latest is None or latest.id != profile_version.id or (
+        latest.status != PROFILE_STATUS_COMPLETED
+    ):
+        await db.commit()  # this document's profile changed while embedding: never bind to it
+        return _StageResult(superseded=SUPERSEDED_PROFILE_NOT_CURRENT), False
     try:
         current = await prepare_embedding(
             db, embedding_provider, tenant_id=tenant_id, candidate_id=candidate_id,
-            max_input_chars=max_input_chars,
+            max_input_chars=max_input_chars, profile_version=latest,
         )
     except EmbeddingPreconditionError:
         await db.commit()
-        return _StageResult(superseded=SUPERSEDED_PROFILE_NOT_CURRENT), False
-    if current.profile_version_id != plan.profile_version_id:
-        await db.commit()  # the effective profile moved while embedding: never bind to it
         return _StageResult(superseded=SUPERSEDED_PROFILE_NOT_CURRENT), False
     if current.existing is not None:
         await record_embedding_reused(
@@ -408,8 +417,10 @@ async def _process_one_candidate_document(
 
     embedded = False
     if profile_ok:
+        assert profile is not None
         embedding_stage, embedded = await _embedding_stage(
-            db, embedding_provider, max_input_chars=max_embedding_input_chars, **common
+            db, embedding_provider, profile_version=profile,
+            max_input_chars=max_embedding_input_chars, **common,
         )
         if embedding_stage.superseded:
             return False, embedding_stage.superseded

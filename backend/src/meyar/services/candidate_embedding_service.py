@@ -15,7 +15,10 @@ from meyar.embedding.serializer import (
     compute_source_sha256,
 )
 from meyar.models.candidate_embedding_version import CandidateEmbeddingVersion
-from meyar.models.candidate_profile_version import PROFILE_STATUS_COMPLETED
+from meyar.models.candidate_profile_version import (
+    PROFILE_STATUS_COMPLETED,
+    CandidateProfileVersion,
+)
 from meyar.services.audit_repo import record_event
 from meyar.services.candidate_embedding_repo import (
     create_embedding_version,
@@ -56,14 +59,30 @@ async def prepare_embedding(
     tenant_id: uuid.UUID,
     candidate_id: uuid.UUID,
     max_input_chars: int,
+    profile_version: CandidateProfileVersion | None = None,
 ) -> EmbeddingPlan:
-    """Short DB phase: select/authorize the effective profile, serialize its
-    professional text and look up an identical existing embedding. Raises
-    EmbeddingPreconditionError when there is nothing embeddable."""
+    """Short DB phase: authorize the profile to embed, serialize its professional
+    text and look up an identical existing embedding. Raises
+    EmbeddingPreconditionError when there is nothing embeddable.
+
+    ``profile_version=None`` (API/CLI) embeds the Candidate's D-100 EFFECTIVE profile.
+    Folder reconciliation (issue #46 S9) passes the tracked document's OWN
+    COMPLETED profile version instead: a Candidate may have several tracked
+    documents but only one effective profile, and readiness of each tracked document
+    is its own complete, evidence-authorized provenance chain. The version is still
+    run through authorize_profile_version, so an unauthorized profile is never
+    embedded; search only ever matches embeddings of the effective version."""
     await require_active_tenant(db, tenant_id)
-    profile_version = await get_effective_profile_version(
-        db, tenant_id=tenant_id, candidate_id=candidate_id
-    )
+    if profile_version is not None and (
+        profile_version.tenant_id != tenant_id or profile_version.candidate_id != candidate_id
+    ):
+        raise EmbeddingPreconditionError(
+            "NO_PROFILE_VERSION", "The profile version does not belong to this candidate."
+        )
+    if profile_version is None:
+        profile_version = await get_effective_profile_version(
+            db, tenant_id=tenant_id, candidate_id=candidate_id
+        )
     if profile_version is None:
         latest = await get_latest_profile_attempt(
             db, tenant_id=tenant_id, candidate_id=candidate_id
