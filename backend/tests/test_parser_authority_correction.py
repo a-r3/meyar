@@ -233,7 +233,7 @@ async def test_active_parser_and_four_waiters_hold_no_request_db_connections(
         await release.wait()
         return output
 
-    monkeypatch.setattr(supervisor, "_run", held)
+    monkeypatch.setattr(supervisor, "run_bounded_worker", held)
 
     # Photo handling is a separate accepted feature, outside this parser invariant.
     async def no_photo(*args, **kwargs):

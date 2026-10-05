@@ -41,8 +41,16 @@ from meyar.core.roles import ROLE_HR_USER
 from meyar.embedding.provider import EmbeddingResult
 from meyar.embedding.serializer import SERIALIZER_VERSION
 from meyar.evaluation.service import evaluate_and_score_candidate
-from meyar.extraction.identity_service import extract_candidate_identity
-from meyar.extraction.service import extract_candidate_profile
+from meyar.extraction.identity_service import (
+    infer_candidate_identity,
+    load_identity_view,
+    persist_identity_outcome,
+)
+from meyar.extraction.service import (
+    infer_candidate_profile,
+    load_profile_view,
+    persist_profile_outcome,
+)
 from meyar.extraction.view import ProfessionalDocumentView
 from meyar.ingestion.parser import DocumentParser
 from meyar.llm.provider import LLMResultProvenance
@@ -71,11 +79,17 @@ from meyar.services.audit_repo import record_event
 from meyar.services.browser_session_repo import revoke_sessions_for_membership
 from meyar.services.candidate_document_service import ingest_candidate_document
 from meyar.services.candidate_embedding_repo import EmbeddingCompatibility
-from meyar.services.candidate_embedding_service import embed_candidate_profile
+from meyar.services.candidate_embedding_service import (
+    persist_embedding,
+    prepare_embedding,
+    record_embedding_reused,
+    validate_embedding_result,
+)
 from meyar.services.candidate_repo import count_candidates_for_tenant, create_candidate
 from meyar.services.job_criteria_repo import create_criteria_version
 from meyar.services.job_repo import create_job
 from meyar.services.profile_authority import get_current_authorized_profile
+from meyar.services.storage_authority import storage_writer
 from meyar.services.storage_recovery import track_staged
 from meyar.services.tenant_membership_repo import create_membership
 from meyar.services.tenant_repo import create_tenant
@@ -1034,6 +1048,7 @@ async def reset_demo(
     if tenant is None:
         return False
     demo_user, _, memberships = await _marked_demo_human(db, tenant.id)
+    await storage_writer(db, tenant.id)
     original_keys = await db.scalars(
         select(CandidateDocument.storage_key).where(CandidateDocument.tenant_id == tenant.id)
     )
@@ -1195,41 +1210,46 @@ async def seed_demo(
         llm = _DemoLLMProvider(
             extraction=_profile_extraction(spec), identity_extraction=_identity_extraction(spec)
         )
-        profile_version = await extract_candidate_profile(
-            db,
-            llm,
-            tenant_id=tenant.id,
-            candidate_id=candidate.id,
-            candidate_document=document,
-            model_provider_name="demo-synthetic",
-            max_input_chars=max_profile_input_chars,
+        view, canonical_id = await load_profile_view(
+            db, tenant_id=tenant.id, candidate_id=candidate.id, candidate_document=document,
+        )
+        outcome = await infer_candidate_profile(llm, view, max_input_chars=max_profile_input_chars)
+        profile_version = await persist_profile_outcome(
+            db, tenant_id=tenant.id, candidate_id=candidate.id, candidate_document=document,
+            canonical_document_id=canonical_id, model_provider_name="demo-synthetic",
+            outcome=outcome,
         )
         profiles_created += 1
-
-        await extract_candidate_identity(
-            db,
-            llm,
-            tenant_id=tenant.id,
-            candidate_id=candidate.id,
-            candidate_document=document,
-            model_provider_name="demo-synthetic",
-            max_input_chars=max_identity_input_chars,
+        view, canonical_id = await load_identity_view(
+            db, tenant_id=tenant.id, candidate_id=candidate.id, candidate_document=document,
+        )
+        identity = await infer_candidate_identity(
+            llm, view, max_input_chars=max_identity_input_chars,
+        )
+        await persist_identity_outcome(
+            db, tenant_id=tenant.id, candidate_id=candidate.id, candidate_document=document,
+            canonical_document_id=canonical_id, model_provider_name="demo-synthetic",
+            outcome=identity,
         )
         identities_created += 1
-
         if profile_version.status == "COMPLETED":
             embedder = _DemoEmbeddingProvider(vector=spec.embedding_vector)
-            await embed_candidate_profile(
-                db,
-                embedder,
-                tenant_id=tenant.id,
-                candidate_id=candidate.id,
-                max_input_chars=max_embedding_input_chars,
-                compatibility=EmbeddingCompatibility(
-                    embedder.provider_name, embedder.model_name, embedder.model_revision,
-                    SERIALIZER_VERSION, len(spec.embedding_vector),
-                ),
+            compatibility = EmbeddingCompatibility(
+                embedder.provider_name, embedder.model_name, embedder.model_revision,
+                SERIALIZER_VERSION, len(spec.embedding_vector),
             )
+            plan = await prepare_embedding(
+                db, embedder, tenant_id=tenant.id, candidate_id=candidate.id,
+                max_input_chars=max_embedding_input_chars, compatibility=compatibility,
+            )
+            if plan.existing is not None:
+                await record_embedding_reused(db, tenant_id=tenant.id,
+                                              candidate_id=candidate.id, plan=plan)
+            else:
+                vector = await embedder.embed(plan.text)
+                validate_embedding_result(vector, compatibility)
+                await persist_embedding(db, tenant_id=tenant.id, candidate_id=candidate.id,
+                                        plan=plan, result=vector)
             embeddings_created += 1
 
     jobs_created = 0

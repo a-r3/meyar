@@ -1,10 +1,13 @@
 import argparse
 import asyncio
 import getpass
+import json
 import uuid
 from collections.abc import Callable, Coroutine
+from dataclasses import asdict
 from datetime import date
 from functools import wraps
+from pathlib import Path
 from typing import Any, Never
 
 from sqlalchemy import select
@@ -14,6 +17,7 @@ from meyar.core.business_date import resolve_business_date
 from meyar.core.roles import VALID_ROLES
 from meyar.db import get_session_factory
 from meyar.diagnostics import exception_type
+from meyar.embedding.db_release import DbReleasingEmbeddingProvider
 from meyar.embedding.dependency import get_embedding_provider, get_embedding_search_config
 from meyar.embedding.provider import EmbeddingProviderError
 from meyar.evaluation.service import EvaluationInputError, evaluate_and_score_candidate
@@ -827,7 +831,10 @@ async def _search_candidates(tenant_id: str, request_file: str) -> None:
                 db,
                 tenant_id=uuid.UUID(tenant_id),
                 request=request,
-                embedding_provider=embedding_provider,
+                embedding_provider=(
+                    DbReleasingEmbeddingProvider(embedding_provider, db)
+                    if embedding_provider is not None else None
+                ),
             )
             await db.commit()
     except SearchRequestError as exc:
@@ -878,7 +885,7 @@ async def _plan_search(
                     natural_language_request=query,
                     as_of_date=trusted_as_of_date,
                     embedding_config=embedding_config,
-                    embedding_provider=get_embedding_provider(),
+                    embedding_provider=DbReleasingEmbeddingProvider(get_embedding_provider(), db),
                 )
                 plan = planned.plan
             else:
@@ -951,6 +958,40 @@ class _PrivateArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> Never:
         # argparse otherwise echoes arbitrary values from argv on mistakes.
         super().error("Invalid CLI arguments (CLI_ARGUMENTS_INVALID).")
+
+
+async def _maintain(args) -> None:
+    from pydantic import ValidationError
+
+    from meyar.services.maintenance import MaintenancePolicy, run_maintenance
+
+    try:
+        tenant_id = uuid.UUID(args.tenant_id)
+        policy = MaintenancePolicy(
+            limit=args.limit, scan_limit=args.scan_limit, scan_offset=args.scan_offset,
+            orphan_age_seconds=args.orphan_age_seconds,
+            session_days=args.session_days, conversation_days=args.conversation_days,
+            audit_days=args.audit_days, empty_candidate_days=args.empty_candidate_days,
+            global_auth_event_days=args.global_auth_event_days,
+        )
+    except (ValueError, ValidationError):
+        print("MAINTENANCE_POLICY_INVALID")
+        raise SystemExit(2) from None
+    try:
+        async with get_session_factory()() as db:
+            result = await run_maintenance(
+                db, tenant_id=tenant_id, storage_root=Path(get_settings().storage_root),
+                policy=policy, apply=args.apply,
+            )
+            if args.apply:
+                await db.commit()
+            else:
+                await db.rollback()
+    except Exception:
+        print("MAINTENANCE_FAILED")
+        raise SystemExit(4) from None
+    print(json.dumps(asdict(result), sort_keys=True))
+    raise SystemExit(result.exit_code)
 
 
 @_safe_cli
@@ -1140,8 +1181,22 @@ def main() -> None:
         help="Execute the validated plan through Slice 8 (default is plan-only).",
     )
 
+    maintain = sub.add_parser("maintain", help="Bounded tenant storage recovery and retention.")
+    maintain.add_argument("--tenant-id", required=True)
+    maintain.add_argument("--apply", action="store_true", help="Apply; default is inspection only.")
+    maintain.add_argument("--limit", type=int, default=100)
+    maintain.add_argument("--scan-limit", type=int, default=10000)
+    maintain.add_argument("--scan-offset", type=int, default=0)
+    maintain.add_argument("--global-auth-event-days", type=int,
+                          help="Explicit GLOBAL retention for tenant-independent login failures.")
+    maintain.add_argument("--orphan-age-seconds", type=int, default=3600)
+    for category in ("session", "conversation", "audit", "empty-candidate"):
+        maintain.add_argument(f"--{category}-days", type=int)
+
     args = parser.parse_args()
-    if args.command == "create-tenant":
+    if args.command == "maintain":
+        asyncio.run(_maintain(args))
+    elif args.command == "create-tenant":
         asyncio.run(_create_tenant(args.name))
     elif args.command in ("disable-tenant", "enable-tenant"):
         asyncio.run(_set_tenant_active_cli(args.tenant_id, active=args.command == "enable-tenant"))

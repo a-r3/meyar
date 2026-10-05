@@ -28,6 +28,12 @@ from meyar.schemas.candidate_profile import CandidateProfileExtraction
 from meyar.services.audit_repo import record_event
 from meyar.services.candidate_document_repo import get_latest_canonical_document
 from meyar.services.candidate_profile_repo import create_profile_version
+from meyar.services.direct_inference_authority import (
+    DirectInferenceSupersededError,
+    direct_authority,
+    revalidate_direct_authority,
+)
+from meyar.services.storage_recovery import commit_with_recovery
 from meyar.services.tenant_authority import require_active_tenant
 
 # One initial attempt + one bounded retry on schema-invalid structured
@@ -250,27 +256,44 @@ async def extract_candidate_profile(
     must have already verified candidate_document belongs to
     (tenant_id, candidate_id).
 
-    One caller-owned transaction spans inference here (API/CLI use). The
-    folder reconciliation pipeline instead composes load_profile_view ->
-    infer_candidate_profile -> persist_profile_outcome in separate short
-    transactions (issue #46 S9)."""
+    The planning phase commits (including pending caller work) before inference;
+    the caller owns the final guarded persistence commit. Folder orchestration
+    uses the individual stages under its separate tracked-document authority."""
     view, canonical_id = await load_profile_view(
         db, tenant_id=tenant_id, candidate_id=candidate_id, candidate_document=candidate_document
     )
-    outcome = await infer_candidate_profile(
-        llm,
-        view,
-        max_input_chars=max_input_chars,
-        before_attempt=lambda: require_active_tenant(db, tenant_id),
-    )
+    try:
+        authority, _ = await direct_authority(
+            db, tenant_id=tenant_id, candidate_id=candidate_id,
+            document_id=candidate_document.id,
+        )
+        if authority.canonical_id != canonical_id:
+            raise DirectInferenceSupersededError()
+        await commit_with_recovery(db)
+        async def before_attempt() -> None:
+            # Each retry has fresh authority, then returns its connection before
+            # waiting on the local-model gate or transport.
+            await revalidate_direct_authority(
+                db, authority, tenant_id=tenant_id, candidate_id=candidate_id,
+            )
+            await commit_with_recovery(db)
+
+        outcome = await infer_candidate_profile(
+            llm, view, max_input_chars=max_input_chars, before_attempt=before_attempt,
+        )
+        # Ensure no caller/provider transaction leaks into fresh Phase B.
+        if db.in_transaction():
+            await db.rollback()
+        document = await revalidate_direct_authority(
+            db, authority, tenant_id=tenant_id, candidate_id=candidate_id,
+        )
+    except DirectInferenceSupersededError as exc:
+        await db.rollback()
+        raise ExtractionPreconditionError(exc.code, str(exc)) from None
     return await persist_profile_outcome(
-        db,
-        tenant_id=tenant_id,
-        candidate_id=candidate_id,
-        candidate_document=candidate_document,
-        canonical_document_id=canonical_id,
-        model_provider_name=model_provider_name,
-        outcome=outcome,
+        db, tenant_id=tenant_id, candidate_id=candidate_id,
+        candidate_document=document, canonical_document_id=canonical_id,
+        model_provider_name=model_provider_name, outcome=outcome,
     )
 
 

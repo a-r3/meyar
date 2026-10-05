@@ -129,7 +129,15 @@ async def _finish(task: asyncio.Task) -> None:
         raise asyncio.CancelledError
 
 
-async def _run(data: bytes, kind: str, limits: policy.OutputLimits, seconds: float) -> bytes:
+async def run_bounded_worker(
+    data: bytes,
+    kind: str,
+    limits: policy.OutputLimits,
+    seconds: float,
+    *,
+    worker_module: str = "meyar.ingestion.parser_worker",
+    worker_args: list[str] | None = None,
+) -> bytes:
     """Deadline for normally resolving startup and input-controlled worker work.
 
     Cleanup intentionally awaits shielded OS spawn resolution to obtain/reap
@@ -137,14 +145,23 @@ async def _run(data: bytes, kind: str, limits: policy.OutputLimits, seconds: flo
     timeout delivery indefinitely; this is not a strict total wall-clock bound.
     Terminate/kill/reap cleanup is outside the worker execution deadline.
     """
+    if worker_module not in ("meyar.ingestion.parser_worker", "meyar.photo.worker"):
+        raise ParseError(ParseFailureCode.PARSER_STARTUP_FAILED)
+    arguments = (
+        worker_args
+        if worker_args is not None
+        else [
+            kind,
+            json.dumps(asdict(limits)),
+            str(len(data)),
+        ]
+    )
     spawn = asyncio.create_task(
         asyncio.create_subprocess_exec(
             sys.executable,
             "-m",
-            "meyar.ingestion.parser_worker",
-            kind,
-            json.dumps(asdict(limits)),
-            str(len(data)),
+            worker_module,
+            *arguments,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
@@ -221,5 +238,5 @@ async def parse_isolated(
         raise ParseError(ParseFailureCode.INVALID_DOCUMENT)
     limits = limits or policy.OutputLimits()
     async with gate().slot():
-        output = await _run(data, document_type, limits, seconds)
+        output = await run_bounded_worker(data, document_type, limits, seconds)
     return decode_result(output, document_type, limits)

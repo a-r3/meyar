@@ -1,5 +1,11 @@
 # MEYAR — Status
 
+**Issue #46 final closure engineering: implementation under independent acceptance, one task branch
+`fix/46-final-closure`, existing M9 milestone 10.** The complete baseline matrix, reproduced residuals,
+implementation contract and actual gate evidence are in `docs/ISSUE_46_FINAL_CLOSURE.md` (D-113).
+Older slice residual lists below describe their historical delivery boundary; the final matrix is current.
+No merge/issue closure is authorized. #35/#36/#45/#49/#50 capability work is unchanged.
+
 **Issue #46 S1 — Tenant Active Authorization: independently ACCEPTED and
 owner-MERGED through PR #116.** Accepted exact head
 `436e01589d86cc6db2d7926d2801525e9555b702`; exact-head CI
@@ -55,7 +61,7 @@ authority is investigated in the bounded S8 proposal below; other deferred scope
 #46/#35/#36/#45/#50 remain OPEN.
 
 **Issue #46 S10 — configured embedding readiness (folder READY requires an embedding compatible
-with the ACTIVE embedding configuration); independent acceptance pending.** Starts from verified main
+with the ACTIVE embedding configuration); ACCEPTED + MERGED through PR #126.** Starts from verified main
 `51ae314a74585902a5aecb164004b52cf00a0df9` (tree `952d97102a69fa15c9055ee0e0e1850518e704a2`). Reproduced
 before the fix: after the embedding model, revision, serializer or source hash changed, `_is_ready`
 (any embedding bound to the profile) still reported the document READY (`already_ready=1, processed=0`),
@@ -64,8 +70,18 @@ so periodic reconciliation quiesced with an embedding semantic search cannot use
 poisoning on audited head `34ef16817dcca6981029cfa409a6599837c486ba`; direct embedding now requires
 trusted compatibility/dimensions and shares folder result validation. Canonical source text/hash derivation
 is centralized in `embedding.serializer` and called by search too. Wrong results are refused before storage;
-valid retries work, historical incompatible rows remain an operator-repair residual. Direct API/CLI transaction
-separation remains deferred under #46. Independent re-audit pending; DO NOT MERGE. #46/#35/#36/#45/#50 remain OPEN.
+valid retries work. **S10 independently ACCEPTED + owner Squash-MERGED through PR #126.**
+Accepted head `6277b77f0c39ca69dd0e6f9515961463e6269f54`; exact-head
+[CI 37327942757](https://github.com/a-r3/meyar/actions/runs/37327942757),
+attempt 1 **SUCCESS, 3873 passed**. Verified owner squash/main
+`532bd295f1e63926a922eee5ddf6ce0200594dfd`, parent
+`51ae314a74585902a5aecb164004b52cf00a0df9`, full tree
+`8b55824e4d59e3d6ed5b31bf75ee312b851c4cec`.
+Accepted head tree equals the merged main tree. Earlier rejected/audited heads remain historical.
+The final #46 engineering PR addresses direct inference separation, historical-row recovery, readiness,
+retention/hard-kill recovery, invalid runtime configuration, schema drift and the DOCX test oracle.
+See `docs/ISSUE_46_FINAL_CLOSURE.md`; independent acceptance is required before owner merge/issue closure.
+#46/#35/#36/#45/#50 remain OPEN.
 
 **Issue #46 S9 — **ACCEPTED + MERGED through corrective PR #125**: accepted head `6f6f49dada7c62614c84a8f340096a3f95426ef4`, exact-head CI 37214484572 attempt 1 SUCCESS (3847 passed), owner squash/main `51ae314a74585902a5aecb164004b52cf00a0df9` (parent `e7dd38e00e86b01e476706e7feca5bbbec44c12c`), merged tree `952d97102a69fa15c9055ee0e0e1850518e704a2` (identical to the accepted-head tree).** The history below is retained as recorded: PR #124 was merged before final
 independent acceptance and was later found defective; D-110 (folder document authority) and D-111
@@ -157,7 +173,8 @@ Candidate FOR UPDATE before enumerating assets, held through its DB outcome.
 Upload's existing Tenant -> ApiKey -> Candidate FOR SHARE order is unchanged.
 D-105 and `docs/ISSUE_46_S5_VALIDATION.md` record the proof, ordering and gates.
 
-Only this original-CV delete/upload boundary is addressed. Folder overlap/content
+Historical S5 delivery boundary (current disposition is the final closure matrix):
+only this original-CV delete/upload boundary was addressed. Folder overlap/content
 leases/dedup, changed-file reads, readiness, retention/orphan sweeping, schema
 drift, derived-photo/post-upload response concurrency and Target-Mac work remain
 outside this slice. S4 hard-kill and reported compensation/purge failure residuals

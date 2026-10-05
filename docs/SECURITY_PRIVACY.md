@@ -30,15 +30,17 @@
   untrusted input exactly like a direct upload — same MIME sniffing, size
   cap, opaque storage id, no filename-derived paths. A local file is not
   implicitly more trusted than an uploaded one.
-- Issue #46 M-5 proposal (D-099): new rejected/operationally failed folder
+- Accepted Issue #46 M-5 (D-099 / merged PR #112): new rejected/operationally failed folder
   paths retain only candidate-less FAILED indexing state and closed safe failure
   metadata. Candidate-less retries attach tenant-validated durable authority;
   exact-content dedup also checks original-document hash and ownership.
   Terminal failed originals keep existing authorized access without canonical
   authority. Legacy empty candidates are not automatically deleted: current
   provenance cannot prove exclusive failed-folder creation ownership. General
-  storage/DB rollback compensation and concurrent reconciliation remain separate
-  unresolved #46 items; see `docs/ISSUE_46_M5_VALIDATION.md`.
+  storage/DB rollback compensation and concurrent reconciliation are accepted
+  through D-104–D-112. D-113 / `docs/ISSUE_46_FINAL_CLOSURE.md` adds explicit,
+  age-gated administrative cleanup only for candidates with no DB references;
+  it never infers failed-folder ownership from names.
 - Any UI/API surface that exposes original CV bytes or `CandidateIdentity`
   fields requires the same authenticated/authorized access control as the
   rest of the API — there is no anonymous or public read path anywhere in
@@ -643,7 +645,7 @@ inference DB release are unchanged. Details/proof: `docs/ISSUE_46_S2_VALIDATION.
 
 ## S3 runtime response and demo-human policy
 
-D-103 / `docs/ISSUE_46_S3_VALIDATION.md` proposes a single ASGI policy for
+Accepted D-103 / PR #118 / `docs/ISSUE_46_S3_VALIDATION.md` enforces a single ASGI policy for
 /api/v1 and /api/v1/*: `Cache-Control: no-store` and
 `X-Content-Type-Options: nosniff`, including safe errors and stream/file/empty
 responses. Existing UI headers and non-API asset semantics are preserved.
@@ -657,9 +659,25 @@ Unmarked/shared Users remain unchanged. Legacy seed preserves data and issues
 a new marked synthetic login; only obsolete demo-tenant membership authority
 may be retired. An immutable unambiguous marker chain permits explicit
 replacement while preserving provenance. Plaintext credentials are never
-persisted/logged. No schema change. Independent S3 acceptance remains pending.
+persisted/logged. No schema change. S3 is independently accepted and owner-merged
+through PR #118; earlier pending wording is historical.
 
 ## Retention / deletion
+
+Issue #46 final engineering (D-113), pending independent acceptance, adds one
+bounded privileged-local operator command: `meyar maintain --tenant-id <UUID>`.
+Inspection is the default; apply and session/conversation/audit/empty-candidate
+ages are explicit. No bank/legal retention period is invented. Live storage
+writers are protected by tenant PostgreSQL advisory authority; reference checks
+prevent deletion of currently referenced original/photo bytes. Durable `.trash`
+journals permit hard-kill restoration without filename-derived ownership; backups
+must preserve the full storage root including journals. Conflicts/symlinks/malformed
+journals remain unresolved, never overwritten. Output is closed counts/codes only.
+Immutable confirmations and synthetic demo ownership markers survive retention;
+ResultSet-specific policy stays D-090/#86. Tenant-independent authentication events
+require the separately named explicit GLOBAL policy. Host log lifecycle remains
+#35. Commands, budgets, exit semantics and limitations are recorded in
+`docs/ISSUE_46_FINAL_CLOSURE.md`; no deployment/target-host capability is added.
 
 Policy values (retention days, backup frequency/schedule) are configurable,
 not hardcoded — open business decision, see DECISIONS.md. The backup/restore

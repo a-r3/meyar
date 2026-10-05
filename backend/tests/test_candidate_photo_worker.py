@@ -205,12 +205,13 @@ def test_malformed_pdf_image_fails_safely() -> None:
 
 
 async def test_isolated_worker_timeout_and_failure(tmp_path: Path, monkeypatch) -> None:
+    from meyar.ingestion import parser_supervisor
     from meyar.services import candidate_photo_service
 
     sleeper = tmp_path / "sleep-worker"
     sleeper.write_text("#!/bin/sh\nexec sleep 5\n")
     sleeper.chmod(0o700)
-    monkeypatch.setattr(candidate_photo_service.sys, "executable", str(sleeper))
+    monkeypatch.setattr(parser_supervisor.sys, "executable", str(sleeper))
     monkeypatch.setattr(policy, "WORKER_TIMEOUT_SECONDS", 0.05)
     timed_out = await candidate_photo_service._extract_isolated(_docx(), "DOCX")
     assert timed_out == {"status": "EXTRACTION_FAILED", "reason_code": "WORKER_TIMEOUT"}

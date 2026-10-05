@@ -67,6 +67,7 @@ jobs:
           MEYAR_DATABASE_URL: postgresql+asyncpg://meyar:meyar_dev_password@localhost:55719/meyar
         run: |
           uv run alembic upgrade head
+          uv run alembic check
           head_count=$(uv run alembic heads | grep -c '(head)')
           if [ "$head_count" -ne 1 ]; then
             echo "Expected exactly one Alembic head, found $head_count" >&2

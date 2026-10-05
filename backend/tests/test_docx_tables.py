@@ -226,7 +226,16 @@ def test_existing_header_variants_shared_parts_and_no_definition_creation(kind):
     before = save(document)
     result = parse(document)
     assert result.content.warnings == [f"DOCX_{kind.upper()}_TEXT_OMITTED"]
-    assert save(document) == before
+    # ZIP timestamps are wall-clock metadata, not document mutation. Compare
+    # every uncompressed package member, including relationships/header parts.
+    from io import BytesIO
+    from zipfile import ZipFile
+
+    with ZipFile(BytesIO(before)) as original, ZipFile(BytesIO(save(document))) as after:
+        assert original.namelist() == after.namelist()
+        assert {name: original.read(name) for name in original.namelist()} == {
+            name: after.read(name) for name in after.namelist()
+        }
     fresh = row_document("Python")
     before_parts = len(fresh.part.rels)
     docx_source.extract_body(fresh, TextBudget(OutputLimits()))

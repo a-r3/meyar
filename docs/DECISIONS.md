@@ -9077,6 +9077,7 @@ names present. A kill after completed `stage_delete` leaves the object under `.t
 DB either kept (object missing at its key but recoverable from `.trash`) or deleted
 (orphan in `.trash`) the rows. Nothing is lost irrecoverably, but no automatic
 repair exists. A durable journal/migration was judged unjustified for S4; the
+Historical S4 residual (now addressed by D-113 and the final closure matrix):
 later #46 orphan/retention reconciliation owns a DB-vs-storage sweep (including
 purging/restoring `.trash`). Demo `reset_demo` of an already-deleted tenant has no
 rows to enumerate, so a crash mid-reset can strand originals under that tenant's
@@ -9435,7 +9436,7 @@ SHARE -> Candidate UPDATE -> revalidate -> commit; no FolderSource lock after Ca
 
 ## D-112 — Issue #46 S10: folder READY requires an embedding compatible with the ACTIVE config
 
-Status: implemented, independent acceptance pending; Refs #46, M9 milestone 10. Starts from accepted/
+Status: independently ACCEPTED + MERGED through PR #126; Refs #46, M9 milestone 10. Starts from accepted/
 merged S9 (PR #125): squash/main `51ae314a74585902a5aecb164004b52cf00a0df9`, tree
 `952d97102a69fa15c9055ee0e0e1850518e704a2`.
 
@@ -9487,4 +9488,71 @@ exit 3. Correct retries create a compatible row normally. Synthetic demo compati
 Historical incompatible rows are kept and refused; D-014 identity still excludes dimensions. D-100/D-110/
 D-111 and folder S9 transaction/lock separation are unchanged. The legacy direct API/CLI transaction
 separation remains deferred under #46; #46/#35/#36/#45/#50 remain OPEN. Full corrective evidence and gates:
-`docs/ISSUE_46_S10_VALIDATION.md`. Independent acceptance remains pending; DO NOT MERGE PR #126.
+`docs/ISSUE_46_S10_VALIDATION.md`.
+
+**S10 independently ACCEPTED + owner Squash-MERGED through PR #126.**
+Accepted head `6277b77f0c39ca69dd0e6f9515961463e6269f54`; exact-head
+[CI 37327942757](https://github.com/a-r3/meyar/actions/runs/37327942757),
+attempt 1 **SUCCESS, 3873 passed**. Verified owner squash/main
+`532bd295f1e63926a922eee5ddf6ce0200594dfd`, parent
+`51ae314a74585902a5aecb164004b52cf00a0df9`, full tree
+`8b55824e4d59e3d6ed5b31bf75ee312b851c4cec`.
+Accepted head and merged main have identical full trees. Earlier audited/rejected heads
+are historical, not accepted. Direct-transaction/historical-row residuals above describe the
+S10 boundary; D-113 and the final closure matrix address those residuals in the same final PR.
+
+
+## D-113 — Issue #46 final runtime, direct inference and hard-kill closure
+
+Status: implemented; independent acceptance and owner manual merge REQUIRED. Refs #46,
+existing M9 milestone 10. Starts from accepted S10/main recorded in D-112. One substantive
+engineering PR, no auto-close, no deployment/Target-Mac/API-parity/candidate-Q&A scope.
+
+The complete pre-production A/B/C/D matrix and all before/after reproductions are in
+`docs/ISSUE_46_FINAL_CLOSURE.md`. Prior accepted capabilities are reused, not reimplemented.
+
+Direct profile, identity and embedding plan and durably record STARTED in a short Phase A,
+commit with recovery and release the serving pool before every local model attempt. Fresh
+Phase B locks Tenant SHARE -> Candidate UPDATE, then exact document/canonical/attempt rows,
+revalidates a content fingerprint and current document frontier, and persists or refuses.
+An explicitly selected older direct-upload document is valid while that frontier is unchanged;
+no FolderIndexedFile ownership rule is imported. Embedding checks only professional profile
+state, never identity as suitability input. Concurrent extraction accepts one result; concurrent
+embedding reuses one immutable compatible row. A kill leaves an observable committed STARTED,
+no speculative authoritative version, and an ordinary retry is supported. Historical poisoned
+embedding identity is repaired by explicit re-extraction/new immutable profile then embedding;
+no historical embedding is deleted, rewritten or treated as search-compatible.
+
+Both direct search CLI query-embedding callers reuse the accepted API/UI database-release
+provider; two real-PG gated reproductions failed before that fix. Search capabilities and
+planner/result authority are unchanged.
+
+General readiness probes serving DB/schema, local Ollama daemon and configured models, storage
+and existing agent admission saturation. Liveness is separate. No candidate is loaded or inferred;
+closed component reasons and 503 are returned. Probe tasks have deadlines; timed-out storage-thread
+admission remains occupied until actual completion. Configuration refuses invalid bounds/provider/
+paths/timezone and retains production-secret refusal. Candidate content stays local.
+
+Tenant storage writers use shared PostgreSQL transaction advisory authority. Maintenance uses an
+exclusive TRY lock (busy exit, no waiting behind live application writes). Candidate authority is
+acquired before writer authority; maintenance row cleanup uses SKIP LOCKED to avoid inversion.
+A fsynced server-owned .trash journal precedes original unlink. Ordinary compensation is preserved;
+operator recovery rechecks durable DB references, restores referenced staged bytes without overwrite,
+and purges only unreferenced bytes. Legacy unmapped trash is reconciled only via exact bounded content
+hash and tenant DB references. Backup must include the full storage root including .trash journals;
+this is a recovery contract, not implementation of #35 deployment/backup orchestration.
+
+`meyar maintain` defaults to inspection, explicit tenant, bounded object/scan/time budgets and counts
+only. Apply is explicit. Session/conversation/audit/empty-candidate retention requires explicit ages;
+no legal retention duration is invented. Immutable confirmations and demo ownership markers are
+preserved. Candidate deletion eligibility requires absence of every candidate reference, never names.
+Global auth-event retention is a separately named explicit global policy, never inferred tenant scope.
+ResultSet-specific policy remains D-090/#86. Host log lifecycle remains #35. Interrupted stage counts
+mean old STARTED without a matching version, not proof of process death. Scan cursors are best-effort
+across mutable directories; repeat full cycles, each destructive action independently DB-safe.
+
+Photo workers reuse the bounded subprocess supervisor, including cancellation during spawn, capped
+stdout and kill/reap. DOCX archive byte equality is replaced with package-member byte equality because
+ZIP timestamps vary. The accepted jobs index is added to SQLAlchemy metadata, with fresh upgrade plus
+alembic check in CI; no migration history, dependencies or lockfiles change. D-100/D-110/D-111/D-112,
+auth/session/CSRF/original-CV and deterministic scoring/provenance remain authoritative.

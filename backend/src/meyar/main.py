@@ -31,7 +31,7 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
 OPENAPI_TAGS = [
     {
         "name": "health",
-        "description": "Unauthenticated liveness and minimal process-local readiness.",
+        "description": "Liveness and bounded DB/schema/local-model/storage readiness.",
     },
     {
         "name": "usage",

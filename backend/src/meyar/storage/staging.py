@@ -9,6 +9,7 @@ became durable) or restored to its exact original key (the deletion did not).
 Restore never overwrites: a different object at the original key fails closed.
 """
 
+import json
 import logging
 import os
 import uuid
@@ -49,15 +50,40 @@ def stage_file(root: Path, path: Path, *, namespace: str, tenant_id: uuid.UUID,
     trash_ref = f"{TRASH_DIR}/{tenant_id.hex}/{uuid.uuid4().hex}"
     trash_path = root / trash_ref
     trash_path.parent.mkdir(parents=True, exist_ok=True)
+    # Publish durable server-owned key authority BEFORE removing the original.
+    # Both the journal and directory are fsynced before destructive unlink.
+    journal = trash_path.with_suffix(".json")
+    payload = {"version": 1, "namespace": namespace, "tenant_id": str(tenant_id),
+               "storage_key": storage_key, "trash_ref": trash_ref}
+    with journal.open("x") as handle:
+        os.chmod(journal, 0o600)
+        json.dump(payload, handle)
+        handle.flush()
+        os.fsync(handle.fileno())
+    directory = os.open(trash_path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
     try:
         # link+unlink instead of rename: an (impossible-by-construction)
         # collision on the random trash name can never replace a staged object.
         os.link(path, trash_path)
     except FileNotFoundError:
+        journal.unlink(missing_ok=True)
         if path.exists():
             raise  # missing trash parent is a structural failure, not absent source
         return None
+    except BaseException:
+        journal.unlink(missing_ok=True)
+        raise
     try:
+        # Persist the recovery link before unlinking the only original name.
+        directory = os.open(trash_path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
         os.unlink(path)
     except BaseException:
         try:
@@ -68,12 +94,14 @@ def stage_file(root: Path, path: Path, *, namespace: str, tenant_id: uuid.UUID,
                 "unresolved_count=1"
             )
             raise StorageStagingError() from None
+        journal.unlink(missing_ok=True)
         raise
     return StagedObject(namespace, tenant_id, storage_key, trash_ref)
 
 
 def purge_staged(root: Path, staged: StagedObject) -> None:
     (root / staged.trash_ref).unlink(missing_ok=True)
+    (root / staged.trash_ref).with_suffix(".json").unlink(missing_ok=True)
 
 
 def _same_bytes(first: Path, second: Path) -> bool:
@@ -93,6 +121,7 @@ def restore_staged(root: Path, path: Path, staged: StagedObject) -> None:
     trash_path = root / staged.trash_ref
     if not trash_path.exists():
         # Already restored/purged by an earlier compensation attempt: idempotent.
+        trash_path.with_suffix(".json").unlink(missing_ok=True)
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -100,4 +129,10 @@ def restore_staged(root: Path, path: Path, staged: StagedObject) -> None:
     except FileExistsError:
         if not _same_bytes(trash_path, path):
             raise StorageRestoreConflictError("Original key contains different bytes") from None
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
     trash_path.unlink(missing_ok=True)
+    trash_path.with_suffix(".json").unlink(missing_ok=True)

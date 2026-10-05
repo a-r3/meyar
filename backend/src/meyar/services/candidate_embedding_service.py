@@ -29,8 +29,15 @@ from meyar.services.candidate_embedding_repo import (
 from meyar.services.candidate_profile_repo import (
     get_effective_profile_version,
     get_latest_profile_attempt,
+    get_profile_version_by_id,
+)
+from meyar.services.direct_inference_authority import (
+    DirectInferenceSupersededError,
+    direct_authority,
+    revalidate_direct_authority,
 )
 from meyar.services.profile_authority import ProfileAuthorityError, authorize_profile_version
+from meyar.services.storage_recovery import commit_with_recovery
 from meyar.services.tenant_authority import require_active_tenant
 
 
@@ -315,16 +322,53 @@ async def embed_candidate_profile(
         )
         return plan.existing, True
 
+    profile = await get_profile_version_by_id(
+        db, tenant_id=tenant_id, profile_version_id=plan.profile_version_id,
+    )
+    assert profile is not None
+    authority, _ = await direct_authority(
+        db, tenant_id=tenant_id, candidate_id=candidate_id,
+        document_id=profile.candidate_document_id,
+    )
+    await record_event(
+        db, tenant_id=tenant_id, event_type="CANDIDATE_EMBEDDING_STARTED",
+        metadata={"candidate_id": str(candidate_id),
+                  "profile_version_id": str(plan.profile_version_id)},
+    )
+    await commit_with_recovery(db)
+    error: EmbeddingProviderError | None = None
     try:
         result = await provider.embed(plan.text)
         validate_embedding_result(result, compatibility)
     except EmbeddingProviderError as exc:
-        await record_embedding_failure(
-            db, tenant_id=tenant_id, candidate_id=candidate_id, plan=plan, exc=exc
+        error = exc
+    try:
+        if db.in_transaction():
+            await db.rollback()
+        await revalidate_direct_authority(
+            db, authority, tenant_id=tenant_id, candidate_id=candidate_id,
         )
-        raise
-
+        current = await prepare_embedding(
+            db, provider, tenant_id=tenant_id, candidate_id=candidate_id,
+            max_input_chars=max_input_chars, compatibility=compatibility,
+        )
+        if (current.profile_version_id, current.source_sha256, current.text) != (
+            plan.profile_version_id, plan.source_sha256, plan.text,
+        ):
+            raise DirectInferenceSupersededError()
+    except DirectInferenceSupersededError as exc:
+        await db.rollback()
+        raise EmbeddingPreconditionError(exc.code, str(exc)) from None
+    if current.existing is not None:
+        await record_embedding_reused(db, tenant_id=tenant_id, candidate_id=candidate_id,
+                                      plan=current)
+        return current.existing, True
+    if error is not None:
+        await record_embedding_failure(
+            db, tenant_id=tenant_id, candidate_id=candidate_id, plan=plan, exc=error,
+        )
+        raise error
     version = await persist_embedding(
-        db, tenant_id=tenant_id, candidate_id=candidate_id, plan=plan, result=result
+        db, tenant_id=tenant_id, candidate_id=candidate_id, plan=plan, result=result,
     )
     return version, False
