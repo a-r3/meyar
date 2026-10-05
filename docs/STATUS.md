@@ -60,7 +60,12 @@ with the ACTIVE embedding configuration); independent acceptance pending.** Star
 before the fix: after the embedding model, revision, serializer or source hash changed, `_is_ready`
 (any embedding bound to the profile) still reported the document READY (`already_ready=1, processed=0`),
 so periodic reconciliation quiesced with an embedding semantic search cannot use. D-112 and
-`docs/ISSUE_46_S10_VALIDATION.md`. #46/#35/#36/#45/#50 remain OPEN.
+`docs/ISSUE_46_S10_VALIDATION.md`. PR #126 acceptance corrective reproduced direct CLI immutable-identity
+poisoning on audited head `34ef16817dcca6981029cfa409a6599837c486ba`; direct embedding now requires
+trusted compatibility/dimensions and shares folder result validation. Canonical source text/hash derivation
+is centralized in `embedding.serializer` and called by search too. Wrong results are refused before storage;
+valid retries work, historical incompatible rows remain an operator-repair residual. Direct API/CLI transaction
+separation remains deferred under #46. Independent re-audit pending; DO NOT MERGE. #46/#35/#36/#45/#50 remain OPEN.
 
 **Issue #46 S9 — **ACCEPTED + MERGED through corrective PR #125**: accepted head `6f6f49dada7c62614c84a8f340096a3f95426ef4`, exact-head CI 37214484572 attempt 1 SUCCESS (3847 passed), owner squash/main `51ae314a74585902a5aecb164004b52cf00a0df9` (parent `e7dd38e00e86b01e476706e7feca5bbbec44c12c`), merged tree `952d97102a69fa15c9055ee0e0e1850518e704a2` (identical to the accepted-head tree).** The history below is retained as recorded: PR #124 was merged before final
 independent acceptance and was later found defective; D-110 (folder document authority) and D-111

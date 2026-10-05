@@ -9,6 +9,7 @@ needed embedding is created; historical embeddings are never deleted or flagged.
 """
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import func, select, text, update
@@ -30,9 +31,11 @@ from test_folder_downstream_concurrency import (  # noqa: F401  (fixtures + help
     version_snapshot,
 )
 
+from meyar import cli
 from meyar.embedding.serializer import SERIALIZER_VERSION
 from meyar.models.candidate_embedding_version import CandidateEmbeddingVersion
 from meyar.models.candidate_profile_version import CandidateProfileVersion
+from meyar.search.schemas import EmbeddingSearchConfig
 from meyar.services.tenant_authority import (
     TenantInactiveError,
     set_tenant_active,
@@ -207,11 +210,78 @@ async def test_embedding_result_with_wrong_dimensions_fails_closed(env, factory)
         assert [r.embedding_dimensions for r in rows] == [8]
 
 
+@pytest.mark.parametrize("retry_path", ["cli", "folder"])
+async def test_direct_cli_wrong_dimensions_does_not_poison_folder_identity(
+    env, factory, monkeypatch, capsys, retry_path
+):
+    """Exercise the production CLI boundary, then the real folder path (PostgreSQL)."""
+    tenant, _, storage, base = env
+    source_id, candidate_id, _ = await processed_once(
+        factory, storage, tenant, base, model="old-model"
+    )
+    config = EmbeddingSearchConfig(
+        provider="fake-embedding", model_name="active-model", model_revision="",
+        serializer_version=SERIALIZER_VERSION, embedding_dimensions=8,
+    )
+    wrong = GateEmbedding(model_name="active-model", dimensions=4)
+    monkeypatch.setattr(
+        cli, "get_settings", lambda: SimpleNamespace(embedding_max_input_chars=20000)
+    )
+    monkeypatch.setattr(cli, "get_session_factory", lambda: factory)
+    monkeypatch.setattr(cli, "get_embedding_provider", lambda: wrong)
+    monkeypatch.setattr(cli, "get_embedding_search_config", lambda: config)
+    with pytest.raises(SystemExit) as exc:
+        await cli._embed_candidate(str(tenant.id), str(candidate_id))
+    assert exc.value.code == 3
+    assert capsys.readouterr().out == "Embedding provider failed: EMBEDDING_INVALID_OUTPUT\n"
+    assert wrong.call_count == 1
+    async with factory() as db, factory() as observer:
+        rows = await embedding_rows(observer, tenant.id)
+        assert [r.model_name for r in rows] == ["old-model"]  # no poisoned identity
+        profile_id = rows[0].candidate_profile_version_id
+        before = await version_snapshot(observer, tenant.id)
+        from meyar.models.audit_event import AuditEvent
+        failures = list(await observer.scalars(select(AuditEvent.event_metadata).where(
+            AuditEvent.tenant_id == tenant.id,
+            AuditEvent.event_type == "CANDIDATE_EMBEDDING_FAILED",
+        )))
+        assert failures == [{
+            "candidate_id": str(candidate_id),
+            "profile_version_id": str(profile_id),
+            "error_code": "EMBEDDING_INVALID_OUTPUT",
+        }]
+        repair = GateEmbedding(model_name="active-model", dimensions=8)
+        monkeypatch.setattr(cli, "get_embedding_provider", lambda: repair)
+        if retry_path == "cli":
+            await cli._embed_candidate(str(tenant.id), str(candidate_id))
+            output = capsys.readouterr().out
+            assert "Dimensions: 8" in output and "Reused existing embedding: False" in output
+        summary = await run_pending(
+            db, GateLLM(), repair, tenant.id, source_id, embedding_config=config
+        )
+        assert (summary.failed, summary.ready_after) == (0, 1)
+        assert repair.call_count == 1
+        rows = await embedding_rows(observer, tenant.id)
+        assert sorted(r.embedding_dimensions for r in rows) == [2, 8]
+        after = await version_snapshot(observer, tenant.id)
+        for name in ("CandidateProfileVersion", "CandidateIdentityVersion"):
+            assert after[name] == before[name]
+        await cli._embed_candidate(str(tenant.id), str(candidate_id))
+        assert "Reused existing embedding: True" in capsys.readouterr().out
+        assert repair.call_count == 1
+        quiet = await run_pending(
+            db, GateLLM(), repair, tenant.id, source_id, embedding_config=config
+        )
+        assert quiet.already_ready == 1 and quiet.processed == quiet.failed == 0
+        assert await version_snapshot(observer, tenant.id) == after
+
+
 async def test_stored_embedding_with_wrong_dimensions_is_not_ready_and_not_deleted(env, factory):
     from meyar.search.schemas import EmbeddingSearchConfig
 
     tenant, _, storage, base = env
-    source_id, _, _ = await processed_once(factory, storage, tenant, base)  # 2-dim vector
+    # Historical 2-dimensional row, same immutable identity as the active model.
+    source_id, candidate_id, _ = await processed_once(factory, storage, tenant, base)
     config = EmbeddingSearchConfig(
         provider="fake-embedding", model_name="fake-embedding-model-v1", model_revision="",
         serializer_version=SERIALIZER_VERSION, embedding_dimensions=8,
@@ -226,6 +296,19 @@ async def test_stored_embedding_with_wrong_dimensions_is_not_ready_and_not_delet
         assert summary.failed == 1 and summary.ready_after == 0, summary
         assert embedder.call_count == 0
         assert len(await embedding_rows(observer, tenant.id)) == 1
+        from meyar.services.candidate_embedding_repo import EmbeddingCompatibility
+        from meyar.services.candidate_embedding_service import (
+            EmbeddingPreconditionError,
+            embed_candidate_profile,
+        )
+        with pytest.raises(EmbeddingPreconditionError) as exc:
+            await embed_candidate_profile(
+                db, embedder, tenant_id=tenant.id, candidate_id=candidate_id,
+                max_input_chars=20000,
+                compatibility=EmbeddingCompatibility(**config.model_dump()),
+            )
+        assert exc.value.code == "EMBEDDING_IDENTITY_INCOMPATIBLE"
+        assert embedder.call_count == 0
 
 
 async def test_concurrent_runs_with_stale_embedding_create_one_compatible_embedding(env, factory):

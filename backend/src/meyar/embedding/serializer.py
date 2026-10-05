@@ -6,6 +6,12 @@ import hashlib
 SERIALIZER_VERSION = "candidate-professional-embedding-text-v1"
 
 
+def embedding_source(profile_content: dict) -> tuple[str, str]:
+    """Canonical professional text/hash shared by creation, readiness and search."""
+    text = build_professional_embedding_text(profile_content)
+    return text, compute_source_sha256(text)
+
+
 def build_professional_embedding_text(profile_content: dict) -> str:
     """Deterministically serializes a CandidateProfileVersion's
     profile_content (a CandidateProfileExtraction.model_dump()) into a

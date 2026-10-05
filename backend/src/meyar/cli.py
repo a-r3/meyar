@@ -40,6 +40,7 @@ from meyar.services.agent_result_set_repo import (
 from meyar.services.api_key_repo import create_api_key
 from meyar.services.audit_repo import record_event
 from meyar.services.candidate_document_repo import get_candidate_document
+from meyar.services.candidate_embedding_repo import EmbeddingCompatibility
 from meyar.services.candidate_embedding_service import (
     EmbeddingPreconditionError,
     embed_candidate_profile,
@@ -760,17 +761,25 @@ async def _embed_candidate(tenant_id: str, candidate_id: str) -> None:
     settings = get_settings()
     factory = get_session_factory()
     provider = get_embedding_provider()
+    compatibility = EmbeddingCompatibility(**get_embedding_search_config().model_dump())
 
     try:
         async with factory() as db:
             await require_active_tenant(db, uuid.UUID(tenant_id))
-            version, was_reused = await embed_candidate_profile(
-                db,
-                provider,
-                tenant_id=uuid.UUID(tenant_id),
-                candidate_id=uuid.UUID(candidate_id),
-                max_input_chars=settings.embedding_max_input_chars,
-            )
+            try:
+                version, was_reused = await embed_candidate_profile(
+                    db,
+                    provider,
+                    tenant_id=uuid.UUID(tenant_id),
+                    candidate_id=uuid.UUID(candidate_id),
+                    max_input_chars=settings.embedding_max_input_chars,
+                    compatibility=compatibility,
+                )
+            except EmbeddingProviderError:
+                # Preserve the closed failure audit (no embedding row was created).
+                # The registered tenant commit guard still applies.
+                await db.commit()
+                raise
             await db.commit()
     except EmbeddingPreconditionError as exc:
         print(f"Embedding could not run: {exc.code}")

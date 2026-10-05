@@ -315,6 +315,7 @@ async def test_invalid_legacy_profile_cannot_embed_or_reuse(db_session, tenant_a
             tenant_id=tenant.id,
             candidate_id=seeded.candidate.id,
             max_input_chars=10000,
+            compatibility=provider.compatibility,
         )
     assert provider.call_count == 0
 
@@ -461,6 +462,7 @@ async def test_current_authority_all_consumers_and_immutable_history(
             tenant_id=tenant.id,
             candidate_id=seeded.candidate.id,
             max_input_chars=10000,
+            compatibility=generated_provider.compatibility,
         )
     assert generated_provider.call_count == 0
     job = await create_job(db_session, tenant_id=tenant.id, title="Synthetic role")
@@ -521,6 +523,7 @@ async def test_current_authority_all_consumers_and_immutable_history(
             tenant_id=tenant.id,
             candidate_id=seeded.candidate.id,
             max_input_chars=10000,
+            compatibility=reused_provider.compatibility,
         )
     assert reused_provider.call_count == 0
     for mode in ("STRUCTURED_ONLY", "SEMANTIC_ONLY", "HYBRID"):

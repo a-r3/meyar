@@ -9455,8 +9455,10 @@ authorized profile, and an embedding of a non-effective version stays inert for 
 
 Change (no migration): `EmbeddingCompatibility` + `find_compatible_embedding` in `candidate_embedding_repo`
 is the single compatibility predicate — `search_compatible_embeddings` now builds its WHERE from the same
-`conditions()`, so they cannot drift (reused, not duplicated). `embedding_source()` is the shared source
-text/hash derivation. `process_pending_candidates` / `reconcile_folder` take an explicit
+`conditions()`, so they cannot drift (reused, not duplicated). `embedding_source()` in the dependency-neutral
+`meyar.embedding.serializer` is the shared source text/hash derivation called by creation, readiness AND
+semantic retrieval (centralized by the PR #126 corrective; search previously repeated the same computation).
+`process_pending_candidates` / `reconcile_folder` take an explicit
 `embedding_config` (the CLI passes the trusted `get_embedding_search_config()`); it is resolved once per
 invocation and authoritative for the run. Without one only the provider identity + serializer are
 constrained (dimensions unconstrained). `_is_ready` and the embedding stage use it. The provider must equal
@@ -9471,3 +9473,18 @@ Concurrency (unchanged S9 architecture): Phase A short -> embedding inference wi
 connection or lock -> Phase B Tenant SHARE -> Candidate UPDATE -> folder/document/profile revalidation ->
 reuse-or-persist -> commit. Concurrent runs converge on one compatible row; delete/changed-document/tenant
 suspension discard or refuse stale output as in S9.
+
+
+D-112 PR #126 acceptance corrective (starting audited head
+`34ef16817dcca6981029cfa409a6599837c486ba`): real PostgreSQL reproduction confirmed the
+production `embed-candidate` command could persist dimensions 4 with active config dimensions 8, then
+folder reconciliation failed with zero repair-provider calls because the immutable identity was occupied.
+The direct service now requires explicit compatibility INCLUDING dimensions; the production CLI passes
+trusted `get_embedding_search_config()`. `prepare_embedding` validates provider/config identity and reuse;
+ONE `validate_embedding_result` checks returned provenance/dimensions in direct and folder creation before
+persistence. A rejected result creates no embedding row, and the CLI commits a safe failure audit before
+exit 3. Correct retries create a compatible row normally. Synthetic demo compatibility is explicit.
+Historical incompatible rows are kept and refused; D-014 identity still excludes dimensions. D-100/D-110/
+D-111 and folder S9 transaction/lock separation are unchanged. The legacy direct API/CLI transaction
+separation remains deferred under #46; #46/#35/#36/#45/#50 remain OPEN. Full corrective evidence and gates:
+`docs/ISSUE_46_S10_VALIDATION.md`. Independent acceptance remains pending; DO NOT MERGE PR #126.

@@ -9,11 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meyar.diagnostics import log_failure
 from meyar.embedding.provider import (
     EmbeddingBusyError,
-    EmbeddingInvalidOutputError,
     EmbeddingProvider,
     EmbeddingProviderError,
 )
-from meyar.embedding.serializer import SERIALIZER_VERSION
+from meyar.embedding.serializer import SERIALIZER_VERSION, embedding_source
 from meyar.extraction.deferral import ExtractionDeferredError
 from meyar.extraction.evidence import EvidenceValidationError
 from meyar.extraction.identity_service import (
@@ -43,11 +42,11 @@ from meyar.services.candidate_embedding_repo import (
 )
 from meyar.services.candidate_embedding_service import (
     EmbeddingPreconditionError,
-    embedding_source,
     persist_embedding,
     prepare_embedding,
     record_embedding_failure,
     record_embedding_reused,
+    validate_embedding_result,
 )
 from meyar.services.candidate_identity_repo import get_latest_identity_version_for_document
 from meyar.services.candidate_photo_service import process_photo_for_document
@@ -318,20 +317,9 @@ async def _embedding_stage(
     result = None
     try:
         result = await embedding_provider.embed(plan.text)
+        validate_embedding_result(result, compatibility)
     except EmbeddingProviderError as exc:
         failure = exc
-    if failure is None and result is not None and (
-        (result.provider, result.model_name, result.model_revision)
-        != (compatibility.provider, compatibility.model_name, compatibility.model_revision)
-        or result.dimensions != len(result.vector)
-        or (
-            compatibility.embedding_dimensions is not None
-            and result.dimensions != compatibility.embedding_dimensions
-        )
-    ):
-        # Fail closed (mirrors the search-side result provenance check): never persist a
-        # vector the active configuration's semantic retrieval could not use.
-        failure = EmbeddingInvalidOutputError("Embedding result does not match active config.")
         result = None
 
     document, reason = await _authority(
