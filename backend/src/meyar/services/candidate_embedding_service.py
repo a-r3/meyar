@@ -5,14 +5,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.embedding.provider import (
     EmbeddingBusyError,
+    EmbeddingInvalidOutputError,
     EmbeddingProvider,
     EmbeddingProviderError,
     EmbeddingResult,
 )
 from meyar.embedding.serializer import (
     SERIALIZER_VERSION,
-    build_professional_embedding_text,
-    compute_source_sha256,
+    embedding_source,
 )
 from meyar.models.candidate_embedding_version import CandidateEmbeddingVersion
 from meyar.models.candidate_profile_version import (
@@ -21,7 +21,9 @@ from meyar.models.candidate_profile_version import (
 )
 from meyar.services.audit_repo import record_event
 from meyar.services.candidate_embedding_repo import (
+    EmbeddingCompatibility,
     create_embedding_version,
+    find_compatible_embedding,
     get_embedding_version_by_source,
 )
 from meyar.services.candidate_profile_repo import (
@@ -42,6 +44,27 @@ class EmbeddingPreconditionError(Exception):
         super().__init__(message)
 
 
+def validate_embedding_result(
+    result: EmbeddingResult, compatibility: EmbeddingCompatibility
+) -> None:
+    """One application check for direct and folder embedding output before persistence.
+
+    The provider validates numeric vector quality; the application owns the trusted
+    active provenance and configured dimensions (which the provider does not know).
+    """
+    if (
+        (result.provider, result.model_name, result.model_revision)
+        != (compatibility.provider, compatibility.model_name, compatibility.model_revision)
+        or SERIALIZER_VERSION != compatibility.serializer_version
+        or result.dimensions != len(result.vector)
+        or (
+            compatibility.embedding_dimensions is not None
+            and result.dimensions != compatibility.embedding_dimensions
+        )
+    ):
+        raise EmbeddingInvalidOutputError("Embedding result does not match active config.")
+
+
 @dataclass(frozen=True)
 class EmbeddingPlan:
     """DB-derived, immutable input to embedding (issue #46 S9)."""
@@ -60,6 +83,7 @@ async def prepare_embedding(
     candidate_id: uuid.UUID,
     max_input_chars: int,
     profile_version: CandidateProfileVersion | None = None,
+    compatibility: EmbeddingCompatibility | None = None,
 ) -> EmbeddingPlan:
     """Short DB phase: authorize the profile to embed, serialize its professional
     text and look up an identical existing embedding. Raises
@@ -73,6 +97,16 @@ async def prepare_embedding(
     run through authorize_profile_version, so an unauthorized profile is never
     embedded; search only ever matches embeddings of the effective version."""
     await require_active_tenant(db, tenant_id)
+    if compatibility is not None and (
+        provider.provider_name != compatibility.provider
+        or provider.model_name != compatibility.model_name
+        or provider.model_revision != compatibility.model_revision
+        or SERIALIZER_VERSION != compatibility.serializer_version
+    ):
+        raise EmbeddingPreconditionError(
+            "EMBEDDING_PROVIDER_CONFIG_MISMATCH",
+            "The embedding provider does not match the active embedding configuration.",
+        )
     if profile_version is not None and (
         profile_version.tenant_id != tenant_id or profile_version.candidate_id != candidate_id
     ):
@@ -112,14 +146,13 @@ async def prepare_embedding(
     # The canonical text and its hash must be computed BEFORE deciding
     # whether an existing embedding is reusable — reuse identity depends
     # on source_sha256/serializer_version, not just the profile version.
-    text = build_professional_embedding_text(profile_content)
+    text, source_sha256 = embedding_source(profile_content)
     if len(text) > max_input_chars:
         raise EmbeddingPreconditionError(
             "INPUT_TOO_LARGE",
             f"Professional embedding text ({len(text)} chars) exceeds the configured "
             f"maximum ({max_input_chars} chars).",
         )
-    source_sha256 = compute_source_sha256(text)
     existing = await get_embedding_version_by_source(
         db,
         tenant_id=tenant_id,
@@ -130,6 +163,23 @@ async def prepare_embedding(
         serializer_version=SERIALIZER_VERSION,
         source_sha256=source_sha256,
     )
+    if compatibility is not None:
+        compatible = await find_compatible_embedding(
+            db,
+            tenant_id=tenant_id,
+            candidate_profile_version_id=profile_version.id,
+            source_sha256=source_sha256,
+            compatibility=compatibility,
+        )
+        if compatible is None and existing is not None:
+            # The immutable identity is taken by a row the active configuration cannot
+            # use (different dimensions). It is never deleted or replaced (D-014).
+            raise EmbeddingPreconditionError(
+                "EMBEDDING_IDENTITY_INCOMPATIBLE",
+                "An embedding with this immutable identity exists but does not match "
+                "the active embedding configuration.",
+            )
+        existing = compatible
     return EmbeddingPlan(profile_version.id, text, source_sha256, existing)
 
 
@@ -221,6 +271,7 @@ async def embed_candidate_profile(
     tenant_id: uuid.UUID,
     candidate_id: uuid.UUID,
     max_input_chars: int,
+    compatibility: EmbeddingCompatibility,
 ) -> tuple[CandidateEmbeddingVersion, bool]:
     """Embeds the candidate's CURRENT CandidateProfileVersion's
     professional content — never CandidateIdentity, which this function
@@ -230,7 +281,9 @@ async def embed_candidate_profile(
     failed/manual-review attempts may preserve accepted facts; an embedding stays
     bound to the exact selected version.
 
-    Idempotent: if a CandidateEmbeddingVersion already exists for the
+    The caller supplies explicit trusted active compatibility, including dimensions;
+    provider identity and returned result are checked before anything is persisted.
+    Idempotent: if a compatible CandidateEmbeddingVersion already exists for the
     exact seven-field identity (profile version, provider, model,
     revision, serializer_version, source_sha256), that row is returned
     unchanged and the embedding provider is never called again — see
@@ -247,9 +300,14 @@ async def embed_candidate_profile(
     event) if the provider itself fails — never persists a partial/
     invalid vector; a failed attempt produces no CandidateEmbeddingVersion
     row at all."""
+    if compatibility.embedding_dimensions is None:
+        raise EmbeddingPreconditionError(
+            "EMBEDDING_CONFIG_REQUIRED", "Configured embedding dimensions are required."
+        )
     plan = await prepare_embedding(
         db, provider, tenant_id=tenant_id, candidate_id=candidate_id,
         max_input_chars=max_input_chars,
+        compatibility=compatibility,
     )
     if plan.existing is not None:
         await record_embedding_reused(
@@ -259,6 +317,7 @@ async def embed_candidate_profile(
 
     try:
         result = await provider.embed(plan.text)
+        validate_embedding_result(result, compatibility)
     except EmbeddingProviderError as exc:
         await record_embedding_failure(
             db, tenant_id=tenant_id, candidate_id=candidate_id, plan=plan, exc=exc

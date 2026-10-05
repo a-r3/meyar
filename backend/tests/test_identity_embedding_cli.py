@@ -9,8 +9,10 @@ from fakes import FakeEmbeddingProvider, FakeLLMProvider
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar import cli
+from meyar.embedding.serializer import SERIALIZER_VERSION
 from meyar.schemas.candidate_identity import CandidateIdentityExtraction, IdentityFieldItem
 from meyar.schemas.candidate_profile import EvidenceRef
+from meyar.search.schemas import EmbeddingSearchConfig
 from meyar.services.candidate_document_repo import (
     create_candidate_document,
     create_canonical_document,
@@ -40,6 +42,10 @@ class _SessionCtx:
 def _patch_session(monkeypatch, db_session: AsyncSession) -> None:
     monkeypatch.setattr(cli, "get_settings", lambda: _FakeSettings())
     monkeypatch.setattr(cli, "get_session_factory", lambda: (lambda: _SessionCtx(db_session)))
+    monkeypatch.setattr(cli, "get_embedding_search_config", lambda: EmbeddingSearchConfig(
+        provider="fake-embedding", model_name="fake-embedding-model-v1", model_revision="",
+        serializer_version=SERIALIZER_VERSION, embedding_dimensions=8,
+    ))
 
 
 async def _seed_document(db_session: AsyncSession, tenant_id: uuid.UUID):

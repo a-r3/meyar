@@ -1,11 +1,66 @@
 import uuid
 from collections.abc import Collection, Mapping
+from dataclasses import dataclass
 
-from sqlalchemy import select, tuple_
+from sqlalchemy import ColumnElement, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, defer
 
 from meyar.models.candidate_embedding_version import CandidateEmbeddingVersion
+
+
+@dataclass(frozen=True)
+class EmbeddingCompatibility:
+    """The ONE definition of "a stored embedding is usable under the active embedding
+    configuration" (issue #46 S10): same provider, model_name, model_revision,
+    serializer_version and (when known) embedding_dimensions. Semantic retrieval
+    (`search_compatible_embeddings`) and folder readiness/embedding reuse
+    (`find_compatible_embedding`) both build their predicate from `conditions()`, so
+    they cannot drift. ``embedding_dimensions=None`` means "not constrained" and is
+    only used when a caller has no configured dimension (provider identity only)."""
+
+    provider: str
+    model_name: str
+    model_revision: str
+    serializer_version: str
+    embedding_dimensions: int | None = None
+
+    def conditions(self) -> list[ColumnElement[bool]]:
+        found: list[ColumnElement[bool]] = [
+            CandidateEmbeddingVersion.provider == self.provider,
+            CandidateEmbeddingVersion.model_name == self.model_name,
+            CandidateEmbeddingVersion.model_revision == self.model_revision,
+            CandidateEmbeddingVersion.serializer_version == self.serializer_version,
+        ]
+        if self.embedding_dimensions is not None:
+            found.append(
+                CandidateEmbeddingVersion.embedding_dimensions == self.embedding_dimensions
+            )
+        return found
+
+
+async def find_compatible_embedding(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    candidate_profile_version_id: uuid.UUID,
+    source_sha256: str,
+    compatibility: EmbeddingCompatibility,
+) -> CandidateEmbeddingVersion | None:
+    """An embedding bound to EXACTLY this profile version and canonical source hash that
+    matches the active configuration. Existence is the criterion; row order is never
+    consulted (at most one can match the exact pair for a fixed configuration, D-015)."""
+    result = await db.execute(
+        select(CandidateEmbeddingVersion)
+        .where(
+            CandidateEmbeddingVersion.tenant_id == tenant_id,
+            CandidateEmbeddingVersion.candidate_profile_version_id == candidate_profile_version_id,
+            CandidateEmbeddingVersion.source_sha256 == source_sha256,
+            *compatibility.conditions(),
+        )
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
 
 
 async def create_embedding_version(
@@ -158,11 +213,9 @@ async def search_compatible_embeddings(
                 CandidateEmbeddingVersion.candidate_profile_version_id,
                 CandidateEmbeddingVersion.source_sha256,
             ).in_(pairs),
-            CandidateEmbeddingVersion.provider == provider,
-            CandidateEmbeddingVersion.model_name == model_name,
-            CandidateEmbeddingVersion.model_revision == model_revision,
-            CandidateEmbeddingVersion.serializer_version == serializer_version,
-            CandidateEmbeddingVersion.embedding_dimensions == embedding_dimensions,
+            *EmbeddingCompatibility(
+                provider, model_name, model_revision, serializer_version, embedding_dimensions
+            ).conditions(),
         )
         .subquery()
     )

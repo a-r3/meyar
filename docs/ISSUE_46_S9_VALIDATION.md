@@ -1,10 +1,11 @@
 # Issue #46 S9 — downstream folder-reconciliation concurrency authority
 
-Status: implemented; independent acceptance pending. **PR #124 was merged (main
-`e7dd38e00e86b01e476706e7feca5bbbec44c12c`, head `7f9d2c3f043c0b293d78f0dfda0116272dd358d5`, tree
-`55177475458d6f1152bb36f03f3eb0e3177da9ee`) before final independent acceptance; a post-hoc audit found the
-candidate-global newest-document rule below to be wrong for folder reconciliation. S9 acceptance stays
-PENDING until the corrective (D-110) is independently accepted.** The rest of the S9 design is preserved. Refs #46 under the existing
+Status: **ACCEPTED + MERGED through corrective PR #125**: accepted head `6f6f49dada7c62614c84a8f340096a3f95426ef4`, exact-head CI 37214484572 attempt 1 SUCCESS (3847 passed), owner squash/main `51ae314a74585902a5aecb164004b52cf00a0df9` (parent `e7dd38e00e86b01e476706e7feca5bbbec44c12c`), merged tree `952d97102a69fa15c9055ee0e0e1850518e704a2` (identical to the accepted-head tree). History retained: PR #124 was merged before final independent acceptance; a post-hoc audit
+found its candidate-global newest-document rule wrong for folder reconciliation, a later audit found readiness
+non-convergent; both were corrected in PR #125 (D-110, D-111) and independently accepted. Earlier CI history of the
+audited PR #125 head `752a11a6a7d1a1c26de7bcbb850918fcc41e2a6f`: run 37207985516 attempt 1 failed on exactly one
+unrelated existing DOCX footer byte-equality test (3843 passed), attempt 2 passed (3844); that flaky test was not
+fixed by S9. The rest of the S9 design is preserved. Refs #46 under the existing
 **M9 — Deployment, Benchmark & Integration Readiness** milestone (10). Bounded
 concurrency slice, not completion of #46.
 

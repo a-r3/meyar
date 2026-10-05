@@ -39,6 +39,7 @@ from meyar.agent.schemas import (
 )
 from meyar.core.roles import ROLE_HR_USER
 from meyar.embedding.provider import EmbeddingResult
+from meyar.embedding.serializer import SERIALIZER_VERSION
 from meyar.evaluation.service import evaluate_and_score_candidate
 from meyar.extraction.identity_service import extract_candidate_identity
 from meyar.extraction.service import extract_candidate_profile
@@ -69,6 +70,7 @@ from meyar.services.api_key_repo import create_api_key, revoke_active_api_keys_f
 from meyar.services.audit_repo import record_event
 from meyar.services.browser_session_repo import revoke_sessions_for_membership
 from meyar.services.candidate_document_service import ingest_candidate_document
+from meyar.services.candidate_embedding_repo import EmbeddingCompatibility
 from meyar.services.candidate_embedding_service import embed_candidate_profile
 from meyar.services.candidate_repo import count_candidates_for_tenant, create_candidate
 from meyar.services.job_criteria_repo import create_criteria_version
@@ -1223,6 +1225,10 @@ async def seed_demo(
                 tenant_id=tenant.id,
                 candidate_id=candidate.id,
                 max_input_chars=max_embedding_input_chars,
+                compatibility=EmbeddingCompatibility(
+                    embedder.provider_name, embedder.model_name, embedder.model_revision,
+                    SERIALIZER_VERSION, len(spec.embedding_vector),
+                ),
             )
             embeddings_created += 1
 

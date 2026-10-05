@@ -54,20 +54,41 @@ No migration, no new dependency. D-107 and `docs/ISSUE_46_S7_VALIDATION.md`. Cha
 authority is investigated in the bounded S8 proposal below; other deferred scope stays open.
 #46/#35/#36/#45/#50 remain OPEN.
 
-**Issue #46 S9 corrective 2 — folder READY is document-level (D-111); independent acceptance
-pending.** An acceptance audit of PR #125 head `752a11a6a7d1a1c26de7bcbb850918fcc41e2a6f` found that
+**Issue #46 S10 — configured embedding readiness (folder READY requires an embedding compatible
+with the ACTIVE embedding configuration); independent acceptance pending.** Starts from verified main
+`51ae314a74585902a5aecb164004b52cf00a0df9` (tree `952d97102a69fa15c9055ee0e0e1850518e704a2`). Reproduced
+before the fix: after the embedding model, revision, serializer or source hash changed, `_is_ready`
+(any embedding bound to the profile) still reported the document READY (`already_ready=1, processed=0`),
+so periodic reconciliation quiesced with an embedding semantic search cannot use. D-112 and
+`docs/ISSUE_46_S10_VALIDATION.md`. PR #126 acceptance corrective reproduced direct CLI immutable-identity
+poisoning on audited head `34ef16817dcca6981029cfa409a6599837c486ba`; direct embedding now requires
+trusted compatibility/dimensions and shares folder result validation. Canonical source text/hash derivation
+is centralized in `embedding.serializer` and called by search too. Wrong results are refused before storage;
+valid retries work, historical incompatible rows remain an operator-repair residual. Direct API/CLI transaction
+separation remains deferred under #46. Independent re-audit pending; DO NOT MERGE. #46/#35/#36/#45/#50 remain OPEN.
+
+**Issue #46 S9 — **ACCEPTED + MERGED through corrective PR #125**: accepted head `6f6f49dada7c62614c84a8f340096a3f95426ef4`, exact-head CI 37214484572 attempt 1 SUCCESS (3847 passed), owner squash/main `51ae314a74585902a5aecb164004b52cf00a0df9` (parent `e7dd38e00e86b01e476706e7feca5bbbec44c12c`), merged tree `952d97102a69fa15c9055ee0e0e1850518e704a2` (identical to the accepted-head tree).** The history below is retained as recorded: PR #124 was merged before final
+independent acceptance and was later found defective; D-110 (folder document authority) and D-111
+(document-level READY) were corrected through PR #125, which was independently accepted. Earlier CI
+history of the audited PR #125 head `752a11a6a7d1a1c26de7bcbb850918fcc41e2a6f`: run 37207985516 attempt 1
+failed on exactly one unrelated existing DOCX footer byte-equality test (3843 passed); attempt 2 passed
+(3844). That DOCX flake was not fixed by S9. #46/#35/#36/#45/#50 remain OPEN.
+
+**Issue #46 S9 corrective 2 — folder READY is document-level (D-111); (historical; accepted
+through PR #125).** An acceptance audit of PR #125 head `752a11a6a7d1a1c26de7bcbb850918fcc41e2a6f` found that
 with several tracked documents per Candidate, repeated no-change reconciliation never quiesced
 (one tracked document stayed "not ready" because only one profile is D-100 effective): reproduced as
 `already_ready=1, processed=1, failed=1` on run 2. Readiness is now the tracked document's own
 authorized profile + identity + embedding bound to that profile version; D-100 effective-profile
 search/evaluation authority is unchanged. CI history of the audited head: run 37207985516 attempt 1
 failed on one unrelated DOCX footer byte-equality test (3843 passed), attempt 2 passed (3844).
-S9 remains NOT accepted. #46/#35/#36/#45/#50 remain OPEN.
+(Historical at the time: S9 was not yet accepted; it is now accepted through PR #125.)
+#46/#35/#36/#45/#50 remain OPEN.
 
-**Issue #46 S9 corrective — folder document authority (D-110); independent acceptance
-pending.** PR #124 was merged (main `e7dd38e00e86b01e476706e7feca5bbbec44c12c`, head
+**Issue #46 S9 corrective — folder document authority (D-110) (historical; accepted
+through PR #125).** PR #124 was merged (main `e7dd38e00e86b01e476706e7feca5bbbec44c12c`, head
 `7f9d2c3f043c0b293d78f0dfda0116272dd358d5`, tree `55177475458d6f1152bb36f03f3eb0e3177da9ee`)
-BEFORE final independent acceptance, so **S9 is NOT accepted**. A post-hoc audit found that its
+BEFORE final independent acceptance (so S9 was not accepted until corrective PR #125). A post-hoc audit found that its
 candidate-global "newest CandidateDocument" rule violated D-013/D-021 (reproduced: diverged
 dedup-linked paths and direct-upload documents were wrongly `superseded`). Folder downstream work is
 now authoritative while a FolderIndexedFile of its source still points at exactly its

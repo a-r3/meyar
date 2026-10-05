@@ -296,3 +296,14 @@ class FakeEmbeddingProvider:
         if self._health_result is not None:
             return self._health_result
         return {"reachable": True, "model": self.model_name, "model_available": True}
+
+    @property
+    def compatibility(self):
+        """Explicit synthetic configuration for service tests; never production settings."""
+        from meyar.embedding.serializer import SERIALIZER_VERSION
+        from meyar.services.candidate_embedding_repo import EmbeddingCompatibility
+
+        return EmbeddingCompatibility(
+            self.provider_name, self.model_name, self.model_revision,
+            SERIALIZER_VERSION, len(self._vector),
+        )

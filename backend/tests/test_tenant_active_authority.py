@@ -363,6 +363,7 @@ async def test_direct_processing_disabled_during_provider_has_no_generated_versi
                 tenant_id=tenant_id,
                 candidate_id=candidate_id,
                 max_input_chars=20_000,
+                compatibility=DisablingEmbedding().compatibility,
             )
         else:
             process = (

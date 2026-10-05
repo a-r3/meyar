@@ -9,6 +9,7 @@ from fakes import FakeEmbeddingProvider
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meyar.embedding import serializer
 from meyar.embedding.ollama_provider import OllamaEmbeddingProvider
 from meyar.embedding.provider import (
     EmbeddingInvalidOutputError,
@@ -191,6 +192,74 @@ def test_serializer_excludes_identity_fields() -> None:
 # --- Service: idempotency / staleness / history ------------------------
 
 
+async def test_direct_embedding_requires_configured_dimensions(
+    db_session, candidate_with_profile_v1
+):
+    from dataclasses import replace
+
+    tenant, candidate, *_ = candidate_with_profile_v1
+    provider = FakeEmbeddingProvider()
+    with pytest.raises(EmbeddingPreconditionError) as exc:
+        await embed_candidate_profile(
+            db_session, provider, tenant_id=tenant.id, candidate_id=candidate.id,
+            max_input_chars=20000,
+            compatibility=replace(provider.compatibility, embedding_dimensions=None),
+        )
+    assert exc.value.code == "EMBEDDING_CONFIG_REQUIRED"
+    assert provider.call_count == 0
+
+
+@pytest.mark.parametrize(
+    "field", ["provider", "model_name", "model_revision", "serializer_version"]
+)
+async def test_direct_embedding_rejects_provider_config_mismatch(
+    db_session, candidate_with_profile_v1, field
+):
+    from dataclasses import replace
+
+    tenant, candidate, *_ = candidate_with_profile_v1
+    provider = FakeEmbeddingProvider(dimensions=8)
+    compatibility = replace(provider.compatibility, **{field: "different"})
+    with pytest.raises(EmbeddingPreconditionError) as exc:
+        await embed_candidate_profile(
+            db_session, provider, tenant_id=tenant.id, candidate_id=candidate.id,
+            max_input_chars=20000, compatibility=compatibility,
+        )
+    assert exc.value.code == "EMBEDDING_PROVIDER_CONFIG_MISMATCH"
+    assert provider.call_count == 0
+    assert await list_embedding_versions_for_candidate(
+        db_session, tenant_id=tenant.id, candidate_id=candidate.id
+    ) == []
+
+
+@pytest.mark.parametrize("field,value", [
+    ("provider", "different"), ("model_name", "different"), ("model_revision", "different"),
+    ("dimensions", 4), ("vector", [1.0] * 4),
+])
+async def test_direct_embedding_rejects_result_config_mismatch(
+    db_session, candidate_with_profile_v1, field, value
+):
+    tenant, candidate, *_ = candidate_with_profile_v1
+
+    class WrongResult(FakeEmbeddingProvider):
+        async def embed(self, text):
+            result = await super().embed(text)
+            return result.model_copy(update={field: value})
+
+    provider = WrongResult(dimensions=8)
+    with pytest.raises(EmbeddingInvalidOutputError) as exc:
+        await embed_candidate_profile(
+            db_session, provider, tenant_id=tenant.id, candidate_id=candidate.id,
+            max_input_chars=20000, compatibility=provider.compatibility,
+        )
+    assert exc.value.code == "EMBEDDING_INVALID_OUTPUT"
+    await db_session.commit()
+    assert provider.call_count == 1
+    assert await list_embedding_versions_for_candidate(
+        db_session, tenant_id=tenant.id, candidate_id=candidate.id
+    ) == []
+
+
 async def test_first_embed_creates_record(
     db_session: AsyncSession, candidate_with_profile_v1
 ) -> None:
@@ -203,6 +272,7 @@ async def test_first_embed_creates_record(
         tenant_id=tenant.id,
         candidate_id=candidate.id,
         max_input_chars=20000,
+        compatibility=provider.compatibility,
     )
     await db_session.commit()
 
@@ -225,6 +295,7 @@ async def test_identical_rerun_is_idempotent_no_duplicate_call(
         tenant_id=tenant.id,
         candidate_id=candidate.id,
         max_input_chars=20000,
+        compatibility=provider.compatibility,
     )
     await db_session.commit()
 
@@ -234,6 +305,7 @@ async def test_identical_rerun_is_idempotent_no_duplicate_call(
         tenant_id=tenant.id,
         candidate_id=candidate.id,
         max_input_chars=20000,
+        compatibility=provider.compatibility,
     )
     await db_session.commit()
 
@@ -379,6 +451,7 @@ async def test_new_profile_version_makes_prior_embedding_stale(
         tenant_id=tenant.id,
         candidate_id=candidate.id,
         max_input_chars=20000,
+        compatibility=provider.compatibility,
     )
     await db_session.commit()
 
@@ -430,6 +503,7 @@ async def test_new_profile_version_makes_prior_embedding_stale(
         tenant_id=tenant.id,
         candidate_id=candidate.id,
         max_input_chars=20000,
+        compatibility=provider.compatibility,
     )
     await db_session.commit()
 
@@ -473,6 +547,7 @@ async def test_serializer_change_produces_new_embedding_not_reuse(
         tenant_id=tenant.id,
         candidate_id=candidate.id,
         max_input_chars=20000,
+        compatibility=provider.compatibility,
     )
     await db_session.commit()
     assert reused1 is False
@@ -482,15 +557,16 @@ async def test_serializer_change_produces_new_embedding_not_reuse(
 
     # Simulate a legitimate serializer revision: same profile, different
     # deterministic output (and therefore a different source hash).
-    original_serializer = svc.build_professional_embedding_text
+    original_serializer = serializer.build_professional_embedding_text
     monkeypatch.setattr(
-        svc,
+        serializer,
         "build_professional_embedding_text",
         lambda content: original_serializer(content) + "\nEXTRA SERIALIZER V2 FIELD",
     )
-    monkeypatch.setattr(
-        svc, "SERIALIZER_VERSION", "candidate-professional-embedding-text-v2-test"
-    )
+    for module in (svc, serializer):
+        monkeypatch.setattr(
+            module, "SERIALIZER_VERSION", "candidate-professional-embedding-text-v2-test"
+        )
 
     e2, reused2 = await embed_candidate_profile(
         db_session,
@@ -498,6 +574,7 @@ async def test_serializer_change_produces_new_embedding_not_reuse(
         tenant_id=tenant.id,
         candidate_id=candidate.id,
         max_input_chars=20000,
+        compatibility=provider.compatibility,
     )
     await db_session.commit()
 
@@ -537,12 +614,16 @@ async def test_same_resulting_hash_different_serializer_version_not_reused(
         tenant_id=tenant.id,
         candidate_id=candidate.id,
         max_input_chars=20000,
+        compatibility=provider.compatibility,
     )
     await db_session.commit()
 
     # Same textual output (same source_sha256) but a bumped serializer
     # version — e.g. an internal refactor with no behavior change.
-    monkeypatch.setattr(svc, "SERIALIZER_VERSION", "candidate-professional-embedding-text-v2-noop")
+    for module in (svc, serializer):
+        monkeypatch.setattr(
+            module, "SERIALIZER_VERSION", "candidate-professional-embedding-text-v2-noop"
+        )
 
     e2, reused = await embed_candidate_profile(
         db_session,
@@ -550,6 +631,7 @@ async def test_same_resulting_hash_different_serializer_version_not_reused(
         tenant_id=tenant.id,
         candidate_id=candidate.id,
         max_input_chars=20000,
+        compatibility=provider.compatibility,
     )
     await db_session.commit()
 
@@ -566,8 +648,6 @@ async def test_same_serializer_different_hash_does_not_reuse(
     changes the output text WITHOUT a version bump must still not be
     reused — source_sha256 alone gates reuse even when serializer_version
     is unchanged."""
-    import meyar.services.candidate_embedding_service as svc
-
     tenant, candidate, _document, _canonical, _profile_v1 = candidate_with_profile_v1
     provider = FakeEmbeddingProvider(dimensions=4)
 
@@ -577,12 +657,13 @@ async def test_same_serializer_different_hash_does_not_reuse(
         tenant_id=tenant.id,
         candidate_id=candidate.id,
         max_input_chars=20000,
+        compatibility=provider.compatibility,
     )
     await db_session.commit()
 
-    original_serializer = svc.build_professional_embedding_text
+    original_serializer = serializer.build_professional_embedding_text
     monkeypatch.setattr(
-        svc,
+        serializer,
         "build_professional_embedding_text",
         lambda content: original_serializer(content) + "\nACCIDENTAL CHANGE",
     )
@@ -594,6 +675,7 @@ async def test_same_serializer_different_hash_does_not_reuse(
         tenant_id=tenant.id,
         candidate_id=candidate.id,
         max_input_chars=20000,
+        compatibility=provider.compatibility,
     )
     await db_session.commit()
 
@@ -619,6 +701,7 @@ async def test_exact_rerun_still_reuses_with_full_seven_field_match(
         tenant_id=tenant.id,
         candidate_id=candidate.id,
         max_input_chars=20000,
+        compatibility=provider.compatibility,
     )
     await db_session.commit()
     e2, reused2 = await embed_candidate_profile(
@@ -627,6 +710,7 @@ async def test_exact_rerun_still_reuses_with_full_seven_field_match(
         tenant_id=tenant.id,
         candidate_id=candidate.id,
         max_input_chars=20000,
+        compatibility=provider.compatibility,
     )
     await db_session.commit()
 
@@ -653,6 +737,7 @@ async def test_different_model_creates_distinct_provenance(
         tenant_id=tenant.id,
         candidate_id=candidate.id,
         max_input_chars=20000,
+        compatibility=provider_a.compatibility,
     )
     await db_session.commit()
     version_b, _ = await embed_candidate_profile(
@@ -661,6 +746,7 @@ async def test_different_model_creates_distinct_provenance(
         tenant_id=tenant.id,
         candidate_id=candidate.id,
         max_input_chars=20000,
+        compatibility=provider_b.compatibility,
     )
     await db_session.commit()
 
@@ -688,6 +774,7 @@ async def test_provider_error_handled_safely_no_row_persisted(
             tenant_id=tenant.id,
             candidate_id=candidate.id,
             max_input_chars=20000,
+            compatibility=provider.compatibility,
         )
     await db_session.commit()
 
@@ -711,6 +798,7 @@ async def test_no_profile_version_precondition_error(db_session: AsyncSession) -
             tenant_id=tenant.id,
             candidate_id=candidate.id,
             max_input_chars=20000,
+            compatibility=provider.compatibility,
         )
     assert exc_info.value.code == "NO_PROFILE_VERSION"
 
@@ -738,6 +826,7 @@ async def test_profile_not_completed_precondition_error(db_session: AsyncSession
             tenant_id=tenant.id,
             candidate_id=candidate.id,
             max_input_chars=20000,
+            compatibility=provider.compatibility,
         )
     assert exc_info.value.code == "PROFILE_NOT_COMPLETED"
 
@@ -755,6 +844,7 @@ async def test_oversized_input_precondition_error(
             tenant_id=tenant.id,
             candidate_id=candidate.id,
             max_input_chars=1,
+            compatibility=provider.compatibility,
         )
     assert exc_info.value.code == "INPUT_TOO_LARGE"
     assert provider.call_count == 0
@@ -774,6 +864,7 @@ async def test_tenant_isolation_embeddings_never_leak(
         tenant_id=tenant_a.id,
         candidate_id=candidate.id,
         max_input_chars=20000,
+        compatibility=provider.compatibility,
     )
     await db_session.commit()
 
@@ -807,6 +898,7 @@ async def test_embedding_audit_metadata_has_no_pii_or_vector(
         tenant_id=tenant.id,
         candidate_id=candidate.id,
         max_input_chars=20000,
+        compatibility=provider.compatibility,
     )
     await db_session.commit()
 

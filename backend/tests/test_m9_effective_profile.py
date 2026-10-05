@@ -63,6 +63,14 @@ async def accepted_then_failed(db, tenant_id):
     return candidate, accepted, failed
 
 
+
+def _compat():
+    from fakes import FakeEmbeddingProvider as _Provider
+
+    from meyar.services.folder_reconciliation_service import resolve_embedding_compatibility
+
+    return resolve_embedding_compatibility(_Provider(), None)
+
 async def test_m9_authority_survives_failed_attempt(db_session, tenant_and_key):
     tenant, _, _ = tenant_and_key
     candidate, accepted, _ = await accepted_then_failed(db_session, tenant.id)
@@ -129,6 +137,7 @@ async def test_m9_embedding_survives_failed_attempt(db_session, tenant_and_key):
         tenant_id=tenant.id,
         candidate_id=candidate.id,
         max_input_chars=10000,
+        compatibility=FakeEmbeddingProvider().compatibility,
     )
     assert embedding.candidate_profile_version_id == accepted.id
 
@@ -326,6 +335,7 @@ async def test_m9_semantic_hybrid_exact_embedding_and_successful_switch(db_sessi
         tenant_id=tenant.id,
         candidate_id=candidate.id,
         max_input_chars=10000,
+        compatibility=provider.compatibility,
     )
     failed = await attempt(db_session, v1)
     config = EmbeddingSearchConfig(
@@ -377,6 +387,7 @@ async def test_m9_semantic_hybrid_exact_embedding_and_successful_switch(db_sessi
         tenant_id=tenant.id,
         candidate_id=candidate.id,
         max_input_chars=10000,
+        compatibility=provider.compatibility,
     )
     assert not reused and new_embedding.candidate_profile_version_id == v3.id
     for mode in (SearchMode.SEMANTIC_ONLY, SearchMode.HYBRID):
@@ -565,6 +576,7 @@ async def test_m9_changed_document_failure_then_retry_restores_authority(
         tenant_id=tenant.id,
         candidate_id=candidate.id,
         candidate_document_id=document.id,
+        compatibility=_compat(),
     )
     assert not ready and latest.id == failed.id
     assert (
@@ -602,6 +614,7 @@ async def test_m9_changed_document_failure_then_retry_restores_authority(
         max_profile_input_chars=10000,
         max_identity_input_chars=10000,
         max_embedding_input_chars=10000,
+        compatibility=_compat(),
     )
     assert outcome
     effective = await get_current_authorized_profile(
@@ -617,6 +630,7 @@ async def test_m9_changed_document_failure_then_retry_restores_authority(
         tenant_id=tenant.id,
         candidate_id=candidate.id,
         candidate_document_id=document.id,
+        compatibility=_compat(),
     )
     assert ready and latest.id == effective[0].id
     response = await search_candidates(
@@ -1006,6 +1020,7 @@ async def test_m9_new_document_has_no_effective_profile_in_any_selector(
         tenant_id=tenant.id,
         candidate_id=candidate.id,
         candidate_document_id=document.id,
+        compatibility=_compat(),
     )
     assert not ready and latest.id == failed.id
 
@@ -1037,6 +1052,7 @@ async def test_m9_new_document_excludes_old_search_and_embedding(
         tenant_id=tenant.id,
         candidate_id=candidate.id,
         max_input_chars=10000,
+        compatibility=provider.compatibility,
     )
     await new_document_attempt(db_session, old, status)
     config = None
@@ -1068,6 +1084,7 @@ async def test_m9_new_document_excludes_old_search_and_embedding(
             tenant_id=tenant.id,
             candidate_id=candidate.id,
             max_input_chars=10000,
+            compatibility=provider.compatibility,
         )
     assert exc.value.code == "PROFILE_NOT_COMPLETED"
     await db_session.refresh(embedding)

@@ -121,24 +121,38 @@ class GateLLM:
 
 
 class GateEmbedding(FakeEmbeddingProvider):
-    def __init__(self, *, gate: bool = False, fail: bool = False) -> None:
-        super().__init__(vector=[1.0, 0.0])
+    def __init__(
+        self,
+        *,
+        gate: bool = False,
+        fail: bool = False,
+        model_name: str = "fake-embedding-model-v1",
+        model_revision: str = "",
+        dimensions: int = 2,
+    ) -> None:
+        super().__init__(
+            vector=[1.0] + [0.0] * (dimensions - 1),
+            model_name=model_name,
+            model_revision=model_revision,
+        )
         self.gate = gate
         self.fail = fail
+        self.entered = 0
         self.first = asyncio.Event()
         self.second = asyncio.Event()
         self.release = asyncio.Event()
 
     async def embed(self, text_value: str):
-        self.call_count += 1
+        self.entered += 1
         if self.fail:
+            self.call_count += 1
             raise EmbeddingProviderError("EMBEDDING_UNAVAILABLE", "simulated outage")
-        if self.gate and self.call_count == 1:
+        if self.gate and self.entered == 1:
             self.first.set()
             await self.release.wait()
-        elif self.gate and self.call_count == 2:
+        elif self.gate and self.entered == 2:
             self.second.set()
-        return await super().embed(text_value)
+        return await super().embed(text_value)  # increments call_count once
 
 
 class Rendezvous:
@@ -194,11 +208,12 @@ async def rescan(factory, storage, tenant_id, root: Path):
         )
 
 
-async def run_pending(db, llm, embedder, tenant_id, source_id):
+async def run_pending(db, llm, embedder, tenant_id, source_id, *, embedding_config=None):
     return await process_pending_candidates(
         db, llm, embedder, tenant_id=tenant_id, folder_source_id=source_id,
         model_provider_name="fake", max_profile_input_chars=CHARS,
         max_identity_input_chars=CHARS, max_embedding_input_chars=CHARS, limit=None,
+        embedding_config=embedding_config,
     )
 
 

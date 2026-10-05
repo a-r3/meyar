@@ -13,7 +13,7 @@ import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.embedding.provider import EmbeddingProvider
-from meyar.embedding.serializer import build_professional_embedding_text, compute_source_sha256
+from meyar.embedding.serializer import embedding_source
 from meyar.schemas.candidate_profile import CandidateProfileExtraction
 from meyar.search.policy import (
     SEARCH_POLICY_VERSION,
@@ -196,7 +196,7 @@ async def search_candidates(
         # based freshness, not chronology-based (no ORDER BY / MAX(id)
         # substitute) — see docs/DECISIONS.md D-015.
         profile_version_source_hashes = {
-            pv_id: compute_source_sha256(build_professional_embedding_text(profile_content))
+            pv_id: embedding_source(profile_content)[1]
             for _cid, pv_id, _profile, profile_content, _matches in eligible
         }
         rows = await search_compatible_embeddings(
