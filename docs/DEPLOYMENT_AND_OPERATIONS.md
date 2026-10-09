@@ -1,5 +1,13 @@
 # MEYAR — Deployment & Operations Runbook
 
+**Current sequencing (D-115):** #35 is queued deployment completion with substantial
+PR1–PR13 tooling delivered; #46 is accepted/merged/CLOSED. Complete #45, independent
+acceptance/owner merge/post-merge verification, comprehensive audit, all required
+remediation and full re-audit before #35. Final target topology/provisioning, scheduling/
+log policy, physical Apple Silicon lifecycle and operator/security approvals remain
+unaccepted. No production model is approved; #36 harness is partial. See
+[ROADMAP_NORMALIZATION.md](ROADMAP_NORMALIZATION.md).
+
 ## 1. Purpose and authority
 
 This document defines the operational lifecycle of MEYAR from an accepted
@@ -8,10 +16,11 @@ host, deploying an update, migrating a database, backing up and restoring,
 moving development to a new workstation, and handing the repository over to
 a new owner.
 
-Issue #60 adds Pillow to the locked backend runtime for local candidate
+Accepted issue #60 added Pillow to the locked backend runtime for local candidate
 photo extraction. The later issue #35 offline Mac package must include a
 compatible Apple Silicon Pillow wheel and verify it on the target host;
-this branch does not build that package. PDF raster decoding has a worker
+the current tooling can build that package, but physical Apple Silicon validation
+remains pending. PDF raster decoding has a worker
 timeout and byte/pixel caps. Its Linux address-space limit is not a
 verified macOS production memory guarantee, so the target-Mac runtime
 rehearsal must validate resource behavior before deployment acceptance.
@@ -102,10 +111,11 @@ developer workstation
   -> pull request into main
   -> CI + owner review
   -> owner Squash and merge
-  -> deployment host pulls accepted main
-  -> dependency sync (uv sync --locked)
-  -> database migrations (alembic upgrade head)
-  -> application restart
+  -> build/verify immutable release from owner-accepted main
+  -> transport hash-bound offline artifact/dependencies/model payloads
+  -> operator installs/verifies release and protected host config
+  -> schema-init (fresh DB) or approved staged update (existing DB)
+  -> explicit service lifecycle and readiness
   -> post-deployment verification (§16)
 ```
 
@@ -119,8 +129,9 @@ hash-bound offline deployment directory, then run the bundled stdlib-only
 `meyar-ops.py` using the bank-provisioned Python interpreter to install,
 verify, and activate the filesystem release. The target host does not
 pull Git or resolve packages on the internet. `docs/MEYAR_OPS.md` gives
-the exact commands and layout. The diagram above is the older manual
-source-checkout procedure, not the final bank-host method. PR4 does not
+the exact commands and layout. The diagram above uses this immutable release path;
+older manual source-checkout
+procedures below are developer/rehearsal history only. PR4 alone does not
 start the service or constitute target-Mac acceptance.
 
 **PR5 host-service boundary, accepted as PR #68:** run
@@ -154,7 +165,7 @@ schema initialization should an administrator use PR6 `service-install` and
 `service-start`, followed by independent readiness checks. Schema current
 does not mean application ready, service healthy, or Ollama/model ready.
 PR7 is **not** the production update migration workflow; existing schemas
-must await the later backup/update/rollback safety boundary.
+use the delivered PR9/PR12 backup/staged-update/rollback safety boundary.
 
 ## 4. Fresh host provisioning
 
@@ -797,5 +808,5 @@ exercise real macOS launchctl, reboot, native arm64 wheels, or bank
 network ingress. No Apple-Silicon rehearsal host was available for this
 PR13 run; that physical rehearsal remains **INCOMPLETE**. The bank-Mac
 latency/RAM/concurrency benchmark and production model selection remain
-unstarted in #36, next only after #35 acceptance. #49 is later
-post-presentation capability expansion; #46 remains open separately.
+unexecuted in #36, after post-audit release/#35 acceptance. #49 is delivered;
+#50 is deferred expansion. #35 completion is queued after #45/audit/full re-audit.

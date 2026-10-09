@@ -9594,3 +9594,66 @@ ResultSets cascade; durable conversation/transcript, confirmation, Job and crite
 survive session-only retirement. Inspection does not mutate either identity. Downgrade
 refuses detached confirmations before any DDL rather than discarding history or
 reattaching expired identity; a fully attached dataset remains representable.
+
+## D-115 — Owner-approved roadmap normalization and bounded milestone ownership
+
+**Date:** 2026-10-09.
+**Status:** roadmap audit OWNER-ACCEPTED WITH AMENDMENTS; normalization implementation
+is documentation/issue metadata only and awaits its own independent audit/owner merge.
+
+**Decision:** authoritative sequence is #46 CLOSED → roadmap normalization accepted
+and owner-merged → #45 API-first application contract completion → independent
+acceptance → OWNER manual Squash merge → post-merge verification → Comprehensive
+Adversarial Product + Architecture Audit → fix all P0/P1 + owner-selected P2 → full
+re-audit accepted → #35 Agentless Mac Deployment Readiness completion → #36 real
+Target-Mac benchmark and production model selection → #20 final DoD/production acceptance.
+
+#45 is the next mandatory engineering phase; it shares/exposes accepted application
+behavior and trusted principals, not a second implementation of JD/search/scoring.
+Human HTTP/JSON session/auth transport must be explicitly reviewed before human endpoints.
+#34 existing JD confirmation is substantially delivered. Shared confirmation operation,
+human JSON/session transport, proposal→human confirmation→Job/criteria audit correlation
+and client-neutral residuals belong to #45; generic arbitrary multi-action expansion is
+deferred/not required for initial deployment. OWNER may close #34 as superseded/not
+planned after normalization acceptance. A future actual mutating capability gets a new
+concrete issue and may then justify generic abstraction.
+
+#38 is disaggregated: A→#45; B/C1/C3→future comprehensive audit/debt register;
+C2/C4 resolved. OWNER may close the historical bundle after transfer review, without
+claiming unresolved debt is fixed. #49/core foundations are delivered. #50 factual
+candidate Q&A/deterministic comparison is deferred post-presentation expansion; #37
+enterprise integrations are conditional on real bank requirements. Neither is a
+mandatory initial-deployment gate. Future #50 consumes accepted #45 contracts.
+
+Milestones are bounded delivery goals. Optional backlog must not masquerade as
+incomplete mandatory deployment work: remove #50 from M8 and #37 from M9, retain both
+OPEN/unmilestoned, keep #34/#45 in M8, #38 in M7, #35/#36 in M9, #20 in M5. No new,
+renamed or closed milestone; owner closes M7 only after #38 disposition, M8 after
+#34/#45 acceptance/disposition, M9 after #35/#36, M5 after #20 sign-off.
+
+**Evidence / limits:** #46 PR #128 accepted head
+`254895c2b6890019c84bff90f00b88038854a097`; verified owner squash/main
+`386ae9da22f2e7cbb4286cde439292d8f21e25e4`; identical full tree
+`96a9934ffbd997cee5d7d5c2b0f3e2ba185d2b94`; #46 CLOSED. Earlier D-113/D-114
+pending/rejected-head statements remain historical. Substantial #35 tooling exists,
+but real target topology/prerequisites, scheduling/log policy, physical Apple Silicon
+lifecycle, final release/operator/security acceptance remain pending. #36 harness is
+partial and must be complete before visiting the bank; production models remain
+unapproved until actual execution on Mac mini M4 Pro (12-core CPU/16-core GPU/
+24 GB unified memory/512 GB SSD). Unknown deployment decisions remain UNKNOWN.
+
+MASTER_SPEC §11 per-tenant sliding-window request rate limiting is genuinely
+unimplemented (validated configuration only, no enforcement consumer). Explicit
+AUD-RATE future comprehensive-audit ownership and #20 final-DoD tracking prevent
+silent omission. No severity or implementation design is chosen here. Current
+original retrieval is an authorized attachment with canonical preview; shared UI/API
+successful-access auditing is #45 scope.
+
+**Why:** distinguish accepted implementation from remaining contracts, physical
+validation and optional product expansion; prevent stale milestone blockers and
+premature deployment/model/DoD claims. Full normalized issue bodies and evidence:
+`docs/ROADMAP_NORMALIZATION.md`.
+
+**Reversibility:** issue bodies and assignments are reversible metadata; future
+scope/sequence changes require a new reviewed owner decision. No product behavior,
+issue closure, milestone closure, next-phase implementation or PR merge is authorized.

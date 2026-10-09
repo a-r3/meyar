@@ -1,5 +1,13 @@
 # MEYAR — Project Vision
 
+**Current delivery authority (D-115):** the bounded MEYAR AI/JD workflow and #49
+foundations are delivered. Normalization → #45 shared application/HTTP contracts
+→ independent acceptance/owner merge/post-merge verification → comprehensive audit,
+required remediation and full re-audit → #35 deployment completion → #36 actual target
+benchmark/model decision → #20 final acceptance. Generic #34 expansion, #50 Q&A/
+comparison and conditional #37 integrations are deferred; optional work is not an
+initial-deployment gate. See [ROADMAP_NORMALIZATION.md](ROADMAP_NORMALIZATION.md).
+
 **MEYAR — Internal AI Candidate Intelligence & CV Search Platform.**
 
 This document is the canonical product-vision reference. Requirement
@@ -43,8 +51,10 @@ public-facing surface exists or is planned.
    candidate profile and the original CV, authorized-access only. Remains
    a first-class surface under the future agent direction.
 3. **Internal REST API** — documented (OpenAPI/Swagger), authenticated,
-   powers the two UI surfaces above and any other approved internal
-   system. Not a commercial product API.
+   exposes existing deterministic services to approved internal systems.
+   Current Jinja adapters also orchestrate workflows; #45 extracts shared application
+   behavior and documents client-neutral contracts without duplicating policy.
+   Not a commercial product API.
 
 ## Core capability pipeline
 
@@ -115,7 +125,8 @@ on top of this — the previous "numeric score deferred" decision (D-010 point
 4) is superseded by D-011. `meyar-score-v1` uses exact Decimal weighted
 factors, explicit as-of provenance, and fit-tier-first batch ranking over one
 current profile per active candidate. See D-017. Service and CLI are
-implemented; UI presentation is implemented in Slice 11, while REST presentation remains later work in Slice 12.
+implemented; UI and machine REST scoring/ranking are delivered (Slices 11–12).
+Remaining workflow/application contract gaps belong to #45.
 
 ## Local-only AI
 
@@ -154,7 +165,8 @@ and a documented internal API — entirely on local infrastructure.
 
 ## Roadmap
 
-R0 (this documentation re-baseline) → Git infrastructure → Slice 6 (Local
+Historical official-task sequence (current sequence is D-115 above):
+R0 (documentation re-baseline) → Git infrastructure → Slice 6 (Local
 CV Library & Folder Indexer) → Slice 7 (CandidateIdentity + local
 embeddings/pgvector) → Slice 8 (Hybrid search) → Slice 9 (NL search
 planner) → Slice 10 (JD 0–100 scoring + batch ranking) → Slice 11 (Chat

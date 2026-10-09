@@ -1,5 +1,9 @@
 # Issue #87 implementation evidence
 
+Current disposition: #87 accepted/merged/CLOSED; this document preserves its
+implementation/reproduction evidence. D-115 / [ROADMAP_NORMALIZATION.md](ROADMAP_NORMALIZATION.md)
+owns the next-phase sequence; #50 remains deferred.
+
 Status: implementation evidence for owner/independent review, not acceptance.
 Accepted source baseline: `ac9a249359c9a5dcf417b4e3f269a2c0b92b3ab0`.
 Issues #88 and #50 are outside this change.

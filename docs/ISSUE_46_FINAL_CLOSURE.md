@@ -1,13 +1,17 @@
 # Issue #46 final closure audit and implementation
 
-Status: initial PR #128 head failed independent L-6 acceptance; SAME-PR correction
-all required local gates PASS; exact-new-head CI and independent re-audit pending (D-114).
-The original local/CI green
-results below are historical evidence, not acceptance of the defective head.
-One branch `fix/46-final-closure`; refs #46 under existing M9 (milestone 10).
-Do not close #46 or merge before independent acceptance and owner action.
+Status: **independently ACCEPTED + owner Squash-MERGED through PR #128; #46 CLOSED**.
+Accepted head `254895c2b6890019c84bff90f00b88038854a097`; accepted-head CI
+[37937363994](https://github.com/a-r3/meyar/actions/runs/37937363994) SUCCESS.
+Verified squash/main `386ae9da22f2e7cbb4286cde439292d8f21e25e4`;
+accepted and merged full tree `96a9934ffbd997cee5d7d5c2b0f3e2ba185d2b94` (identical).
 
-## Starting authority (live verified)
+The initial rejected head, SAME-PR D-114 correction and recorded pending instructions
+below remain historical. They are not rewritten as if the rejected head was accepted.
+`fix/46-final-closure` is the historical implementation branch, not the normalization branch.
+D-115 / [ROADMAP_NORMALIZATION.md](ROADMAP_NORMALIZATION.md) owns current sequencing.
+
+## Starting authority (live verified at the historical task start)
 
 GitHub main / PR #126 squash: `532bd295f1e63926a922eee5ddf6ce0200594dfd`.
 Parent: `51ae314a74585902a5aecb164004b52cf00a0df9`.
@@ -273,7 +277,7 @@ is actual; cache-location override was `/tmp/uv-cache`, not a test exclusion.
 Exact final PR head/run/attempt/result are recorded in the PR acceptance handoff and final report;
 a commit cannot contain its own SHA. Green CI does not substitute for independent acceptance.
 
-## Ownership and closure handoff
+## Historical ownership and closure handoff (completed through PR #128)
 
 #46 remains OPEN. Accepted external #80/#84/#85/#86/#87/#88 are CLOSED, with their merged
 PR history recorded above. #35/#36/#45/#50 remain OPEN; #49 was live-verified CLOSED under milestone 9.
@@ -404,3 +408,13 @@ single Alembic head `c46d7e8f9012`, fresh upgrade and drift check clean. Both di
 checks and the complete tracked-tree scan pass. Initial audited-head green CI
 remains historical; the corrected exact-head CI must pass separately before
 return for independent re-audit. No merge or issue closure is authorized.
+
+## Final accepted closure / current roadmap handoff — 2026-10-09
+
+Independent acceptance, owner manual Squash merge, identical-tree verification and
+#46 closure are complete at the exact accepted identities recorded above. The initial
+L-6 blocker was corrected before final acceptance; earlier green CI is historical.
+This document does not claim independent acceptance of the new normalization PR.
+Next: normalization → #45 → independent acceptance/owner merge/post-merge verification
+→ comprehensive audit/remediation/full re-audit → #35 → #36 → #20. #49 is delivered;
+#50 deferred and #37 conditional. No next-phase implementation starts here.
