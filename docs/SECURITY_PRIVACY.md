@@ -673,7 +673,16 @@ prevent deletion of currently referenced original/photo bytes. Durable `.trash`
 journals permit hard-kill restoration without filename-derived ownership; backups
 must preserve the full storage root including journals. Conflicts/symlinks/malformed
 journals remain unresolved, never overwritten. Output is closed counts/codes only.
-Immutable confirmations and synthetic demo ownership markers survive retention;
+D-114 corrects the initial PR #128 L-6 blocker: confirmed sessions receive no
+permanent retention exemption. An explicit session age permits expired/revoked
+BrowserSession deletion. Confirmation keeps its immutable historical session UUID
+and Job/criteria links; only its nullable live session FK becomes NULL (SET NULL).
+Creation still validates and locks the existing same-tenant live session. Historical
+UUID never grants replay, auth or draft authority; relogin cannot reuse the old link.
+Session contexts/tasks/clarifications/submissions and ResultSets cascade, while
+durable conversation history survives session-only cleanup. No raw content, cookie
+or CSRF secret is copied into the historical reference. Immutable confirmations
+and synthetic demo ownership markers survive session retention;
 ResultSet-specific policy stays D-090/#86. Tenant-independent authentication events
 require the separately named explicit GLOBAL policy. Host log lifecycle remains
 #35. Commands, budgets, exit semantics and limitations are recorded in

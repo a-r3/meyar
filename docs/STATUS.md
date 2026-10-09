@@ -1,5 +1,14 @@
 # MEYAR — Status
 
+**PR #128 independent acceptance correction (D-114):** initial audited head
+`a4fba702d22b2f7557475b46ec4f8657558a4052` had an L-6 blocker: confirmed
+BrowserSessions were permanently excluded from explicit retention. Same-PR correction
+preserves historical confirmation session identity and decouples its nullable live FK
+with forward migration `c46d7e8f9012`. Expired/revoked sessions past the operator cutoff
+can retire; consequential confirmation/Job/criteria and durable conversations survive.
+Live replay still requires the exact live session link. Independent re-audit required;
+the initial head is not accepted. No merge or #46 closure authorized.
+
 **Issue #46 final closure engineering: implementation under independent acceptance, one task branch
 `fix/46-final-closure`, existing M9 milestone 10.** The complete baseline matrix, reproduced residuals,
 implementation contract and actual gate evidence are in `docs/ISSUE_46_FINAL_CLOSURE.md` (D-113).

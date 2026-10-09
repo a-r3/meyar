@@ -1,6 +1,9 @@
 # Issue #46 final closure audit and implementation
 
-Status: engineering complete; all required local gates PASS; PR exact-head CI and independent acceptance pending.
+Status: initial PR #128 head failed independent L-6 acceptance; SAME-PR correction
+all required local gates PASS; exact-new-head CI and independent re-audit pending (D-114).
+The original local/CI green
+results below are historical evidence, not acceptance of the defective head.
 One branch `fix/46-final-closure`; refs #46 under existing M9 (milestone 10).
 Do not close #46 or merge before independent acceptance and owner action.
 
@@ -101,8 +104,8 @@ this PR as follows; independent acceptance/owner merge remains pending.
 | Invalid runtime environment | `config.py` field and runtime validators | `test_runtime_closure.py` invalid upload/rate/timeouts/input/dimensions/provider/path/timezone rejected; existing production-secret guard retained | none |
 | L-5 general readiness | `core/readiness.py`, `api/v1/health.py` | `test_runtime_closure.py` dead DB, schema mismatch, daemon/model absence, unwritable storage, healthy components; independent liveness and existing saturation tests preserved | none |
 | Hard-kill original/photo recovery + L-6 orphan cleanup | `storage/staging.py`, `services/storage_authority.py`, `services/maintenance.py`, CLI | `test_maintenance.py` real SIGKILL after save, staging before DB commit, staging after DB commit; inspection, repeat idempotency, writer-busy safety, journal conflict/malformed/symlink refusal, referenced photo exact restore, legacy tenant hash recovery | none |
-| L-6 retention and M-5 legacy empty candidates | same bounded maintenance service | explicit age policy; expired session/context removed, live session/durable conversation preserved; live conversation reservation/context retained; audit demo ownership markers retained; total object/action and scan pagination tests; global auth retention separately explicit | none; legal ages remain bank/operator policy, host logs #35, ResultSet policy #86 |
-| L-1 schema drift | `models/job.py`, `.github/workflows/ci.yml` | fresh accepted migration chain already has `ix_jobs_tenant_id_status`; metadata now mirrors it. Empty DB upgrade → one head → check clean | none; no new migration/history rewrite |
+| L-6 retention and M-5 legacy empty candidates | same bounded maintenance service + D-114 confirmation decoupling | initial audited head had immortal confirmed sessions; corrected with historical session UUID + nullable SET NULL live FK; explicit age policy; expired session/context removed, live session/durable conversation preserved; live conversation reservation/context retained; audit demo ownership markers retained; total object/action and scan pagination tests; global auth retention separately explicit | none; legal ages remain bank/operator policy, host logs #35, ResultSet policy #86 |
+| L-1 schema drift | `models/job.py`, `.github/workflows/ci.yml` | fresh accepted migration chain already has `ix_jobs_tenant_id_status`; metadata now mirrors it. Empty DB upgrade → one head → check clean | none; index correction needs no migration; D-114 adds its separate forward confirmation migration |
 | DOCX footer flake | `tests/test_docx_tables.py` | compares every ZIP member name/uncompressed byte, preserving exact content/relationships; controlled unequal timestamped containers have identical member contents | none |
 | Photo worker cancellation/output volume | `services/candidate_photo_service.py`, `ingestion/parser_supervisor.py` | `test_photo_worker_lifecycle.py`: actual child cancellation, delayed spawn, 2MB stdout overproduction are reaped; existing timeout/failure and photo noninterference/delete tests | none |
 
@@ -151,9 +154,13 @@ cursors are best-effort enumeration offsets, not a stable directory snapshot; re
 when live activity changes entries. Every destructive action rechecks durable reference authority
 under the exclusive writer lock. Counts contain no candidate content or host paths.
 
-Session retention protects immutable AgentDraftConfirmation provenance. Expired/revoked sessions
-and their working context can be retired only after an explicit grace; durable conversations are
-preserved by default. Explicit conversation ages still protect live browser contexts and reserved
+Session retention protects consequential AgentDraftConfirmation provenance without preserving
+the entire BrowserSession indefinitely (D-114). Historical session UUID stays non-null; the live
+FK becomes NULL on session deletion. Creation validates the same-tenant live session under SHARE
+and stores both identities; lookup/replay still uses the exact live FK, never historical identity.
+Expired/revoked sessions and their contexts/tasks/clarifications/submissions/ResultSets retire
+after the explicit operator grace; confirmation, Job and immutable criteria remain unchanged;
+durable conversations are preserved by default. Explicit conversation ages still protect live browser contexts and reserved
 turns. Demo identity marker chains are retained during audit cleanup. Empty-candidate policy requires
 an explicit age and absence of every DB candidate reference (including folder rows), never names or
 assumed folder ownership. Tenant-independent AuthSecurityEvent needs its separately named GLOBAL
@@ -238,7 +245,9 @@ those corrections; no test exclusions/xfails are added.
 
 Fresh **empty** synthetic PostgreSQL `meyar_46_acceptance`: full `upgrade head` succeeds;
 `alembic heads`: `b88a2c4d6e10 (head)`; `alembic check`: **No new upgrade operations detected.**
-No new migration. CI runs fresh upgrade + drift check + single-head assertion.
+The initial implementation needed no new migration. D-114 adds forward migration
+`c46d7e8f9012`; the evidence in this section remains the initial historical result.
+CI runs fresh upgrade + drift check + single-head assertion on the corrected head.
 
 `ruff check .`: **All checks passed!**
 `mypy src`: **Success: no issues found in 237 source files** (not whole-repository mypy).
@@ -277,7 +286,7 @@ The final matrix has no known remaining #46-owned engineering defect. Closure-re
 verification, then owner issue closure. Do not auto-close or merge from this report. All blocker
 fixes and re-audit stay on this same PR. No force-push or merge is performed by this agent.
 
-## Changed-file manifest
+## Initial audited-head changed-file manifest (historical)
 
 Paths are exact relative to the repository root discovered by `git rev-parse --show-toplevel`;
 no machine-specific checkout path is repository authority. **37 files**, no dependencies/lockfiles,
@@ -322,3 +331,76 @@ docs/ISSUE_46_S10_VALIDATION.md
 docs/STATUS.md
 docs/SECURITY_PRIVACY.md
 ```
+
+## Independent acceptance correction: confirmed-session L-6 (D-114)
+
+Initial audited PR #128 head `a4fba702d22b2f7557475b46ec4f8657558a4052`, CI
+37391167162 attempt 1 SUCCESS / 3939 passed, was NOT independently accepted.
+The non-null `AgentDraftConfirmation.browser_session_id` CASCADE FK prompted a
+permanent maintenance exemption, leaving expired confirmed sessions unbounded.
+Before any production correction, `test_confirmed_session_retention.py` failed
+against real PostgreSQL: 90-day expired/revoked session + context + ResultSet all
+remained after apply with `session_days=7` (counts `{}`). Normal expired sessions
+without a confirmation were already covered by the passing maintenance regression.
+The initial "no residual" L-6 disposition above was premature; this finding supersedes it.
+
+D-057/MASTER_SPEC require independent durable confirmation identity, D-088/#84
+immutable criteria semantic provenance, D-086 durable history separated from
+session context, D-090 session-cascade ResultSets, and #87/#88 live-session auth,
+CSRF and task authority. No contract permits destroying confirmation history just
+to shrink session storage. D-114 keeps original session UUID as non-null historical
+provenance and makes the live FK nullable ON DELETE SET NULL, constrained to match
+historical identity whenever present. Exact live-session lookup/uniqueness and
+atomic confirmation/Job/criteria/audit creation remain. Retired historical identity
+is never replay authority. No legal age or separate confirmation lifetime is invented.
+
+Forward Alembic `c46d7e8f9012` follows immediately previous accepted schema
+`b88a2c4d6e10`, backfills existing historical identity without changing timestamps,
+Job/criteria/provenance or uniqueness. No migration history rewrite. Downgrade
+refuses detached confirmations before any DDL; attached state can round-trip.
+Tests cover fresh upgrade/check and a populated previous-schema upgrade, session
+deletion preserving identity, identity mismatch refusal and fail-closed downgrade.
+Current-head assertions in prior migration tests advance; historical slice targets remain.
+
+New correction validation and exact-new-head CI are recorded in the final PR handoff
+and re-audit report, so this commit never fabricates its own SHA or CI result.
+
+Correction-specific local verification: focused maintenance/session/confirmation/ResultSet/
+conversation/auth/tenant/demo/migration/privacy suite **408 passed in 379.11s**. Final strengthened
+new regressions separately **12 passed in 7.70s**, including submission/task/clarification
+cascade and refusal of relogin replay. Ruff clean; mypy(src) **237 source files** clean.
+Fresh empty synthetic PostgreSQL `meyar_128_acceptance_b6ce7ce20b7145bfa1d1f8b7e16bb699`:
+`upgrade head` succeeds, `heads` = **c46d7e8f9012 (head)**, `check` = **No new upgrade
+operations detected.** Populated `b88a2c4d6e10` upgrade and attached/detached downgrade behavior
+are covered by the new migration regression. Full-suite/final CI evidence belongs to the
+final handoff below and PR re-audit report; no CI acceptance is inferred from local tests.
+
+Correction changed-file manifest (same branch/PR; exact repository-relative paths):
+
+```text
+backend/alembic/versions/c46d7e8f9012_confirmation_session_retention.py
+backend/src/meyar/models/agent_draft_confirmation.py
+backend/src/meyar/services/agent_draft_confirmation_repo.py
+backend/src/meyar/services/maintenance.py
+backend/tests/test_agent_conversation_authority_migration.py
+backend/tests/test_agent_result_set_snapshot_migration.py
+backend/tests/test_agent_semantic_provenance_migration.py
+backend/tests/test_agent_turn_reservation_migration.py
+backend/tests/test_candidate_photo_migration.py
+backend/tests/test_confirmation_session_retention_migration.py
+backend/tests/test_confirmed_session_retention.py
+backend/tests/test_issue88_slice_a_migration.py
+backend/tests/test_ui_migration_packaging.py
+docs/DECISIONS.md
+docs/ISSUE_46_FINAL_CLOSURE.md
+docs/SECURITY_PRIVACY.md
+docs/STATUS.md
+```
+
+Final correction full local gate: **3951 passed in 1012.85s (0:16:52)**, with no
+exclusions or xfails. Focused suite: **408 passed in 379.11s**; strengthened new
+regressions: **12 passed in 7.70s**. Ruff and mypy(src) clean (237 source files);
+single Alembic head `c46d7e8f9012`, fresh upgrade and drift check clean. Both diff
+checks and the complete tracked-tree scan pass. Initial audited-head green CI
+remains historical; the corrected exact-head CI must pass separately before
+return for independent re-audit. No merge or issue closure is authorized.

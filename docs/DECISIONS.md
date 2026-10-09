@@ -9554,5 +9554,43 @@ across mutable directories; repeat full cycles, each destructive action independ
 Photo workers reuse the bounded subprocess supervisor, including cancellation during spawn, capped
 stdout and kill/reap. DOCX archive byte equality is replaced with package-member byte equality because
 ZIP timestamps vary. The accepted jobs index is added to SQLAlchemy metadata, with fresh upgrade plus
-alembic check in CI; no migration history, dependencies or lockfiles change. D-100/D-110/D-111/D-112,
+alembic check in CI. That initial index correction needed no migration; D-114 adds
+a forward confirmation migration. No migration history, dependency or lockfile rewrite.
+D-100/D-110/D-111/D-112,
 auth/session/CSRF/original-CV and deterministic scoring/provenance remain authoritative.
+
+## D-114 — Confirmed-session retirement preserves consequential provenance (#46 L-6)
+
+Status: correction on SAME PR #128; independent re-audit and owner merge required.
+The initial audited head `a4fba702d22b2f7557475b46ec4f8657558a4052` had an L-6 blocker:
+the confirmation's non-null CASCADE session FK caused maintenance to exempt confirmed
+sessions permanently. A real PostgreSQL desired-invariant test failed before production
+changes: expired/revoked 90-day session, live context and ResultSet all remained under
+explicit `session_days=7`. That head is not independently accepted.
+
+D-057 / MASTER_SPEC's dedicated confirmation identity is durable independently of
+transcript state. D-088/#84 keeps immutable criteria semantic provenance; #87/D-091
+requires live auth and independent CSRF; #88/D-092 and D-086 separate disposable live
+context from durable history. No accepted contract authorizes session expiry to erase
+the consequential confirmation. D-090 explicitly allows ResultSets to cascade with the
+retired session. Therefore preserve the confirmation, Job, criteria and original session
+UUID while retiring the expired/revoked session after the operator's explicit age.
+
+Forward migration `c46d7e8f9012` on `b88a2c4d6e10` backfills a non-null
+`historical_browser_session_id` from the existing session FK. The live
+`browser_session_id` becomes nullable with ON DELETE SET NULL. A check requires every
+non-null live link to equal historical identity. Creation still requires an existing,
+same-tenant, unexpired/unrevoked session under SHARE lock, and inserts both identities
+with Job/criteria/audit atomically. The live FK still enforces existence; historical UUID
+alone never authorizes creation or replay. Existing exact tenant/live-session/draft
+lookup and unique constraints are retained. Retirement clears only the live FK; a new
+session cannot replay an old confirmation or inherit pending authority. No raw JD/CV,
+token or CSRF secret is copied into provenance. No independent confirmation age is
+invented; tenant/Job/criteria deletion retains existing consequential cascade policy.
+
+Maintenance removes the permanent exemption using the same tenant, cutoff, bounded
+batch and SKIP LOCKED rules. Session contexts, tasks, clarifications, submissions and
+ResultSets cascade; durable conversation/transcript, confirmation, Job and criteria
+survive session-only retirement. Inspection does not mutate either identity. Downgrade
+refuses detached confirmations before any DDL rather than discarding history or
+reattaching expired identity; a fully attached dataset remains representable.

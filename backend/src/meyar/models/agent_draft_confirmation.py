@@ -20,6 +20,10 @@ class AgentDraftConfirmation(Base):
             "criteria_version_id", name="uq_agent_draft_confirmation_criteria_version"
         ),
         CheckConstraint("status = 'CONFIRMED'", name="ck_agent_draft_confirmation_status"),
+        CheckConstraint(
+            "browser_session_id IS NULL OR browser_session_id = historical_browser_session_id",
+            name="ck_agent_draft_confirmation_session_identity",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
@@ -27,8 +31,10 @@ class AgentDraftConfirmation(Base):
         ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
     )
     draft_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
-    browser_session_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("browser_sessions.id", ondelete="CASCADE"), nullable=False, index=True
+    # Immutable provenance only; never substitutes for live authentication/replay.
+    historical_browser_session_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    browser_session_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("browser_sessions.id", ondelete="SET NULL"), nullable=True, index=True
     )
     job_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False

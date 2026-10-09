@@ -19,7 +19,6 @@ from sqlalchemy import String, exists, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.models.agent_conversation import AgentConversation, AgentConversationSessionContext
-from meyar.models.agent_draft_confirmation import AgentDraftConfirmation
 from meyar.models.audit_event import AuditEvent
 from meyar.models.auth_security_event import AuthSecurityEvent
 from meyar.models.browser_session import BrowserSession
@@ -358,7 +357,6 @@ async def run_maintenance(
                     select(TenantMembership.id).where(TenantMembership.tenant_id == tenant_id)
                 )
                 & ((BrowserSession.expires_at < cutoff) | (BrowserSession.revoked_at < cutoff))
-                & ~exists().where(AgentDraftConfirmation.browser_session_id == BrowserSession.id)
             ),
             "SESSION_RETIRED",
         )
