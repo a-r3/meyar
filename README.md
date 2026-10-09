@@ -660,8 +660,11 @@ Two further capabilities are scoped but **not implemented**:
 - Full API-first parity for every step of the agent's conversational
   workflow (JD drafting, review, confirmation) is tracked separately and
   incomplete — see issue #45.
-- Additional pre-deployment runtime/ingestion/recovery hardening is tracked
-  in issue #46.
+- Issue #46 final runtime/ingestion/recovery engineering is implemented for
+  independent acceptance; issue closure still requires owner acceptance,
+  manual merge and post-merge verification. The complete requirement matrix,
+  actual tests and bounded `meyar maintain` inspection/recovery/retention
+  contract are in [`docs/ISSUE_46_FINAL_CLOSURE.md`](docs/ISSUE_46_FINAL_CLOSURE.md).
 - Conversational follow-up on a prior search result and evidence-backed
   candidate Q&A/comparison are planned, not implemented — see "Post-
   presentation capability backlog" above (issues #49, #50).

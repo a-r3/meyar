@@ -1,8 +1,21 @@
 # Issue #46 S10 — configured embedding readiness
 
-Status: implemented; independent acceptance pending. Refs #46 under the existing **M9 — Deployment,
+Status: independently ACCEPTED + owner-MERGED through PR #126. Refs #46 under the existing **M9 — Deployment,
 Benchmark & Integration Readiness** milestone (10). Bounded slice, not completion of #46. Also corrects the
 stale S9 acceptance wording in STATUS / DECISIONS / `ISSUE_46_S9_VALIDATION.md` (same PR, history kept).
+
+## Final accepted and merged authority
+
+**S10 independently ACCEPTED + owner Squash-MERGED through PR #126.**
+Accepted head `6277b77f0c39ca69dd0e6f9515961463e6269f54`; exact-head
+[CI 37327942757](https://github.com/a-r3/meyar/actions/runs/37327942757),
+attempt 1 **SUCCESS, 3873 passed**. Verified owner squash/main
+`532bd295f1e63926a922eee5ddf6ce0200594dfd`, parent
+`51ae314a74585902a5aecb164004b52cf00a0df9`, full tree
+`8b55824e4d59e3d6ed5b31bf75ee312b851c4cec`.
+Accepted head tree equals merged main tree. Earlier rejection/corrective records below are
+historical. Direct transaction separation and historical-row repair residuals are addressed by
+`ISSUE_46_FINAL_CLOSURE.md`, not retroactively attributed to S10.
 
 ## Verified accepted starting state (live, before any edit)
 
@@ -253,6 +266,6 @@ The final focused suite passed. Untracked `.aws` was neither read nor staged.
 
 Full and focused PostgreSQL suites ran sequentially, with no diagnostic override or excluded tests.
 No production/test change occurred between the final focused and full gates. Final documentation records
-these actual results. Delivery continues on the same PR #126 branch, normal push only; exact-new-head
-CI and OPEN/unmerged issue/PR state will be verified in the operational handoff. Independent re-audit is
-required before any merge; this report does not declare S10 accepted or #46 complete.
+these actual results. Historical pre-acceptance delivery wording: the corrective remained on PR #126,
+with independent re-audit required before merge. The final accepted/merged authority at the top of this
+record supersedes that pending state; it does not declare #46 complete.

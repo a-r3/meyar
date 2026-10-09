@@ -7,6 +7,7 @@ from meyar.models.candidate_photo_version import PHOTO_AVAILABLE, CandidatePhoto
 from meyar.services.audit_repo import ACTOR_API_KEY, record_event
 from meyar.services.candidate_document_repo import list_candidate_documents
 from meyar.services.candidate_repo import delete_candidate_row, get_candidate
+from meyar.services.storage_authority import storage_writer
 from meyar.services.storage_recovery import (
     commit_with_recovery,
     rollback_with_recovery,
@@ -42,6 +43,7 @@ async def delete_candidate_cascade(
     if candidate is None:
         return None
 
+    await storage_writer(db, tenant_id)
     documents = await list_candidate_documents(db, tenant_id=tenant_id, candidate_id=candidate_id)
     photo_rows = await db.scalars(
         select(CandidatePhotoVersion).where(

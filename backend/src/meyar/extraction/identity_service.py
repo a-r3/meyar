@@ -28,6 +28,12 @@ from meyar.schemas.candidate_identity import CandidateIdentityExtraction
 from meyar.services.audit_repo import record_event
 from meyar.services.candidate_document_repo import get_latest_canonical_document
 from meyar.services.candidate_identity_repo import create_identity_version
+from meyar.services.direct_inference_authority import (
+    DirectInferenceSupersededError,
+    direct_authority,
+    revalidate_direct_authority,
+)
+from meyar.services.storage_recovery import commit_with_recovery
 from meyar.services.tenant_authority import require_active_tenant
 
 # One initial attempt + one bounded retry on schema-invalid structured
@@ -247,25 +253,44 @@ async def extract_candidate_identity(
     (build_identity_document_view) and the persisted content carries
     real PII, never logged or placed in audit metadata — only ids/status
     are. Caller must have already verified candidate_document belongs to
-    (tenant_id, candidate_id). One caller-owned transaction spans inference;
-    the folder pipeline composes the three staged functions instead (S9)."""
+    (tenant_id, candidate_id). Planning commits before inference; the caller owns
+    the final
+    guarded persistence commit. Folder processing uses its own staged authority."""
     view, canonical_id = await load_identity_view(
         db, tenant_id=tenant_id, candidate_id=candidate_id, candidate_document=candidate_document
     )
-    outcome = await infer_candidate_identity(
-        llm,
-        view,
-        max_input_chars=max_input_chars,
-        before_attempt=lambda: require_active_tenant(db, tenant_id),
-    )
+    try:
+        authority, _ = await direct_authority(
+            db, tenant_id=tenant_id, candidate_id=candidate_id,
+            document_id=candidate_document.id, identity=True,
+        )
+        if authority.canonical_id != canonical_id:
+            raise DirectInferenceSupersededError()
+        await commit_with_recovery(db)
+        async def before_attempt() -> None:
+            # Each retry has fresh authority, then returns its connection before
+            # waiting on the local-model gate or transport.
+            await revalidate_direct_authority(
+                db, authority, tenant_id=tenant_id, candidate_id=candidate_id, identity=True,
+            )
+            await commit_with_recovery(db)
+
+        outcome = await infer_candidate_identity(
+            llm, view, max_input_chars=max_input_chars, before_attempt=before_attempt,
+        )
+        # Ensure no caller/provider transaction leaks into fresh Phase B.
+        if db.in_transaction():
+            await db.rollback()
+        document = await revalidate_direct_authority(
+            db, authority, tenant_id=tenant_id, candidate_id=candidate_id, identity=True,
+        )
+    except DirectInferenceSupersededError as exc:
+        await db.rollback()
+        raise IdentityExtractionPreconditionError(exc.code, str(exc)) from None
     return await persist_identity_outcome(
-        db,
-        tenant_id=tenant_id,
-        candidate_id=candidate_id,
-        candidate_document=candidate_document,
-        canonical_document_id=canonical_id,
-        model_provider_name=model_provider_name,
-        outcome=outcome,
+        db, tenant_id=tenant_id, candidate_id=candidate_id,
+        candidate_document=document, canonical_document_id=canonical_id,
+        model_provider_name=model_provider_name, outcome=outcome,
     )
 
 

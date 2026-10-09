@@ -53,7 +53,7 @@ async def test_upload_closed_failures_no_canonical_inference_or_lost_original(
 
     from meyar.ingestion import parser_supervisor
 
-    run = parser_supervisor._run
+    run = parser_supervisor.run_bounded_worker
 
     async def fast_timeout(data, kind, limits, seconds):
         return await run(data, kind, limits, 0.00001)
@@ -67,7 +67,7 @@ async def test_upload_closed_failures_no_canonical_inference_or_lost_original(
     }[mode]
     with monkeypatch.context() as patch:
         if mode == "timeout":
-            patch.setattr(parser_supervisor, "_run", fast_timeout)
+            patch.setattr(parser_supervisor, "run_bounded_worker", fast_timeout)
         if mode == "resource":
             patch.setattr(asyncio, "create_subprocess_exec", fault)
         if mode == "legacy_raw":

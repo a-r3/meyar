@@ -28,7 +28,7 @@ async def _verify(url: str) -> None:
     async with engine.connect() as connection:
         assert await connection.scalar(text("SELECT to_regclass('candidate_photo_versions')"))
         assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-            "b88a2c4d6e10"  # issue #88 slice A
+            "c46d7e8f9012"  # issue #46 confirmation/session retention
         )
         constraints = set(
             (

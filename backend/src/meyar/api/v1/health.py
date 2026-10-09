@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, Response, status
 
 from meyar.config import Settings, get_settings
+from meyar.core.readiness import readiness_reasons
 from meyar.core.saturation import probe_saturation
 from meyar.db import get_engine
 from meyar.llm.concurrency import current_inference_admission
@@ -19,16 +20,17 @@ async def health() -> dict:
 async def readiness(
     response: Response, settings: Settings = Depends(get_settings)
 ) -> dict:
-    """Minimal process-local readiness (issue #85; the full readiness design
-    is issue #46). ``503`` with closed reason codes while the process is
-    seriously saturated (inference gate persistently full, or DB pool
-    exhausted); ``200`` otherwise. Reads no database and no candidate data."""
+    """DB/schema, local-model and storage readiness; independent of liveness.
+    Failures expose closed codes, never configuration or candidate data."""
     snapshot = probe_saturation(
         settings,
         admission=current_inference_admission(),
         pool=get_engine().sync_engine.pool,
     )
-    if snapshot.ready:
+    reasons = [reason.value for reason in snapshot.reasons]
+    if not reasons:
+        reasons = await readiness_reasons(get_engine(), settings)
+    if not reasons:
         return {"status": "ready"}
     response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
-    return {"status": "not_ready", "reasons": [reason.value for reason in snapshot.reasons]}
+    return {"status": "not_ready", "reasons": reasons}

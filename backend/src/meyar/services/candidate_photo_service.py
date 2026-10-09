@@ -5,15 +5,19 @@ import base64
 import hashlib
 import json
 import logging
-import sys
 import uuid
 from io import BytesIO
+from weakref import WeakKeyDictionary
 
 from PIL import Image, ImageDraw
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meyar.extraction.evidence import EvidenceValidationError
+from meyar.ingestion.admission import AdmissionGate
+from meyar.ingestion.parser import ParseError, ParseFailureCode
+from meyar.ingestion.parser_policy import OutputLimits
+from meyar.ingestion.parser_supervisor import run_bounded_worker
 from meyar.models.candidate_document import CandidateDocument
 from meyar.models.candidate_photo_version import (
     PHOTO_AVAILABLE,
@@ -26,6 +30,7 @@ from meyar.services.candidate_identity_repo import get_current_identity_version
 from meyar.services.candidate_photo_repo import create_photo_version, get_photo_for_document
 from meyar.services.candidate_repo import get_candidate
 from meyar.services.identity_authority import authorize_identity_version
+from meyar.services.storage_authority import storage_writer
 from meyar.services.storage_recovery import (
     StorageCompensationError,
     recover_on_failure,
@@ -51,26 +56,32 @@ def _placeholder() -> bytes:
 PLACEHOLDER_JPEG = _placeholder()
 
 
+_photo_gates: WeakKeyDictionary[asyncio.AbstractEventLoop, AdmissionGate] = WeakKeyDictionary()
+
+
 async def _extract_isolated(data: bytes, kind: str) -> dict:
-    process = await asyncio.create_subprocess_exec(
-        sys.executable,
-        "-m",
-        "meyar.photo.worker",
-        kind,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
-    )
+    loop = asyncio.get_running_loop()
+    if loop not in _photo_gates:
+        _photo_gates[loop] = AdmissionGate(active=1, waiters=4, seconds=3)
     try:
-        stdout, _ = await asyncio.wait_for(
-            process.communicate(data), timeout=policy.WORKER_TIMEOUT_SECONDS
+        async with _photo_gates[loop].slot():
+            stdout = await run_bounded_worker(
+                data,
+                kind,
+                OutputLimits(result_bytes=policy.MAX_DERIVED_BYTES * 2 + 4096),
+                policy.WORKER_TIMEOUT_SECONDS,
+                worker_module="meyar.photo.worker",
+                worker_args=[kind],
+            )
+    except ParseError as exc:
+        reason = (
+            "WORKER_TIMEOUT"
+            if exc.code == ParseFailureCode.PARSER_TIMEOUT
+            else "WORKER_BUSY"
+            if exc.code == ParseFailureCode.PARSER_BUSY
+            else "WORKER_FAILED"
         )
-    except TimeoutError:
-        process.kill()
-        await process.wait()
-        return {"status": "EXTRACTION_FAILED", "reason_code": "WORKER_TIMEOUT"}
-    if process.returncode != 0 or len(stdout) > policy.MAX_DERIVED_BYTES * 2 + 4096:
-        return {"status": "EXTRACTION_FAILED", "reason_code": "WORKER_FAILED"}
+        return {"status": "EXTRACTION_FAILED", "reason_code": reason}
     try:
         outcome = json.loads(stdout)
         if outcome["status"] not in (
@@ -144,11 +155,14 @@ async def process_photo_for_document(
                 raise ValueError("Invalid sanitized output")
         async with recover_on_failure(db):
             await require_active_tenant(db, tenant_id, lock=True)
-            if await get_candidate(
-                db, tenant_id=tenant_id, candidate_id=candidate_id, share=True
-            ) is None or await get_candidate_document(
-                db, tenant_id=tenant_id, candidate_id=candidate_id, document_id=document_id
-            ) is None:
+            if (
+                await get_candidate(db, tenant_id=tenant_id, candidate_id=candidate_id, share=True)
+                is None
+                or await get_candidate_document(
+                    db, tenant_id=tenant_id, candidate_id=candidate_id, document_id=document_id
+                )
+                is None
+            ):
                 await db.rollback()
                 return None  # deletion won; no derived asset was written
             existing = await get_photo_for_document(
@@ -161,11 +175,15 @@ async def process_photo_for_document(
             if existing is not None:
                 await db.rollback()
                 return existing
+            await storage_writer(db, tenant_id)
             derived_key: str | None = None
             if jpeg is not None:
                 derived_key = await photo_storage.save(tenant_id=tenant_id, content=jpeg)
                 track_created(
-                    db, photo_storage, tenant_id=tenant_id, storage_key=derived_key,
+                    db,
+                    photo_storage,
+                    tenant_id=tenant_id,
+                    storage_key=derived_key,
                     namespace="photo",
                 )
             row = await create_photo_version(

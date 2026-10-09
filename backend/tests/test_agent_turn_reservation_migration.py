@@ -226,6 +226,6 @@ def test_expired_reservation_does_not_block_clean_roundtrip(monkeypatch) -> None
 def test_single_head_chains_through_the_turn_reservation_revision() -> None:
     script = ScriptDirectory.from_config(_config())
     # issue #86 (D-090) chains f3a9c6d2e815 directly on this revision.
-    assert script.get_heads() == ["b88a2c4d6e10"]
+    assert script.get_heads() == ["c46d7e8f9012"]
     assert script.get_revision("f3a9c6d2e815").down_revision == NEW_HEAD
     assert script.get_revision(NEW_HEAD).down_revision == PRIOR_HEAD

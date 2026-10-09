@@ -1,6 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -24,8 +25,8 @@ class Settings(BaseSettings):
     env: Literal["development", "test", "production"] = "development"
     ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_model: str = "qwen3:0.6b"
-    max_upload_bytes: int = 10 * 1024 * 1024
-    rate_limit_per_minute: int = 60
+    max_upload_bytes: int = Field(default=10 * 1024 * 1024, ge=1, le=32 * 1024 * 1024)
+    rate_limit_per_minute: int = Field(default=60, ge=1, le=100000)
     # Issue #85 (docs/DECISIONS.md D-089): process-wide bounded local
     # inference admission. ``inference_concurrency`` model calls run at
     # once; at most ``inference_queue_max_waiters`` more wait, each for at
@@ -63,9 +64,9 @@ class Settings(BaseSettings):
     llm_provider: Literal["ollama"] = "ollama"
     # Small local models can need more than a minute for the bounded JD
     # schema-repair turn on development hardware; still finite and explicit.
-    llm_timeout_seconds: float = 120.0
-    llm_max_input_chars: int = 20000
-    embedding_provider: str = "ollama"
+    llm_timeout_seconds: float = Field(default=120.0, gt=0, le=1800)
+    llm_max_input_chars: int = Field(default=20000, ge=1, le=1000000)
+    embedding_provider: Literal["ollama"] = "ollama"
     # DEV_INTEGRATION_MODEL default — not an approved final production
     # embedding model (see meyar.embedding.ollama_provider,
     # docs/DECISIONS.md). Final selection is blocked on the target Mac
@@ -74,9 +75,9 @@ class Settings(BaseSettings):
     # Trusted runtime provenance for the DEV_INTEGRATION_MODEL. This is
     # configuration, never LLM-controlled planner output, and remains
     # replaceable when the target-Mac production model is approved.
-    embedding_dimensions: int = 768
-    embedding_timeout_seconds: float = 60.0
-    embedding_max_input_chars: int = 20000
+    embedding_dimensions: int = Field(default=768, ge=1, le=16000)
+    embedding_timeout_seconds: float = Field(default=60.0, gt=0, le=1800)
+    embedding_max_input_chars: int = Field(default=20000, ge=1, le=1000000)
     # Browser sessions are deliberately bounded and cookies are secure by
     # default. Local loopback development must opt out explicitly.
     ui_session_ttl_hours: int = Field(default=8, ge=1, le=24)
@@ -107,6 +108,16 @@ class Settings(BaseSettings):
     # services still receive the resolved date explicitly and never consult
     # the wall clock themselves.
     business_timezone: str = "Asia/Baku"
+
+    @model_validator(mode="after")
+    def _runtime_values(self) -> "Settings":
+        if not self.storage_root.strip():
+            raise ValueError("Storage root must be nonblank.")
+        try:
+            ZoneInfo(self.business_timezone)
+        except (ZoneInfoNotFoundError, ValueError):
+            raise ValueError("Business timezone must be a supported timezone.") from None
+        return self
 
     @model_validator(mode="after")
     def _turn_reservation_outlives_inference_gap(self) -> "Settings":

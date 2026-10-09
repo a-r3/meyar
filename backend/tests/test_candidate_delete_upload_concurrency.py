@@ -64,7 +64,7 @@ async def setup(db_session, tenant_and_key, tmp_path):
 
 
 def files(storage):
-    return [p for p in storage._root.rglob("*") if p.is_file()]
+    return [p for p in storage._root.rglob("*") if p.is_file() and p.suffix != ".json"]
 
 
 async def blocked_or_finished(observer, task, waiter, holder):

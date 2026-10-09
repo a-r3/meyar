@@ -1228,8 +1228,14 @@ async def test_active_result_set_superseded_while_inferring_cannot_commit_stale_
 
 
 async def test_readiness_reports_persistent_inference_saturation_liveness_stays_ok(
-    small_pool,
+    small_pool, monkeypatch,
 ) -> None:
+    from meyar.api.v1 import health
+
+    async def healthy_components(*args):
+        return []
+
+    monkeypatch.setattr(health, "readiness_reasons", healthy_components)
     settings = Settings(
         inference_concurrency=1,
         inference_queue_max_waiters=0,
@@ -1567,11 +1573,18 @@ async def test_hybrid_agent_search_busy_embedding_gate_gives_busy_outcome(
     assert await _audit(factory, tenant.id, "agent.turn.busy") == [{"reason_code": "QUEUE_FULL"}]
 
 
-async def test_readiness_reflects_shared_gate_saturated_by_embedding_calls(small_pool) -> None:
+async def test_readiness_reflects_shared_gate_saturated_by_embedding_calls(
+    small_pool, monkeypatch
+) -> None:
     """Readiness observes the ONE shared gate: saturation caused by an
     embedding call reports INFERENCE_SATURATED; liveness stays 200."""
+    from meyar.api.v1 import health
     from meyar.embedding.ollama_provider import OllamaEmbeddingProvider
 
+    async def healthy_components(*args):
+        return []
+
+    monkeypatch.setattr(health, "readiness_reasons", healthy_components)
     settings = Settings(
         inference_concurrency=1,
         inference_queue_max_waiters=0,

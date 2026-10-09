@@ -17,6 +17,7 @@ from meyar.services.candidate_document_repo import (
     create_candidate_document,
     create_canonical_document,
 )
+from meyar.services.storage_authority import storage_writer
 from meyar.services.storage_recovery import abandon_created, settle_leftovers, track_created
 from meyar.services.tenant_authority import require_active_tenant
 from meyar.storage.base import DocumentStorage
@@ -102,6 +103,7 @@ async def persist_candidate_document(
     if isinstance(outcome, ParseError) and not outcome.is_terminal:
         raise outcome
     await settle_leftovers(db)  # compensate any earlier direct db.rollback()
+    await storage_writer(db, tenant_id)
     storage_key = await storage.save(tenant_id=tenant_id, content=data)
     created = track_created(db, storage, tenant_id=tenant_id, storage_key=storage_key)
     try:

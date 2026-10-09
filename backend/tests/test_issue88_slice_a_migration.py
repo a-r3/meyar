@@ -71,7 +71,7 @@ def test_issue88_slice_a_upgrade_constraints_downgrade_and_single_head(monkeypat
     name = f"meyar_issue88a_{uuid.uuid4().hex}"
     url = f"{BASE_URL}/{name}"
     config = Config(str(Path(__file__).resolve().parent.parent / "alembic.ini"))
-    assert ScriptDirectory.from_config(config).get_heads() == [NEW_HEAD]
+    assert ScriptDirectory.from_config(config).get_heads() == ["c46d7e8f9012"]
     asyncio.run(_admin(f'CREATE DATABASE "{name}"', name=name))
     monkeypatch.setenv("MEYAR_DATABASE_URL", url)
     get_settings.cache_clear()

@@ -13,6 +13,7 @@ JOB_STATUS_ARCHIVED = "ARCHIVED"
 class Job(Base):
     __tablename__ = "jobs"
     __table_args__ = (
+        Index("ix_jobs_tenant_id_status", "tenant_id", "status"),
         # An identical (title + criteria) signature may exist any number
         # of times across ARCHIVED jobs (an archived duplicate never
         # blocks a new active one) and NULL signatures (API/CLI-created

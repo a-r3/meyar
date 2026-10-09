@@ -115,7 +115,7 @@ async def test_partial_stage_source_unlink_failure_cleans_new_trash(
 
     def fail_source_unlink(path, *args, **kwargs):
         if Path(path) == source:
-            trash = files_under(root / ".trash")
+            trash = [p for p in files_under(root / ".trash") if p.suffix != ".json"]
             assert len(trash) == 1
             assert os.path.samefile(source, trash[0])  # real os.link already succeeded
             linked_trash.extend(trash)
@@ -149,7 +149,7 @@ async def test_partial_stage_cleanup_failure_is_closed_and_observable(
 
     def fail_both_unlinks(path, *args, **kwargs):
         attempted.append(Path(path))
-        trash = files_under(root / ".trash")
+        trash = [p for p in files_under(root / ".trash") if p.suffix != ".json"]
         assert len(trash) == 1 and os.path.samefile(source, trash[0])
         raise OSError(payload)
 
@@ -158,10 +158,11 @@ async def test_partial_stage_cleanup_failure_is_closed_and_observable(
         with caplog.at_level(logging.ERROR):
             with pytest.raises(StorageStagingError) as info:
                 await store.stage_delete(tenant_id=tenant_id, storage_key=key)
-    trash = files_under(root / ".trash")
+    trash = [p for p in files_under(root / ".trash") if p.suffix != ".json"]
     assert attempted == [source, trash[0]]
     assert source.read_bytes() == content and trash[0].read_bytes() == content
     assert os.path.samefile(source, trash[0])
+    assert trash[0].with_suffix(".json").exists()  # durable recovery authority survives
     assert str(info.value) == "Storage staging cleanup unresolved"
     assert info.value.__cause__ is None and info.value.__suppress_context__
     emitted = caplog.text + "".join(traceback.format_exception(info.value))
@@ -229,7 +230,7 @@ async def test_partial_stage_cascade_later_source_unlink_failure_restores_earlie
             staged_sources.append(path)
             if len(staged_sources) == 2:
                 assert not staged_sources[0].exists()  # earlier stage completed
-                trash = files_under(root / ".trash")
+                trash = [p for p in files_under(root / ".trash") if p.suffix != ".json"]
                 assert len(trash) == 2
                 assert any(os.path.samefile(path, p) for p in trash)
                 raise failure
