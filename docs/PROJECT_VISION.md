@@ -44,12 +44,13 @@ public-facing surface exists or is planned.
    candidates with at least 5 years of banking experience who know
    Python, SQL, Russian and English") return the requested number of
    matching candidates (when enough exist) with evidence/reasons per
-   candidate, not just an ID list. **Future direction (D-030):** this
-   surface evolves into "MEYAR AI," a bounded local-AI agent workspace —
-   see "Future direction" below.
+   candidate, not just an ID list. **Delivered direction:** MEYAR AI is
+   the primary bounded local-AI workflow foundation, including server-owned
+   ResultSet follow-up/refinement and JD review/confirmation — see
+   "Bounded local-AI HR agent direction" below.
 2. **CV Library** — browse/search all indexed candidates; open a
    candidate profile and the original CV, authorized-access only. Remains
-   a first-class surface under the future agent direction.
+   a first-class surface alongside the delivered MEYAR AI workspace.
 3. **Internal REST API** — documented (OpenAPI/Swagger), authenticated,
    exposes existing deterministic services to approved internal systems.
    Current Jinja adapters also orchestrate workflows; #45 extracts shared application
@@ -173,13 +174,13 @@ planner) → Slice 10 (JD 0–100 scoring + batch ranking) → Slice 11 (Chat
 UI + CV Library UI) → Slice 12 (API/Swagger/README completion) → Slice 13
 (Security + official DoD acceptance). Full detail in `docs/MVP_PLAN.md`.
 
-## Future direction — bounded local-AI HR agent (D-030, D-031, D-032)
+## Bounded local-AI HR agent direction
 
-Following the official-task MVP roadmap above, MEYAR's primary future user
-experience is a **bounded local-AI HR agent** ("MEYAR AI"), not indefinite
-growth of the natural-language search/filter surface. This does not change
-the permanent product principles, which now apply explicitly to every
-future agent tool call, not only the Slice 9 search planner:
+D-030/D-031/D-032 established this direction as future work at the time of those
+historical decisions. Subsequent accepted implementation delivered **MEYAR AI**
+as the primary bounded local-AI HR workflow foundation, alongside Candidate
+Library / Candidate Detail. The permanent principles apply to current agent
+capabilities and any reviewed future expansion:
 
 > AI understands. Database remembers. Search retrieves. Deterministic
 > policy evaluates. Evidence explains. Humans decide.
@@ -191,20 +192,43 @@ Candidate-content AI remains local-only via Ollama; no external AI API may
 ever receive candidate content, in the agent's tool-calling loop or
 anywhere else.
 
-Target primary product surface: **MEYAR AI + Candidate Library / Candidate
-Detail**. `SearchPlan` and the deterministic policy/validation machinery
-introduced in Slice 9 are retained as internal typed tool/policy
-boundaries — the agent invokes typed tools; it does not bypass schema
-validation, the prohibited-attribute policy, no-silent-weakening rules,
-tenant/auth boundaries, or evidence/provenance rules, which apply to
-LLM-produced tool arguments exactly as they apply to today's NL search
-path. The deterministic language fast-path added in Slice/M7 work is
-frozen and carries an explicit sunset condition tied to the agent reaching
-accepted functional parity. The existing Job/vacancy backend and
-deterministic evaluation engine are retained unchanged; the vacancy UI's
-role shifts toward reviewing/confirming agent-drafted criteria rather than
-growing as a hand-built CRUD surface. Full detail, rationale, and
-supersession of prior framing: `docs/DECISIONS.md` D-030, D-031, D-032.
-Roadmap slices and GitHub milestones/issues: `docs/MVP_PLAN.md` and GitHub
-milestones **M8 — Bounded Local-AI HR Agent Platform** / **M9 —
-Deployment, Benchmark & Integration Readiness** (issues #30–#37).
+### Delivered workflow foundation
+
+MEYAR AI uses typed capability registration, bounded server-owned plans and
+structured dialogue/clarification state over existing domain services. #49
+server-owned ResultSet authority and conversational follow-up/refinement are
+delivered. JD drafting, review/conflict resolution and amendment lead to explicit
+human confirmation, then deterministic evaluation/ranking.
+
+Human authority is the implemented live User + TenantMembership + BrowserSession
+and active Tenant boundary. Job creation is HUMAN_ACTION_ONLY with CSRF and exact
+server-held proposal authority; AgentDraftConfirmation preserves durable identity
+and replay/idempotency. Machine API keys do not confer human confirmation authority.
+
+`SearchPlan` and the deterministic policy/validation machinery from Slice 9 remain
+internal typed tool/policy boundaries. Agent arguments retain schema validation,
+prohibited-attribute policy, no-silent-weakening, tenant authorization and accepted
+evidence/provenance requirements. The existing Job/criteria and deterministic
+evaluation engines remain scoring/ranking authority. The deterministic language
+fast-path remains frozen under D-031; its existing sunset condition is tied to
+accepted functional parity, not an automatic rewrite.
+
+### Remaining contracts and future expansion
+
+#45 completes client-neutral shared application/API contracts for these accepted
+workflows; it does not rebuild them. Human HTTP/JSON session/authentication design
+and shared successful original-CV access auditing remain explicit #45 residuals.
+
+#50 dedicated evidence-backed arbitrary candidate Q&A and deterministic
+multi-candidate comparison remain unimplemented, deferred post-presentation work.
+They are distinct from delivered #49 follow-ups and consume accepted #45 contracts
+where relevant. No #50 capability is claimed here.
+
+Future external or consequential capabilities require actual requirements and new
+reviewed scope. Generic #34 expansion is deferred and #37 integrations conditional;
+neither creates an initial-deployment requirement. Any new consequential capability
+must retain accountable human confirmation, deterministic authority and privacy rules.
+
+Historical rationale and supersession: `docs/DECISIONS.md` D-030/D-031/D-032.
+Current phase sequence, bounded milestone ownership and remaining scope: D-115,
+[ROADMAP_NORMALIZATION.md](ROADMAP_NORMALIZATION.md) and `docs/MVP_PLAN.md`.

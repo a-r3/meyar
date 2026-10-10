@@ -366,8 +366,10 @@ boundary:
 - Tenant isolation at the data-access layer (no route trusts a
   client-supplied tenant id).
 - Auth/session/CSRF protections unchanged in the deployed configuration.
-- Original-CV access remains authorized/audited — no anonymous/public read
-  path introduced by deployment tooling.
+- Original-CV authorization must remain unchanged. Successful UI download access
+  is not yet audited; #45 must add shared successful-access auditing for UI/API.
+  After #45 acceptance, #35 must preserve that authorization/audit behavior and
+  must not introduce an anonymous/public bypass.
 - No candidate/JD content exfiltration: local Ollama only, never publicly
   exposed, no external/cloud AI endpoint reachable from the deployed service.
 - Secrets (DB credentials, API keys, model config) live outside Git and are

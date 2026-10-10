@@ -361,44 +361,58 @@ single deployable FastAPI app + one background worker process, both from
 the same codebase. The internal chat/CV-Library surface is server-rendered
 by that FastAPI app (Slice 11, D-018).
 
-## 22. Future direction — bounded local-AI agent (D-030, D-031, D-032)
+## 22. Bounded local-AI agent direction — delivered foundation and remaining expansion
 
-MEYAR's primary future UX is a bounded local-AI HR agent ("MEYAR AI")
-sitting in front of the domain services this spec already defines — it is
-additive to, not a replacement of, sections 1–21. Concretely:
+D-030/D-031/D-032 originally set a future bounded local-AI HR agent direction.
+Those decisions retain their historical rationale and scope. Subsequent accepted
+work delivered the MEYAR AI foundation described below; D-115 governs remaining
+phases. This foundation extends the domain services in sections 1–21 without
+replacing their deterministic policy, privacy or authorization boundaries.
 
-- **Section 1 (product flow)** gains a future orchestration step between
-  "internal chat UI" and the deterministic policy engine: a typed
-  tool-dispatch layer through which the agent invokes existing domain
-  services (search, evaluation, job/criteria) — the deterministic policy
-  engine (§4, §13, §14) remains the sole authority over criterion status
-  and score, unchanged.
-- **Section 3 (local AI)** is unchanged in its local-only boundary
-  (`meyar.llm.LLMProvider`, Ollama-only, no direct import elsewhere) — the
-  future agent orchestration layer is built on top of this same boundary,
-  not a new one.
-- **Section 15 (semantic search)**'s `SearchPlan`/planner boundary (D-016)
-  becomes the internal typed tool/policy contract an agent's tool calls are
-  validated against, rather than the user-facing NL-parse target it is
-  today (D-031). Every LLM/agent-produced tool argument remains untrusted
-  input, subject to the same schema validation, prohibited-attribute
-  policy, no-silent-weakening rule, tenant/auth boundary, and
-  evidence/provenance rule as today's NL search path — tool-calling does
-  not create a weaker or parallel validation surface.
-- **Section 17 (internal UI)** gains a future primary "MEYAR AI" workspace
-  surface, additive to the existing FastAPI/Jinja `ui/` sub-app; no SPA/Node
-  dependency is introduced by this direction.
-- **Section 13/14 (matching criteria/engine)** are unchanged; a future
-  agent may propose a structured criteria *draft* for human review, but
-  never bypasses `JobCriteriaVersion`'s existing validation or the
-  deterministic evaluation pipeline.
-- **Confirmed mutations.** Any future agent action that mutates data
-  requires: a validated server-side pending action, an accountable human
-  confirmation (extending §17's session model with real user identity, not
-  only an API-key-derived session), typed-tool execution through the
-  existing domain services, and an audit record — no silent mutation path
-  exists or is planned.
+### Delivered foundation
 
-Full rationale, scope, and roadmap: `docs/DECISIONS.md` D-030/D-031/D-032,
-`docs/PROJECT_VISION.md` "Future direction," `docs/MVP_PLAN.md`, and GitHub
-milestones **M8**/**M9** (issues #30–#37).
+- **MEYAR AI workspace and Agent Core.** The primary FastAPI/Jinja workflow
+  includes typed capability registration, bounded server-owned orchestration/plans
+  and structured dialogue/clarification state (Agent Core v2, D-092–D-095).
+  It invokes existing domain services; no SPA/Node dependency or parallel policy
+  engine is introduced. The local-only provider boundary in §3 remains unchanged.
+- **Search and ResultSet follow-ups.** The agent uses validated typed search
+  contracts over the structured/semantic services in §15. `SearchPlan` remains
+  an internal tool/policy boundary. #49 server-owned ResultSet authority supports
+  conversational follow-up/refinement; the model cannot invent membership or order.
+  Tool arguments remain untrusted and retain schema, prohibited-attribute,
+  no-silent-weakening, tenant and evidence/provenance validation.
+- **JD draft/review/amendment.** The delivered workflow proposes server-owned
+  drafts for human review, resolves conflicts/amendments and binds criteria to
+  canonical source authority. It cannot bypass §13 criteria validation or §14's
+  deterministic evaluation pipeline. Unsupported requirements remain unscored.
+- **Accountable human confirmation.** Live User + TenantMembership + BrowserSession
+  and active Tenant authority is implemented. Machine API keys remain a separate
+  access path. Job creation is HUMAN_ACTION_ONLY: an authenticated, CSRF-protected
+  human confirms the exact live server-held proposal. AgentDraftConfirmation
+  preserves replay/idempotency and durable confirmation identity; no silent Job
+  mutation occurs in agent turns. #46 retention preserves consequential provenance.
+- **Deterministic authority.** Existing evaluation/scoring/ranking services alone
+  determine criterion status and scores (§4, §13, §14, §16). The LLM interprets
+  and explains; evidence and human confirmation remain authoritative boundaries.
+
+### Remaining contracts and expansion
+
+- **#45 — shared application/API contracts:** extract/expose existing workflow
+  orchestration and client-neutral responses without rebuilding JD/search/scoring
+  policy. Human HTTP/JSON authentication/session transport still requires explicit
+  review before human JSON endpoints. Shared successful original-CV access auditing
+  for UI/API is a remaining #45 requirement, not delivered download behavior.
+- **#50 — deferred capability:** dedicated evidence-backed arbitrary candidate Q&A
+  and deterministic multi-candidate comparison remain unimplemented. They are
+  separate from delivered #49 follow-up/refinement and consume accepted #45
+  contracts where relevant; they are not an initial-deployment gate.
+- **Future concrete mutations/integrations:** require actual requirements and a new
+  reviewed scope. Generic #34 multi-action expansion is deferred; #37 integrations
+  are conditional. Any consequential capability must preserve server-held proposal
+  authority, accountable human confirmation, typed domain execution and privacy-safe
+  audit. Existing human identity is reused, not a future API-key browser bridge.
+
+Historical rationale: `docs/DECISIONS.md` D-030/D-031/D-032. Current delivery and
+remaining scope: `docs/PROJECT_VISION.md` "Bounded local-AI HR agent direction",
+`docs/MVP_PLAN.md`, D-115 and [ROADMAP_NORMALIZATION.md](ROADMAP_NORMALIZATION.md).

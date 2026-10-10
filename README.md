@@ -201,14 +201,15 @@ reconciliation), identity/profile extraction with claim-level evidence
 attribution, local embeddings, structured/semantic/hybrid search, the AZ/EN
 natural-language search and JD-requirement interpretation described above,
 deterministic evaluation/scoring/ranking, the MEYAR AI conversational
-workflow (search, JD drafting, review, confirmation, ranking), the CV
+workflow (search, JD drafting, review, confirmation, ranking), #49 server-owned
+ResultSet authority and conversational result-set follow-up/refinement, the CV
 Library/candidate detail UI, and the internal REST API below.
 
-**Not yet implemented** (see "Roadmap" and "Known current limitations"):
-agentless deployment tooling completion, the real target-hardware model
-benchmark, conversational follow-up on a prior result set, evidence-backed
-candidate Q&A/comparison, and full API-first parity for every agent
-workflow step.
+**Not yet implemented / deferred** (see "Roadmap" and "Known current limitations"):
+#50 dedicated evidence-backed arbitrary candidate Q&A and deterministic
+multi-candidate comparison; #45 remaining shared application/API contract parity;
+#35 deployment completion; and #36 real target benchmark/production model approval.
+#49 follow-up/refinement is delivered and is distinct from deferred #50 capabilities.
 
 ## Architecture
 
