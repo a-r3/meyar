@@ -1,5 +1,12 @@
 # MEYAR — Target-Mac Benchmark & Model-Approval Gate
 
+**Current scope (D-115 / #36):** A. complete and verify the full harness BEFORE
+bank visit; B. execute ON the real target Mac. Current script is only a partial
+foundation. Dependencies: accepted post-audit application release, accepted #35
+lifecycle and actual bank Mac availability. No coding agent is required on the target.
+Production LLM/embedding approval remains blocked until real target measurements.
+Full required matrix: [#36 normalized scope](ROADMAP_NORMALIZATION.md#issue-36).
+
 **FINAL TARGET-MAC GATE NOT YET EXECUTED.** This document describes the
 harness and process; it does not itself constitute the acceptance run.
 
@@ -56,7 +63,8 @@ approval, never invented and applied unilaterally.
 
 ## Harness
 
-`backend/scripts/target_mac_benchmark.py` — run on the target machine:
+`backend/scripts/target_mac_benchmark.py` — current partial foundation.
+Developer-checkout harness verification only (not final production deployment):
 
 ```bash
 cd backend
@@ -75,9 +83,10 @@ parse, DOCX parse, profile extraction, and embedding creation directly
 — these need only a reachable local Ollama, no seeded database. It does
 NOT yet measure structured search, semantic/hybrid search, NL planning,
 deterministic score, or batch rank — those require a seeded tenant/job/
-candidate fixture and are explicitly deferred to be wired in using the
-same synthetic end-to-end fixture Phase F will build, at the time of the
-actual target-Mac run — not fabricated ahead of that fixture existing.
+candidate fixture. #36 must wire these and the complete workload/resource/recovery
+matrix into a verified synthetic harness BEFORE the bank visit. They must not be
+reported PASS while unmeasured. The script's older "wire during target run" comment
+is historical planning, superseded by this roadmap; no script changes occur here.
 
 A dry run of this harness was executed on the development machine
 during Slice 13 preparation purely to prove the harness code itself
@@ -105,16 +114,18 @@ and hash, platform, and service readiness codes. Verify its checksums with
 script below remains the Issue #36 performance authority; diagnostics do
 not establish latency, memory, concurrency, or production model approval.
 
-On the confirmed target Mac mini M4 Pro:
+On the confirmed target Mac mini M4 Pro, the operator must use the verified immutable
+installed release and approved offline benchmark payload, protected host settings,
+synthetic data and agentless runbook. Do not deploy by Git checkout, `uv sync` or
+manual source editing. Current partial script is not a final installed-release harness;
+#36 must define and verify that invocation/dataset/artifact contract before the visit.
+No unimplemented production command is invented here. #35 owns fresh schema initialization
+and staged updates; a benchmark does not authorize arbitrary migrations.
 
-```bash
-uname -a; sw_vers; system_profiler SPHardwareDataType   # record, never the serial number
-cd backend
-uv sync --locked
-# point MEYAR_DATABASE_URL / MEYAR_OLLAMA_BASE_URL at a real local Postgres/Ollama
-uv run alembic upgrade head
-uv run python scripts/target_mac_benchmark.py --out target-mac-report.json
-```
+Record safe hardware/OS/runtime identity (exclude serial numbers), release/schema/model
+digests, cold/warm operations, resources/concurrency and full workload/recovery results.
+Use PASS/FAIL/INCOMPLETE/NOT_TARGET_HARDWARE distinctions from #36. Missing measurements
+are INCOMPLETE, not PASS. Diagnostics identify the release but do not prove performance.
 
 Then record the result in this file's Status section and in
 `docs/DECISIONS.md` D-020 (item 15), and update `docs/STATUS.md`'s matrix

@@ -1,5 +1,68 @@
 # MEYAR — Status
 
+## Current authority — 2026-10-09 (D-115)
+
+#46 is independently ACCEPTED, owner Squash-MERGED through PR #128, post-merge
+full-tree verified and CLOSED. Accepted remote main/squash:
+`386ae9da22f2e7cbb4286cde439292d8f21e25e4`; accepted PR head:
+`254895c2b6890019c84bff90f00b88038854a097`; both trees:
+`96a9934ffbd997cee5d7d5c2b0f3e2ba185d2b94`.
+Accepted-head CI [37937363994](https://github.com/a-r3/meyar/actions/runs/37937363994)
+SUCCESS. The initial rejected head and correction records below remain historical.
+
+The roadmap audit is OWNER-ACCEPTED WITH AMENDMENTS. This normalization is
+DOCUMENTATION / GITHUB ISSUE METADATA ONLY; its PR awaits independent audit.
+
+**Authoritative sequence:** #46 CLOSED → normalization accepted + owner-merged
+→ #45 API-first application contract completion → independent acceptance
+→ owner manual Squash merge → post-merge verification
+→ Comprehensive Adversarial Product + Architecture Audit
+→ all P0/P1 + owner-selected P2 remediation → full re-audit accepted
+→ #35 deployment completion → #36 real Target-Mac benchmark/production model selection
+→ #20 final DoD / production acceptance.
+
+- #45 is the NEXT MANDATORY ENGINEERING PHASE after normalization acceptance/merge.
+  Extract/expose accepted workflows through shared application/principal and HTTP/JSON
+  contracts; do not rebuild JD/scoring/search policy. Scope A–G is versioned in
+  [ROADMAP_NORMALIZATION.md](ROADMAP_NORMALIZATION.md) and the live issue.
+- #34 existing JD confirmation architecture is substantially delivered. Concrete
+  application/human-JSON/audit residuals belong to #45; generic multi-action expansion
+  is deferred. OPEN, OWNER-CLOSURE-READY after independent normalization review.
+- #38 findings are disaggregated: A→#45; B/C1/C3→future audit/debt register;
+  C2/C4 resolved. OPEN, OWNER-CLOSURE-READY after ownership-transfer review.
+- #35 is QUEUED DEPLOYMENT-COMPLETION PHASE. PR1–PR13 operator tooling exists,
+  including immutable release/offline install/config/schema/readiness, backup/restore,
+  update/rollback, offline Ollama/models, launchd, reboot/HTTPS/diagnostics/evidence.
+  Real topology/prerequisites, scheduling/log policy, physical Apple Silicon lifecycle,
+  final accepted release and operator/security handoff remain unaccepted.
+- #36 is OPEN. Harness completion BEFORE bank visit is separate from actual full-matrix
+  execution ON the bank Mac mini M4 Pro (12-core CPU, 16-core GPU, 24 GB unified memory,
+  512 GB SSD). Current harness is partial; production model approval remains blocked.
+- #20 is the OPEN final DoD umbrella: #45 + audit/remediation/full re-audit + #35/#36 +
+  security/operational prerequisites + production models + final official traceability
+  + owner sign-off. The target run is not its sole remaining mandatory condition.
+- #49 and #84/#85/#86/#87/#88 foundations are delivered and CLOSED.
+- #50 is POST-PRESENTATION / DEFERRED CAPABILITY; #37 DEFERRED / CONDITIONAL.
+  Both remain OPEN, unmilestoned, and are not mandatory initial deployment gates.
+- MASTER_SPEC §11 per-tenant sliding-window rate limiting is genuinely unimplemented:
+  validated configuration alone is not enforcement. AUD-RATE in the future comprehensive
+  audit/debt register and #20 final DoD explicitly retain this requirement; no severity
+  or implementation design is assigned here.
+
+Milestones remain bounded delivery goals: M5→#20, M7→#38 pending owner closure,
+M8→#34/#45, M9→#35/#36. #50 removed from M8 and #37 from M9; no milestone closed,
+renamed or created. M7 becomes closure-ready after #38 owner closure; M8 after #34
+and #45 acceptance/closure; M9 after #35/#36. Optional backlog must not hold them open.
+
+Full issue bodies, evidence and owner actions: [ROADMAP_NORMALIZATION.md](ROADMAP_NORMALIZATION.md).
+
+## Historical delivery and audit records
+
+The following snapshots preserve facts and instructions at their recorded heads.
+Their OPEN/pending/current-phase wording is historical, superseded by D-115 above;
+it does not authorize starting #35 or resurrect #46/#49. Earlier rejected heads
+remain rejected history; subsequent acceptance is recorded above.
+
 **PR #128 independent acceptance correction (D-114):** initial audited head
 `a4fba702d22b2f7557475b46ec4f8657558a4052` had an L-6 blocker: confirmed
 BrowserSessions were permanently excluded from explicit retention. Same-PR correction
@@ -298,7 +361,7 @@ single Alembic head. Details and final acceptance/post-merge evidence are record
 in the PR-3 validation document. This documentation-only follow-up starts no next
 implementation slice and does not advance #35/#36/#50.
 
-## Current phase
+### Historical phase snapshot
 
 **Issue #46 PR-2 — independently ACCEPTED and MERGED through PR #108;
 PR-2 is COMPLETE, but #46 remains OPEN.** Accepted head:
@@ -619,7 +682,7 @@ attribution) is merged and issue #62 is CLOSED. Deterministic evaluations
 use `meyar-policy-v3`; historical v2 rows remain immutable. The ranking
 algorithm and `meyar-score-v1` numeric formula remain unchanged, while
 corrected criterion outcomes can change scores and rankings in that case.
-**Issue #35 is the active engineering phase.**
+**Historical 2026-09 phase: issue #35 was then active (superseded by D-115).**
 
 **PR #42 (M8 Slice 4 — Agent Product UX & JD Matching, issue #33) is
 MERGED — squash SHA `584eb3584f10abf13db03046d32f85041b4df2ab` on `main`.**
@@ -633,7 +696,7 @@ Post-merge, `main` at that SHA carries a clean quality gate and a clean
 Readiness (issue #27, PR #29, M7) is likewise merged/accepted — see the
 correction below in this same section.
 
-**Current active engineering phase: issue #35 — Agentless Mac Deployment
+**Historical active engineering phase (superseded by D-115): issue #35 — Agentless Mac Deployment
 Readiness (M9).** Tested, executable (not merely documented)
 provisioning/configuration/PostgreSQL-pgvector/migration/Ollama-and-model-
 setup/service-lifecycle/healthcheck/backup-restore/update-rollback/
@@ -2111,44 +2174,17 @@ items 3, 7, 9). **M6 has no remaining open issues but is deliberately
 left open pending explicit owner milestone-closure approval** — see
 "Current phase" above.
 
-## Blockers
-**Mac Mini benchmark execution** — the sole remaining mandatory blocker to
-MVP closure, now sequenced behind issue #35 (Agentless Mac Deployment
-Readiness, the current active phase): issue #35's tooling lands first, then
-issue #36 executes the benchmark. Target hardware is owner-confirmed (Mac
-mini M4 Pro, 12-core CPU/16-core GPU/24GB unified memory/512GB SSD —
-reference, not lock-in), and the benchmark harness is built and dry-run
-smoke-tested, but it has not been executed on the actual confirmed hardware
-— this also blocks approving a final production LLM/embedding model
-(D-014). Other previously-open items: document encryption-at-rest remains a
-deployment responsibility, not an application feature, per
-`docs/SECURITY_PRIVACY.md` (unchanged); D-009 Ollama upgrade needs root
-(unchanged, non-blocking). Git remote is connected but is a
-personal/temporary one (D-012) — official bank-owned remote still pending,
-migration keeps full history when it arrives (organizational, non-blocking
-for MVP).
+## Current blockers and next action
 
-## Next action
-1. **Issue #35 — Agentless Mac Deployment Readiness (M9, current active
-   phase).** Complete tested, executable provisioning/configuration/
-   migration/Ollama-setup/service-lifecycle/healthcheck/backup-restore/
-   update-rollback/diagnostics tooling, with no Claude Code/Codex/AI-coding-
-   agent dependency on the target deployment host.
-2. **Issue #36 — Real Target-Mac Model Selection & Benchmark (M9, next,
-   depends on #35).** Run `backend/scripts/target_mac_benchmark.py` on the
-   actual confirmed target hardware and record a production model decision.
-   M5/issue #20 must not close until this moves to DONE — #35/#36 do not
-   supersede or close M5/#20.
-3. **M6 closure decision** — issue #23 is closed and M6 has no remaining
-   open issues; closing the milestone itself requires an explicit owner
-   decision (never invented automatically — see
-   `.claude/rules/git-workflow.md`).
-4. **Git Infrastructure** — remote connected (`a-r3/meyar`, private,
-   temporary — D-012); governance merged (`16929fd`). May later migrate
-   to an official bank-owned remote (history preserved).
+Independently audit and owner-merge this normalization before #45 implementation.
+After #45 acceptance/merge/post-merge verification, execute the comprehensive audit,
+required remediation and full re-audit before #35. #36 still needs complete harness
+preparation before bank visit and actual target availability/execution. Final production
+model, topology/environment/security approvals and #20 traceability/sign-off remain
+pending. No coding agent is required on the target host. See D-115 and
+[ROADMAP_NORMALIZATION.md](ROADMAP_NORMALIZATION.md) for issue and owner actions.
 
-The previously planned "Slice 6 — External Async Evaluation API" is
-CANCELLED (superseded by D-011) — it is not what "Slice 6" now refers to.
+The cancelled external async-evaluation product scope remains superseded by D-011.
 
 ## GitHub milestone status
 
@@ -2162,15 +2198,17 @@ due date because the official timeline has not been supplied.
 | M2 — Candidate Search Intelligence | Slices 7–9 | CLOSED — PRs #9/#11/#13 merged; issues #8/#10/#12 closed |
 | M3 — JD Matching & Ranking | Slice 10 | CLOSED — PR #15 merged at `1c9dbbd`, issue #14 closed |
 | M4 — Internal Product Interface & API | Slices 11–12 | CLOSED — Slice 11 merged (PR #17, issue #16 closed); Slice 12 merged (PR #19 at `93fa567`, issue #18 closed) |
-| M5 — Security, Target-Mac Validation & MVP Acceptance | Slice 13 + target-Mac benchmark | OPEN — issue #20 open; PR #22 merged at `a709ce1` implementing Pass 1 (original CV, no-exfiltration, backup/restore, audit guard, multilingual evidence) with `Refs #20`; Mac Mini benchmark execution on the now owner-confirmed target hardware remains the sole open mandatory gate |
+| M5 — Security, Target-Mac Validation & MVP Acceptance | #20 final DoD / production acceptance | OPEN — consumes #45, comprehensive audit/remediation/full re-audit, #35/#36, production model decision, final security/operational prerequisites and official traceability/sign-off |
 | M6 — Operational CV Intake & Reconciliation | Slice 14 | CLOSED — Slice 14 merged (PR #24 at `f6e31ff`), issue #23 closed; owner-approved closure |
-| M7 — HR UI & Presentation Readiness | HR UI productization (chore, issue #27) | OPEN (milestone not yet explicitly closed by owner) — PR #29 MERGED at `1f8bd12`, closing issue #27; Job lifecycle implemented; see D-023 through D-029 |
-| M8 — Bounded Local-AI HR Agent Platform | Slices 1–5 (issues #30–#34) | OPEN — Slice 1 (#30), Slice 2 (#31), Slice 3 (#32) merged (PR #41 at `8c1782f`); Slice 4 (#33) MERGED as PR #42 at `584eb35`, closing issue #33 and, via its full D-042–D-065 corrective series, issue #44; Slice 5 — Confirmed Actions Framework (issue #34) remains OPEN, not started |
-| M9 — Deployment, Benchmark & Integration Readiness | Slices 6–8 (issues #35–#37) | OPEN — created 2026-09-01 per D-030/D-031/D-032; issue #35 (Agentless Mac Deployment Readiness) is the current active engineering phase, implementation in progress; issue #36 (Real Target-Mac Model Selection & Benchmark) is next, not yet started; does not supersede or close M5/#20 |
+| M7 — HR UI & Presentation Readiness | #38 historical findings disposition | OPEN — #38 OWNER-CLOSURE-READY after independent transfer review; milestone closure is OWNER action |
+| M8 — Bounded Local-AI HR Agent Platform | #34 historical disposition + #45 contracts | OPEN — JD confirmation substantially delivered; #45 next mandatory engineering after normalization; #49/core foundations CLOSED; deferred #50 unmilestoned |
+| M9 — Deployment, Benchmark & Integration Readiness | #35 deployment completion + #36 target execution | OPEN — #46 CLOSED; #35 queued after #45/audit/remediation/full re-audit; conditional #37 unmilestoned |
 
-## Official requirement gap matrix
+## Official requirement foundation matrix — dated evidence, not final acceptance
 
-Against `AI-PROJ-CV-01` + owner clarifications. DONE = implemented and
+Historical Slice-13 foundation evidence against `AI-PROJ-CV-01` + owner clarifications.
+Final current-release traceability and rate-limit disposition belong to #20 after the
+D-115 gates; these dated counts cannot substitute for production sign-off. DONE = implemented and
 tested; PARTIAL = foundation exists, capability incomplete; NOT STARTED =
 no code yet.
 
@@ -2185,7 +2223,7 @@ no code yet.
 | Strict JSON validation | DONE | Pydantic v2, `extra="forbid"`, bounded retry (Slice 4, Slice 7 identity, Slice 9 planner) | — | 4, 7, 9 |
 | Uncertainty handling | DONE | `UNKNOWN` never auto-downgraded (D-010), Slice 5 | — | 5 |
 | Candidate DB | DONE | `Candidate`, `CandidateDocument`, `CandidateProfileVersion`, `CandidateIdentityVersion` (Slice 7, D-014) | — | 3, 4, 7 |
-| Original file reference | DONE | Opaque storage id + `DocumentStorage` abstraction (Slice 3) | Opaque reference is DONE; the separate mandatory "open original CV" product capability (`docs/PROJECT_VISION.md`) is not implemented — carried into Slice 13 / M5 final MVP acceptance, not Slice 11 | 13 |
+| Original file reference | DONE | Opaque storage id + `DocumentStorage` abstraction (Slice 3) | Authorized UI original attachment download and separate canonical preview are implemented; shared UI/API successful-access audit and HTTP retrieval parity belong to #45 | 13 |
 | Local CV folder migration/indexing | DONE | Symlink-safe recursive scanner, SHA-256 content-hash incremental/idempotent indexing, existing ingestion pipeline reused, tombstone-not-delete on removal (Slice 6, D-013) | — | 6 |
 | Local embeddings / vector storage | DONE | Local `EmbeddingProvider`/`OllamaEmbeddingProvider` (loopback-enforced), pgvector-backed `CandidateEmbeddingVersion` with version/provenance, idempotent, dimension-agnostic column (Slice 7, D-014) | — | 7 |
 | Access control | DONE | API-key auth, scopes, tenant isolation (Slice 1) | Extend scopes as new endpoints ship | ongoing |
@@ -2219,8 +2257,9 @@ separate mandatory item tracked in issue #20. The one remaining PARTIAL row
 (Git branch/PR workflow) is organizational, pending a bank-owned remote, and
 is not a Slice 13 or MVP-closure blocker. The two remaining NOT STARTED rows
 are Mac Mini/model benchmark (mandatory — target hardware is now
-owner-confirmed, but execution on that hardware has not occurred; this is the
-sole remaining mandatory MVP blocker) and OCR (explicitly deferred/non-MVP
+owner-confirmed, but execution on that hardware has not occurred; this was the
+remaining hardware blocker at the dated Slice-13 baseline; D-115 now requires the
+complete #45/audit/#35/#36/#20 sequence) and OCR (explicitly deferred/non-MVP
 per D-007, durable decision authority, not a blocker). **MVP cannot be
 declared complete and M5/issue #20 must not close until the Mac Mini
 benchmark row moves to DONE** on the actual confirmed target hardware.

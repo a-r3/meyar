@@ -1,5 +1,29 @@
 # MEYAR — MVP Plan
 
+## Current mandatory roadmap — D-115
+
+#46 CLOSED → normalization accepted + owner-merged → #45 shared application/API
+contracts → independent acceptance → owner Squash merge → post-merge verification
+→ comprehensive adversarial product/architecture audit → all P0/P1 + owner-selected
+P2 remediation → full re-audit accepted → #35 deployment completion → #36 real target
+benchmark/production model decision → #20 final DoD/production acceptance.
+
+#34 existing JD confirmation is substantially delivered; concrete residuals transfer
+into #45; speculative generic expansion is deferred. #38 is owner-closure-ready
+after item-level transfers (#45 and the future audit/debt register). Both remain OPEN.
+#49/core foundations are delivered. #50 deferred Q&A/comparison and #37 conditional
+integrations remain OPEN/unmilestoned and are not mandatory initial-deployment gates.
+#35 is QUEUED DEPLOYMENT-COMPLETION PHASE with PR1–PR13 tooling already delivered;
+#36 harness completion before the bank visit precedes actual full-matrix target execution.
+
+Milestone principle: bounded delivery goals, not indefinite optional-backlog buckets.
+M5→#20, M7→#38 pending owner closure, M8→#34/#45, M9→#35/#36; no milestone closed.
+Full normalized issue scope, milestone actions and explicit audit debt including
+rate limiting: [ROADMAP_NORMALIZATION.md](ROADMAP_NORMALIZATION.md).
+
+The slice history below preserves original planning/delivery boundaries; D-115
+supersedes its sequencing and generic future-scope assumptions.
+
 Canonical product direction: `docs/PROJECT_VISION.md`. This document
 sequences the implementation slices.
 
@@ -124,20 +148,23 @@ ranked list with reasons. **DONE and merged** (D-017, issue #14, PR #15).
 
 Server-rendered chat/search, candidate results, CV Library, candidate detail,
 existing-job JD matching results, and the API-key browser-session bridge.
-Implemented on `feat/internal-chat-cv-library-ui`, pending independent
-acceptance and owner merge (D-018, issue #16). Arbitrary raw-CV delivery and
+Accepted and merged through PR #17; issue #16 CLOSED (D-018).
+The API-key browser bridge was later retired for User/membership/BrowserSession
+authority. Arbitrary raw-CV delivery and
 final REST/OpenAPI work remain outside this slice.
 
 ### Slice 12 — REST API / Swagger / README Completion
 
 Finalize the internal API surface for the above capabilities; OpenAPI/
-Swagger docs; README usage examples. Not started.
+Swagger docs; README usage examples. DONE through PR #19 / D-019.
+Further client-neutral workflow contract gaps are explicitly #45, not a repeat of Slice 12.
 
 ### Slice 13 — Security + Official Definition-of-Done Acceptance
 
 Full acceptance pass against the official DoD matrix (`docs/STATUS.md`),
 including bad-file testing, scoring consistency, and an
-external-network/exfiltration verification pass. Not started.
+external-network/exfiltration verification pass. Historical Pass 1 merged through
+PR #22 / D-020; final #20 acceptance now consumes the D-115 sequence above.
 
 ### Slice 14 — CV Folder Import & Continuous Ingestion
 
@@ -196,9 +223,10 @@ until its Target-Mac gate is executed — see Slice 7 below).
   explanations, JD-to-draft-criteria, human review, deterministic ranking;
   de-emphasizes classic search/Vacancies navigation once accepted; evaluates
   and, if accepted, acts on the D-031 fast-path sunset condition.
-- **Slice 5 — Confirmed Actions Framework** (#34): propose → validated
-  pending action → human confirmation (gated on Slice 1 identity) → typed
-  tool execution → audit. No silent mutations.
+- **Slice 5 — Confirmed Actions Framework** (#34): JD-specific propose →
+  confirm → mutate substantially delivered. Concrete application/human-JSON/audit
+  residuals belong to #45; arbitrary multi-action expansion is deferred. OWNER
+  closure-ready after normalization review, not a mandatory generic-framework build.
 
 ### M9 — Deployment, Benchmark & Integration Readiness
 

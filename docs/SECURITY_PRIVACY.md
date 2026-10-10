@@ -1,5 +1,11 @@
 # MEYAR — Security & Privacy
 
+**Current acceptance boundary (D-115):** #46 is accepted/merged/CLOSED. #45 shared
+human/application contracts precede comprehensive audit/remediation/full re-audit,
+then #35 deployment completion, #36 real target/model decision and #20 final security/
+production sign-off. Per-tenant request limits remain unimplemented audit/DoD debt;
+no new severity or design is assigned. See [ROADMAP_NORMALIZATION.md](ROADMAP_NORMALIZATION.md).
+
 ## Privacy model
 
 - `CandidateIdentityVersion` (name/contact) is implemented as a model separate
@@ -533,7 +539,7 @@ remains the model-approval evidence boundary.
 | Local inference endpoint exposure | Ollama bound to localhost/internal Docker network only, in every environment; never a public route |
 | Secret leakage via logs/git | PII-safe structured logging (ids only); `.claude` hooks block obvious secret patterns and real CV files from commits |
 | Retry-induced duplicate work/cost | `Idempotency-Key` on unsafe writes where relevant |
-| Inference overload | Process-wide bounded admission gate shared by every `OllamaLLMProvider` and `OllamaEmbeddingProvider` inference call (max active, max queued, finite queue wait, cancellation-safe; D-089); excess agent work gets an HR-safe BUSY outcome, never a 500 or a fabricated answer; agent turns hold no DB connection/transaction/row lock while waiting for or running local inference, and re-validate principal/reservation/context before committing (fail closed); per-tenant rate limit |
+| Inference overload | Process-wide bounded admission gate shared by every `OllamaLLMProvider` and `OllamaEmbeddingProvider` inference call (max active, max queued, finite queue wait, cancellation-safe; D-089); excess agent work gets an HR-safe BUSY outcome, never a 500 or a fabricated answer; agent turns hold no DB connection/transaction/row lock while waiting for or running local inference, and re-validate principal/reservation/context before committing (fail closed); per-tenant sliding-window enforcement remains unimplemented, explicit AUD-RATE future-audit/#20 requirement |
 | Candidate content leaving bank infrastructure via embeddings | Local-only embedding provider abstraction, same boundary pattern as `LLMProvider`; no external embedding API call anywhere in code |
 | Candidate content leaving the host machine via any outbound network call | Formally verified (Slice 13): static inventory confirms three call sites build a local-only HTTP client in the app (`OllamaLLMProvider.health`, `OllamaLLMProvider._chat`, `OllamaEmbeddingProvider.embed`), all loopback-gated; a deterministic runtime guard (`test_no_exfiltration.py`) proves a representative extract+embed workflow, run through the real provider classes, never attempts a non-loopback request. Validated as an application-level, tested-configuration claim — not a physical-firewall/network-layer guarantee. |
 | Candidate content leaving the host machine via process-environment proxy configuration (`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`), even when the logical request URL is loopback | D-047: all three client-construction sites above route through the single shared `meyar.llm.loopback.build_local_only_async_client` boundary, which passes `trust_env=False` — httpx's own environment-derived proxy selection (`_get_proxy_map`) is disabled outright, so the fix does not depend on `NO_PROXY` being set correctly. `follow_redirects` stays explicit `False` so a redirect response cannot carry a request outside the boundary either. Proven at the transport-configuration level (internal `_mounts`/`_trust_env` state, not just `request.url.host`) in `test_ollama_transport_proxy_isolation.py`. See "Local-only Ollama operating contract" below for the host/daemon-level guarantees this does not cover. |
@@ -571,7 +577,7 @@ scripts).
 
 ## API security
 
-Issue #87 proposal (D-091, not accepted): human BrowserSessions are revoked
+Issue #87 (D-091, accepted and merged; #87 CLOSED): human BrowserSessions are revoked
 transactionally on password rotation, user disable, or their membership
 disable; re-enable never revives old cookies. Pending tenant-selection claims
 bind live user/membership security stamps. Failed-login events use a separate
@@ -582,21 +588,27 @@ and the #85 reservation; they grant no scopes, ResultSet, or draft authority.
 CSRF remains mandatory and independent. Agent and classic search text count
 canonical LF characters against the same 4000-character HR limit.
 
-- All non-health routes require `Authorization: Bearer meyar_live_...` (or
+- Protected machine REST routes require `Authorization: Bearer meyar_live_...` (or
   `meyar_test_...` in non-prod).
 - Key verification: look up by prefix, compare SHA-256 hash in constant
   time, check `revoked_at`/`expires_at`, update `last_used_at`.
 - Scopes enforced per-route via a FastAPI dependency.
 - Errors never reveal whether a resource exists in another tenant (404, not
   403-with-details, for cross-tenant reads).
-- Browser UI login posts the API key once to `/ui/login`, exchanges it for a
-  256-bit opaque cookie token, and persists only the token's SHA-256 digest in
-  `BrowserSession`. Every browser request reloads the live API-key row and
-  derives tenant/scopes from it. Sessions expire after eight hours, support
-  revocation/logout, and all authenticated POSTs require per-session CSRF.
-  Cookies are `HttpOnly`, `SameSite=Lax`, `Path=/ui`, and Secure by default;
-  loopback development must opt out explicitly. UI responses are no-store and
-  carry restrictive same-origin browser headers (D-018).
+- Human `/ui/login` uses username/password and live User + tenant membership,
+  issues a SHA-256-digest-backed opaque BrowserSession token and derives role/scopes
+  from live authority on each request. API keys are machine credentials only.
+  Sessions expire after eight hours; password rotation, user/membership disable,
+  tenant suspension and logout revoke or invalidate live authority. Authenticated
+  POSTs require independent CSRF. Cookies are HttpOnly, SameSite=Lax, Path=/ui,
+  Secure by default; loopback development opts out explicitly. UI responses are
+  no-store with same-origin browser headers. D-018's API-key browser bridge is historical.
+- #45 human HTTP/JSON design must explicitly review cookie scope, CSRF, authentication
+  failure semantics and OpenAPI security before implementing human endpoints. Client/
+  model ids are never authority; API keys alone cannot confirm consequential human actions.
+- Current original-CV UI retrieval is an authorized synthetic-filename attachment
+  download with separate canonical preview. Successful-access audit through a shared
+  UI/API application operation remains explicit #45 scope, not a delivered claim.
 
 ## Document storage
 
@@ -664,7 +676,7 @@ through PR #118; earlier pending wording is historical.
 
 ## Retention / deletion
 
-Issue #46 final engineering (D-113), pending independent acceptance, adds one
+Issue #46 final engineering (D-113/D-114), accepted and merged through PR #128, adds one
 bounded privileged-local operator command: `meyar maintain --tenant-id <UUID>`.
 Inspection is the default; apply and session/conversation/audit/empty-candidate
 ages are explicit. No bank/legal retention period is invented. Live storage

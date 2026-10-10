@@ -87,14 +87,24 @@ that debt is resolved.
   workaround only, not CI or production architecture.
 - `qwen3:0.6b` is integration-verified development infrastructure only. Final
   production model selection must occur on the target Mac Mini.
-- Slice 11 (PR #17) and Slice 12 — REST/OpenAPI completion (PR #19) are both
-  merged; **M4 — Internal Product Interface & API is CLOSED**. **M5 —
-  Security, Target-Mac Validation & MVP Acceptance is OPEN**, containing only
-  issue #20 (Slice 13 — Security + Official Definition-of-Done Acceptance,
-  open). Slice 13 implementation Pass 1 is in PR #22 (open); the Target-Mac
-  benchmark execution on the owner-confirmed Mac mini M4 Pro remains the
-  sole mandatory blocker to closing M5. The old External Async Evaluation
-  API Slice 6 remains cancelled and superseded.
+- D-115 is the owner-approved current roadmap authority; full scope and debt ownership
+  are in `docs/ROADMAP_NORMALIZATION.md`. #46 is accepted/merged/CLOSED through
+  PR #128 (squash `386ae9da22f2e7cbb4286cde439292d8f21e25e4`, accepted head
+  `254895c2b6890019c84bff90f00b88038854a097`, identical tree
+  `96a9934ffbd997cee5d7d5c2b0f3e2ba185d2b94`).
+- Sequence: normalization acceptance/merge → #45 → independent acceptance →
+  owner manual Squash merge → post-merge verification → comprehensive adversarial
+  product/architecture audit → all P0/P1 + owner-selected P2 fixes → full re-audit
+  → #35 deployment completion → #36 actual Target-Mac/model decision → #20 final DoD.
+  #35 is queued and already has substantial tooling. #36 harness is partial; target
+  is Mac mini M4 Pro, 12-core CPU/16-core GPU/24 GB unified memory/512 GB SSD.
+- #34 JD confirmation is substantially delivered; residual contracts/audit belong to
+  #45 and generic expansion is deferred. #38 is disaggregated with explicit ownership.
+  Both require independent normalization review before OWNER closure. #49 is delivered.
+  #50 is deferred and #37 conditional, both OPEN/unmilestoned, not initial-deployment gates.
+  M5/#20 remain OPEN for final acceptance, not solely the hardware gate. Per-tenant
+  request rate-limit enforcement remains explicit future-audit/#20 debt (AUD-RATE).
+  The old external async-evaluation scope remains cancelled; PR #22 is merged.
 - The GitHub repository is currently a private personal development repository
   and may later migrate to an official bank-owned repository. Preserve full
   Git history during any migration.

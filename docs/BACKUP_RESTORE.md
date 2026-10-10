@@ -180,7 +180,7 @@ At minimum, confirm:
   candidate_profile_versions, candidate_identity_versions,
   candidate_photo_versions,
   candidate_embedding_versions, evaluations, audit_events)
-- a known candidate's original CV opens via
+- a known candidate's original CV downloads as an authorized attachment via
   `GET /ui/candidates/{id}/documents/{id}/original` and its bytes are
   unchanged (`sha256` match)
 - the current authorized candidate photo row and its derived JPEG survive

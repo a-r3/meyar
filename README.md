@@ -1,5 +1,20 @@
 # MEYAR
 
+## Current delivery sequence (D-115)
+
+#46 is accepted, owner-merged through PR #128 and CLOSED. Verified accepted main:
+`386ae9da22f2e7cbb4286cde439292d8f21e25e4`.
+Owner-approved roadmap: normalization acceptance/merge → #45 shared application/API
+contracts → independent acceptance/owner merge/post-merge verification → comprehensive
+adversarial product/architecture audit → all P0/P1 + owner-selected P2 fixes → full
+re-audit → #35 deployment completion → #36 real Target-Mac/model decision → #20 final DoD.
+#35 has substantial delivered operator tooling and is queued after the audit sequence.
+#34's JD confirmation is substantially delivered; generic expansion is deferred.
+#49/core foundations are delivered; #50 Q&A/comparison is deferred, #37 conditional;
+neither is a mandatory initial-deployment gate. Current benchmark harness is partial.
+See [roadmap scope and debt ownership](docs/ROADMAP_NORMALIZATION.md) and
+[status](docs/STATUS.md). This normalization does not implement the next phases.
+
 MEYAR is an **internal AI Candidate Intelligence & CV Search Platform** for
 bank HR. It ingests candidate CVs, extracts professional facts locally,
 lets HR search/browse the candidate library, and evaluates candidates
@@ -63,7 +78,8 @@ be described here as implemented.
   creating a duplicate candidate.
 - Authenticated original-document access
   (`GET /ui/candidates/{candidate_id}/documents/{document_id}/original`)
-  for authorized HR users only.
+  as an attachment download with a synthetic filename for authorized HR users only,
+  with a separate canonical in-app preview.
 
 ### Candidate understanding
 
@@ -185,14 +201,15 @@ reconciliation), identity/profile extraction with claim-level evidence
 attribution, local embeddings, structured/semantic/hybrid search, the AZ/EN
 natural-language search and JD-requirement interpretation described above,
 deterministic evaluation/scoring/ranking, the MEYAR AI conversational
-workflow (search, JD drafting, review, confirmation, ranking), the CV
+workflow (search, JD drafting, review, confirmation, ranking), #49 server-owned
+ResultSet authority and conversational result-set follow-up/refinement, the CV
 Library/candidate detail UI, and the internal REST API below.
 
-**Not yet implemented** (see "Roadmap" and "Known current limitations"):
-agentless deployment tooling completion, the real target-hardware model
-benchmark, conversational follow-up on a prior result set, evidence-backed
-candidate Q&A/comparison, and full API-first parity for every agent
-workflow step.
+**Not yet implemented / deferred** (see "Roadmap" and "Known current limitations"):
+#50 dedicated evidence-backed arbitrary candidate Q&A and deterministic
+multi-candidate comparison; #45 remaining shared application/API contract parity;
+#35 deployment completion; and #36 real target benchmark/production model approval.
+#49 follow-up/refinement is delivered and is distinct from deferred #50 capabilities.
 
 ## Architecture
 
@@ -583,76 +600,57 @@ must include the updated `backend/uv.lock` when applicable.
 
 ## Current phase and roadmap
 
-**Active: Agentless Mac Deployment Readiness (issue #35).** Goal: MEYAR is
-deployable and operable on the target host by operations staff with no
-Claude Code/Codex/AI-coding-agent dependency of any kind:
+The authoritative D-115 sequence is recorded above and in
+[`docs/ROADMAP_NORMALIZATION.md`](docs/ROADMAP_NORMALIZATION.md). #45 is the next
+mandatory engineering phase after independent normalization acceptance and owner
+merge. It shares/exposes existing conversation/JD/candidate/evaluation behavior
+through trusted application and HTTP contracts; it does not rebuild policy.
 
-```text
-provision -> configure -> PostgreSQL/pgvector -> migrations
-  -> Ollama/model setup -> service lifecycle -> healthcheck
-  -> synthetic smoke -> backup/restore -> update/rollback
-  -> support/log collection
-```
+#35 is **QUEUED DEPLOYMENT-COMPLETION PHASE**, after #45 acceptance/merge/verification,
+comprehensive adversarial product/architecture audit, all P0/P1 + owner-selected P2
+fixes and full re-audit. Existing release/config/schema/readiness/backup/restore/
+update/rollback/offline-model/launchd/diagnostic/reboot/HTTPS/evidence tooling is
+substantial. Real topology, operator assumptions, scheduling/log policy, physical
+Apple Silicon rehearsal and final operational/security handoff remain pending.
 
-Final deployment must be agentless: Claude Code/Codex availability on the
-bank Mac is not assumed, and no AI agent edits live production code there.
-A problem discovered on the bank Mac is diagnosed from logs/a support
-bundle, fixed and tested on a development machine, then released and
-redeployed — never patched in place by an agent on the production host.
+#36 separates complete harness preparation BEFORE bank visit from actual full-matrix
+execution ON the real Mac mini M4 Pro (12-core CPU/16-core GPU/24 GB unified memory/
+512 GB SSD). Current harness is partial; production model approval remains blocked.
+No coding agent is required on the target host; no source editing or checkout/package
+resolution substitutes for the immutable owner-accepted offline release path.
 
-**Next: Real Target-Mac Model Selection & Benchmark (issue #36).** Executes
-the benchmark suite on the actual confirmed reference hardware — Mac mini
-M4 Pro, 12-core CPU, 16-core GPU, 24 GB unified memory, 512 GB SSD — to make
-the final production LLM/embedding model decision. This benchmark **has not
-been executed yet**; nothing in this README should be read as claiming it
-has.
+### Delivered foundations and deferred capability
 
-**Other open tracked work:** issue #45 (API-first parity for the full agent
-workflow) and issue #46 (pre-deployment runtime/ingestion/recovery
-hardening) — see `docs/STATUS.md` for detail.
+#49 server-owned ResultSets and conversational follow-ups are delivered/CLOSED,
+as are #84/#85/#86/#87/#88 foundations. JD-specific human confirmation under #34
+is substantially delivered; residual application/human-JSON/audit contracts belong
+to #45. Generic arbitrary multi-action expansion is deferred.
 
-### Post-presentation capability backlog (planned, not implemented)
-
-Two further capabilities are scoped but **not implemented**:
-
-- **Issue #49 — server-owned search result context and conversational
-  follow-ups.** Lets HR refer back to a previous result set ("bunlardan",
-  "ikinci namizəd", "ilk üçü"). Result membership and ordering must remain
-  server-owned — the LLM interprets that HR *means* the prior result set,
-  but never guesses who was in it or which candidate was "second."
-- **Issue #50 — evidence-backed candidate Q&A and deterministic
-  comparison.** Depends on #49. The intended architecture is a
-  **structured / evidence-aware RAG**, explicitly not "raw CV chunks →
-  vector search → LLM → trust answer":
-
-  ```text
-  authorized candidate reference (via #49's result set)
-    -> structured CandidateProfile facts
-    -> accepted evidence / relevant canonical CV spans
-    -> deterministic calculations where needed (e.g. duration)
-    -> local LLM explanation
-    -> evidence-backed answer
-  ```
-
-  No LLM hiring winner, no LLM-authored numeric hiring score, and
-  `UNKNOWN` whenever evidence is insufficient — same invariants as every
-  other MEYAR AI capability today.
+#50 dedicated evidence-backed candidate Q&A and deterministic multi-candidate
+comparison remain unimplemented post-presentation expansion. Future work consumes
+accepted #45 contracts, server-authorized ResultSets, professional facts/evidence,
+deterministic calculations and local explanation. Unsupported evidence remains
+UNKNOWN; no LLM winner or score authority. #37 enterprise integrations remain
+conditional on real bank requirements. Both issues are OPEN/unmilestoned and are
+not mandatory initial-deployment gates.
 
 ## Known current limitations
 
 - The production LLM/embedding model is not selected — that decision is
   blocked on the real target-hardware benchmark (issue #36), which has not
   yet run.
-- Agentless deployment tooling (issue #35) is in progress; some
-  operational procedures (provisioning, rollback, diagnostics) remain
-  runbook prose rather than executable automation — see
+- Agentless deployment completion (issue #35) is queued. Existing rollback and
+  diagnostics commands are implemented; real provisioning assumptions and physical
+  lifecycle acceptance remain pending — see
   `docs/DEPLOYMENT_AND_OPERATIONS.md`.
 - No formal penetration test has been performed, and no security
   validation has occurred on target deployment hardware.
 - Scanned/image-only PDFs have no OCR fallback yet; text-based PDFs and
   DOCX remain supported.
 - No rate limiting is enforced yet (`MEYAR_RATE_LIMIT_PER_MINUTE` exists in
-  config but is not yet wired into request handling).
+  config but is not yet wired into request handling). AUD-RATE explicitly assigns
+  examination to the future comprehensive audit and final #20 DoD; no severity/design
+  is assigned in normalization.
 - No CORS policy is configured; the current same-origin UI + internal API
   deployment does not require one.
 - Application-layer encryption at rest is not implemented; real production
@@ -660,14 +658,12 @@ Two further capabilities are scoped but **not implemented**:
 - Full API-first parity for every step of the agent's conversational
   workflow (JD drafting, review, confirmation) is tracked separately and
   incomplete — see issue #45.
-- Issue #46 final runtime/ingestion/recovery engineering is implemented for
-  independent acceptance; issue closure still requires owner acceptance,
-  manual merge and post-merge verification. The complete requirement matrix,
-  actual tests and bounded `meyar maintain` inspection/recovery/retention
-  contract are in [`docs/ISSUE_46_FINAL_CLOSURE.md`](docs/ISSUE_46_FINAL_CLOSURE.md).
-- Conversational follow-up on a prior search result and evidence-backed
-  candidate Q&A/comparison are planned, not implemented — see "Post-
-  presentation capability backlog" above (issues #49, #50).
+- #46 final runtime/recovery/retention engineering is accepted, owner-merged and
+  CLOSED through PR #128. Its bounded maintenance/recovery contract and historical
+  rejection/correction evidence remain in
+  [`docs/ISSUE_46_FINAL_CLOSURE.md`](docs/ISSUE_46_FINAL_CLOSURE.md).
+- Dedicated candidate Q&A/comparison remains deferred #50. Existing #49 follow-ups
+  are delivered; they are not a missing capability.
 
 See [`docs/STATUS.md`](docs/STATUS.md) for the complete current gap matrix
 and the latest next action.

@@ -249,8 +249,8 @@ from a model that didn't run.
    Show skills/employment/education with evidence, and that identity
    (name/contact) is clearly separated from the professional facts used for
    matching.
-4. **Original CV** — from candidate detail, open the original synthetic
-   document.
+4. **Original CV** — download the original synthetic document as an attachment;
+   use the separate canonical in-app preview to inspect parsed content.
 5. **Structured search** — search by a required skill (e.g. `Java`) and show
    the matching candidates only.
 6. **Jobs / criteria** — `/ui/jobs`, open "Senior Backend Engineer" or

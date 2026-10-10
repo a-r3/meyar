@@ -6,6 +6,10 @@ and MERGED (PR #100, D-094); slice C independently accepted and MERGED
 (PR #102, D-095); Amendment A3 ACCEPTED and MERGED (PR #103); Issue #88
 CLOSED/completed (see "Current implementation status" below).**
 
+Current roadmap: #45 accepted shared application contracts precede the future
+comprehensive audit/remediation/full re-audit and #35; #50 is deferred and consumes
+#45 contracts where relevant (D-115 / [ROADMAP_NORMALIZATION.md](ROADMAP_NORMALIZATION.md)).
+
 Historical status at design acceptance (kept as recorded then):
 - This design was independently reviewed and accepted, at design head
   `dfc7636b1c0b788024c28d17f2b913784b5a897c`.

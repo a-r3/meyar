@@ -1,5 +1,14 @@
 # MEYAR Ops — `meyar-ops`
 
+**Current phase (D-115): #35 is QUEUED DEPLOYMENT-COMPLETION PHASE.** PR1–PR13
+operator tooling exists, including the PR #76 diagnostics/reboot/HTTPS/lifecycle
+commands. The future #45 acceptance/merge/post-merge verification, comprehensive
+audit/remediation/full re-audit sequence must finish before deployment completion.
+#46 runtime/readiness/recovery/retention is accepted/merged/CLOSED; operator host
+log/scheduling/legal policy and physical Mac lifecycle acceptance remain separate.
+PR-by-PR scope notes below are historical boundaries, not current missing-tool claims.
+#49 is delivered; #50 deferred. See [ROADMAP_NORMALIZATION.md](ROADMAP_NORMALIZATION.md).
+
 Operator tooling for agentless deployment readiness (issue #35 — Slice 6,
 M9). This document covers PR1 (`preflight`/`status`/`readiness`/
 `verify-release` — `docs/DECISIONS.md` D-066), PR2 (`service-render`/
@@ -158,7 +167,7 @@ sidecars; an I/O failure while reading is reported as
 `MANIFEST_UNREADABLE`/`SHA256SUMS_UNREADABLE`. Archive-member inspection
 stops the instant its own declared-size bound is exceeded, reported as its
 own `ARCHIVE_RESOURCE_BOUND_EXCEEDED`/`*_TOO_LARGE` finding. Release-artifact
-*building* is deferred to a later #35 PR — this PR's tests use synthetic
+*building* was deferred at PR1 and is now delivered by PR3 below — PR1 tests use synthetic
 fixtures built on the fly, never real repository binaries.
 
 ## PR2 commands
@@ -954,8 +963,8 @@ never flip `ok`. Every component's finding is always present in the list
 
 ## What is NOT implemented yet
 
-- No HTTP `/ready` route (`/api/v1/health` remains liveness-only,
-  unchanged) — issue #46.
+- `/api/v1/health/ready` is now delivered by accepted #46; `/api/v1/health` remains liveness-only.
+  Operator deployment readiness and HTTP readiness serve different callers.
 - No service uninstall, production database restore cutover, or PostgreSQL provisioning.
   PR6's privileged lifecycle foundation
   installs and controls the MEYAR LaunchDaemon; it does not invoke
@@ -978,8 +987,8 @@ never flip `ok`. Every component's finding is always present in the list
   further governance rules are for issue #36 to define once real
   benchmark evidence exists.
 - No PostgreSQL/Homebrew/Docker production provisioning topology choice.
-- PR5 covers only the deployment-blocking production config boundary;
-  remaining #46 work, including SQL/exception logging, stays open.
+- PR5 historically covered deployment-blocking config only; later #46 runtime/config/
+  SQL/exception-privacy work is accepted/merged and #46 CLOSED.
 
 ## #35 / #46 boundary
 
@@ -1047,10 +1056,9 @@ verification, and readiness/runtime identity checks. No model approval.
 application rollback with mandatory verified backup and durable receipts.
 No downgrade or production restore cutover.
 
-**Deferred to #46:** authenticated HTTP `/ready`, in-application
-  degraded-state semantics, remaining production config policy,
-  SQL/exception logging hardening, application recovery/
-concurrency semantics.
+**Delivered by #46:** authenticated HTTP readiness, degraded-state semantics,
+production runtime/config validation, diagnostic privacy, recovery/retention and
+concurrency foundations. #46 CLOSED through PR #128; see its final closure record.
 
 **Deferred to #36:** real Target-Mac model selection & benchmark on the
 confirmed Mac mini M4 Pro reference hardware. `meyar-ops` does not choose,
@@ -1301,9 +1309,9 @@ restore cutover. Real Apple-Silicon/launchd behavior remains unconfirmed.
 
 ## PR13 — diagnostics, HTTPS edge, reboot proof, cleanup, lifecycle matrix (D-082)
 
-PR12 / PR #75 merged and was post-merge verified. Accepted main is
-`7c911cbc850d21999eae2239e6b51bfedc570d4a`. PR13 is engineering
-closure tooling for #35; the separate owner acceptance audit decides
+PR12 / PR #75 historical starting main was
+`7c911cbc850d21999eae2239e6b51bfedc570d4a`. PR13 tooling is merged through PR #76;
+its engineering commands exist. Separate physical lifecycle acceptance decides
 whether #35 can close. Run the active release's Python as the trusted
 non-root install owner. IDs match `[A-Za-z0-9][A-Za-z0-9_-]{0,79}`.
 
@@ -1435,7 +1443,7 @@ for #36; it does not duplicate
 
 | Stage | PR13 state |
 | --- | --- |
-| Tooling implemented | proposed in PR13; independent audit pending |
+| Tooling implemented | merged through PR #76; physical lifecycle acceptance still pending |
 | Linux simulations | executed in PR13 quality gate |
 | Apple-Silicon lifecycle rehearsal | **INCOMPLETE / hardware unavailable in this run** |
 | Bank-Mac benchmark and production model | **unstarted; Issue #36** |
@@ -1443,4 +1451,5 @@ for #36; it does not duplicate
 **Issue #35 tooling complete != real bank Mac benchmark complete.** Real
 macOS arm64 native runtime, launchctl, and reboot behavior are not
 established by Linux tests. Issue #36 remains next after #35 acceptance.
-Issue #49 is post-presentation capability expansion. #35/#46 remain OPEN.
+Issue #49 is delivered/CLOSED; #50 is deferred expansion. #35 remains OPEN,
+queued after #45/audit/remediation/full re-audit; #46 is CLOSED.
