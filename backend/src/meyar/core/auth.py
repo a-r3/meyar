@@ -1,11 +1,10 @@
-import uuid
-from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from fastapi import Depends, HTTPException, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meyar.application.principal import MachinePrincipal
 from meyar.db import get_db
 from meyar.models.api_key import ApiKey
 from meyar.services.api_key_repo import get_api_key_by_plaintext, touch_last_used
@@ -18,11 +17,9 @@ bearer_scheme = HTTPBearer(
 )
 
 
-@dataclass(frozen=True)
-class TenantContext:
-    tenant_id: uuid.UUID
-    api_key_id: uuid.UUID
-    scopes: list[str]
+# The machine principal lives in the shared application boundary; the old
+# name stays as the established dependency/test vocabulary.
+TenantContext = MachinePrincipal
 
 
 def _unauthorized() -> HTTPException:

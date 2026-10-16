@@ -9,6 +9,6 @@ prompts, and vectors. Re-exporting it as the REST response model avoids
 a duplicate parallel schema for an identical, already-reviewed shape.
 """
 
-from meyar.ui.view_models import CandidateDetailView as ApiCandidateDetailResponse
+from meyar.schemas.read_models import CandidateDetailView as ApiCandidateDetailResponse
 
 __all__ = ["ApiCandidateDetailResponse"]

@@ -109,6 +109,54 @@ class CriterionSemanticProvenance(BaseModel):
         return self
 
 
+NonScorableState = Literal["UNSUPPORTED", "NEEDS_HUMAN_REVIEW", "PROHIBITED"]
+NonScorableReason = Literal[
+    "PROHIBITED_ATTRIBUTE",
+    "UNSUPPORTED_BY_SCORING_POLICY",
+    "EXCLUDED_BY_REVIEWER",
+    "REVIEW_ONLY_NOT_SCORED",
+]
+
+
+class NonScorableRequirementProvenance(BaseModel):
+    """Why one source occurrence did NOT become a scoring criterion (issue #45).
+
+    ``scoring_authority`` is structurally always ``False``: nothing recorded
+    here is ever read by the scorer. A PROHIBITED occurrence keeps no text at
+    all (the redaction rule of the draft carries through); the others keep the
+    exact source slice the server re-derived. ``review_decision`` is present
+    only when a human explicitly excluded the occurrence."""
+
+    model_config = {"extra": "forbid", "frozen": True}
+
+    span_id: str = Field(pattern=r"^req-\d{4}$")
+    start_offset: int = Field(ge=0)
+    end_offset: int = Field(gt=0)
+    state: NonScorableState
+    reason_code: NonScorableReason
+    source_text: str | None = Field(default=None, min_length=1, max_length=4000)
+    review_decision: Literal["EXCLUDED_BY_REVIEWER"] | None = None
+    scoring_authority: Literal[False] = False
+
+    @model_validator(mode="after")
+    def _validate_shape(self) -> NonScorableRequirementProvenance:
+        if self.end_offset <= self.start_offset:
+            raise ValueError("Provenance offsets must describe a non-empty range.")
+        if self.state == "PROHIBITED":
+            if self.source_text is not None or self.reason_code != "PROHIBITED_ATTRIBUTE":
+                raise ValueError("A prohibited occurrence keeps no text and one reason.")
+        else:
+            if self.source_text is None:
+                raise ValueError("A reviewable occurrence records its exact source slice.")
+            if len(self.source_text) != self.end_offset - self.start_offset:
+                raise ValueError("Provenance source text must match its exact offsets.")
+        if (self.review_decision == "EXCLUDED_BY_REVIEWER") != (
+            self.reason_code == "EXCLUDED_BY_REVIEWER"
+        ):
+            raise ValueError("Exclusion reason and review decision must agree.")
+        return self
+
+
 def _parameter_value(parameters: SemanticParameters, field: SemanticCriterionAmendmentField) -> Any:
     if field == SemanticCriterionAmendmentField.CRITERION_TYPE:
         return parameters.criterion_type
@@ -170,6 +218,12 @@ class AgentSemanticProvenance(BaseModel):
         default_factory=list, max_length=MAX_JD_REQUIREMENT_SPANS
     )
     amendments: list[SemanticCriterionAmendment] = Field(default_factory=list, max_length=256)
+    # Issue #45: ``None`` means "not recorded" (every version confirmed before
+    # this field existed) and is never reconstructed; ``[]`` means "recorded:
+    # nothing was left out of scoring".
+    non_scorable_requirements: list[NonScorableRequirementProvenance] | None = Field(
+        default=None, max_length=MAX_JD_REQUIREMENT_SPANS
+    )
 
     @model_validator(mode="after")
     def _validate_consistency(self) -> AgentSemanticProvenance:
@@ -195,6 +249,20 @@ class AgentSemanticProvenance(BaseModel):
             for span in item.source_spans
         ) and self.model is None:
             raise ValueError("A model-validated criterion requires model provenance.")
+
+        if self.non_scorable_requirements is not None:
+            non_scorable_ids = [item.span_id for item in self.non_scorable_requirements]
+            if len(set(non_scorable_ids)) != len(non_scorable_ids):
+                raise ValueError("Duplicate non-scorable provenance.")
+            if set(non_scorable_ids) & set(span_ids):
+                raise ValueError("A scored source span cannot also be non-scorable.")
+            recorded_exclusions = {
+                item.span_id
+                for item in self.non_scorable_requirements
+                if item.review_decision == "EXCLUDED_BY_REVIEWER"
+            }
+            if recorded_exclusions != excluded:
+                raise ValueError("Non-scorable exclusions do not match review decisions.")
 
         spans_by_criterion = {
             item.criterion_id: {span.span_id for span in item.source_spans}
@@ -412,6 +480,47 @@ def build_agent_semantic_provenance(
             )
         )
 
+    non_scorable: list[NonScorableRequirementProvenance] = []
+    for requirement in draft.requirements:
+        if requirement.state == RequirementSpanState.SCORABLE:
+            continue
+        source_span = source_spans.get(requirement.span_id)
+        if source_span is None or (source_span.start_offset, source_span.end_offset) != (
+            requirement.start_offset,
+            requirement.end_offset,
+        ):
+            raise SemanticProvenanceError("Non-scorable source provenance is incomplete.")
+        excluded_here = (
+            decisions.get(requirement.span_id) == SemanticReviewDecisionKind.EXCLUDED_BY_REVIEWER
+        )
+        if requirement.state == RequirementSpanState.PROHIBITED:
+            reason: NonScorableReason = "PROHIBITED_ATTRIBUTE"
+            text: str | None = None
+        else:
+            if requirement.text is not None and requirement.text != source_span.text:
+                raise SemanticProvenanceError("Non-scorable source text is not the source slice.")
+            text = source_span.text
+            if excluded_here:
+                reason = "EXCLUDED_BY_REVIEWER"
+            elif requirement.state == RequirementSpanState.UNSUPPORTED:
+                reason = "UNSUPPORTED_BY_SCORING_POLICY"
+            else:
+                reason = "REVIEW_ONLY_NOT_SCORED"
+        try:
+            non_scorable.append(
+                NonScorableRequirementProvenance(
+                    span_id=requirement.span_id,
+                    start_offset=requirement.start_offset,
+                    end_offset=requirement.end_offset,
+                    state=requirement.state.value,  # type: ignore[arg-type]
+                    reason_code=reason,
+                    source_text=text,
+                    review_decision="EXCLUDED_BY_REVIEWER" if excluded_here else None,
+                )
+            )
+        except ValidationError as exc:
+            raise SemanticProvenanceError("Non-scorable provenance is inconsistent.") from exc
+
     excluded_by_items = {
         item.span_id for item in draft.needs_review if item.acknowledged_excluded
     }
@@ -434,6 +543,7 @@ def build_agent_semantic_provenance(
             review_decisions=list(draft.review_decisions),
             conflict_resolutions=list(draft.conflict_resolutions),
             amendments=list(draft.amendments),
+            non_scorable_requirements=non_scorable,
         )
     except ValidationError as exc:
         raise SemanticProvenanceError("Semantic provenance is inconsistent.") from exc
