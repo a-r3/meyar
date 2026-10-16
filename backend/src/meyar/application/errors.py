@@ -112,8 +112,10 @@ class ApplicationError(Exception):
         retryable: bool = False,
         clear_session_cookie: bool = False,
         headers: dict[str, str] | None = None,
+        legacy_detail: str | None = None,
     ) -> None:
         self.code = code
+        self.legacy_detail = legacy_detail
         self.status_code = status_code
         self.reason = reason
         self.message = message or _DEFAULT_MESSAGES[code]
@@ -124,7 +126,11 @@ class ApplicationError(Exception):
 
     def body(self) -> dict[str, object]:
         return error_envelope(
-            self.code, reason=self.reason, message=self.message, retryable=self.retryable
+            self.code,
+            reason=self.reason,
+            message=self.message,
+            retryable=self.retryable,
+            legacy_detail=self.legacy_detail,
         )
 
 

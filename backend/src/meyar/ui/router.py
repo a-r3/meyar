@@ -28,6 +28,7 @@ from meyar.api.errors import (
     validation_error_response,
 )
 from meyar.api.human.router import human_router
+from meyar.application.candidates import OriginalCvUnavailableError, retrieve_original_cv
 from meyar.application.conversations import (
     NOT_RUN_PRESENTATION,
     TurnDisposition,
@@ -44,6 +45,7 @@ from meyar.application.drafts import (
     resolve_draft_review,
 )
 from meyar.application.errors import ApplicationError
+from meyar.application.jobs import archive_job_for
 from meyar.config import Settings, get_settings
 from meyar.core.business_date import resolve_business_date
 from meyar.core.password import hash_password, needs_rehash, verify_password
@@ -56,7 +58,6 @@ from meyar.embedding.provider import (
     EmbeddingProvider,
     EmbeddingProviderError,
 )
-from meyar.ingestion.validation import PDF_MIME
 from meyar.llm.dependency import get_llm_provider
 from meyar.llm.provider import LLMProvider
 from meyar.models.job import JOB_STATUS_ACTIVE, JOB_STATUS_ARCHIVED
@@ -80,11 +81,10 @@ from meyar.services.browser_session_repo import (
     create_browser_session,
     revoke_browser_session_by_id,
 )
-from meyar.services.candidate_document_repo import get_candidate_document
 from meyar.services.candidate_photo_service import PLACEHOLDER_JPEG, current_presentable_photo
 from meyar.services.candidate_repo import get_candidate
 from meyar.services.job_criteria_repo import create_criteria_version, get_criteria_version_by_id
-from meyar.services.job_repo import archive_job, create_job, find_active_duplicate_job
+from meyar.services.job_repo import create_job, find_active_duplicate_job
 from meyar.services.tenant_authority import (
     TenantInactiveError,
     require_active_tenant,
@@ -921,11 +921,6 @@ async def candidate_detail(
     return _render(request, "candidate_detail.html", _context(ctx, candidate=candidate))
 
 
-def _original_document_filename(document_id: uuid.UUID, mime_type: str) -> str:
-    extension = "pdf" if mime_type == PDF_MIME else "docx"
-    return f"cv-{document_id.hex}.{extension}"
-
-
 @router.get("/candidates/{candidate_id}/documents/{document_id}/original")
 async def candidate_document_original(
     request: Request,
@@ -935,29 +930,43 @@ async def candidate_document_original(
     db: AsyncSession = Depends(get_db),
     storage: DocumentStorage = Depends(get_document_storage),
 ) -> Response:
-    """Authorized original-CV retrieval. storage_key is always resolved
-    server-side from the document row — the client supplies only the
-    candidate/document UUIDs, never a storage key or filesystem path."""
-    document = await get_candidate_document(
-        db, tenant_id=ctx.tenant_id, candidate_id=candidate_id, document_id=document_id
-    )
-    if document is None:
+    """Authorized original-CV retrieval through the shared, audited operation
+    (``meyar.application.candidates.retrieve_original_cv``). storage_key is
+    always resolved server-side from the document row — the client supplies
+    only the candidate/document UUIDs, never a storage key or filesystem path."""
+    try:
+        original = await retrieve_original_cv(
+            db, ctx, storage, candidate_id=candidate_id, document_id=document_id, channel="UI"
+        )
+    except OriginalCvUnavailableError:
+        return _render(
+            request,
+            "error.html",
+            _context(
+                ctx,
+                title="Sənəd əlçatan deyil",
+                message=(
+                    "Original fayl hazırda təqdim edilə bilmir. "
+                    "Bir qədər sonra yenidən cəhd edin."
+                ),
+            ),
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    if original is None:
         return _render(
             request,
             "error.html",
             _context(ctx, title="Tapılmadı", message="Sənəd tapılmadı."),
             status_code=status.HTTP_404_NOT_FOUND,
         )
-    content = await storage.read(storage_key=document.storage_key)
-    filename = _original_document_filename(document.id, document.mime_type)
     # Always a true download ("Originalı yüklə" in the UI): the safe,
     # already-parsed in-app view is the separate /preview route below.
     # A browser-inline PDF response here would silently turn the "download"
     # action into an "open" action for PDFs only — see docs/DECISIONS.md D-023.
     return Response(
-        content=content,
-        media_type=document.mime_type,
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        content=original.content,
+        media_type=original.media_type,
+        headers={"Content-Disposition": f'attachment; filename="{original.filename}"'},
     )
 
 
@@ -1063,8 +1072,8 @@ async def archive_job_route(
 ) -> Response:
     verify_csrf(ctx.csrf_token, csrf_token)
     try:
-        job = await archive_job(db, tenant_id=ctx.tenant_id, job_id=job_id)
-        if job is None:
+        archived = await archive_job_for(db, ctx, job_id=job_id)
+        if archived is None:
             await db.rollback()
             return _render(
                 request,
@@ -1072,15 +1081,6 @@ async def archive_job_route(
                 _context(ctx, title="Tapılmadı", message="Vakansiya tapılmadı."),
                 status_code=status.HTTP_404_NOT_FOUND,
             )
-        await record_event(
-            db,
-            tenant_id=ctx.tenant_id,
-            event_type="job.archived",
-            metadata={"job_id": str(job.id)},
-            actor_type=ACTOR_HUMAN_USER,
-            actor_id=ctx.user_id,
-        )
-        await db.commit()
     except SQLAlchemyError:
         await db.rollback()
         return _render(

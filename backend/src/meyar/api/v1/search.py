@@ -3,11 +3,15 @@ services. HTTP validates and presents; `meyar.search.service` and
 `meyar.search.planner_service` decide. No ranking/matching logic is
 duplicated here."""
 
+from datetime import date
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meyar.application.business_date import effective_business_date
+from meyar.config import Settings, get_settings
 from meyar.core.auth import TenantContext, require_scope
 from meyar.db import get_db
 from meyar.embedding.db_release import DbReleasingEmbeddingProvider
@@ -39,7 +43,10 @@ router = APIRouter(tags=["search"])
 
 
 def _to_api_search_response(
-    response: CandidateSearchResponse, views: list[CandidateSearchResultView]
+    response: CandidateSearchResponse,
+    views: list[CandidateSearchResultView],
+    *,
+    as_of_date: date,
 ) -> ApiCandidateSearchResponse:
     """Adapt the Slice 8 result authority/order plus Slice 11 identity
     enrichment into the external DTO — never re-ranks/re-sorts."""
@@ -65,6 +72,7 @@ def _to_api_search_response(
         results=items,
         result_count=response.result_count,
         limit=response.limit,
+        as_of_date=as_of_date,
     )
 
 
@@ -75,7 +83,11 @@ async def post_search(
     db: AsyncSession = Depends(get_db),
     trusted_embedding_config: EmbeddingSearchConfig = Depends(get_embedding_search_config),
     embedding_provider: EmbeddingProvider = Depends(get_embedding_provider),
+    settings: Settings = Depends(get_settings),
 ) -> ApiCandidateSearchResponse:
+    # Resolved ONCE here (supplied date wins unchanged) and passed explicitly:
+    # the deterministic search never reads the wall clock.
+    as_of_date = effective_business_date(body.as_of_date, timezone_name=settings.business_timezone)
     needs_semantic = body.mode in (SearchMode.SEMANTIC_ONLY, SearchMode.HYBRID)
     # STRUCTURED_ONLY must never set embedding_config on the internal
     # request (CandidateSearchRequest's own validator forbids it) and
@@ -91,7 +103,7 @@ async def post_search(
             preferred_filters=body.preferred_filters,
             semantic_query=body.semantic_query,
             embedding_config=embedding_config,
-            as_of_date=body.as_of_date,
+            as_of_date=as_of_date,
             limit=body.limit,
             structured_weight=DEFAULT_STRUCTURED_WEIGHT,
             semantic_weight=DEFAULT_SEMANTIC_WEIGHT,
@@ -124,7 +136,7 @@ async def post_search(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=code
         ) from exc
 
-    return _to_api_search_response(response, views)
+    return _to_api_search_response(response, views, as_of_date=as_of_date)
 
 
 @router.post("/search/natural-language", response_model=ApiNaturalLanguageSearchResponse)
@@ -135,14 +147,16 @@ async def post_natural_language_search(
     llm: LLMProvider = Depends(get_llm_provider),
     embedding_provider: EmbeddingProvider = Depends(get_embedding_provider),
     embedding_config: EmbeddingSearchConfig = Depends(get_embedding_search_config),
+    settings: Settings = Depends(get_settings),
 ) -> ApiNaturalLanguageSearchResponse:
+    as_of_date = effective_business_date(body.as_of_date, timezone_name=settings.business_timezone)
     try:
         planned = await plan_and_search_candidates(
             db,
             llm,
             tenant_id=ctx.tenant_id,
             natural_language_request=body.query,
-            as_of_date=body.as_of_date,
+            as_of_date=as_of_date,
             embedding_config=embedding_config,
             embedding_provider=DbReleasingEmbeddingProvider(embedding_provider, db),
         )
@@ -151,7 +165,9 @@ async def post_natural_language_search(
             views = await build_search_result_views(
                 db, tenant_id=ctx.tenant_id, response=planned.search_response
             )
-            search_api_response = _to_api_search_response(planned.search_response, views)
+            search_api_response = _to_api_search_response(
+                planned.search_response, views, as_of_date=as_of_date
+            )
         await db.commit()
     except (EmbeddingProviderError, SearchRequestError, SQLAlchemyError) as exc:
         await db.rollback()
@@ -165,4 +181,5 @@ async def post_natural_language_search(
         executable=planned.plan.executable,
         reason_codes=planned.plan.reason_codes,
         search=search_api_response,
+        as_of_date=as_of_date,
     )

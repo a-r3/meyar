@@ -62,14 +62,19 @@ async def _job_with_criteria(db: AsyncSession, tenant_id, criteria: list[Criteri
     return job, version
 
 
-async def test_score_missing_as_of_date_rejected(client: AsyncClient, tenant_and_key) -> None:
+async def test_score_omitted_as_of_date_is_accepted_not_a_validation_error(
+    client: AsyncClient, tenant_and_key
+) -> None:
+    """Issue #45 (F): the evaluation date is optional (defaulted once at the
+    boundary). An omitted date is no longer a 422 — the request proceeds to
+    resource resolution (here: an unknown job)."""
     _tenant, _key, plaintext = tenant_and_key
     resp = await client.post(
         "/api/v1/jobs/00000000-0000-0000-0000-000000000000/criteria/1/score",
         json={"candidate_id": "00000000-0000-0000-0000-000000000000"},
         headers=_auth(plaintext),
     )
-    assert resp.status_code == 422
+    assert resp.status_code == 404
 
 
 async def test_score_idempotency_and_decimal_contract(

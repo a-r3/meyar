@@ -62,6 +62,8 @@ async def post_job(
         id=job.id,
         tenant_id=job.tenant_id,
         title=job.title,
+        status=job.status,
+        archived_at=job.archived_at,
         created_at=job.created_at,
         current_criteria_version=_version_out(version),
     )
@@ -86,6 +88,8 @@ async def get_job_detail(
         id=job.id,
         tenant_id=job.tenant_id,
         title=job.title,
+        status=job.status,
+        archived_at=job.archived_at,
         created_at=job.created_at,
         current_criteria_version=_version_out(version),
     )

@@ -26,5 +26,8 @@ class JobOut(BaseModel):
     id: uuid.UUID
     tenant_id: uuid.UUID
     title: str
+    # Lifecycle (ACTIVE / ARCHIVED); additive in issue #45.
+    status: str = "ACTIVE"
+    archived_at: datetime | None = None
     created_at: datetime
     current_criteria_version: JobCriteriaVersionOut
