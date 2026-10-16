@@ -56,6 +56,20 @@ and #45 acceptance/closure; M9 after #35/#36. Optional backlog must not hold the
 
 Full issue bodies, evidence and owner actions: [ROADMAP_NORMALIZATION.md](ROADMAP_NORMALIZATION.md).
 
+## Issue #45 implementation (2026-10-16) — awaiting independent acceptance
+
+Branch `feat/45-api-application-contracts` (from verified main `81c31aa`): shared
+`meyar.application` boundary (conversation turn, JD resolve/confirm, candidates, jobs,
+evaluations), human HTTP/JSON surface `/ui/api/v1` (session cookie + `X-CSRF-Token`),
+shared candidate/job/evaluation routes on both surfaces, audited original-CV access,
+non-scorable JD requirement provenance, `agent.draft.confirmed` correlation, optional
+once-resolved business date, error envelope and OpenAPI security. Design, compatibility
+contracts and limitations: [DECISIONS.md D-116](DECISIONS.md) and
+[API_CONTRACTS.md](API_CONTRACTS.md). **No schema change.** The human JSON authentication
+design (D-116 §2) is an implementation security decision and is explicitly submitted for
+independent review. #45 is NOT closed or accepted by this entry; #35/#36/#20/#37/#50 and
+AUD-B/C1/C3/RATE are untouched.
+
 ## Historical delivery and audit records
 
 The following snapshots preserve facts and instructions at their recorded heads.

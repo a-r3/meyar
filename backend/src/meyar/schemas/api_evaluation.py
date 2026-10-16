@@ -6,7 +6,7 @@ Decimal/float — see `meyar.scoring.schemas.ScoreExplanation`."""
 import uuid
 from datetime import date, datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from meyar.scoring.schemas import ScoreExplanation
 
@@ -76,7 +76,8 @@ class ApiBatchRankingResponse(BaseModel):
     reused_count: int
     skipped_count: int
     skip_reason_counts: dict[str, int]
-    results: list[ApiRankedCandidate]
+    # Bounded by the version's result_limit (1..100, enforced in the database).
+    results: list[ApiRankedCandidate] = Field(max_length=100)
 
 
 class ApiEvaluationOut(BaseModel):

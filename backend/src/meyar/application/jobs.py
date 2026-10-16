@@ -60,10 +60,11 @@ async def archive_job_for(
     if job is None:
         return None
     if job.status == JOB_STATUS_ARCHIVED:
-        await db.rollback()
-        return JobArchiveOut(
+        result = JobArchiveOut(
             job_id=job.id, status=job.status, archived_at=job.archived_at, already_archived=True
         )
+        await db.rollback()
+        return result
     archived = await archive_job(db, tenant_id=principal.tenant_id, job_id=job_id)
     assert archived is not None
     await record_event(

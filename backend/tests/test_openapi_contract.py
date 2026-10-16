@@ -36,8 +36,9 @@ async def test_all_expected_v1_routes_present(client: AsyncClient) -> None:
 async def test_ui_paths_absent_from_openapi(client: AsyncClient) -> None:
     resp = await client.get("/openapi.json")
     data = resp.json()
+    # Issue #45: only the documented human JSON API lives under /ui; no HTML page does.
     ui_paths = [p for p in data["paths"] if p.startswith("/ui")]
-    assert ui_paths == []
+    assert ui_paths and all(p.startswith("/ui/api/v1/") for p in ui_paths)
 
 
 async def test_docs_route_and_asset_mount_absent_from_openapi(client: AsyncClient) -> None:

@@ -36,7 +36,9 @@ def _python_fake() -> FakeLLMProvider:
             title="Backend",
             must_have=[
                 JDDraftCriterionItem(
-                    span_id="req-0001", kind="SKILL", requirement="Python",
+                    span_id="req-0001",
+                    kind="SKILL",
+                    requirement="Python",
                     source_text="Python required",
                 )
             ],
@@ -49,7 +51,8 @@ async def _login(client: AsyncClient, user, password: str) -> str:  # noqa: ANN0
     # object: tests that log in more than once pass the name captured up front.
     username = user if isinstance(user, str) else user.username
     response = await client.post(
-        "/ui/login", data={"username": username, "password": password},
+        "/ui/login",
+        data={"username": username, "password": password},
         follow_redirects=False,
     )
     assert response.status_code == 303
@@ -82,10 +85,13 @@ async def _submit(client: AsyncClient, csrf: str, conversation: str, message: st
 
 
 async def test_unauthenticated_human_json_is_401_envelope_not_a_redirect(
-    client: AsyncClient, local_ui_settings: Settings  # noqa: F811
+    client: AsyncClient,
+    local_ui_settings: Settings,  # noqa: F811
 ) -> None:
     for method, path in (
-        ("GET", "/session"), ("GET", "/conversations"), ("POST", "/conversations"),
+        ("GET", "/session"),
+        ("GET", "/conversations"),
+        ("POST", "/conversations"),
         ("POST", f"/drafts/{uuid.uuid4()}/confirm"),
     ):
         response = await client.request(method, f"{BASE}{path}", follow_redirects=False)
@@ -98,14 +104,18 @@ async def test_unauthenticated_human_json_is_401_envelope_not_a_redirect(
 
 
 async def test_api_key_is_never_human_authority_and_cookie_is_never_machine_authority(
-    client: AsyncClient, db_session: AsyncSession, tenant_key_and_user,
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_key_and_user,
     local_ui_settings: Settings,  # noqa: F811
 ) -> None:
     tenant, _key, plaintext_key, user, password, _membership = tenant_key_and_user
     bearer = {"Authorization": f"Bearer {plaintext_key}"}
     for method, path in (
-        ("GET", "/session"), ("GET", "/conversations"),
-        ("POST", f"/drafts/{uuid.uuid4()}/confirm"), ("POST", "/conversations"),
+        ("GET", "/session"),
+        ("GET", "/conversations"),
+        ("POST", f"/drafts/{uuid.uuid4()}/confirm"),
+        ("POST", "/conversations"),
     ):
         response = await client.request(method, f"{BASE}{path}", headers=bearer)
         assert response.status_code == 401, path
@@ -117,7 +127,9 @@ async def test_api_key_is_never_human_authority_and_cookie_is_never_machine_auth
 
 
 async def test_session_endpoint_returns_only_the_server_derived_principal(
-    client: AsyncClient, tenant_and_user, local_ui_settings: Settings  # noqa: F811
+    client: AsyncClient,
+    tenant_and_user,
+    local_ui_settings: Settings,  # noqa: F811
 ) -> None:
     tenant, user, password, membership = tenant_and_user
     await _login(client, user, password)
@@ -132,7 +144,9 @@ async def test_session_endpoint_returns_only_the_server_derived_principal(
 
 
 async def test_state_changing_json_requires_a_valid_csrf_header(
-    client: AsyncClient, tenant_and_user, local_ui_settings: Settings  # noqa: F811
+    client: AsyncClient,
+    tenant_and_user,
+    local_ui_settings: Settings,  # noqa: F811
 ) -> None:
     _tenant, user, password, _membership = tenant_and_user
     csrf = await _login(client, user, password)
@@ -146,26 +160,32 @@ async def test_state_changing_json_requires_a_valid_csrf_header(
 
 
 async def test_csrf_is_checked_after_authentication_so_it_never_leaks_resources(
-    client: AsyncClient, local_ui_settings: Settings  # noqa: F811
+    client: AsyncClient,
+    local_ui_settings: Settings,  # noqa: F811
 ) -> None:
     response = await client.post(f"{BASE}/conversations", headers=_h("a" * 64))
     assert response.status_code == 401
 
 
 async def test_client_supplied_authority_is_rejected_not_obeyed(
-    client: AsyncClient, tenant_and_user, local_ui_settings: Settings  # noqa: F811
+    client: AsyncClient,
+    tenant_and_user,
+    local_ui_settings: Settings,  # noqa: F811
 ) -> None:
     _tenant, user, password, _membership = tenant_and_user
     csrf = await _login(client, user, password)
     conversation = await _new_conversation(client, csrf)
     forged = {
-        "tenant_id": str(uuid.uuid4()), "user_id": str(uuid.uuid4()),
-        "session_id": str(uuid.uuid4()), "browser_session_id": str(uuid.uuid4()),
+        "tenant_id": str(uuid.uuid4()),
+        "user_id": str(uuid.uuid4()),
+        "session_id": str(uuid.uuid4()),
+        "browser_session_id": str(uuid.uuid4()),
     }
     token = await client.post(f"{BASE}/conversations/{conversation}/submissions", headers=_h(csrf))
     for field, value in forged.items():
         response = await client.post(
-            f"{BASE}/conversations/{conversation}/turns", headers=_h(csrf),
+            f"{BASE}/conversations/{conversation}/turns",
+            headers=_h(csrf),
             json={"message": "salam", "submission_id": token.json()["submission_id"], field: value},
         )
         assert response.status_code == 422, field
@@ -178,7 +198,9 @@ async def test_client_supplied_authority_is_rejected_not_obeyed(
 
 
 async def test_logged_out_revoked_session_is_refused_and_cookie_cleared(
-    client: AsyncClient, tenant_and_user, local_ui_settings: Settings  # noqa: F811
+    client: AsyncClient,
+    tenant_and_user,
+    local_ui_settings: Settings,  # noqa: F811
 ) -> None:
     _tenant, user, password, _membership = tenant_and_user
     csrf = await _login(client, user, password)
@@ -192,7 +214,9 @@ async def test_logged_out_revoked_session_is_refused_and_cookie_cleared(
 
 
 async def test_membership_and_tenant_deactivation_take_effect_immediately(
-    client: AsyncClient, db_session: AsyncSession, tenant_and_user,
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
     local_ui_settings: Settings,  # noqa: F811
 ) -> None:
     tenant, user, password, membership = tenant_and_user
@@ -215,7 +239,10 @@ async def test_membership_and_tenant_deactivation_take_effect_immediately(
 
 
 async def test_conversation_lifecycle_is_bounded_and_owner_isolated(
-    client: AsyncClient, db_session: AsyncSession, tenant_and_user, tenant_key_and_user,
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    tenant_key_and_user,
     local_ui_settings: Settings,  # noqa: F811
 ) -> None:
     tenant, user, password, _membership = tenant_and_user
@@ -235,8 +262,9 @@ async def test_conversation_lifecycle_is_bounded_and_owner_isolated(
     other_user = await create_user(
         db_session, username=f"hr2-{uuid.uuid4().hex[:6]}", plaintext_password=DEFAULT_TEST_PASSWORD
     )
-    await create_membership(db_session, user_id=other_user.id, tenant_id=tenant.id,
-                            role=ROLE_HR_USER)
+    await create_membership(
+        db_session, user_id=other_user.id, tenant_id=tenant.id, role=ROLE_HR_USER
+    )
     await db_session.commit()
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as other:
@@ -257,7 +285,9 @@ async def test_conversation_lifecycle_is_bounded_and_owner_isolated(
 
 
 async def test_turn_is_idempotent_and_planner_outcome_is_not_an_error(
-    client: AsyncClient, db_session: AsyncSession, tenant_and_user,
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
     local_ui_settings: Settings,  # noqa: F811
 ) -> None:
     _tenant, user, password, _membership = tenant_and_user
@@ -273,7 +303,8 @@ async def test_turn_is_idempotent_and_planner_outcome_is_not_an_error(
     assert body["message"]
     # Replay of the SAME submission: never a second turn.
     replay = await client.post(
-        f"{BASE}/conversations/{conversation}/turns", headers=_h(csrf),
+        f"{BASE}/conversations/{conversation}/turns",
+        headers=_h(csrf),
         json={"message": "salam", "submission_id": submission},
     )
     assert replay.status_code == 200 and replay.json()["status"] == "REPLAYED"
@@ -282,39 +313,47 @@ async def test_turn_is_idempotent_and_planner_outcome_is_not_an_error(
     # A different message under the already-used identity is refused identically
     # to an unknown one (no oracle).
     tampered = await client.post(
-        f"{BASE}/conversations/{conversation}/turns", headers=_h(csrf),
+        f"{BASE}/conversations/{conversation}/turns",
+        headers=_h(csrf),
         json={"message": "başqa", "submission_id": submission},
     )
     assert tampered.status_code == 404
 
 
 async def test_turn_message_is_bounded_and_unknown_submission_is_not_found(
-    client: AsyncClient, tenant_and_user, local_ui_settings: Settings  # noqa: F811
+    client: AsyncClient,
+    tenant_and_user,
+    local_ui_settings: Settings,  # noqa: F811
 ) -> None:
     _tenant, user, password, _membership = tenant_and_user
     csrf = await _login(client, user, password)
     conversation = await _new_conversation(client, csrf)
     token = await client.post(f"{BASE}/conversations/{conversation}/submissions", headers=_h(csrf))
     too_long = await client.post(
-        f"{BASE}/conversations/{conversation}/turns", headers=_h(csrf),
+        f"{BASE}/conversations/{conversation}/turns",
+        headers=_h(csrf),
         json={"message": "x" * 4001, "submission_id": token.json()["submission_id"]},
     )
     assert too_long.status_code == 422
     assert too_long.json()["error"]["reason"] == "MESSAGE_LENGTH"
     huge = await client.post(
-        f"{BASE}/conversations/{conversation}/turns", headers=_h(csrf),
+        f"{BASE}/conversations/{conversation}/turns",
+        headers=_h(csrf),
         json={"message": "x" * 9000, "submission_id": token.json()["submission_id"]},
     )
     assert huge.status_code == 422
     unknown = await client.post(
-        f"{BASE}/conversations/{conversation}/turns", headers=_h(csrf),
+        f"{BASE}/conversations/{conversation}/turns",
+        headers=_h(csrf),
         json={"message": "salam", "submission_id": str(uuid.uuid4())},
     )
     assert unknown.status_code == 404
 
 
 async def test_busy_local_inference_is_a_retryable_503_not_a_planner_outcome(
-    client: AsyncClient, tenant_and_user, local_ui_settings: Settings  # noqa: F811
+    client: AsyncClient,
+    tenant_and_user,
+    local_ui_settings: Settings,  # noqa: F811
 ) -> None:
     from meyar.llm.provider import InferenceBusyError
 
@@ -349,7 +388,9 @@ async def _draft(client: AsyncClient, csrf: str) -> tuple[str, str, dict]:
 
 
 async def test_confirm_creates_the_job_once_and_replays_without_a_second_one(
-    client: AsyncClient, db_session: AsyncSession, tenant_and_user,
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
     local_ui_settings: Settings,  # noqa: F811
 ) -> None:
     tenant, user, password, _membership = tenant_and_user
@@ -368,9 +409,7 @@ async def test_confirm_creates_the_job_once_and_replays_without_a_second_one(
     assert again.status_code == 200 and again.json()["replayed"] is True
     assert again.json()["job_id"] == body["job_id"]
     assert again.json()["criteria_version_id"] == body["criteria_version_id"]
-    jobs = (
-        await db_session.scalars(select(Job).where(Job.tenant_id == tenant.id))
-    ).all()
+    jobs = (await db_session.scalars(select(Job).where(Job.tenant_id == tenant.id))).all()
     assert len(jobs) == 1
 
     events = (
@@ -384,8 +423,10 @@ async def test_confirm_creates_the_job_once_and_replays_without_a_second_one(
     event = events[0]
     assert event.actor_type == "HUMAN_USER" and event.actor_id == user.id
     assert event.event_metadata == {
-        "draft_id": draft_id, "job_id": body["job_id"],
-        "criteria_version_id": body["criteria_version_id"], "criteria_version": 1,
+        "draft_id": draft_id,
+        "job_id": body["job_id"],
+        "criteria_version_id": body["criteria_version_id"],
+        "criteria_version": 1,
     }
     # Confirmation is independent of ranking: nothing was ranked by it.
     from meyar.models.evaluation import Evaluation
@@ -394,7 +435,9 @@ async def test_confirm_creates_the_job_once_and_replays_without_a_second_one(
 
 
 async def test_only_the_exact_live_draft_in_the_callers_own_session_is_confirmable(
-    client: AsyncClient, db_session: AsyncSession, tenant_and_user,
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
     local_ui_settings: Settings,  # noqa: F811
 ) -> None:
     tenant, user, password, _membership = tenant_and_user
@@ -418,7 +461,9 @@ async def test_only_the_exact_live_draft_in_the_callers_own_session_is_confirmab
 
 
 async def test_reviewed_proposal_must_equal_the_server_draft_exactly(
-    client: AsyncClient, db_session: AsyncSession, tenant_and_user,
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
     local_ui_settings: Settings,  # noqa: F811
 ) -> None:
     tenant, user, password, _membership = tenant_and_user
@@ -429,21 +474,29 @@ async def test_reviewed_proposal_must_equal_the_server_draft_exactly(
     good = {
         "span_id": row["span_id"],
         "criterion": {
-            "id": "python", "kind": "SKILL", "type": "MUST_HAVE", "label": "Python",
-            "value": "Python", "weight": 1.0,
+            "id": "python",
+            "kind": "SKILL",
+            "type": "MUST_HAVE",
+            "label": "Python",
+            "value": "Python",
+            "weight": 1.0,
         },
     }
 
     def body(**changes):  # noqa: ANN003,ANN202
         criterion = {**good["criterion"], **changes.pop("criterion", {})}
-        return {"reviewed": {"title": changes.pop("title", "Backend"),
-                             "criteria": [{**good, "criterion": criterion}]}}
+        return {
+            "reviewed": {
+                "title": changes.pop("title", "Backend"),
+                "criteria": [{**good, "criterion": criterion}],
+            }
+        }
 
     for tampered in (
-        body(criterion={"weight": 0.1}),            # weakened weight
+        body(criterion={"weight": 0.1}),  # weakened weight
         body(criterion={"value": "Java", "label": "Java"}),  # replaced criterion
-        body(criterion={"type": "PREFERRED"}),      # weakened modality
-        body(title="Other title"),                  # different title
+        body(criterion={"type": "PREFERRED"}),  # weakened modality
+        body(title="Other title"),  # different title
         {"reviewed": {"title": "Backend", "criteria": []}},  # criterion removed
     ):
         refused = await client.post(
@@ -452,13 +505,14 @@ async def test_reviewed_proposal_must_equal_the_server_draft_exactly(
         assert refused.status_code == 422, tampered
         assert refused.json()["error"]["code"] == "VALIDATION_FAILED"
     assert (await db_session.scalars(select(Job).where(Job.tenant_id == tenant_id))).all() == []
-    accepted = await client.post(f"{BASE}/drafts/{draft_id}/confirm", headers=_h(csrf),
-                                 json=body())
+    accepted = await client.post(f"{BASE}/drafts/{draft_id}/confirm", headers=_h(csrf), json=body())
     assert accepted.status_code == 200, accepted.text
 
 
 async def test_resolve_requires_exactly_one_decision_and_csrf(
-    client: AsyncClient, tenant_and_user, local_ui_settings: Settings  # noqa: F811
+    client: AsyncClient,
+    tenant_and_user,
+    local_ui_settings: Settings,  # noqa: F811
 ) -> None:
     _tenant, user, password, _membership = tenant_and_user
     csrf = await _login(client, user, password)
@@ -473,19 +527,23 @@ async def test_resolve_requires_exactly_one_decision_and_csrf(
     assert nothing.status_code == 422
     assert nothing.json()["error"]["reason"] == "INVALID_RESOLUTION"
     two = await client.post(
-        f"{BASE}/drafts/{draft_id}/resolve", headers=_h(csrf),
+        f"{BASE}/drafts/{draft_id}/resolve",
+        headers=_h(csrf),
         json={"span_id": span, "criterion_type": "PREFERRED", "decision": "exclude"},
     )
     assert two.status_code == 422
     bad_span = await client.post(
-        f"{BASE}/drafts/{draft_id}/resolve", headers=_h(csrf),
+        f"{BASE}/drafts/{draft_id}/resolve",
+        headers=_h(csrf),
         json={"span_id": "'; DROP", "criterion_type": "PREFERRED"},
     )
     assert bad_span.status_code == 422
 
 
 async def test_unrelated_user_cannot_use_a_draft_id_from_another_tenant(
-    client: AsyncClient, tenant_and_user, tenant_key_and_user,
+    client: AsyncClient,
+    tenant_and_user,
+    tenant_key_and_user,
     local_ui_settings: Settings,  # noqa: F811
 ) -> None:
     _tenant, user, password, _membership = tenant_and_user
@@ -496,9 +554,11 @@ async def test_unrelated_user_cannot_use_a_draft_id_from_another_tenant(
     async with AsyncClient(transport=transport, base_url="http://test") as foreign:
         foreign_csrf = await _login(foreign, user2, password2)
         for action in ("confirm", "resolve"):
-            payload = {} if action == "confirm" else {
-                "span_id": "req-0001", "criterion_type": "PREFERRED"
-            }
+            payload = (
+                {}
+                if action == "confirm"
+                else {"span_id": "req-0001", "criterion_type": "PREFERRED"}
+            )
             response = await foreign.post(
                 f"{BASE}/drafts/{draft_id}/{action}", headers=_h(foreign_csrf), json=payload
             )
@@ -508,9 +568,70 @@ async def test_unrelated_user_cannot_use_a_draft_id_from_another_tenant(
 
 @pytest.mark.parametrize("prefix", ["/ui/api/v1", "/api/v1"])
 async def test_error_bodies_never_leak_internals(
-    client: AsyncClient, local_ui_settings: Settings, prefix: str  # noqa: F811
+    client: AsyncClient,
+    local_ui_settings: Settings,  # noqa: F811
+    prefix: str,
 ) -> None:
     response = await client.get(f"{prefix}/does-not-exist")
     text = response.text
     for forbidden in ("Traceback", "sqlalchemy", "/home/", "storage_key", "postgres"):
         assert forbidden not in text
+
+
+async def test_human_duplicate_guard_is_preserved_for_identical_active_jobs(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,  # noqa: F811
+) -> None:
+    """Documented compatibility contract (D-116): the human workflow rejects an
+    identical ACTIVE job (409); the machine API does not (see
+    test_machine_api_job_creation_still_permits_duplicates)."""
+    tenant, user, password, _membership = tenant_and_user
+    tenant_id = tenant.id
+    csrf = await _login(client, user, password)
+    _c1, first_draft, _d1 = await _draft(client, csrf)
+    first = await client.post(f"{BASE}/drafts/{first_draft}/confirm", headers=_h(csrf), json={})
+    assert first.status_code == 200
+    _c2, second_draft, _d2 = await _draft(client, csrf)
+    second = await client.post(f"{BASE}/drafts/{second_draft}/confirm", headers=_h(csrf), json={})
+    assert second.status_code == 409
+    assert second.json()["error"]["code"] == "CONFLICT"
+    assert second.json()["error"]["reason"] == "DUPLICATE_ACTIVE_JOB"
+    jobs = (await db_session.scalars(select(Job).where(Job.tenant_id == tenant_id))).all()
+    assert len(jobs) == 1
+
+
+async def test_clarification_state_is_readable_and_buttons_are_checked_against_the_live_one(
+    client: AsyncClient,
+    tenant_and_user,
+    local_ui_settings: Settings,  # noqa: F811
+) -> None:
+    from meyar.agent.clarification_schemas import ClarificationProposalValue
+
+    _tenant, user, password, _membership = tenant_and_user
+    app.dependency_overrides[get_llm_provider] = lambda: FakeLLMProvider(
+        agent_plan=converse("GREETING"),
+        clarification_proposals=[ClarificationProposalValue.UNCLEAR],
+    )
+    csrf = await _login(client, user, password)
+    conversation = await _new_conversation(client, csrf)
+    first, _s = await _submit(client, csrf, conversation, "Python mütləqdir.")
+    assert first.status_code == 200
+    detail = (await client.get(f"{BASE}/conversations/{conversation}")).json()
+    live = detail["active_clarification"]
+    assert live is not None and live["choices"]
+    # A button naming a foreign clarification id is refused; nothing changes.
+    refused, _s2 = await _submit(
+        client,
+        csrf,
+        conversation,
+        "bəli",
+        clarification_id=str(uuid.uuid4()),
+        clarification_choice=live["choices"][0]["value"],
+    )
+    assert refused.status_code == 409
+    assert refused.json()["error"]["reason"] == "CLARIFICATION_NOT_ACTIVE"
+    after = (await client.get(f"{BASE}/conversations/{conversation}")).json()
+    assert after["active_clarification"]["id"] == live["id"]
+    assert after["turns"] == detail["turns"]
