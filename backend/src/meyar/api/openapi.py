@@ -73,7 +73,6 @@ def _normalise_machine_error_responses(schema: dict[str, Any]) -> None:
             for code in COMMON_MACHINE_ERROR_CODES:
                 if code not in responses:
                     responses[code] = {
-                        "model": None,
                         "content": {
                             "application/json": {
                                 "schema": {"$ref": "#/components/schemas/ErrorEnvelope"}

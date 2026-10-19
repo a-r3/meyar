@@ -694,3 +694,51 @@ def test_openapi_production_docs_disabled(schema: dict) -> None:
     assert "ErrorEnvelope" in schema["components"]["schemas"]
     assert "ApiKeyBearer" in schema["components"]["securitySchemes"]
     assert "HumanSessionCookie" in schema["components"]["securitySchemes"]
+
+
+def test_openapi_generated_response_objects_have_no_invalid_model_field(
+    schema: dict,
+) -> None:
+    """Generated OpenAPI Response Objects must not contain FastAPI-only fields.
+
+    ``model`` is a Python-level FastAPI ``responses=`` declaration convention,
+    not a valid OpenAPI Response Object field. The final generated document must
+    contain only valid Response Object fields (description, headers, content,
+    links, or x-* extensions).
+    """
+    allowed = {"description", "headers", "content", "links"}
+    for path, operations in schema["paths"].items():
+        for method, operation in operations.items():
+            if method not in ("get", "post", "put", "patch", "delete"):
+                continue
+            for code, response in operation.get("responses", {}).items():
+                invalid = set(response) - allowed - {k for k in response if k.startswith("x-")}
+                assert not invalid, (method, path, code, sorted(invalid))
+
+
+def test_openapi_injected_common_responses_are_spec_conformant(schema: dict) -> None:
+    """Injected common error responses (401/403/422/500) must be valid OpenAPI
+    Response Objects referencing ErrorEnvelope."""
+    for path, operations in schema["paths"].items():
+        if not path.startswith("/api/v1"):
+            continue
+        if path.startswith("/api/v1/health"):
+            continue
+        for method, operation in operations.items():
+            if method not in ("get", "post", "put", "patch", "delete"):
+                continue
+            for code in ("401", "403", "422", "500"):
+                response = operation.get("responses", {}).get(code)
+                if response is None:
+                    continue
+                assert "description" in response, (method, path, code)
+                assert "content" in response, (method, path, code)
+                json_media = response["content"].get("application/json", {})
+                assert json_media, (method, path, code)
+                ref = json_media.get("schema", {}).get("$ref", "")
+                assert ref == "#/components/schemas/ErrorEnvelope", (
+                    method,
+                    path,
+                    code,
+                    ref,
+                )
