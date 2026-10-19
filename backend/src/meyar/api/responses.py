@@ -12,6 +12,7 @@ _DESCRIPTIONS: dict[int, str] = {
     409: "Conflicts with current state (CONFLICT); see error.reason.",
     413: "Request too large (PAYLOAD_TOO_LARGE).",
     422: "Invalid request (VALIDATION_FAILED).",
+    500: "An unexpected error occurred.",
     503: "Temporarily unavailable or busy; retry when error.retryable is true.",
 }
 

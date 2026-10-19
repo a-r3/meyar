@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meyar.api.responses import error_responses
 from meyar.application.business_date import effective_business_date
 from meyar.config import Settings, get_settings
 from meyar.core.auth import TenantContext, require_scope
@@ -76,7 +77,11 @@ def _to_api_search_response(
     )
 
 
-@router.post("/search", response_model=ApiCandidateSearchResponse)
+@router.post(
+    "/search",
+    response_model=ApiCandidateSearchResponse,
+    responses=error_responses(401, 403, 422, 503),
+)
 async def post_search(
     body: ApiCandidateSearchRequest,
     ctx: TenantContext = Depends(require_scope("candidates:read")),
@@ -139,7 +144,11 @@ async def post_search(
     return _to_api_search_response(response, views, as_of_date=as_of_date)
 
 
-@router.post("/search/natural-language", response_model=ApiNaturalLanguageSearchResponse)
+@router.post(
+    "/search/natural-language",
+    response_model=ApiNaturalLanguageSearchResponse,
+    responses=error_responses(401, 403, 422, 503),
+)
 async def post_natural_language_search(
     body: ApiNaturalLanguageSearchRequest,
     ctx: TenantContext = Depends(require_scope("candidates:read")),

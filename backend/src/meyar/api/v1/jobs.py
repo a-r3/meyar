@@ -3,6 +3,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meyar.api.responses import error_responses
 from meyar.core.auth import TenantContext, require_scope
 from meyar.db import get_db
 from meyar.models.job_criteria_version import JobCriteriaVersion
@@ -35,7 +36,12 @@ async def _get_job_or_404(db: AsyncSession, tenant_id: uuid.UUID, job_id: uuid.U
     return job
 
 
-@router.post("/jobs", status_code=status.HTTP_201_CREATED, response_model=JobOut)
+@router.post(
+    "/jobs",
+    status_code=status.HTTP_201_CREATED,
+    response_model=JobOut,
+    responses=error_responses(401, 403, 422),
+)
 async def post_job(
     body: JobCreateRequest,
     ctx: TenantContext = Depends(require_scope("jobs:write")),
@@ -69,7 +75,11 @@ async def post_job(
     )
 
 
-@router.get("/jobs/{job_id}", response_model=JobOut)
+@router.get(
+    "/jobs/{job_id}",
+    response_model=JobOut,
+    responses=error_responses(401, 403, 404, 500),
+)
 async def get_job_detail(
     job_id: uuid.UUID,
     ctx: TenantContext = Depends(require_scope("jobs:read")),
@@ -99,6 +109,7 @@ async def get_job_detail(
     "/jobs/{job_id}/criteria",
     status_code=status.HTTP_201_CREATED,
     response_model=JobCriteriaVersionOut,
+    responses=error_responses(401, 403, 404, 422),
 )
 async def post_job_criteria(
     job_id: uuid.UUID,
@@ -124,7 +135,11 @@ async def post_job_criteria(
     return _version_out(version)
 
 
-@router.get("/jobs/{job_id}/criteria", response_model=list[JobCriteriaVersionOut])
+@router.get(
+    "/jobs/{job_id}/criteria",
+    response_model=list[JobCriteriaVersionOut],
+    responses=error_responses(401, 403, 404),
+)
 async def list_job_criteria(
     job_id: uuid.UUID,
     ctx: TenantContext = Depends(require_scope("jobs:read")),
@@ -135,7 +150,11 @@ async def list_job_criteria(
     return [_version_out(v) for v in versions]
 
 
-@router.get("/jobs/{job_id}/criteria/{version_number}", response_model=JobCriteriaVersionOut)
+@router.get(
+    "/jobs/{job_id}/criteria/{version_number}",
+    response_model=JobCriteriaVersionOut,
+    responses=error_responses(401, 403, 404),
+)
 async def get_job_criteria_version(
     job_id: uuid.UUID,
     version_number: int,

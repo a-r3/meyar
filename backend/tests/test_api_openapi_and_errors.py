@@ -14,10 +14,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from test_ui_agent_routes import local_ui_settings  # noqa: F401 - pytest fixture re-export
 
 from meyar.config import Settings
+from meyar.embedding.provider import EmbeddingBusyError
 from meyar.llm.dependency import get_llm_provider
 from meyar.main import app, create_app
 from meyar.search.planner_schemas import PlannerDraft
 from meyar.search.schemas import RequiredFilters
+from meyar.search.service import SearchRequestError
 
 SRC = Path(__file__).resolve().parent.parent / "src" / "meyar"
 HTTP_METHODS = {"get", "post", "put", "patch", "delete"}
@@ -498,3 +500,197 @@ async def test_machine_500_unexpected_envelope(
         reason=None,
         retryable=False,
     )
+
+
+async def test_machine_search_inference_busy_reason_and_retryable(
+    client: AsyncClient, tenant_and_key, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Search inference busy -> 503 SERVICE_UNAVAILABLE with reason=INFERENCE_BUSY,
+    retryable=true, fixed safe detail."""
+    _tenant, _key, plaintext = tenant_and_key
+    headers = {"Authorization": f"Bearer {plaintext}"}
+
+    async def _boom(*_a: object, **_k: object) -> object:
+        raise EmbeddingBusyError("queue full")
+
+    monkeypatch.setattr("meyar.api.v1.search.search_candidates", _boom)
+    response = await client.post(
+        "/api/v1/search",
+        headers=headers,
+        json={"mode": "STRUCTURED_ONLY"},
+    )
+    assert response.status_code == 503
+    body = response.json()
+    assert body["error"]["code"] == "SERVICE_UNAVAILABLE"
+    assert body["error"]["reason"] == "INFERENCE_BUSY"
+    assert body["error"]["retryable"] is True
+    assert body["error"]["message"] == "The service is temporarily unavailable."
+    assert body["detail"] == "The service is temporarily unavailable."
+    # No internal text leaks
+    assert "queue full" not in response.text
+
+
+async def test_machine_search_validation_error_reason(
+    client: AsyncClient, tenant_and_key, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Bounded SearchRequestError code -> 422 VALIDATION_FAILED with reason set,
+    fixed safe detail, no provider text."""
+    _tenant, _key, plaintext = tenant_and_key
+    headers = {"Authorization": f"Bearer {plaintext}"}
+
+    async def _boom(*_a: object, **_k: object) -> object:
+        raise SearchRequestError(
+            "EMBEDDING_PROVIDER_REQUIRED",
+            "An embedding_provider is required for SEMANTIC_ONLY/HYBRID search.",
+        )
+
+    monkeypatch.setattr("meyar.api.v1.search.search_candidates", _boom)
+    response = await client.post(
+        "/api/v1/search",
+        headers=headers,
+        json={"mode": "SEMANTIC_ONLY", "semantic_query": "python"},
+    )
+    assert response.status_code == 422
+    body = response.json()
+    assert body["error"]["code"] == "VALIDATION_FAILED"
+    assert body["error"]["reason"] == "EMBEDDING_PROVIDER_REQUIRED"
+    assert body["error"]["retryable"] is False
+    assert body["error"]["message"] == "The request is invalid."
+    assert body["detail"] == "The request is invalid."
+    # Provider config text must not leak
+    assert "embedding_provider" not in response.text
+
+
+async def test_machine_unknown_detail_not_promoted_to_reason(
+    client: AsyncClient, tenant_and_key, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unknown/unclassified HTTPException.detail must NOT become error.reason."""
+    _tenant, _key, plaintext = tenant_and_key
+    headers = {"Authorization": f"Bearer {plaintext}"}
+
+    async def _boom(*_a: object, **_k: object) -> object:
+        from starlette.exceptions import HTTPException as StarletteHTTPException
+
+        raise StarletteHTTPException(
+            status_code=500, detail="arbitrary unsafe internal detail XYZ"
+        )
+
+    monkeypatch.setattr("meyar.api.contracts.candidate_ops.list_candidate_library", _boom)
+    response = await client.get("/api/v1/candidates", headers=headers)
+    assert response.status_code == 500
+    body = response.json()
+    assert body["error"]["code"] == "INTERNAL_ERROR"
+    assert body["error"]["reason"] is None
+    assert body["error"]["message"] == "An unexpected error occurred."
+    assert body["detail"] == "An unexpected error occurred."
+    # Arbitrary detail must not be reflected
+    assert "arbitrary unsafe internal detail XYZ" not in response.text
+
+
+async def test_machine_unknown_unsafe_detail_not_reflected(
+    client: AsyncClient, tenant_and_key, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unknown unsafe 422 detail is replaced with fixed safe message, not echoed."""
+    _tenant, _key, plaintext = tenant_and_key
+    headers = {"Authorization": f"Bearer {plaintext}"}
+
+    async def _boom(*_a: object, **_k: object) -> object:
+        from starlette.exceptions import HTTPException as StarletteHTTPException
+
+        raise StarletteHTTPException(
+            status_code=422, detail="__PRIVATE_SQL_LEAK__"
+        )
+
+    monkeypatch.setattr("meyar.api.contracts.candidate_ops.list_candidate_library", _boom)
+    response = await client.get("/api/v1/candidates", headers=headers)
+    assert response.status_code == 422
+    body = response.json()
+    assert body["error"]["code"] == "VALIDATION_FAILED"
+    assert body["error"]["reason"] is None
+    assert body["detail"] == "The request is invalid."
+    assert "__PRIVATE_SQL_LEAK__" not in response.text
+
+
+# --- Expanded OpenAPI truthfulness tests -------------------------------------
+
+
+def test_openapi_entire_machine_surface_uses_error_envelope(schema: dict) -> None:
+    """Every /api/v1 error response (except health) references ErrorEnvelope,
+    never HTTPValidationError. Common 401/403/422/500 documented everywhere."""
+    checked = 0
+    for path, operations in schema["paths"].items():
+        if not path.startswith("/api/v1"):
+            continue
+        if path.startswith("/api/v1/health"):
+            # Health routes are intentionally unauthenticated.
+            continue
+        for method, operation in operations.items():
+            if method not in ("get", "post", "put", "patch", "delete"):
+                continue
+            # Protected machine operations use ApiKeyBearer only.
+            schemes = {name for req in operation.get("security", []) for name in req}
+            assert schemes == {"ApiKeyBearer"}, (method, path, schemes)
+            for code, response in operation.get("responses", {}).items():
+                if code in ("401", "403", "404", "409", "413", "422", "500", "503"):
+                    content = response.get("content", {})
+                    json_media = content.get("application/json", {})
+                    ref = json_media.get("schema", {}).get("$ref", "")
+                    assert ref == "#/components/schemas/ErrorEnvelope", (
+                        method, path, code, ref
+                    )
+                    checked += 1
+    assert checked > 30, f"Expected >30 envelope error responses, got {checked}"
+
+
+def test_openapi_422_is_not_httpvalidationerror(schema: dict) -> None:
+    """No /api/v1 422 response references FastAPI's default HTTPValidationError."""
+    for path, operations in schema["paths"].items():
+        if not path.startswith("/api/v1"):
+            continue
+        if path.startswith("/api/v1/health"):
+            continue
+        for method, operation in operations.items():
+            if method not in ("get", "post", "put", "patch", "delete"):
+                continue
+            if "422" in operation.get("responses", {}):
+                ref = (
+                    operation["responses"]["422"]
+                    .get("content", {})
+                    .get("application/json", {})
+                    .get("schema", {})
+                    .get("$ref", "")
+                )
+                assert ref == "#/components/schemas/ErrorEnvelope", (
+                    method, path, ref
+                )
+
+
+def test_openapi_health_routes_unauthenticated(schema: dict) -> None:
+    """Public health routes are not marked authenticated."""
+    for path in ("/api/v1/health", "/api/v1/health/ready"):
+        op = schema["paths"][path].get("get", {})
+        assert "security" not in op, path
+
+
+def test_openapi_human_cookie_csrf_unchanged(schema: dict) -> None:
+    """Human /ui/api/v1 security remains cookie + CSRF (mutations) / cookie (reads)."""
+    seen = 0
+    for path, operations in schema["paths"].items():
+        if not path.startswith("/ui/api/v1"):
+            continue
+        for method, operation in operations.items():
+            if method not in ("get", "post", "put", "patch", "delete"):
+                continue
+            seen += 1
+            (requirement,) = operation["security"]
+            assert "ApiKeyBearer" not in requirement, (method, path)
+            assert "HumanSessionCookie" in requirement, (method, path)
+            assert ("HumanCsrfToken" in requirement) == (method != "get"), (method, path)
+    assert seen >= 15
+
+
+def test_openapi_production_docs_disabled(schema: dict) -> None:
+    """OpenAPI schema is generated in non-production (test) settings."""
+    assert "ErrorEnvelope" in schema["components"]["schemas"]
+    assert "ApiKeyBearer" in schema["components"]["securitySchemes"]
+    assert "HumanSessionCookie" in schema["components"]["securitySchemes"]

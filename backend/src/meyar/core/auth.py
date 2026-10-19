@@ -4,6 +4,7 @@ from fastapi import Depends, HTTPException, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meyar.application.errors import ApplicationError, ErrorCode
 from meyar.application.principal import MachinePrincipal
 from meyar.db import get_db
 from meyar.models.api_key import ApiKey
@@ -80,9 +81,12 @@ def require_scope(scope: str):
         ctx: TenantContext = Depends(get_current_tenant),
     ) -> TenantContext:
         if scope not in ctx.scopes:
-            raise HTTPException(
+            raise ApplicationError(
+                ErrorCode.AUTHORIZATION_DENIED,
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"API key is missing required scope: {scope}",
+                reason="SCOPE_MISSING",
+                message="This action is not permitted.",
+                legacy_detail=f"API key is missing required scope: {scope}",
             )
         return ctx
 

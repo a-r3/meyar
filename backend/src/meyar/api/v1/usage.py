@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meyar.api.responses import error_responses
 from meyar.core.auth import TenantContext, get_current_tenant
 from meyar.db import get_db
 from meyar.services.candidate_repo import count_candidates_for_tenant
@@ -9,7 +10,10 @@ from meyar.services.evaluation_repo import count_evaluations_for_tenant
 router = APIRouter(tags=["usage"])
 
 
-@router.get("/usage")
+@router.get(
+    "/usage",
+    responses=error_responses(401, 403),
+)
 async def get_usage(
     ctx: TenantContext = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_db),
