@@ -20,8 +20,12 @@ from meyar.core.roles import ROLE_HR_USER
 from meyar.llm.dependency import get_llm_provider
 from meyar.main import app
 from meyar.models.audit_event import AuditEvent
-from meyar.models.job import Job
+from meyar.models.job import JOB_STATUS_ARCHIVED, Job
 from meyar.models.tenant import Tenant
+from meyar.schemas.criteria import CriterionIn, CriterionKind, CriterionType
+from meyar.services.candidate_repo import create_candidate
+from meyar.services.job_criteria_repo import create_criteria_version
+from meyar.services.job_repo import create_job
 from meyar.services.tenant_membership_repo import create_membership, set_membership_active
 from meyar.services.user_repo import create_user
 
@@ -635,3 +639,116 @@ async def test_clarification_state_is_readable_and_buttons_are_checked_against_t
     after = (await client.get(f"{BASE}/conversations/{conversation}")).json()
     assert after["active_clarification"]["id"] == live["id"]
     assert after["turns"] == detail["turns"]
+
+
+# --- Human JSON legacy_detail separation (issue #45 blocker 2) --------------
+
+
+def _profile(*skills: str) -> dict:
+    return {
+        "skills": [{"name": s, "evidence": {"source": "synthetic", "quote": s}} for s in skills],
+        "employment_history": [],
+        "education": [],
+        "certifications": [],
+        "languages": [],
+        "projects": [],
+    }
+
+
+def _skill(criterion_id: str, value: str, weight: float = 1.0) -> CriterionIn:
+    return CriterionIn(
+        id=criterion_id,
+        kind=CriterionKind.SKILL,
+        type=CriterionType.MUST_HAVE,
+        label=value,
+        value=value,
+        weight=weight,
+    )
+
+
+async def _human_job(
+    db_session: AsyncSession, tenant_id: uuid.UUID, *criteria: CriterionIn
+) -> tuple[uuid.UUID, int]:
+    job = await create_job(db_session, tenant_id=tenant_id, title="Human Job")
+    version = await create_criteria_version(
+        db_session,
+        tenant_id=tenant_id,
+        job_id=job.id,
+        criteria=[c.model_dump(mode="json") for c in criteria],
+        created_by_api_key_id=None,
+    )
+    await db_session.commit()
+    return job.id, version.version_number
+
+
+async def _assert_human_envelope(
+    response, *, status: int, code: str, reason: str, message_fragment: str
+) -> None:
+    assert response.status_code == status
+    body = response.json()
+    assert set(body) == {"detail", "error"}, body
+    error = body["error"]
+    assert error["code"] == code
+    assert error["reason"] == reason
+    assert isinstance(error["message"], str) and error["message"]
+    # Blocker 2: top-level detail is the fixed human message, never the raw
+    # machine/internal legacy_detail sub-code.
+    assert body["detail"] == error["message"]
+    assert message_fragment in body["detail"]
+    # Human JSON never exposes legacy_detail as a top-level field.
+    assert "legacy_detail" not in body
+
+
+async def test_human_score_not_found_detail_is_message_not_legacy_detail(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,  # noqa: F811
+) -> None:
+    tenant, user, password, _membership = tenant_and_user
+    tenant_id = tenant.id
+    csrf = await _login(client, user, password)
+    # A candidate with NO effective profile: score must 404 with PROFILE_NOT_FOUND.
+    candidate = await create_candidate(db_session, tenant_id=tenant_id)
+    await db_session.commit()
+    job, number = await _human_job(db_session, tenant_id, _skill("python", "Python"))
+    response = await client.post(
+        f"{BASE}/jobs/{job}/criteria/{number}/score",
+        headers=_h(csrf),
+        json={"candidate_id": str(candidate.id)},
+    )
+    await _assert_human_envelope(
+        response,
+        status=404,
+        code="NOT_FOUND",
+        reason="PROFILE_NOT_FOUND",
+        message_fragment="profile",
+    )
+
+
+async def test_human_rank_archived_job_detail_is_message_not_legacy_code(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_and_user,
+    local_ui_settings: Settings,  # noqa: F811
+) -> None:
+    tenant, user, password, _membership = tenant_and_user
+    tenant_id = tenant.id
+    csrf = await _login(client, user, password)
+    job, number = await _human_job(db_session, tenant_id, _skill("python", "Python"))
+    # Archive the job so ranking is refused with the closed JOB_ARCHIVED sub-code.
+    job_row = await db_session.get(Job, job)
+    job_row.status = JOB_STATUS_ARCHIVED
+    await db_session.commit()
+    response = await client.post(
+        f"{BASE}/jobs/{job}/criteria/{number}/rank",
+        headers=_h(csrf),
+        json={},
+    )
+    await _assert_human_envelope(
+        response,
+        status=409,
+        code="CONFLICT",
+        reason="JOB_ARCHIVED",
+        message_fragment="archived",
+    )

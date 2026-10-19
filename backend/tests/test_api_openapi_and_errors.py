@@ -10,6 +10,7 @@ from api_contract_support import human_surface
 from conftest import BrowserTestClient as AsyncClient
 from fakes import FakeLLMProvider
 from httpx import ASGITransport
+from sqlalchemy.ext.asyncio import AsyncSession
 from test_ui_agent_routes import local_ui_settings  # noqa: F401 - pytest fixture re-export
 
 from meyar.config import Settings
@@ -165,16 +166,65 @@ async def test_new_machine_routes_return_the_envelope_and_keep_legacy_detail(
     # legacy `detail` key is preserved for FastAPI-style clients
     assert isinstance(missing.json()["detail"], str)
     bad = await client.get("/api/v1/jobs?page_size=500", headers=headers)
-    assert bad.status_code == 422 and bad.json() == {"detail": "Invalid request."}
+    assert bad.status_code == 422
+    body = bad.json()
+    assert body["detail"] == "Invalid request."
+    assert body["error"] == {
+        "code": "VALIDATION_FAILED",
+        "reason": "REQUEST_INVALID",
+        "message": "The request is invalid.",
+        "retryable": False,
+    }
 
 
-async def test_legacy_machine_error_bodies_are_unchanged(
+async def test_machine_framework_errors_use_the_envelope_with_preserved_detail(
     client: AsyncClient, tenant_and_key
 ) -> None:
-    unauthenticated = await client.get("/api/v1/jobs")
-    assert unauthenticated.status_code == 401
-    assert unauthenticated.json() == {"detail": "Invalid or missing API key."}
-    assert unauthenticated.headers["www-authenticate"] == "Bearer"
+    """Every /api/v1 framework failure returns the stable error envelope.
+
+    The historical top-level ``detail`` is preserved (where it was already
+    present) and the ``error`` object is added. Auth failures keep
+    ``WWW-Authenticate: Bearer``.
+    """
+    _tenant, _key, plaintext = tenant_and_key
+    headers = {"Authorization": f"Bearer {plaintext}"}
+
+    # 401 invalid key: legacy detail preserved + Bearer challenge header.
+    bad_key = await client.get(
+        "/api/v1/jobs", headers={"Authorization": "Bearer definitely-invalid-key"}
+    )
+    assert bad_key.status_code == 401
+    assert bad_key.headers["www-authenticate"] == "Bearer"
+    body = bad_key.json()
+    assert body["detail"] == "Invalid or missing API key."
+    assert body["error"] == {
+        "code": "AUTHENTICATION_REQUIRED",
+        "reason": None,
+        "message": "Authentication is required.",
+        "retryable": False,
+    }
+
+    # 401 missing key.
+    missing_key = await client.get("/api/v1/jobs")
+    assert missing_key.status_code == 401
+    assert missing_key.headers["www-authenticate"] == "Bearer"
+    assert missing_key.json()["detail"] == "Invalid or missing API key."
+
+    # 422 validation: legacy detail preserved + envelope.
+    bad = await client.get("/api/v1/jobs?page_size=500", headers=headers)
+    assert bad.status_code == 422
+    bad_body = bad.json()
+    assert bad_body["detail"] == "Invalid request."
+    assert bad_body["error"]["code"] == "VALIDATION_FAILED"
+
+    # 404 from a shared contract route: enveloped, safe detail.
+    missing = await client.get(
+        "/api/v1/evaluations/00000000-0000-0000-0000-000000000001", headers=headers
+    )
+    assert missing.status_code == 404
+    assert missing.json()["error"]["code"] == "NOT_FOUND"
+    assert "Traceback" not in missing.text
+    assert "sqlalchemy" not in missing.text.lower()
 
 
 async def test_planner_non_executable_outcome_is_a_200_answer_not_an_http_error(
@@ -294,3 +344,157 @@ async def test_clarification_is_a_200_outcome_and_its_live_state_is_readable(
     ).json()
     assert [turn["role"] for turn in detail["turns"]] == ["user", "assistant"]
     assert detail["title_kind"] in {"NEW", "GENERAL"}
+
+
+# --- Machine (/api/v1) error contract regression tests -----------------------
+
+
+def _assert_envelope(
+    body: dict, code: str, *, detail: str, reason: str | None, retryable: bool
+) -> None:
+    assert set(body) == {"detail", "error"}, body
+    assert body["detail"] == detail
+    error = body["error"]
+    assert error["code"] == code
+    assert error["reason"] == reason
+    assert isinstance(error["message"], str) and error["message"]
+    assert error["retryable"] is retryable
+    text = str(body)
+    for forbidden in ("Traceback", "sqlalchemy", "storage_key", "/home/", "postgres"):
+        assert forbidden not in text, forbidden
+
+
+async def test_machine_401_invalid_api_key_envelope(
+    client: AsyncClient, tenant_and_key
+) -> None:
+    _tenant, _key, _plaintext = tenant_and_key
+    response = await client.get(
+        "/api/v1/jobs", headers={"Authorization": "Bearer definitely-invalid-key"}
+    )
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
+    _assert_envelope(
+        response.json(),
+        "AUTHENTICATION_REQUIRED",
+        detail="Invalid or missing API key.",
+        reason=None,
+        retryable=False,
+    )
+
+
+async def test_machine_401_missing_api_key_envelope(client: AsyncClient) -> None:
+    response = await client.get("/api/v1/jobs")
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
+    _assert_envelope(
+        response.json(),
+        "AUTHENTICATION_REQUIRED",
+        detail="Invalid or missing API key.",
+        reason=None,
+        retryable=False,
+    )
+
+
+async def test_machine_403_insufficient_scope_envelope(
+    client: AsyncClient, tenant_and_key, db_session: AsyncSession
+) -> None:
+    from meyar.services.api_key_repo import create_api_key
+
+    tenant, _key, _plaintext = tenant_and_key
+    _limited_key, limited_plaintext = await create_api_key(
+        db_session, tenant_id=tenant.id, env="test", scopes=["candidates:read"]
+    )
+    await db_session.commit()
+    response = await client.post(
+        "/api/v1/jobs",
+        headers={"Authorization": f"Bearer {limited_plaintext}"},
+        json={"title": "Limited", "criteria": []},
+    )
+    assert response.status_code == 403
+    body = response.json()
+    assert body["error"]["code"] == "AUTHORIZATION_DENIED"
+    assert isinstance(body["detail"], str) and body["detail"]
+    assert "Traceback" not in response.text
+
+
+async def test_machine_422_request_validation_envelope(
+    client: AsyncClient, tenant_and_key
+) -> None:
+    _tenant, _key, plaintext = tenant_and_key
+    headers = {"Authorization": f"Bearer {plaintext}"}
+    response = await client.get("/api/v1/jobs?page_size=500", headers=headers)
+    assert response.status_code == 422
+    _assert_envelope(
+        response.json(),
+        "VALIDATION_FAILED",
+        detail="Invalid request.",
+        reason="REQUEST_INVALID",
+        retryable=False,
+    )
+
+
+async def test_machine_shared_application_error_envelope(
+    client: AsyncClient, tenant_and_key
+) -> None:
+    _tenant, _key, plaintext = tenant_and_key
+    headers = {"Authorization": f"Bearer {plaintext}"}
+    response = await client.get(
+        "/api/v1/evaluations/00000000-0000-0000-0000-000000000001", headers=headers
+    )
+    assert response.status_code == 404
+    body = response.json()
+    assert body["error"]["code"] == "NOT_FOUND"
+    assert body["error"]["reason"] is None
+    assert isinstance(body["detail"], str) and body["detail"]
+    assert "Traceback" not in response.text
+
+
+async def test_machine_413_upload_limit_envelope(
+    client: AsyncClient, tenant_and_key, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _tenant, _key, plaintext = tenant_and_key
+    headers = {"Authorization": f"Bearer {plaintext}"}
+
+    from meyar.config import Settings, get_settings
+
+    app.dependency_overrides[get_settings] = lambda: Settings(max_upload_bytes=10)
+    try:
+        created = await client.post("/api/v1/candidates", headers=headers)
+        assert created.status_code == 201
+        candidate_id = created.json()["id"]
+        response = await client.post(
+            f"/api/v1/candidates/{candidate_id}/documents",
+            headers=headers,
+            files={"file": ("cv.pdf", b"x" * 100, "application/pdf")},
+        )
+    finally:
+        app.dependency_overrides.pop(get_settings, None)
+    assert response.status_code == 413
+    _assert_envelope(
+        response.json(),
+        "PAYLOAD_TOO_LARGE",
+        detail="File exceeds the maximum allowed size of 10 bytes.",
+        reason=None,
+        retryable=False,
+    )
+
+
+async def test_machine_500_unexpected_envelope(
+    client: AsyncClient, tenant_and_key, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _tenant, _key, plaintext = tenant_and_key
+    headers = {"Authorization": f"Bearer {plaintext}"}
+
+    async def _boom(*_a: object, **_k: object) -> object:
+        raise RuntimeError("unexpected database failure")
+
+    monkeypatch.setattr("meyar.api.contracts.candidate_ops.list_candidate_library", _boom)
+    response = await client.get("/api/v1/candidates", headers=headers)
+    assert response.status_code == 500
+    _assert_envelope(
+        response.json(),
+        "INTERNAL_ERROR",
+        detail="Internal server error.",
+        reason=None,
+        retryable=False,
+    )

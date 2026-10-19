@@ -12,7 +12,7 @@ compatibility rules that a schema cannot.
 | Credential | API key, `Authorization: Bearer <key>` | BrowserSession cookie from the interactive `/ui/login` |
 | Mutations | key scope (`jobs:write`, …) | scope **plus** `X-CSRF-Token` header |
 | May own a conversation / confirm a JD draft | **no** | yes (accountable `HUMAN_USER`) |
-| Auth failure | `401 {"detail": "Invalid or missing API key."}` (legacy body) | `401` error envelope |
+| Auth failure | `401` error envelope (`detail` = "Invalid or missing API key.", keeps `WWW-Authenticate: Bearer`) | `401` error envelope (`detail == error.message`) |
 
 Human bootstrap: log in at `/ui/login` (form), then `GET /ui/api/v1/session` returns the
 server-derived principal and `csrf_token`; send it as `X-CSRF-Token` on every POST. The
@@ -67,10 +67,19 @@ criteria-version ids; it never ranks inline (call `rank` afterwards).
 NOT_FOUND, CONFLICT, RETRYABLE_BUSY, SERVICE_UNAVAILABLE, PAYLOAD_TOO_LARGE,
 INTERNAL_ERROR`; `reason` is a closed sub-code (`JOB_ARCHIVED`, `DUPLICATE_ACTIVE_JOB`,
 `DRAFT_NOT_ACTIVE`, `UNSUPPORTED_FILTER`, `ORIGINAL_UNAVAILABLE`, …); `message` is fixed
-privacy-safe text. Foreign and nonexistent resources are indistinguishable. Pre-existing
-machine framework errors (invalid key, generic 422, 500, upload 413) keep their legacy
-`{"detail": …}` body; routes moved into the shared factory add `error` and keep the old
-`detail` string.
+privacy-safe text. Foreign and nonexistent resources are indistinguishable.
+
+**Compatibility rule:** where a historical machine endpoint already had a top-level
+`detail` string, that string is preserved (as `legacy_detail`) so existing FastAPI-style
+clients keep working, and the stable `error { code, reason, message, retryable }` object
+is added — every `/api/v1` failure now has the common contract. The human surface never
+serializes `legacy_detail` as its top-level `detail`: there `detail == error.message`.
+Auth failures on the machine surface keep `WWW-Authenticate: Bearer`.
+
+No stack trace, SQL, path/storage key, raw model output or candidate/JD content appears
+in any error body. If preserving a historical `detail` value would expose something
+unsafe, a privacy-safe fixed value is used instead (a documented compatibility
+correction).
 
 ## Compatibility rules (do not change without a reviewed decision)
 
@@ -94,7 +103,7 @@ success event.
 
 ## Known limitations
 
-No JSON login or token auth for humans; no rate limiting (AUD-RATE); legacy machine error
-bodies are not yet enveloped; the `ui.service` read-model builders have not been relocated
-into `application/`; embedding readiness appears on detail only (not per list item);
-identity-extraction retry is not offered; folder reconciliation remains an operator command.
+No JSON login or token auth for humans; no rate limiting (AUD-RATE); the `ui.service`
+read-model builders have not been relocated into `application/`; embedding readiness
+appears on detail only (not per list item); identity-extraction retry is not offered;
+folder reconciliation remains an operator command.

@@ -84,7 +84,14 @@ async def test_honest_over_limit_content_length_rejected_without_reading() -> No
     harness = _Harness([b"x" * 10], content_length=str(BOUND + 1))
     await harness.run()
     assert harness.statuses == [413]
-    assert json.loads(harness.body()) == {"detail": too_large_message(MAX_BYTES)}
+    body = json.loads(harness.body())
+    assert body["detail"] == too_large_message(MAX_BYTES)
+    assert body["error"] == {
+        "code": "PAYLOAD_TOO_LARGE",
+        "reason": None,
+        "message": "The request is too large.",
+        "retryable": False,
+    }
     assert harness.app_called is False
     assert harness.real_receive_calls == 0
 
@@ -94,7 +101,9 @@ async def test_streamed_body_without_content_length_stops_at_bound() -> None:
     harness = _Harness([b"x" * chunk] * 20, content_length=None)
     await harness.run()
     assert harness.statuses == [413]  # downstream's own 400 is suppressed
-    assert json.loads(harness.body()) == {"detail": too_large_message(MAX_BYTES)}
+    body = json.loads(harness.body())
+    assert body["detail"] == too_large_message(MAX_BYTES)
+    assert body["error"]["code"] == "PAYLOAD_TOO_LARGE"
     # 66_536-byte bound crossed on the 3rd chunk; nothing further is read.
     assert harness.real_receive_calls == 3
     assert harness.app_received < BOUND
@@ -176,7 +185,9 @@ async def test_real_app_over_limit_body_never_reaches_handler(
         files={"file": ("cv.pdf", b"%PDF-" + b"x" * (BOUND + 10), "application/pdf")},
     )
     assert resp.status_code == 413
-    assert resp.json() == {"detail": too_large_message(MAX_BYTES)}
+    body = resp.json()
+    assert body["detail"] == too_large_message(MAX_BYTES)
+    assert body["error"]["code"] == "PAYLOAD_TOO_LARGE"
 
 
 async def test_real_app_file_exactly_at_limit_passes_transport_to_validation(
@@ -205,7 +216,9 @@ async def test_real_app_file_one_byte_over_limit_rejected_by_validator(
         files={"file": ("cv.pdf", b"x" * (MAX_BYTES + 1), "application/pdf")},
     )
     assert resp.status_code == 413
-    assert resp.json() == {"detail": too_large_message(MAX_BYTES)}
+    body = resp.json()
+    assert body["detail"] == too_large_message(MAX_BYTES)
+    assert body["error"]["code"] == "PAYLOAD_TOO_LARGE"
 
 
 # --- handler-side bounded read -------------------------------------------

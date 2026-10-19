@@ -489,7 +489,14 @@ async def test_failed_hard_delete_preserves_preexisting_broken_photo(
         headers={"Authorization": f"Bearer {summary.api_key_plaintext}"},
     )
     assert response.status_code == 500
-    assert response.json() == {"detail": "Internal server error."}
+    body = response.json()
+    assert body["detail"] == "Internal server error."
+    assert body["error"] == {
+        "code": "INTERNAL_ERROR",
+        "reason": None,
+        "message": "An unexpected error occurred.",
+        "retryable": False,
+    }
     assert "error_type=OSError" in caplog.text
     assert await db_session.get(Candidate, candidate_id) is not None
     retained = await db_session.get(CandidatePhotoVersion, photo_id)
@@ -552,7 +559,14 @@ async def test_mixed_photo_states_survive_later_delete_failure(
         headers={"Authorization": f"Bearer {summary.api_key_plaintext}"},
     )
     assert response.status_code == 500
-    assert response.json() == {"detail": "Internal server error."}
+    body = response.json()
+    assert body["detail"] == "Internal server error."
+    assert body["error"] == {
+        "code": "INTERNAL_ERROR",
+        "reason": None,
+        "message": "An unexpected error occurred.",
+        "retryable": False,
+    }
     assert "error_type=OSError" in caplog.text
     assert await db_session.get(Candidate, candidate_id) is not None
     assert await photos.read(tenant_id=tenant_id, storage_key=good_key) == good_bytes
@@ -607,7 +621,14 @@ async def test_failed_hard_delete_preserves_valid_photo_and_retry(
     auth = {"Authorization": f"Bearer {summary.api_key_plaintext}"}
     response = await client.delete(url, headers=auth)
     assert response.status_code == 500
-    assert response.json() == {"detail": "Internal server error."}
+    body = response.json()
+    assert body["detail"] == "Internal server error."
+    assert body["error"] == {
+        "code": "INTERNAL_ERROR",
+        "reason": None,
+        "message": "An unexpected error occurred.",
+        "retryable": False,
+    }
     assert "error_type=OSError" in caplog.text
     assert await db_session.get(Candidate, candidate_id) is not None
     assert await db_session.get(CandidatePhotoVersion, photo_id) is not None
@@ -665,7 +686,14 @@ async def test_multi_photo_partial_delete_restores_every_available_asset(
     auth = {"Authorization": f"Bearer {summary.api_key_plaintext}"}
     response = await client.delete(url, headers=auth)
     assert response.status_code == 500
-    assert response.json() == {"detail": "Internal server error."}
+    body = response.json()
+    assert body["detail"] == "Internal server error."
+    assert body["error"] == {
+        "code": "INTERNAL_ERROR",
+        "reason": None,
+        "message": "An unexpected error occurred.",
+        "retryable": False,
+    }
     assert "error_type=OSError" in caplog.text
     assert await db_session.get(Candidate, candidate_id) is not None
     for key, content in expected.items():
@@ -706,7 +734,14 @@ async def test_photo_assets_recover_when_candidate_db_commit_fails(
     auth = {"Authorization": f"Bearer {summary.api_key_plaintext}"}
     response = await client.delete(url, headers=auth)
     assert response.status_code == 500
-    assert response.json() == {"detail": "Internal server error."}
+    body = response.json()
+    assert body["detail"] == "Internal server error."
+    assert body["error"] == {
+        "code": "INTERNAL_ERROR",
+        "reason": None,
+        "message": "An unexpected error occurred.",
+        "retryable": False,
+    }
     assert "error_type=OSError" in caplog.text
     assert await db_session.get(Candidate, candidate_id) is not None
     assert await photos.read(tenant_id=tenant_id, storage_key=photo_key) == photo_bytes
@@ -736,7 +771,14 @@ async def test_hard_delete_rejects_foreign_tenant_photo_key_before_any_delete(
         headers={"Authorization": f"Bearer {summary.api_key_plaintext}"},
     )
     assert response.status_code == 500
-    assert response.json() == {"detail": "Internal server error."}
+    body = response.json()
+    assert body["detail"] == "Internal server error."
+    assert body["error"] == {
+        "code": "INTERNAL_ERROR",
+        "reason": None,
+        "message": "An unexpected error occurred.",
+        "retryable": False,
+    }
     assert "error_type=ValueError" in caplog.text
     assert await db_session.get(Candidate, candidate_id) is not None
     assert await storage.read(storage_key=document_key) == original

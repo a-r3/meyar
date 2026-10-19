@@ -24,6 +24,11 @@ from meyar.api.errors import (
     http_error_response,
     internal_error_response,
     is_human_json_path,
+    is_machine_api_path,
+    machine_http_error_response,
+    machine_internal_error_response,
+    machine_unauthenticated_response,
+    machine_validation_error_response,
     unauthenticated_response,
     validation_error_response,
 )
@@ -1608,13 +1613,9 @@ def install_ui(app: FastAPI) -> None:
     async def _tenant_access_error(request: Request, exc: TenantInactiveError) -> Response:
         if is_human_json_path(request.url.path):
             return unauthenticated_response()
-        if not request.url.path.startswith("/ui"):
-            from fastapi.responses import JSONResponse
-
-            return JSONResponse(
-                {"detail": "Invalid or missing API key."}, status_code=401,
-                headers={"WWW-Authenticate": "Bearer"},
-            )
+        if is_machine_api_path(request.url.path):
+            # Machine /api/v1: enveloped 401 that keeps WWW-Authenticate: Bearer.
+            return machine_unauthenticated_response()
         if request.url.path.startswith("/ui/login"):
             response = _render(
                 request, "login.html", _context(error=_GENERIC_LOGIN_ERROR),
@@ -1665,6 +1666,9 @@ def install_ui(app: FastAPI) -> None:
                 ),
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             )
+        if is_machine_api_path(request.url.path):
+            # Machine /api/v1: enveloped 422 preserving the historical detail.
+            return machine_validation_error_response()
         # Pydantic's default errors include raw input and exception context.
         return JSONResponse({"detail": "Invalid request."}, status_code=422)
 
@@ -1672,6 +1676,10 @@ def install_ui(app: FastAPI) -> None:
     async def _http_error(request: Request, exc: StarletteHTTPException) -> Response:
         if is_human_json_path(request.url.path):
             return http_error_response(exc)
+        if is_machine_api_path(request.url.path):
+            # Machine /api/v1: enveloped response preserving the historical
+            # detail (and WWW-Authenticate: Bearer on 401 challenges).
+            return machine_http_error_response(exc)
         if request.url.path == "/ui" or request.url.path.startswith("/ui/"):
             return _render(
                 request,
@@ -1689,6 +1697,9 @@ def install_ui(app: FastAPI) -> None:
         log_failure(logger, component="http", code="UNEXPECTED_ERROR", exc=exc)
         if is_human_json_path(request.url.path):
             return internal_error_response()
+        if is_machine_api_path(request.url.path):
+            # Machine /api/v1: enveloped 500 with no stack trace or exception text.
+            return machine_internal_error_response()
         if request.url.path == "/ui" or request.url.path.startswith("/ui/"):
             return _render(
                 request,

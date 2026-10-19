@@ -659,7 +659,14 @@ async def test_7_api_upload_commit_failure_is_safe_and_leaves_no_orphan(
         files={"file": (name, data, ctype)},
     )
     assert response.status_code == 500
-    assert response.json() == {"detail": "Internal server error."}
+    body = response.json()
+    assert body["detail"] == "Internal server error."
+    assert body["error"] == {
+        "code": "INTERNAL_ERROR",
+        "reason": None,
+        "message": "An unexpected error occurred.",
+        "retryable": False,
+    }
     assert files_under(root) == []
     assert await count(db_session, CandidateDocument) == 0
     assert await count(db_session, CanonicalDocument) == 0

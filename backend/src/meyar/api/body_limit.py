@@ -16,6 +16,7 @@ from typing import Any
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from meyar.api.errors import ErrorCode, error_envelope
 from meyar.config import Settings, get_settings
 from meyar.ingestion.validation import too_large_message
 
@@ -53,7 +54,10 @@ def _declared_content_length(scope: Scope) -> int | None:
 
 
 async def _send_too_large(send: Send, max_bytes: int) -> None:
-    body = json.dumps({"detail": too_large_message(max_bytes)}).encode()
+    detail = too_large_message(max_bytes)
+    body = json.dumps(
+        error_envelope(ErrorCode.PAYLOAD_TOO_LARGE, reason=None, legacy_detail=detail)
+    ).encode()
     await send(
         {
             "type": "http.response.start",

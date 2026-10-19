@@ -108,8 +108,15 @@ async def test_inactive_rest_reads_writes_last_used_and_other_tenant(
     ):
         response = await client.request(method, path, headers=headers)
         assert response.status_code == 401
-        assert response.json() == {"detail": "Invalid or missing API key."}
         assert response.headers["www-authenticate"] == "Bearer"
+        body = response.json()
+        assert body["detail"] == "Invalid or missing API key."
+        assert body["error"] == {
+            "code": "AUTHENTICATION_REQUIRED",
+            "reason": None,
+            "message": "Authentication is required.",
+            "retryable": False,
+        }
     assert (
         await db_session.scalar(select(ApiKey.last_used_at).where(ApiKey.id == key_id)) == last_used
     )

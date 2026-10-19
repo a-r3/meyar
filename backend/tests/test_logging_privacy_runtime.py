@@ -75,7 +75,9 @@ async def test_api_validation_does_not_report_input_or_exception_context(
         json={"mode": "STRUCTURED_ONLY", "limit": UNSAFE, CANARIES[0]: UNSAFE},
     )
     assert response.status_code == 422
-    assert response.json() == {"detail": "Invalid request."}
+    body = response.json()
+    assert body["detail"] == "Invalid request."
+    assert body["error"]["code"] == "VALIDATION_FAILED"
     assert_private(caplog.text + response.text)
 
 
@@ -158,7 +160,14 @@ async def test_storage_failure_has_generic_response_and_safe_error_log(
         files={"file": (CANARIES[0] + ".pdf", VALID, "application/pdf")},
     )
     assert response.status_code == 500
-    assert response.json() == {"detail": "Internal server error."}
+    body = response.json()
+    assert body["detail"] == "Internal server error."
+    assert body["error"] == {
+        "code": "INTERNAL_ERROR",
+        "reason": None,
+        "message": "An unexpected error occurred.",
+        "retryable": False,
+    }
     assert_private(response.text + caplog.text)
     assert "UNEXPECTED_ERROR" in caplog.text and "OSError" in caplog.text
 

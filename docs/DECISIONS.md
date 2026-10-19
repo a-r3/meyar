@@ -9802,12 +9802,18 @@ The UI keeps resolving its own date in the router and passing it explicitly.
 `ErrorEnvelope {detail, error{code, reason, message, retryable}}` with a closed
 `ErrorCode` enum. Every error the application layer raises uses it on both surfaces, and
 the human surface also maps its framework-level failures (auth, validation, unexpected)
-into it. **Legacy exception:** framework-level failures on the machine surface (invalid
-API key 401, generic 422 "Invalid request.", unexpected 500 "Internal server error.",
-upload 413) keep their exact FastAPI-style `{detail: ...}` bodies because existing
-clients and privacy tests assert them; routes that moved into the shared factory add the
-envelope while keeping the old `detail` string. Migrating the legacy bodies is an
-explicit future compatibility decision.
+into it.
+
+The machine surface returns the same stable envelope for every failure too. Where a
+historical machine endpoint already had a top-level `detail` string, that string is
+preserved (as `legacy_detail`) so existing FastAPI-style clients keep working, and the
+stable `error { code, reason, message, retryable }` object is added. The human surface
+never serializes `legacy_detail` as its top-level `detail`: there `detail == error.message`.
+Auth failures on the machine surface keep `WWW-Authenticate: Bearer`.
+
+Compatibility rule: the historical top-level `detail` may remain where safe, but every
+`/api/v1` error now also carries the stable envelope contract. No stack trace, SQL,
+path, storage key, raw model output or candidate/JD content appears in any error body.
 
 ### 9. Bounds
 

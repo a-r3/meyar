@@ -216,8 +216,15 @@ async def test_rest_query_embedding_tenant_authority_and_active_control(
     assert inner.call_count == 1
     if disable:
         assert response.status_code == 401
-        assert response.json() == {"detail": "Invalid or missing API key."}
         assert response.headers["www-authenticate"] == "Bearer"
+        body = response.json()
+        assert body["detail"] == "Invalid or missing API key."
+        assert body["error"] == {
+            "code": "AUTHENTICATION_REQUIRED",
+            "reason": None,
+            "message": "Authentication is required.",
+            "retryable": False,
+        }
         for private_value in (str(candidate_id), str(profile_id), NAME, "results", "Java"):
             assert private_value not in response.text
         _assert_no_candidate_work(candidate_work)
@@ -349,8 +356,15 @@ async def test_planner_inference_loss_preserves_existing_post_model_authority(
                     headers={"Authorization": f"Bearer {raw}"},
                 )
                 assert response.status_code == 401
-                assert response.json() == {"detail": "Invalid or missing API key."}
                 assert response.headers["www-authenticate"] == "Bearer"
+                body = response.json()
+                assert body["detail"] == "Invalid or missing API key."
+                assert body["error"] == {
+                    "code": "AUTHENTICATION_REQUIRED",
+                    "reason": None,
+                    "message": "Authentication is required.",
+                    "retryable": False,
+                }
             else:
                 csrf = await _login_and_csrf(client, username, password)
                 response = await client.post(
