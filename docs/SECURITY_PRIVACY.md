@@ -610,6 +610,26 @@ canonical LF characters against the same 4000-character HR limit.
   download with separate canonical preview. Successful-access audit through a shared
   UI/API application operation remains explicit #45 scope, not a delivered claim.
 
+## Human JSON surface and shared application operations (issue #45, D-116)
+
+- Two credential types, never mixed: machine API keys (`/api/v1`) and the interactive
+  BrowserSession cookie (`/ui/api/v1`, cookie `Path=/ui`). API keys cannot confirm a JD
+  draft or own a conversation; a cookie is never accepted on `/api/v1`.
+- Human JSON mutations require `X-CSRF-Token` (the per-session HMAC), checked after
+  authentication and scope. Session, user, membership, tenant and BrowserSession are
+  re-derived live on every request. Errors are JSON (401/403/404/422), never redirects.
+- Tenant, user and session identity are never read from a client. Request bodies forbid
+  extra fields; foreign and nonexistent resources return identical 404s.
+- Successful original-CV access is audited in ONE shared operation for the UI and both
+  JSON surfaces (ids + channel + actor only), after the bytes are read and before they are
+  returned; denial or failure writes no success event and serves nothing.
+- `agent.draft.confirmed` correlates draft → accountable human → Job → CriteriaVersion with
+  ids only. Non-scorable JD requirement provenance keeps location, reason and (except for
+  prohibited content, which keeps no text) the exact source slice, and can never become
+  scoring authority.
+- New API/application code imports no HTTP client or cloud AI SDK; model access stays
+  behind the loopback-only `LLMProvider`/`EmbeddingProvider` (source-checked).
+
 ## Document storage
 
 Raw candidate CV bytes are addressed only by an opaque storage key

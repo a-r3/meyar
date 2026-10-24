@@ -89,6 +89,15 @@ async def test_real_rest_safe_errors_are_private(client, db_session, tenant_and_
             f"/api/v1/candidates/{target}/detail", headers={"Authorization": f"Bearer {key}"}
         )
     assert response.status_code == status
+    body = response.json()
+    assert set(body) == {"detail", "error"}, body
+    assert isinstance(body["detail"], str) and body["detail"]
+    assert body["error"]["code"] in {
+        "AUTHENTICATION_REQUIRED",
+        "AUTHORIZATION_DENIED",
+        "NOT_FOUND",
+        "VALIDATION_FAILED",
+    }
     _private(response)
 
 
@@ -98,7 +107,15 @@ async def test_inactive_tenant_generic_401_is_private(client, db_session, tenant
     await db_session.commit()
     response = await client.get("/api/v1/usage", headers={"Authorization": f"Bearer {key}"})
     assert response.status_code == 401
-    assert response.json() == {"detail": "Invalid or missing API key."}
+    assert response.headers["www-authenticate"] == "Bearer"
+    body = response.json()
+    assert body["detail"] == "Invalid or missing API key."
+    assert body["error"] == {
+        "code": "AUTHENTICATION_REQUIRED",
+        "reason": None,
+        "message": "Authentication is required.",
+        "retryable": False,
+    }
     _private(response)
 
 
@@ -111,7 +128,14 @@ async def test_unexpected_safe_500_is_private(monkeypatch):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get("/api/v1/usage", headers={"Authorization": "Bearer synthetic"})
     assert response.status_code == 500
-    assert response.json() == {"detail": "Internal server error."}
+    body = response.json()
+    assert body["detail"] == "Internal server error."
+    assert body["error"] == {
+        "code": "INTERNAL_ERROR",
+        "reason": None,
+        "message": "An unexpected error occurred.",
+        "retryable": False,
+    }
     _private(response)
 
 
@@ -148,6 +172,9 @@ async def test_early_upload_413_receives_policy(client, monkeypatch):
         content=b"synthetic", headers={"content-length": "999999"},
     )
     assert response.status_code == 413
+    body = response.json()
+    assert body["detail"] == "File exceeds the maximum allowed size of 1 bytes."
+    assert body["error"]["code"] == "PAYLOAD_TOO_LARGE"
     _private(response)
 
 
@@ -159,7 +186,14 @@ async def test_unexpected_upload_limiter_failure_is_safe_and_private(monkeypatch
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         response = await ac.post(f"/api/v1/candidates/{uuid.uuid4()}/documents", content=b"x")
     assert response.status_code == 500
-    assert response.json() == {"detail": "Internal server error."}
+    body = response.json()
+    assert body["detail"] == "Internal server error."
+    assert body["error"] == {
+        "code": "INTERNAL_ERROR",
+        "reason": None,
+        "message": "An unexpected error occurred.",
+        "retryable": False,
+    }
     _private(response)
 
 

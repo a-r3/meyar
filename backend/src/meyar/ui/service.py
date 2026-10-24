@@ -1282,7 +1282,12 @@ def _refine_headline(summary: AgentRefineSummaryView | None) -> str:
 
 
 async def list_job_views(
-    db: AsyncSession, *, tenant_id: uuid.UUID, status: str = JOB_STATUS_ACTIVE
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    status: str = JOB_STATUS_ACTIVE,
+    limit: int | None = None,
+    offset: int = 0,
 ) -> list[JobView]:
     latest = (
         select(
@@ -1293,20 +1298,22 @@ async def list_job_views(
         .group_by(JobCriteriaVersion.job_id)
         .subquery()
     )
-    rows = (
-        await db.execute(
-            select(Job, JobCriteriaVersion)
-            .outerjoin(latest, Job.id == latest.c.job_id)
-            .outerjoin(
-                JobCriteriaVersion,
-                (JobCriteriaVersion.tenant_id == tenant_id)
-                & (JobCriteriaVersion.job_id == Job.id)
-                & (JobCriteriaVersion.version_number == latest.c.max_version),
-            )
-            .where(Job.tenant_id == tenant_id, Job.status == status)
-            .order_by(Job.created_at.desc(), Job.id.asc())
+    statement = (
+        select(Job, JobCriteriaVersion)
+        .outerjoin(latest, Job.id == latest.c.job_id)
+        .outerjoin(
+            JobCriteriaVersion,
+            (JobCriteriaVersion.tenant_id == tenant_id)
+            & (JobCriteriaVersion.job_id == Job.id)
+            & (JobCriteriaVersion.version_number == latest.c.max_version),
         )
-    ).all()
+        .where(Job.tenant_id == tenant_id, Job.status == status)
+        .order_by(Job.created_at.desc(), Job.id.asc())
+    )
+    if limit is not None:
+        # Bounded API paging; the HR page keeps its unbounded (unpaged) listing.
+        statement = statement.offset(offset).limit(limit)
+    rows = (await db.execute(statement)).all()
     views: list[JobView] = []
     for job, criteria in rows:
         must_have_labels: list[str] = []

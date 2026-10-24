@@ -217,11 +217,16 @@ async def test_search_nl_requires_auth(client: AsyncClient) -> None:
     assert resp.status_code == 401
 
 
-async def test_search_nl_missing_as_of_date_rejected(client: AsyncClient, tenant_and_key) -> None:
+async def test_search_nl_omitted_as_of_date_is_defaulted_and_echoed(
+    client: AsyncClient, tenant_and_key
+) -> None:
+    """Issue #45 (F): omitted → the configured business "today", resolved once
+    at the boundary and returned as the effective date."""
     _tenant, _key, plaintext = tenant_and_key
     resp = await client.post(
         "/api/v1/search/natural-language",
         json={"query": "Python candidates"},
         headers=_auth(plaintext),
     )
-    assert resp.status_code == 422
+    assert resp.status_code == 200
+    assert resp.json()["as_of_date"] is not None

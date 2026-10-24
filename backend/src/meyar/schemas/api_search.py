@@ -43,7 +43,8 @@ class ApiNaturalLanguageSearchRequest(BaseModel):
     model_config = {"extra": "forbid"}
 
     query: str = Field(min_length=1, max_length=4000)
-    as_of_date: date
+    # Omitted → the configured business "today", resolved once at the boundary.
+    as_of_date: date | None = None
 
 
 class ApiCandidateSearchResultItem(BaseModel):
@@ -74,6 +75,8 @@ class ApiCandidateSearchResponse(BaseModel):
     results: list[ApiCandidateSearchResultItem]
     result_count: int
     limit: int
+    # The effective date the deterministic search used (supplied or defaulted).
+    as_of_date: date | None = None
 
 
 class ApiNaturalLanguageSearchResponse(BaseModel):
@@ -88,3 +91,4 @@ class ApiNaturalLanguageSearchResponse(BaseModel):
     executable: bool
     reason_codes: list[PlannerReasonCode]
     search: ApiCandidateSearchResponse | None = None
+    as_of_date: date | None = None

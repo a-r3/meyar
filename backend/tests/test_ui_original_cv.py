@@ -277,5 +277,8 @@ async def test_original_cv_route_is_absent_from_openapi_schema(client: AsyncClie
     response = await client.get("/openapi.json")
     assert response.status_code == 200
     schema = response.json()
-    assert not any("/original" in path for path in schema["paths"])
-    assert not any(path.startswith("/ui/") for path in schema["paths"])
+    # The HTML page route is not documented; the JSON API original route is (issue #45).
+    assert "/ui/candidates/{candidate_id}/documents/{document_id}/original" not in schema["paths"]
+    assert all(
+        path.startswith("/ui/api/v1/") for path in schema["paths"] if path.startswith("/ui/")
+    )

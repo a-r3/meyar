@@ -5,6 +5,8 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meyar.api.responses import error_responses
+from meyar.application.errors import ApplicationError, ErrorCode
 from meyar.config import Settings, get_settings
 from meyar.core.auth import TenantContext, api_key_is_active, require_scope
 from meyar.db import get_db
@@ -16,7 +18,6 @@ from meyar.models.api_key import ApiKey
 from meyar.models.candidate import Candidate
 from meyar.models.candidate_document import PARSER_STATUS_PARSED, CandidateDocument
 from meyar.models.canonical_document import CanonicalDocument
-from meyar.schemas.api_candidate import ApiCandidateDetailResponse
 from meyar.schemas.candidate import (
     CandidateDocumentOut,
     CandidateOut,
@@ -40,7 +41,6 @@ from meyar.services.tenant_authority import require_active_tenant
 from meyar.storage.base import DocumentStorage
 from meyar.storage.dependency import get_document_storage, get_photo_storage
 from meyar.storage.photo import LocalPhotoStorage
-from meyar.ui.service import get_candidate_detail_view
 
 router = APIRouter(tags=["candidates"])
 logger = logging.getLogger(__name__)
@@ -121,9 +121,12 @@ async def _revalidate_upload_authority(
             headers={"WWW-Authenticate": "Bearer"},
         )
     if "candidates:write" not in key.scopes:
-        raise HTTPException(
+        raise ApplicationError(
+            ErrorCode.AUTHORIZATION_DENIED,
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="API key is missing required scope: candidates:write",
+            reason="SCOPE_MISSING",
+            message="This action is not permitted.",
+            legacy_detail="API key is missing required scope: candidates:write",
         )
     candidate = await db.scalar(
         select(Candidate)
@@ -135,7 +138,12 @@ async def _revalidate_upload_authority(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Candidate not found.")
 
 
-@router.post("/candidates", status_code=status.HTTP_201_CREATED, response_model=CandidateOut)
+@router.post(
+    "/candidates",
+    status_code=status.HTTP_201_CREATED,
+    response_model=CandidateOut,
+    responses=error_responses(401, 403, 422),
+)
 async def post_candidate(
     ctx: TenantContext = Depends(require_scope("candidates:write")),
     db: AsyncSession = Depends(get_db),
@@ -153,7 +161,11 @@ async def post_candidate(
     return _candidate_out(candidate)
 
 
-@router.get("/candidates/{candidate_id}", response_model=CandidateOut)
+@router.get(
+    "/candidates/{candidate_id}",
+    response_model=CandidateOut,
+    responses=error_responses(401, 403, 404),
+)
 async def get_candidate_detail(
     candidate_id: uuid.UUID,
     ctx: TenantContext = Depends(require_scope("candidates:read")),
@@ -163,21 +175,11 @@ async def get_candidate_detail(
     return _candidate_out(candidate)
 
 
-@router.get("/candidates/{candidate_id}/detail", response_model=ApiCandidateDetailResponse)
-async def get_candidate_detail_enriched(
-    candidate_id: uuid.UUID,
-    ctx: TenantContext = Depends(require_scope("candidates:read")),
-    db: AsyncSession = Depends(get_db),
-) -> ApiCandidateDetailResponse:
-    detail = await get_candidate_detail_view(
-        db, tenant_id=ctx.tenant_id, candidate_id=candidate_id
-    )
-    if detail is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Candidate not found.")
-    return detail
-
-
-@router.delete("/candidates/{candidate_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/candidates/{candidate_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    responses=error_responses(401, 403, 404),
+)
 async def delete_candidate(
     candidate_id: uuid.UUID,
     ctx: TenantContext = Depends(require_scope("candidates:write")),
@@ -197,6 +199,7 @@ async def delete_candidate(
     "/candidates/{candidate_id}/documents",
     status_code=status.HTTP_201_CREATED,
     response_model=CandidateDocumentOut,
+    responses=error_responses(401, 403, 404, 413, 422, 503),
 )
 async def post_candidate_document(
     candidate_id: uuid.UUID,
@@ -224,18 +227,34 @@ async def post_candidate_document(
             max_bytes=settings.max_upload_bytes,
         )
     except DocumentTooLargeError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail=str(exc)
+        # Server-generated size message is safe; preserve as legacy_detail.
+        raise ApplicationError(
+            ErrorCode.PAYLOAD_TOO_LARGE,
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            reason=None,
+            message="The request is too large.",
+            legacy_detail=str(exc),
         ) from exc
     except UnsupportedDocumentError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        # Server-generated validation message is safe; preserve as legacy_detail.
+        raise ApplicationError(
+            ErrorCode.VALIDATION_FAILED,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            reason=None,
+            message="The request is invalid.",
+            legacy_detail=str(exc),
         ) from exc
 
     except ParseError as exc:
         # Operational validation/parser failures precede every storage/document write.
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=exc.public_message
+        # public_message is a fixed server-owned string; preserve as legacy_detail.
+        raise ApplicationError(
+            ErrorCode.SERVICE_UNAVAILABLE,
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            reason=None,
+            message="The service is temporarily unavailable.",
+            legacy_detail=exc.public_message,
+            retryable=False,
         ) from None
 
     # Original bytes and DB authority are not one transaction: any failure up to
@@ -267,7 +286,11 @@ async def post_candidate_document(
     return await _document_out(db, durable_document, tenant_id=ctx.tenant_id)
 
 
-@router.get("/candidates/{candidate_id}/documents", response_model=list[CandidateDocumentOut])
+@router.get(
+    "/candidates/{candidate_id}/documents",
+    response_model=list[CandidateDocumentOut],
+    responses=error_responses(401, 403, 404),
+)
 async def list_candidate_documents_endpoint(
     candidate_id: uuid.UUID,
     ctx: TenantContext = Depends(require_scope("candidates:read")),
@@ -281,7 +304,9 @@ async def list_candidate_documents_endpoint(
 
 
 @router.get(
-    "/candidates/{candidate_id}/documents/{document_id}", response_model=CandidateDocumentOut
+    "/candidates/{candidate_id}/documents/{document_id}",
+    response_model=CandidateDocumentOut,
+    responses=error_responses(401, 403, 404),
 )
 async def get_candidate_document_detail(
     candidate_id: uuid.UUID,

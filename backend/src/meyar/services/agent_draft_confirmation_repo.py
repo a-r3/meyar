@@ -69,3 +69,16 @@ async def create_draft_confirmation(
     db.add(confirmation)
     await db.flush()
     return confirmation
+
+
+async def get_confirmation_for_criteria_version(
+    db: AsyncSession, *, tenant_id: uuid.UUID, criteria_version_id: uuid.UUID
+) -> AgentDraftConfirmation | None:
+    """Tenant-scoped provenance link (read-only; never replay authority)."""
+    result = await db.execute(
+        select(AgentDraftConfirmation).where(
+            AgentDraftConfirmation.tenant_id == tenant_id,
+            AgentDraftConfirmation.criteria_version_id == criteria_version_id,
+        )
+    )
+    return result.scalar_one_or_none()

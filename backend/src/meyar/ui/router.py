@@ -1,7 +1,7 @@
 import hashlib
 import logging
 import uuid
-from datetime import UTC, date, datetime
+from datetime import date
 from importlib import resources
 
 from fastapi import APIRouter, Depends, FastAPI, Form, Query, Request, status
@@ -17,8 +17,40 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from starlette.responses import Response
 from starlette.templating import Jinja2Templates
 
-from meyar.agent.service import normalize_message_newlines
+from meyar.agent.service import ClarificationButton, normalize_message_newlines
 from meyar.api.diagnostic_errors import DiagnosticErrorMiddleware
+from meyar.api.errors import (
+    application_error_handler,
+    http_error_response,
+    internal_error_response,
+    is_human_json_path,
+    is_machine_api_path,
+    machine_http_error_response,
+    machine_internal_error_response,
+    machine_unauthenticated_response,
+    machine_validation_error_response,
+    unauthenticated_response,
+    validation_error_response,
+)
+from meyar.api.human.router import human_router
+from meyar.application.candidates import OriginalCvUnavailableError, retrieve_original_cv
+from meyar.application.conversations import (
+    NOT_RUN_PRESENTATION,
+    TurnDisposition,
+    canonical_turn_message,
+    open_conversation,
+    start_new_conversation,
+    submit_conversation_turn,
+    turn_log_entries,
+)
+from meyar.application.drafts import (
+    DraftProposal,
+    DraftRejected,
+    confirm_job_draft,
+    resolve_draft_review,
+)
+from meyar.application.errors import ApplicationError
+from meyar.application.jobs import archive_job_for
 from meyar.config import Settings, get_settings
 from meyar.core.business_date import resolve_business_date
 from meyar.core.password import hash_password, needs_rehash, verify_password
@@ -31,7 +63,6 @@ from meyar.embedding.provider import (
     EmbeddingProvider,
     EmbeddingProviderError,
 )
-from meyar.ingestion.validation import PDF_MIME
 from meyar.llm.dependency import get_llm_provider
 from meyar.llm.provider import LLMProvider
 from meyar.models.job import JOB_STATUS_ACTIVE, JOB_STATUS_ARCHIVED
@@ -55,11 +86,10 @@ from meyar.services.browser_session_repo import (
     create_browser_session,
     revoke_browser_session_by_id,
 )
-from meyar.services.candidate_document_repo import get_candidate_document
 from meyar.services.candidate_photo_service import PLACEHOLDER_JPEG, current_presentable_photo
 from meyar.services.candidate_repo import get_candidate
 from meyar.services.job_criteria_repo import create_criteria_version, get_criteria_version_by_id
-from meyar.services.job_repo import archive_job, create_job, find_active_duplicate_job
+from meyar.services.job_repo import create_job, find_active_duplicate_job
 from meyar.services.tenant_authority import (
     TenantInactiveError,
     require_active_tenant,
@@ -106,7 +136,6 @@ from meyar.ui.service import (
     CriterionRowInput,
     UIServiceInputError,
     agent_draft_requires_resolution,
-    authorize_agent_draft_confirmation,
     build_job_create_request,
     build_ranked_candidate_views,
     build_search_result_views,
@@ -121,15 +150,12 @@ from meyar.ui.view_models import AgentTurnView, PlannerOutcomeView
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/ui", tags=["internal-ui"], include_in_schema=False)
-_HR_TEXT_LIMIT = 4000
 _FORM_TRANSPORT_LIMIT = 8192  # 4000 LF textarea chars can arrive as 8000 CRLF chars.
 
 
 def _canonical_hr_text(value: str) -> str | None:
-    canonical = normalize_message_newlines(value)
-    if not 1 <= len(canonical) <= _HR_TEXT_LIMIT:
-        return None
-    return canonical
+    return canonical_turn_message(value)
+
 
 # A fixed, valid-shaped Argon2 hash verified against on an unknown
 # username so that responding to "unknown user" costs roughly the same
@@ -601,46 +627,15 @@ async def search(
     )
 
 
-def _agent_turn_log_views(conversation) -> list:
-    """Replay only text rendered under the currently accepted server policy.
-
-    Older SERVER_VALIDATED markers do not prove current display authority.
-    Their text is replaced by fixed outcome copy, without mutating history.
-    User turns remain the HR user's own untrusted text.
-    """
-    from meyar.services.agent_conversation_repo import (
-        ASSISTANT_TEXT_AUTHORITY_SERVER,
-        ASSISTANT_TEXT_AUTHORITY_VERSION,
-    )
-    from meyar.ui.view_models import AgentTurnLogView
-
-    views = []
-    for turn in conversation.turns:
-        role = turn.get("role", "user")
-        if role == "assistant":
-            trusted_text = (
-                turn.get("text")
-                if (
-                    turn.get("text_authority") == ASSISTANT_TEXT_AUTHORITY_SERVER
-                    and turn.get("text_authority_version") == ASSISTANT_TEXT_AUTHORITY_VERSION
-                )
-                else None
-            )
-            text = agent_turn_outcome_message(turn.get("outcome", "ANSWERED"), trusted_text or None)
-        else:
-            text = turn.get("text", "")
-        views.append(AgentTurnLogView(role=role, text=text))
-    return views
+# The transcript replay policy lives in the shared application boundary; the
+# private name stays as the adapter's established vocabulary.
+_agent_turn_log_views = turn_log_entries
 
 
 def _conversation_owner(ctx: UIContext):  # noqa: ANN202 - OwnerPrincipal (lazy import)
     """The durable-conversation owner is ALWAYS the live, re-derived UIContext
     principal (issue #80) — never a stored or client-supplied owner."""
-    from meyar.services.agent_conversation_repo import OwnerPrincipal
-
-    return OwnerPrincipal(
-        tenant_id=ctx.tenant_id, user_id=ctx.user_id, membership_id=ctx.membership_id
-    )
+    return ctx.owner()
 
 
 def _render_conversation_not_found(request: Request, ctx: UIContext) -> HTMLResponse:
@@ -653,37 +648,6 @@ def _render_conversation_not_found(request: Request, ctx: UIContext) -> HTMLResp
         _context(ctx, title="Tapılmadı", message="Söhbət tapılmadı."),
         status_code=status.HTTP_404_NOT_FOUND,
     )
-
-
-# Issue #85 (D-089): truthful HR copy for a turn that did not run or could
-# not be committed. Never exposes queue/pool/lock internals or reason codes.
-_AGENT_BUSY_COPY = "MEYAR hazırda digər sorğuları emal edir. Bir qədər sonra yenidən cəhd edin."
-_AGENT_TURN_IN_PROGRESS_COPY = (
-    "Bu söhbətdə əvvəlki sorğu hələ emal olunur. Cavabı gözləyin, sonra yenidən göndərin."
-)
-_AGENT_TURN_STALE_COPY = (
-    "Sorğu emal edilərkən söhbətin vəziyyəti dəyişdi, ona görə nəticə tətbiq edilmədi. "
-    "Sorğunu yenidən göndərin."
-)
-
-
-async def _audit_agent_turn_not_committed(
-    db: AsyncSession, ctx: UIContext, event_type: str, reason_code: str
-) -> None:
-    """Bounded structural audit only: a closed reason code — never prompt,
-    model output, message text, or queue/pool figures."""
-    try:
-        await record_event(
-            db,
-            tenant_id=ctx.tenant_id,
-            event_type=event_type,
-            metadata={"reason_code": reason_code},
-            actor_type=ACTOR_HUMAN_USER,
-            actor_id=ctx.user_id,
-        )
-        await db.commit()
-    except SQLAlchemyError:
-        await db.rollback()
 
 
 async def _render_agent_turn_not_run(
@@ -777,35 +741,9 @@ async def agent_workspace(
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> HTMLResponse:
-    from meyar.services.agent_conversation_repo import (
-        get_owned_conversation,
-        record_conversation_access_rejected,
-        resolve_or_create_current_conversation,
-    )
-
-    owner = _conversation_owner(ctx)
-    if conversation is not None:
-        selected = await get_owned_conversation(db, owner=owner, conversation_id=conversation)
-        if selected is None:
-            await record_conversation_access_rejected(db, owner=owner)
-            await db.commit()
-            return _render_conversation_not_found(request, ctx)
-        await record_event(
-            db,
-            tenant_id=ctx.tenant_id,
-            event_type="agent.conversation.opened",
-            metadata={"conversation_id": str(selected.id), "title_kind": selected.title_kind},
-            actor_type=ACTOR_HUMAN_USER,
-            actor_id=ctx.user_id,
-        )
-    else:
-        selected = await resolve_or_create_current_conversation(
-            db, owner=owner, browser_session_id=ctx.session_id
-        )
-        if selected is None:
-            await db.rollback()
-            return _render_conversation_not_found(request, ctx)
-    await db.commit()
+    selected = await open_conversation(db, ctx, conversation_id=conversation)
+    if selected is None:
+        return _render_conversation_not_found(request, ctx)
     return await _render_agent_workspace(
         request, ctx, db, settings, conversation=selected,
         history_turns=_agent_turn_log_views(selected), page=page,
@@ -833,11 +771,12 @@ async def agent_turn(
     verify_csrf(ctx.csrf_token, csrf_token)
     canonical_message = _canonical_hr_text(message)
     if canonical_message is None:
-        owner = _conversation_owner(ctx)
         from meyar.services.agent_conversation_repo import (
             get_owned_conversation,
             resolve_or_create_current_conversation,
         )
+
+        owner = ctx.owner()
         selected = (
             await get_owned_conversation(db, owner=owner, conversation_id=conversation_id)
             if conversation_id is not None else
@@ -856,346 +795,50 @@ async def agent_turn(
             composer_error="Mətn 1–4000 simvol olmalıdır.",
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         )
-    message = canonical_message
-    from meyar.agent.dialogue import (
-        CLARIFICATION_REJECTED_COPY,
-        ClarificationClassifierError,
-        ClarificationRejectedError,
-    )
-    from meyar.agent.service import (
-        AgentPlanProviderError,
-        ClarificationButton,
-        apply_agent_turn_commit,
-        execute_agent_turn,
-    )
-    from meyar.agent.turn_boundary import (
-        AgentInferenceBusyError,
-        BoundaryEmbedding,
-        BoundaryLLM,
-        ClientDisconnectedError,
-        ConversationSnapshot,
-        ConversationTurnInProgressError,
-        TurnAuthorityLostError,
-        TurnBoundary,
-        TurnSessionState,
-        TurnStaleReason,
-        abandon_reserved_turn,
-        clear_turn_reservation,
-        reserve_agent_turn,
-        run_until_client_disconnects,
-    )
-    from meyar.services.agent_conversation_repo import (
-        record_conversation_access_rejected,
-        resolve_or_create_current_conversation,
-        sync_last_turn_display_text,
-    )
-    from meyar.services.agent_submission_repo import (
-        claim_submission,
-        complete_submission,
-        get_bound_submission,
-        request_hash,
-    )
-    from meyar.services.agent_task_repo import lock_dialogue_rows, stamp_created_turn_version
-    from meyar.ui.service import build_agent_turn_view
-
-    owner = _conversation_owner(ctx)
-    explicit_selector = conversation_id is not None
-    if conversation_id is None:
-        # Legacy form without a selector: resolve (or race-safely create)
-        # this session's current conversation in its OWN short transaction,
-        # so the per-owner membership lock is released before the turn.
-        current = await resolve_or_create_current_conversation(
-            db, owner=owner, browser_session_id=ctx.session_id
-        )
-        if current is None:
-            await db.rollback()
-            return _render_conversation_not_found(request, ctx)
-        conversation_id = current.id
-        await db.commit()
     clarification_button = (
         ClarificationButton(clarification_id=clarification_id, choice=clarification_choice)
         if clarification_id is not None or clarification_choice is not None
         else None
     )
-    # #87 replay evidence over the WHOLE semantic request (D-092 §13): the
-    # message plus any clarification id/choice. Never authorization.
-    message_sha256 = request_hash(
-        message, clarification_id=clarification_id, clarification_choice=clarification_choice
+    outcome = await submit_conversation_turn(
+        db, ctx,
+        request=request, settings=settings, llm=llm,
+        embedding_provider=embedding_provider, embedding_config=embedding_config,
+        message=canonical_message, conversation_id=conversation_id,
+        submission_id=submission_id, clarification_button=clarification_button,
     )
-    submission = await get_bound_submission(
-        db, submission_id=submission_id, owner=owner,
-        browser_session_id=ctx.session_id, conversation_id=conversation_id,
-    )
-    if submission is None or submission.expires_at <= datetime.now(UTC):
-        await db.rollback()
+    if outcome.disposition == TurnDisposition.PRINCIPAL_REVOKED:
+        raise UIAccessError(status.HTTP_303_SEE_OTHER, clear_cookie=True)
+    if outcome.disposition == TurnDisposition.NOT_FOUND:
         return _render_conversation_not_found(request, ctx)
-    if submission.request_sha256 is not None and submission.request_sha256 != message_sha256:
-        await db.rollback()
-        return _render_conversation_not_found(request, ctx)
-    if submission.status == "COMPLETED":
-        await db.rollback()
+    if outcome.disposition == TurnDisposition.REPLAYED:
         return RedirectResponse(
-            f"/ui/agent?conversation={conversation_id}",
+            f"/ui/agent?conversation={outcome.conversation_id}",
             status_code=status.HTTP_303_SEE_OTHER,
         )
-    if submission.status == "PROCESSING" and submission.lease_expires_at and (
-        submission.lease_expires_at > datetime.now(UTC)
-    ):
-        await db.rollback()
-        return await _render_agent_turn_not_run(
-            request, ctx, db, settings, owner=owner, conversation_id=conversation_id,
-            message=message, outcome="AGENT_TURN_IN_PROGRESS",
-            copy=_AGENT_TURN_IN_PROGRESS_COPY, status_code=status.HTTP_409_CONFLICT,
-        )
-    # issue #85 (D-089) PHASE A: lock the durable conversation row briefly,
-    # authorize, refuse (immediately, 409) when another turn on this same
-    # conversation is still in flight, and write the server-owned
-    # reservation. The row lock is NOT held across local inference any more:
-    # TurnBoundary commits before every model/embedding wait and re-locks +
-    # revalidates afterwards. Same-conversation serialization (#80) is kept
-    # by the reservation + turn_version, never by a lock held across Ollama.
-    try:
-        reserved = await reserve_agent_turn(
-            db,
-            owner=owner,
-            conversation_id=conversation_id,
-            browser_session_id=ctx.session_id,
-            ttl_seconds=settings.agent_turn_reservation_seconds,
-        )
-    except TurnAuthorityLostError:
-        await db.rollback()
-        raise UIAccessError(status.HTTP_303_SEE_OTHER, clear_cookie=True) from None
-    except ConversationTurnInProgressError:
-        await db.rollback()
-        unused_submission = await get_bound_submission(
-            db, submission_id=submission_id, owner=owner,
-            browser_session_id=ctx.session_id, conversation_id=conversation_id,
-            for_update=True,
-        )
-        if unused_submission is not None and unused_submission.status == "ISSUED":
-            unused_submission.status = "ABANDONED"
-        await record_event(
-            db,
-            tenant_id=ctx.tenant_id,
-            event_type="agent.turn.rejected",
-            metadata={"reason_code": "TURN_IN_PROGRESS"},
-            actor_type=ACTOR_HUMAN_USER,
-            actor_id=ctx.user_id,
-        )
-        await db.commit()
-        return await _render_agent_turn_not_run(
-            request, ctx, db, settings, owner=owner, conversation_id=conversation_id,
-            message=message, outcome="AGENT_TURN_IN_PROGRESS",
-            copy=_AGENT_TURN_IN_PROGRESS_COPY, status_code=status.HTTP_409_CONFLICT,
-        )
-    if reserved is None:
-        await db.rollback()
-        if explicit_selector:
-            await record_conversation_access_rejected(db, owner=owner)
-            await db.commit()
-        return _render_conversation_not_found(request, ctx)
-    reservation = reserved.reservation
-    submission = await get_bound_submission(
-        db, submission_id=submission_id, owner=owner,
-        browser_session_id=ctx.session_id, conversation_id=conversation_id,
-        for_update=True,
-    )
-    claim_outcome = (
-        claim_submission(
-            submission, reservation=reservation, message_sha256=message_sha256,
-            ttl_seconds=settings.agent_turn_reservation_seconds,
-        ) if submission is not None else "INVALID"
-    )
-    if claim_outcome != "CLAIMED":
-        await db.rollback()
-        if claim_outcome == "COMPLETED":
-            return RedirectResponse(
-                f"/ui/agent?conversation={conversation_id}",
-                status_code=status.HTTP_303_SEE_OTHER,
-            )
-        return _render_conversation_not_found(request, ctx)
-    await db.flush()
-    boundary = TurnBoundary(
-        db, reservation, ttl_seconds=settings.agent_turn_reservation_seconds
-    )
-    # Same "current date is a trusted-runtime value, never user/model
-    # supplied" boundary as /ui/search (docs/DECISIONS.md D-023).
-    as_of_date = resolve_business_date(settings.business_timezone)
-    failure: tuple[str, str, int] | None = None
-    try:
-        commit = await run_until_client_disconnects(
-            request,
-            execute_agent_turn(
-                db,
-                BoundaryLLM(llm, boundary),
-                tenant_id=ctx.tenant_id,
-                # Plain snapshots cross the inference gap — never live ORM
-                # authority (Phase B re-reads and revalidates everything).
-                conversation=ConversationSnapshot.of(reserved.conversation),
-                session_context=TurnSessionState.of(reserved.session_context),
-                user_message=message,
-                as_of_date=as_of_date,
-                embedding_config=embedding_config,
-                embedding_provider=BoundaryEmbedding(embedding_provider, boundary),
-                max_tool_calls=settings.agent_max_tool_calls,
-                max_context_turns=settings.agent_max_context_turns,
-                clarification_button=clarification_button,
-                # Issue #88 slice B: Layer-1 SCOPE_MISSING uses the live
-                # principal's scopes (re-derived per request, never client).
-                principal_scopes=ctx.scopes,
-            ),
-        )
-        # PHASE B: ALWAYS a fresh transaction (issue #88, D-092 §12.2) — end
-        # Phase A / the last re-entry first, so no Phase A conversation/
-        # context/submission lock is held when the principal is re-locked.
-        # Then re-lock and revalidate principal, reservation, turn_version and
-        # live context; only then persist the outcome and clear the
-        # reservation in the same commit.
-        conversation, session_context = await boundary.enter_phase_b()
-        # Issue #88 (§12.2): clarification/task rows are locked and their
-        # staged preconditions re-verified AFTER conversation/context and
-        # BEFORE the submission row (fixed lock order).
-        locked_dialogue = await lock_dialogue_rows(
-            db, conversation=conversation, session_context=session_context,
-            dialogue=commit.dialogue,
-        )
-        phase_b_submission = await get_bound_submission(
-            db, submission_id=submission_id, owner=owner,
-            browser_session_id=ctx.session_id, conversation_id=conversation_id,
-            for_update=True,
-        )
-        if phase_b_submission is None:
-            raise TurnAuthorityLostError(TurnStaleReason.CONTEXT_CHANGED)
-        if (
-            phase_b_submission.status != "PROCESSING"
-            or phase_b_submission.reservation_id != reservation.token
-            or phase_b_submission.request_sha256 != message_sha256
-        ):
-            raise TurnAuthorityLostError(TurnStaleReason.CONTEXT_CHANGED)
-        result = await apply_agent_turn_commit(
-            db, conversation, session_context, tenant_id=ctx.tenant_id, commit=commit,
-            submission_id=submission_id, locked_dialogue=locked_dialogue,
-            clarification_ttl_seconds=settings.agent_clarification_ttl_seconds,
-        )
-        clear_turn_reservation(conversation)
-        latest = await build_agent_turn_view(db, tenant_id=ctx.tenant_id, result=result)
-        # D-045 (PR #42 owner correction, issue #33): make the persisted
-        # turn text and the just-rendered live headline the same value, so
-        # a later history re-render is byte-for-byte identical to what HR
-        # saw live instead of falling back to a generic per-outcome
-        # message — see sync_last_turn_display_text's own docstring.
-        await sync_last_turn_display_text(db, conversation, text=latest.headline)
-        # A1: provenance = the FINAL committed turn_version (after D-045).
-        await stamp_created_turn_version(
-            db, session_context=session_context, conversation=conversation,
-            submission_id=submission_id,
-        )
-        complete_submission(
-            phase_b_submission, reservation=reservation, message_sha256=message_sha256,
-            completed_turn_version=conversation.turn_version,
-        )
-        await db.commit()
-    except TurnAuthorityLostError as exc:
-        await abandon_reserved_turn(db, reservation, submission_id=submission_id)
-        await _audit_agent_turn_not_committed(db, ctx, "agent.turn.stale", exc.reason.value)
-        if exc.reason == TurnStaleReason.PRINCIPAL_REVOKED:
-            # Same outcome as any request made after revocation.
-            raise UIAccessError(status.HTTP_303_SEE_OTHER, clear_cookie=True) from None
-        failure = ("AGENT_TURN_STALE", _AGENT_TURN_STALE_COPY, status.HTTP_409_CONFLICT)
-    except AgentInferenceBusyError as exc:
-        await abandon_reserved_turn(db, reservation, submission_id=submission_id)
-        await _audit_agent_turn_not_committed(db, ctx, "agent.turn.busy", exc.reason)
-        failure = ("AGENT_BUSY", _AGENT_BUSY_COPY, status.HTTP_503_SERVICE_UNAVAILABLE)
-    except ClarificationRejectedError as exc:
-        # A2 (T8b): a rejected request, not a clarification transition —
-        # nothing appended, pointer/attempt untouched, submission ABANDONED.
-        await abandon_reserved_turn(db, reservation, submission_id=submission_id)
-        # Rejected before any inference: the rollback above also undid the
-        # PROCESSING claim, so retire the still-ISSUED token explicitly.
-        rejected_submission = await get_bound_submission(
-            db, submission_id=submission_id, owner=owner,
-            browser_session_id=ctx.session_id, conversation_id=reservation.conversation_id,
-            for_update=True,
-        )
-        if rejected_submission is not None and rejected_submission.status == "ISSUED":
-            rejected_submission.status = "ABANDONED"
-        await _audit_agent_turn_not_committed(
-            db, ctx, "agent.clarification.rejected", exc.reason.value
-        )
-        failure = (
-            "CLARIFICATION_NOT_ACTIVE", CLARIFICATION_REJECTED_COPY, status.HTTP_409_CONFLICT
-        )
-    except ClarificationClassifierError:
-        # A2 (T8a): classifier infrastructure/contract failure is NOT
-        # UNCLEAR — the turn is abandoned and the clarification stays live.
-        await abandon_reserved_turn(db, reservation, submission_id=submission_id)
-        await _audit_agent_turn_not_committed(
-            db, ctx, "agent.turn.abandoned", "CLARIFICATION_CLASSIFIER_FAILURE"
-        )
-        failure = (
-            "AGENT_PROVIDER_FAILURE",
-            "MEYAR AI xidməti hazırda əlçatan deyil. Bir qədər sonra yenidən cəhd edin.",
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-        )
-    except AgentPlanProviderError:
-        # Issue #88 slice C (#85): the one plan-proposal call (or its
-        # repair) failed on infrastructure — the turn is abandoned: no
-        # transcript, no plan execution, no task/pointer/clarification change.
-        await abandon_reserved_turn(db, reservation, submission_id=submission_id)
-        await _audit_agent_turn_not_committed(
-            db, ctx, "agent.turn.abandoned", "AGENT_PLAN_PROVIDER_FAILURE"
-        )
-        failure = (
-            "AGENT_PROVIDER_FAILURE",
-            "MEYAR AI xidməti hazırda əlçatan deyil. Bir qədər sonra yenidən cəhd edin.",
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-        )
-    except ClientDisconnectedError:
-        await abandon_reserved_turn(db, reservation, submission_id=submission_id)
-        await _audit_agent_turn_not_committed(
-            db, ctx, "agent.turn.abandoned", "CLIENT_DISCONNECTED"
-        )
-        # Nobody is listening; any minimal response is fine.
+    if outcome.disposition == TurnDisposition.CLIENT_DISCONNECTED:
         return HTMLResponse("", status_code=499)
-    except (EmbeddingProviderError, SearchRequestError, SQLAlchemyError):
-        await abandon_reserved_turn(db, reservation, submission_id=submission_id)
-        failure = (
-            "AGENT_PROVIDER_FAILURE",
-            "MEYAR AI xidməti hazırda əlçatan deyil. Bir qədər sonra yenidən cəhd edin.",
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-        )
-    except BaseException:
-        # Cancellation or an unexpected error: never leave this turn's
-        # reservation behind (shielded, best-effort; TTL is the backstop).
-        await abandon_reserved_turn(db, reservation, submission_id=submission_id)
-        raise
-    if failure is not None:
-        outcome, copy, status_code = failure
-        # D-044 (PR #42 owner UX correction): nothing was persisted for
-        # this attempt, so show the HR user's own just-submitted text
-        # directly rather than losing it. Never a fabricated answer.
+    if outcome.disposition == TurnDisposition.NOT_RUN:
+        assert outcome.not_run is not None and outcome.conversation_id is not None
+        presentation = NOT_RUN_PRESENTATION[outcome.not_run]
         return await _render_agent_turn_not_run(
-            request, ctx, db, settings, owner=owner,
-            conversation_id=reservation.conversation_id, message=message,
-            outcome=outcome, copy=copy, status_code=status_code,
+            request, ctx, db, settings, owner=ctx.owner(),
+            conversation_id=outcome.conversation_id, message=canonical_message,
+            outcome=presentation.outcome, copy=presentation.copy,
+            status_code=presentation.status_code,
         )
 
-    # D-044: run_agent_turn always persists exactly one new (user,
-    # assistant) pair via its own _finish_turn when it returns without
-    # raising — split it off history so it renders once, adjacent to its
-    # own rich `latest` cards, instead of duplicated as a plain text
-    # bubble AND a rich block separated by the composer.
-    all_turns = _agent_turn_log_views(conversation)
+    # D-044: the application operation always persists exactly one new (user,
+    # assistant) pair when it completes — split it off history so it renders
+    # once, adjacent to its own rich `latest` cards, instead of duplicated as
+    # a plain text bubble AND a rich block separated by the composer.
+    assert outcome.conversation is not None and outcome.latest is not None
+    all_turns = _agent_turn_log_views(outcome.conversation)
     history_turns = all_turns[:-2] if len(all_turns) >= 2 else []
-    for tool_result in latest.tool_results:
-        if tool_result.job_draft is not None:
-            tool_result.job_draft.can_act = (
-                session_context.active_pending_draft_id == tool_result.job_draft.draft_id
-            )
     return await _render_agent_workspace(
-        request, ctx, db, settings, conversation=conversation,
-        history_turns=history_turns, latest=latest, latest_user_message=message,
-        completed_turn=True,
+        request, ctx, db, settings, conversation=outcome.conversation,
+        history_turns=history_turns, latest=outcome.latest,
+        latest_user_message=canonical_message, completed_turn=True,
     )
 
 
@@ -1213,16 +856,7 @@ async def agent_reset(
     reachable as history; another session's current conversation is never
     switched."""
     verify_csrf(ctx.csrf_token, csrf_token)
-    from meyar.services.agent_conversation_repo import (
-        create_conversation,
-        get_or_create_session_context,
-    )
-
-    conversation = await create_conversation(db, owner=_conversation_owner(ctx))
-    await get_or_create_session_context(
-        db, conversation=conversation, browser_session_id=ctx.session_id
-    )
-    await db.commit()
+    conversation = await start_new_conversation(db, ctx)
     return RedirectResponse(
         f"/ui/agent?conversation={conversation.id}", status_code=status.HTTP_303_SEE_OTHER
     )
@@ -1292,11 +926,6 @@ async def candidate_detail(
     return _render(request, "candidate_detail.html", _context(ctx, candidate=candidate))
 
 
-def _original_document_filename(document_id: uuid.UUID, mime_type: str) -> str:
-    extension = "pdf" if mime_type == PDF_MIME else "docx"
-    return f"cv-{document_id.hex}.{extension}"
-
-
 @router.get("/candidates/{candidate_id}/documents/{document_id}/original")
 async def candidate_document_original(
     request: Request,
@@ -1306,29 +935,43 @@ async def candidate_document_original(
     db: AsyncSession = Depends(get_db),
     storage: DocumentStorage = Depends(get_document_storage),
 ) -> Response:
-    """Authorized original-CV retrieval. storage_key is always resolved
-    server-side from the document row — the client supplies only the
-    candidate/document UUIDs, never a storage key or filesystem path."""
-    document = await get_candidate_document(
-        db, tenant_id=ctx.tenant_id, candidate_id=candidate_id, document_id=document_id
-    )
-    if document is None:
+    """Authorized original-CV retrieval through the shared, audited operation
+    (``meyar.application.candidates.retrieve_original_cv``). storage_key is
+    always resolved server-side from the document row — the client supplies
+    only the candidate/document UUIDs, never a storage key or filesystem path."""
+    try:
+        original = await retrieve_original_cv(
+            db, ctx, storage, candidate_id=candidate_id, document_id=document_id, channel="UI"
+        )
+    except OriginalCvUnavailableError:
+        return _render(
+            request,
+            "error.html",
+            _context(
+                ctx,
+                title="Sənəd əlçatan deyil",
+                message=(
+                    "Original fayl hazırda təqdim edilə bilmir. "
+                    "Bir qədər sonra yenidən cəhd edin."
+                ),
+            ),
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    if original is None:
         return _render(
             request,
             "error.html",
             _context(ctx, title="Tapılmadı", message="Sənəd tapılmadı."),
             status_code=status.HTTP_404_NOT_FOUND,
         )
-    content = await storage.read(storage_key=document.storage_key)
-    filename = _original_document_filename(document.id, document.mime_type)
     # Always a true download ("Originalı yüklə" in the UI): the safe,
     # already-parsed in-app view is the separate /preview route below.
     # A browser-inline PDF response here would silently turn the "download"
     # action into an "open" action for PDFs only — see docs/DECISIONS.md D-023.
     return Response(
-        content=content,
-        media_type=document.mime_type,
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        content=original.content,
+        media_type=original.media_type,
+        headers={"Content-Disposition": f'attachment; filename="{original.filename}"'},
     )
 
 
@@ -1434,8 +1077,8 @@ async def archive_job_route(
 ) -> Response:
     verify_csrf(ctx.csrf_token, csrf_token)
     try:
-        job = await archive_job(db, tenant_id=ctx.tenant_id, job_id=job_id)
-        if job is None:
+        archived = await archive_job_for(db, ctx, job_id=job_id)
+        if archived is None:
             await db.rollback()
             return _render(
                 request,
@@ -1443,15 +1086,6 @@ async def archive_job_route(
                 _context(ctx, title="Tapılmadı", message="Vakansiya tapılmadı."),
                 status_code=status.HTTP_404_NOT_FOUND,
             )
-        await record_event(
-            db,
-            tenant_id=ctx.tenant_id,
-            event_type="job.archived",
-            metadata={"job_id": str(job.id)},
-            actor_type=ACTOR_HUMAN_USER,
-            actor_id=ctx.user_id,
-        )
-        await db.commit()
     except SQLAlchemyError:
         await db.rollback()
         return _render(
@@ -1699,78 +1333,22 @@ async def resolve_agent_job_draft_review(
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> HTMLResponse:
-    """Persist one canonical, server-declared human-review resolution.
-
-    Exactly one of: a modality resolution (``criterion_type``) for a
-    server-validated canonical shape, or (issue #84) ``decision=exclude`` —
-    HR's explicit acknowledgement that an unresolved MUST_HAVE source
-    requirement is not part of automatic ranking. Neither path accepts
-    free text and neither can turn arbitrary source text into a criterion."""
-    from meyar.agent.service import (
-        exclude_blocking_review_requirement,
-        resolve_job_draft_review_modality,
-        resolve_job_draft_semantic_conflict,
-    )
-    from meyar.schemas.criteria import CriterionType
-    from meyar.services.agent_conversation_repo import (
-        replace_pending_job_draft,
-        resolve_pending_draft_authority,
-    )
+    """Persist one canonical, server-declared human-review resolution (the
+    policy lives in ``meyar.application.drafts.resolve_draft_review``)."""
     from meyar.ui.service import build_agent_job_draft_view
     from meyar.ui.view_models import AgentToolResultView, AgentTurnView
 
     verify_csrf(ctx.csrf_token, csrf_token)
     try:
-        exclude = decision == "exclude"
-        chosen_paths = [exclude, criterion_type is not None, option is not None]
-        if (decision is not None and not exclude) or chosen_paths.count(True) != 1:
-            raise UIServiceInputError("Dəqiqləşdirmə seçimi etibarsızdır.")
-        resolved_type = CriterionType(criterion_type) if criterion_type is not None else None
-        # issue #80: live pending authority only — owner + this
-        # BrowserSession's context pointer + transcript payload, all
-        # required (see resolve_pending_draft_authority).
-        authority = await resolve_pending_draft_authority(
-            db,
-            owner=_conversation_owner(ctx),
-            browser_session_id=ctx.session_id,
-            draft_id=draft_id,
+        resolution = await resolve_draft_review(
+            db, ctx, draft_id=draft_id, span_id=span_id,
+            criterion_type=criterion_type, decision=decision, option=option,
         )
-        if authority is None:
-            raise UIServiceInputError("Qaralama bu sessiyada tapılmadı.")
-        conversation = authority.conversation
-        if option is not None:
-            resolved = resolve_job_draft_semantic_conflict(
-                authority.draft, span_id=span_id, option_index=option
-            )
-            resolution_code = "CONFLICT_RESOLVED"
-        elif resolved_type is None:
-            resolved = exclude_blocking_review_requirement(authority.draft, span_id=span_id)
-            resolution_code = "EXCLUDED_BY_REVIEWER"
-        else:
-            resolved = resolve_job_draft_review_modality(
-                authority.draft, span_id=span_id, criterion_type=resolved_type
-            )
-            resolution_code = resolved_type.value
-        await replace_pending_job_draft(db, authority, draft=resolved)
-        await record_event(
-            db,
-            tenant_id=ctx.tenant_id,
-            event_type="agent.draft.review_resolved",
-            metadata={
-                "draft_id": str(resolved.draft_id),
-                "span_id": span_id,
-                "criterion_type": resolution_code,
-                "semantic_policy_version": resolved.semantic_policy_version,
-            },
-            actor_type=ACTOR_HUMAN_USER,
-            actor_id=ctx.user_id,
-        )
-        await db.commit()
-    except (ValueError, UIServiceInputError) as exc:
-        await db.rollback()
+    except DraftRejected as exc:
         return _render_agent_confirmation_error(
-            request, ctx, message=str(exc), status_code=status.HTTP_422_UNPROCESSABLE_CONTENT
+            request, ctx, message=exc.message, status_code=exc.status_code
         )
+    conversation, resolved = resolution.conversation, resolution.draft
 
     all_turns = _agent_turn_log_views(conversation)
     latest_user_message = all_turns[-2].text if len(all_turns) >= 2 else ""
@@ -1792,7 +1370,7 @@ async def resolve_agent_job_draft_review(
     )
     draft_view = latest.tool_results[0].job_draft
     assert draft_view is not None
-    draft_view.can_act = authority.session_context.active_pending_draft_id == resolved.draft_id
+    draft_view.can_act = resolution.can_act
     return await _render_agent_workspace(
         request, ctx, db, settings, conversation=conversation,
         history_turns=all_turns[:-2] if len(all_turns) >= 2 else [],
@@ -1813,240 +1391,53 @@ async def confirm_agent_job_draft(
 ) -> HTMLResponse:
     """Confirm one session-held canonical draft, then rank separately.
 
-    The route itself establishes agent-confirmation provenance. Browser rows
-    are checked as proposals against the locked server draft and never select
-    the authorization mode. Confirmation commits before ranking and retains a
-    durable result link so replay/retry cannot create another Job or version.
+    The accountable confirmation policy lives in
+    ``meyar.application.drafts.confirm_job_draft``; this route only parses
+    the (backward-compatible) browser rows into an untrusted *proposal* that
+    the shared operation checks against the locked server draft. Confirmation
+    commits before ranking and retains a durable result link so
+    replay/retry cannot create another Job or version.
     """
-    from meyar.agent.schemas import ConfirmedAgentJobDraft
-    from meyar.agent.semantic_provenance import (
-        SemanticProvenanceError,
-        build_agent_semantic_provenance,
-    )
-    from meyar.services.agent_conversation_repo import (
-        mark_pending_job_draft_confirmed,
-        resolve_pending_draft_authority,
-    )
-    from meyar.services.agent_draft_confirmation_repo import (
-        create_draft_confirmation,
-        get_draft_confirmation,
-    )
-    from meyar.services.agent_task_repo import complete_confirmed_draft_task
-
     verify_csrf(ctx.csrf_token, csrf_token)
     evaluation_as_of_date = resolve_business_date(settings.business_timezone)
     form = await request.form()
 
-    try:
-        # issue #80: live pending authority only — owner + this
-        # BrowserSession's context pointer + transcript payload. A relogin,
-        # another conversation's context, or a superseded draft id never
-        # resolves here. Holds the conversation row lock on success.
-        authority = await resolve_pending_draft_authority(
-            db,
-            owner=_conversation_owner(ctx),
-            browser_session_id=ctx.session_id,
-            draft_id=draft_id,
-        )
-        if authority is None:
-            # Checked AFTER the lock attempt so a concurrent duplicate
-            # confirmation observes the winner's committed row. Replay /
-            # idempotency authority is ONLY the independent
-            # AgentDraftConfirmation row (same tenant + BrowserSession) —
-            # never transcript scanning. Disclosures are reloaded from the
-            # immutable criteria version inside _render_job_ranking.
-            durable_confirmation = await get_draft_confirmation(
-                db,
-                tenant_id=ctx.tenant_id,
-                browser_session_id=ctx.session_id,
-                draft_id=draft_id,
-            )
-            if durable_confirmation is not None:
-                await db.commit()
-                return await _render_job_ranking(
-                    request,
-                    ctx,
-                    db,
-                    job_criteria_version_id=durable_confirmation.criteria_version_id,
-                    confirmation_succeeded=True,
-                    evaluation_as_of_date=evaluation_as_of_date,
-                )
-            raise UIServiceInputError(
-                "Qaralama təsdiqi tapılmadı və ya bu sessiyaya aid deyil; "
-                "elanı yenidən analiz edin."
-            )
-        pending = authority.draft
-        if agent_draft_requires_resolution(pending):
-            # Same single confirmability rule as authorize_agent_draft_
-            # confirmation, checked before any request shape is built (a
-            # fully conflicted draft may have no criteria at all yet).
-            raise UIServiceInputError(
-                "İnsan baxışı tələb edən sahələri dəqiqləşdirmədən sıralamanı təsdiqləmək olmaz."
-            )
-
-        canonical_title = pending.title or "Vakansiya qaralaması"
-        submitted_authority = "title" in form or any(
-            key.startswith(("must_", "pref_")) for key in form
-        )
-        if submitted_authority:
-            # Backward-compatible handling for already-open review pages and
-            # explicit tamper regressions. New protected review pages submit no
-            # criterion authority at all.
-            must_have_rows = [
-                _job_form_row(form, "must", i) for i in range(CRITERION_ROW_COUNT)
-            ]
-            preferred_rows = [
-                _job_form_row(form, "pref", i) for i in range(CRITERION_ROW_COUNT)
-            ]
-            if str(form.get("title", "")).strip() != canonical_title.strip():
-                raise UIServiceInputError(
-                    "Qaralama başlığı yadda saxlanmış təsdiqli forma ilə uyğun gəlmir."
-                )
+    proposal: DraftProposal | None = None
+    if "title" in form or any(key.startswith(("must_", "pref_")) for key in form):
+        # Backward-compatible handling for already-open review pages and
+        # explicit tamper regressions. New protected review pages submit no
+        # criterion authority at all.
+        def _build(canonical_title: str) -> tuple[JobCreateRequest, list[str]]:
+            must_have_rows = [_job_form_row(form, "must", i) for i in range(CRITERION_ROW_COUNT)]
+            preferred_rows = [_job_form_row(form, "pref", i) for i in range(CRITERION_ROW_COUNT)]
             job_request = build_job_create_request(
                 title=canonical_title,
                 must_have_rows=must_have_rows,
                 preferred_rows=preferred_rows,
             )
-            submitted_span_ids = [
+            span_ids = [
                 str(form.get(f"{prefix}_span_id_{index}", ""))
                 for prefix, rows in (("must", must_have_rows), ("pref", preferred_rows))
                 for index, row in enumerate(rows)
                 if row.requirement.strip()
             ]
-        else:
-            job_request = JobCreateRequest(
-                title=canonical_title,
-                criteria=[*pending.must_have, *pending.preferred],
-            )
-            # Primary (first) supporting span per criterion (issue #84).
-            span_by_criterion: dict[str, str] = {}
-            for item in pending.requirements:
-                if item.criterion_id is not None and item.state.value == "SCORABLE":
-                    span_by_criterion.setdefault(item.criterion_id, item.span_id)
-            submitted_span_ids = []
-            for criterion in job_request.criteria:
-                span_id = span_by_criterion.get(criterion.id)
-                if span_id is None:
-                    raise UIServiceInputError(
-                        "Qaralama meyarlarının təsdiqi etibarsızdır; elanı yenidən analiz edin."
-                    )
-                submitted_span_ids.append(span_id)
-        authorize_agent_draft_confirmation(
-            draft=pending,
-            request=job_request,
-            submitted_span_ids=submitted_span_ids,
-        )
-        # issue #84: durable semantic provenance, built fail-closed from the
-        # locked server draft (never browser data) BEFORE anything is created.
-        try:
-            semantic_provenance = build_agent_semantic_provenance(
-                pending, job_request.criteria
-            )
-        except SemanticProvenanceError as exc:
-            raise UIServiceInputError(
-                "Qaralama meyarlarının mənbə izi təsdiqlənmədi; elanı yenidən analiz edin."
-            ) from exc
+            return job_request, span_ids
 
-        duplicate_signature = compute_job_duplicate_signature(
-            job_request.title, job_request.criteria
-        )
-        if (
-            await find_active_duplicate_job(
-                db, tenant_id=ctx.tenant_id, duplicate_signature=duplicate_signature
-            )
-            is not None
-        ):
-            await db.rollback()
-            return _render_agent_confirmation_error(
-                request,
-                ctx,
-                message=JOB_DUPLICATE_MESSAGE,
-                status_code=status.HTTP_409_CONFLICT,
-            )
+        proposal = DraftProposal(title=str(form.get("title", "")), build=_build)
 
-        job = await create_job(
-            db,
-            tenant_id=ctx.tenant_id,
-            title=job_request.title,
-            duplicate_signature=duplicate_signature,
-        )
-        version = await create_criteria_version(
-            db,
-            tenant_id=ctx.tenant_id,
-            job_id=job.id,
-            criteria=[criterion.model_dump(mode="json") for criterion in job_request.criteria],
-            created_by_api_key_id=None,
-            unsupported_requirements=[item.requirement for item in pending.unsupported],
-            needs_review_requirements=[item.requirement for item in pending.needs_review],
-            result_limit=pending.result_limit,
-            eligible_only=True,
-            agent_semantic_provenance=semantic_provenance.model_dump(mode="json"),
-        )
-        await record_event(
-            db,
-            tenant_id=ctx.tenant_id,
-            event_type="job.created",
-            metadata={"job_id": str(job.id), "criteria_version": version.version_number},
-            actor_type=ACTOR_HUMAN_USER,
-            actor_id=ctx.user_id,
-        )
-        confirmation = ConfirmedAgentJobDraft(
-            draft_id=draft_id,
-            job_id=job.id,
-            criteria_version_id=version.id,
-            result_limit=pending.result_limit,
-            unsupported_requirements=[item.requirement for item in pending.unsupported],
-            needs_review_requirements=[item.requirement for item in pending.needs_review],
-        )
-        await create_draft_confirmation(
-            db,
-            tenant_id=ctx.tenant_id,
-            browser_session_id=ctx.session_id,
-            draft_id=draft_id,
-            job_id=job.id,
-            criteria_version_id=version.id,
-        )
-        await mark_pending_job_draft_confirmed(db, authority, confirmation=confirmation)
-        # Issue #88 T10: complete the lane-B task; lane A is never touched.
-        await complete_confirmed_draft_task(
-            db, session_context=authority.session_context, draft_id=draft_id
-        )
-        await db.commit()
-    except UIServiceInputError as exc:
-        await db.rollback()
+    try:
+        confirmed = await confirm_job_draft(db, ctx, draft_id=draft_id, proposal=proposal)
+    except DraftRejected as exc:
         return _render_agent_confirmation_error(
-            request,
-            ctx,
-            message=str(exc),
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            request, ctx, message=exc.message, status_code=exc.status_code
         )
-    except IntegrityError:
-        await db.rollback()
-        return _render_agent_confirmation_error(
-            request,
-            ctx,
-            message=JOB_DUPLICATE_MESSAGE,
-            status_code=status.HTTP_409_CONFLICT,
-        )
-    except (ValueError, SQLAlchemyError):
-        await db.rollback()
-        return _render_agent_confirmation_error(
-            request,
-            ctx,
-            message=(
-                "Qaralama təhlükəsiz şəkildə təsdiqlənə bilmədi. "
-                "Elanı yenidən analiz edin."
-            ),
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        )
-
     return await _render_job_ranking(
         request,
         ctx,
         db,
-        job_criteria_version_id=confirmation.criteria_version_id,
-        unsupported_requirements=confirmation.unsupported_requirements,
-        needs_review_requirements=confirmation.needs_review_requirements,
+        job_criteria_version_id=confirmed.criteria_version_id,
+        unsupported_requirements=confirmed.unsupported_requirements,
+        needs_review_requirements=confirmed.needs_review_requirements,
         confirmation_succeeded=True,
         evaluation_as_of_date=evaluation_as_of_date,
     )
@@ -2214,16 +1605,17 @@ async def rank_job(
 def install_ui(app: FastAPI) -> None:
     app.mount("/ui/static", StaticFiles(directory=str(_static_dir)), name="ui-static")
     app.include_router(router)
+    app.include_router(human_router)
+
+    app.add_exception_handler(ApplicationError, application_error_handler)  # type: ignore[arg-type]
 
     @app.exception_handler(TenantInactiveError)
     async def _tenant_access_error(request: Request, exc: TenantInactiveError) -> Response:
-        if not request.url.path.startswith("/ui"):
-            from fastapi.responses import JSONResponse
-
-            return JSONResponse(
-                {"detail": "Invalid or missing API key."}, status_code=401,
-                headers={"WWW-Authenticate": "Bearer"},
-            )
+        if is_human_json_path(request.url.path):
+            return unauthenticated_response()
+        if is_machine_api_path(request.url.path):
+            # Machine /api/v1: enveloped 401 that keeps WWW-Authenticate: Bearer.
+            return machine_unauthenticated_response()
         if request.url.path.startswith("/ui/login"):
             response = _render(
                 request, "login.html", _context(error=_GENERIC_LOGIN_ERROR),
@@ -2252,6 +1644,8 @@ def install_ui(app: FastAPI) -> None:
 
     @app.exception_handler(RequestValidationError)
     async def _validation_error(request: Request, exc: RequestValidationError) -> Response:
+        if is_human_json_path(request.url.path):
+            return validation_error_response()
         if request.url.path == "/ui" or request.url.path.startswith("/ui/"):
             resolved_ctx: UIContext | None = None
             provider = app.dependency_overrides.get(get_db, get_db)
@@ -2272,11 +1666,20 @@ def install_ui(app: FastAPI) -> None:
                 ),
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             )
+        if is_machine_api_path(request.url.path):
+            # Machine /api/v1: enveloped 422 preserving the historical detail.
+            return machine_validation_error_response()
         # Pydantic's default errors include raw input and exception context.
         return JSONResponse({"detail": "Invalid request."}, status_code=422)
 
     @app.exception_handler(StarletteHTTPException)
     async def _http_error(request: Request, exc: StarletteHTTPException) -> Response:
+        if is_human_json_path(request.url.path):
+            return http_error_response(exc)
+        if is_machine_api_path(request.url.path):
+            # Machine /api/v1: enveloped response preserving the historical
+            # detail (and WWW-Authenticate: Bearer on 401 challenges).
+            return machine_http_error_response(exc)
         if request.url.path == "/ui" or request.url.path.startswith("/ui/"):
             return _render(
                 request,
@@ -2292,6 +1695,11 @@ def install_ui(app: FastAPI) -> None:
     @app.exception_handler(Exception)
     async def _unexpected_error(request: Request, exc: Exception) -> Response:
         log_failure(logger, component="http", code="UNEXPECTED_ERROR", exc=exc)
+        if is_human_json_path(request.url.path):
+            return internal_error_response()
+        if is_machine_api_path(request.url.path):
+            # Machine /api/v1: enveloped 500 with no stack trace or exception text.
+            return machine_internal_error_response()
         if request.url.path == "/ui" or request.url.path.startswith("/ui/"):
             return _render(
                 request,

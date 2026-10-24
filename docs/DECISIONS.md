@@ -9657,3 +9657,172 @@ premature deployment/model/DoD claims. Full normalized issue bodies and evidence
 **Reversibility:** issue bodies and assignments are reversible metadata; future
 scope/sequence changes require a new reviewed owner decision. No product behavior,
 issue closure, milestone closure, next-phase implementation or PR merge is authorized.
+
+## D-116 — Issue #45: shared application boundary, human HTTP/JSON authentication and API contracts
+
+**Date:** 2026-10-16.
+**Status:** IMPLEMENTATION SECURITY DECISION for #45, recorded with the implementation.
+It has NOT been independently reviewed. The #45 PR explicitly requests independent
+review of §2 (human JSON authentication) before acceptance; nothing here claims review.
+
+### 1. Shared application boundary
+
+`backend/src/meyar/application/` holds client-neutral use cases extracted from the Jinja
+router bodies **without changing policy**: conversation turn submission/replay
+(#80/#85/#87/#88), JD draft review resolution and accountable confirmation, candidate
+library/detail/original-CV/retry, job list/archive/provenance and score/rank/evaluation
+reads. Adapters (Jinja UI, machine REST, human JSON) authenticate, validate transport
+shape and present; they do not decide. Domain policy deliberately stays where it was
+(`meyar.agent.*` JD/semantic policy, `meyar.evaluation`, `meyar.scoring`,
+`meyar.search`, `meyar.services.*` repositories). Candidate/job/evaluation routes are one
+route factory (`meyar.api.contracts`) mounted under both surfaces, so they cannot drift.
+Client-neutral read models moved to `meyar.schemas.read_models`; `meyar.ui.view_models`
+only re-exports them. The `ui.service` read-model *builders* stay in place (used by both
+adapters) — a documented, deliberately deferred relocation.
+
+Trusted principals (`application/principal.py`): `MachinePrincipal` (active API key on an
+active tenant; alias of `TenantContext`) and `HumanPrincipal` (live User +
+TenantMembership + BrowserSession on an active tenant; `UIContext` extends it). No
+operation accepts a client/model-supplied tenant, user or session id as authority; ids in
+bodies are *references* that must resolve inside the principal's own scope. Every
+request body model forbids extra fields.
+
+### 2. Human JSON authentication design (for independent review)
+
+- **Mechanism:** the SAME BrowserSession cookie the interactive `/ui/login` issues
+  (HttpOnly, SameSite=Lax, `Path=/ui`, Secure per `ui_cookie_secure`). No JSON login,
+  password or token endpoint is added: tenant selection, pending-login tokens, the
+  timing-equalised unknown-user path and session-fixation prevention stay in exactly one
+  place. A non-browser client therefore needs a cookie jar and an interactive login.
+- **Mount point:** `/ui/api/v1/*`. Because the cookie is `Path=/ui`, it is never sent to
+  the machine `/api/v1` surface, and API keys are never read on `/ui/api/v1`. The two
+  credential types cannot be confused: a Bearer key on the human surface is 401; a cookie
+  on the machine surface is 401.
+- **Authority per request:** `resolve_ui_context` (unchanged) re-derives User →
+  TenantMembership → Tenant → BrowserSession live, in the existing lock order, every
+  request. A disabled user, inactive membership, inactive tenant, expired or revoked
+  session takes effect immediately.
+- **CSRF:** every state-changing human request (POST/PUT/PATCH/DELETE) must carry
+  `X-CSRF-Token`, the per-session HMAC the HTML forms already embed
+  (`derive_csrf_token`), obtained from `GET /ui/api/v1/session`. Compared in constant
+  time, checked AFTER authentication and scope (so CSRF failure never reveals resources
+  to an unauthenticated caller). A custom header cannot be set cross-origin without a
+  CORS preflight and no CORS is enabled; SameSite=Lax is the second layer. GET is
+  side-effect-free except for audit events and never needs the token.
+- **Failure semantics (JSON, never redirect/HTML):** missing/invalid/expired/revoked
+  session, disabled user, inactive membership or tenant → 401 `AUTHENTICATION_REQUIRED`
+  (the cookie is cleared when it was presented and is dead). Missing scope → 403
+  `AUTHORIZATION_DENIED`. Missing/wrong CSRF → 403 `CSRF_REJECTED`. A resource outside
+  the caller's tenant/owner/BrowserSession scope → 404 `NOT_FOUND`, byte-identical to a
+  nonexistent id (no existence oracle). Validation → 422 without echoing input.
+- **Ownership:** conversations remain owned by (tenant, user, membership); live
+  ResultSet/draft/clarification authority remains BrowserSession-bound. A second login is
+  a different BrowserSession and cannot act on another session's pending draft.
+- **Machine vs human authority:** an API key can never own a conversation or confirm a
+  JD draft; those routes exist only on the human surface. Job creation by an API key
+  remains a machine write (see §6).
+- **OpenAPI:** schemes `ApiKeyBearer` (http bearer), `HumanSessionCookie` (apiKey/cookie
+  `meyar_ui_session`) and `HumanCsrfToken` (apiKey/header `X-CSRF-Token`). Human
+  operations declare cookie AND (mutations) CSRF in ONE requirement object (AND), merged
+  by `meyar.api.openapi` because FastAPI would otherwise emit alternatives (OR).
+  `openapi_url`/`/docs` stay disabled in production, unchanged.
+- **Accepted limitations:** no JSON login; no per-request origin check beyond the
+  custom-header + SameSite model; rate limiting is not implemented (AUD-RATE, unchanged).
+
+### 3. Conversation and JD contracts
+
+Typed contracts: `GET /session`, `GET|POST /conversations`, `GET /conversations/{id}`,
+`POST /conversations/{id}/submissions` (single-use submission identity — a POST so GET
+stays read-only), `POST /conversations/{id}/turns`, `POST /drafts/{id}/resolve|confirm`.
+Reservation/two-phase/idempotent-replay behavior is the extracted code verbatim. A turn
+that did not run is an error envelope (`CONFLICT` turn-in-progress/stale/clarification
+inactive; `RETRYABLE_BUSY`/`SERVICE_UNAVAILABLE`, `retryable=true`); a planner
+non-executable outcome is a **200 answer** (`results[].search.outcome`), and internal
+planner reason codes are not part of the human contract. Confirm takes the criteria only
+from the locked live server draft; an optional `reviewed` body is a *proposal* checked by
+`authorize_agent_draft_confirmation` against the server rows (exact equality, any
+deviation → 422). Confirmation never ranks inline.
+
+### 4. Provenance
+
+- **Correlation chain:** draft id (in the immutable semantic provenance) →
+  `AgentDraftConfirmation` (draft→job→criteria version, session-bound, #46-retained) →
+  audit event `agent.draft.confirmed` (ids + version number + accountable
+  `HUMAN_USER` actor; no JD/model text) → Job → CriteriaVersion. Readable via
+  `GET /jobs/{id}/criteria/{n}/provenance` (`authoring_channel`: AGENT_CONFIRMED_DRAFT /
+  MACHINE_API / HUMAN_OR_LEGACY — manual UI and pre-provenance versions are
+  indistinguishable and are not guessed).
+- **Non-scorable requirements:** `AgentSemanticProvenance.non_scorable_requirements`
+  (additive, inside the existing JSON column — **no schema change, no migration**)
+  records, per UNSUPPORTED / NEEDS_HUMAN_REVIEW / PROHIBITED source occurrence, span id,
+  offsets, closed `reason_code`, the exact server-re-derived source slice (never for
+  PROHIBITED), and an `EXCLUDED_BY_REVIEWER` decision when a human excluded it.
+  `scoring_authority` is structurally `False`. `None` = "not recorded" (every version
+  confirmed before #45); it is never reconstructed, and API/manual versions never gain
+  provenance. Built fail-closed from the re-analysed original JD at confirmation.
+
+### 5. Original CV
+
+One audited operation (`application.candidates.retrieve_original_cv`) serves the UI and
+both JSON surfaces: tenant-scoped row lookup, server-side storage resolution, bytes read,
+THEN audit event `candidate.original_cv.accessed` (candidate id, document id, channel
+`UI`/`API`/`UI_JSON`, actor) committed, THEN bytes returned. A failed read or failed
+audit serves nothing (503 `ORIGINAL_UNAVAILABLE`); a denied/foreign/missing request
+writes no success event and returns an identical 404. Download name is the synthetic
+`cv-<hex>.pdf|docx`, always `attachment`, `no-store`, `nosniff`; no path, key or uploaded
+filename appears in headers, bodies or audit metadata.
+
+### 6. Compatibility contracts (unchanged, now documented)
+
+- Human/UI Job creation (manual form and agent confirmation) rejects an identical ACTIVE
+  job (duplicate signature, 409). Machine `POST /api/v1/jobs` has no signature and
+  permits duplicates. #45 changes neither; unifying them needs a separate reviewed decision.
+- Batch ranking uses each candidate's CURRENT effective profile only. Single-candidate
+  scoring may name a historical `candidate_profile_version_id`; it must belong to the
+  named candidate inside the caller's tenant (otherwise the same 404 as an unknown
+  profile). No scoring policy, weight or LLM involvement changed; identity is never an
+  input.
+- Criteria versions stay immutable (no update/delete route); archiving is soft and
+  idempotent (a second archive preserves `archived_at` and writes no event); ranking an
+  archived job stays 409 `JOB_ARCHIVED`.
+
+### 7. Business date
+
+`application.business_date.effective_business_date(supplied, timezone)` is called once per
+request at the adapter/application boundary: omitted → the configured business "today";
+supplied → used unchanged. The resulting date is passed explicitly and returned
+(`evaluation_as_of_date`, `evaluation_date_defaulted`) and persisted on evaluations.
+`meyar.evaluation`, `meyar.scoring` and structured search never read the clock (enforced
+by a source test). **Intentional contract change:** `evaluation_as_of_date` (score, rank,
+NL search) and search `as_of_date` are now optional; previously a missing date was a 422.
+The UI keeps resolving its own date in the router and passing it explicitly.
+
+### 8. Errors
+
+`ErrorEnvelope {detail, error{code, reason, message, retryable}}` with a closed
+`ErrorCode` enum. Every error the application layer raises uses it on both surfaces, and
+the human surface also maps its framework-level failures (auth, validation, unexpected)
+into it.
+
+The machine surface returns the same stable envelope for every failure too. Where a
+historical machine endpoint already had a top-level `detail` string, that string is
+preserved (as `legacy_detail`) so existing FastAPI-style clients keep working, and the
+stable `error { code, reason, message, retryable }` object is added. The human surface
+never serializes `legacy_detail` as its top-level `detail`: there `detail == error.message`.
+Auth failures on the machine surface keep `WWW-Authenticate: Bearer`.
+
+Compatibility rule: the historical top-level `detail` may remain where safe, but every
+`/api/v1` error now also carries the stable envelope contract. No stack trace, SQL,
+path, storage key, raw model output or candidate/JD content appears in any error body.
+
+### 9. Bounds
+
+Library/job lists: `page_size` ≤ 50; conversation list ≤ 50; conversation history ≤ 100
+persisted turns; batch ranking ≤ `result_limit` ≤ 100; messages ≤ 4000 characters (8192
+transport). Retry is limited to the two stages MEYAR can actually re-run (profile
+extraction for a named document, embedding for the current profile); parsing needs a new
+upload and folder reconciliation stays an operator command. No generic job framework.
+
+**Reversibility:** additive routes/fields; the extraction is behavior-preserving (the
+existing UI/agent/draft suites pass unchanged). Removing the human surface means removing
+`api/human` and its router include.

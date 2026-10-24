@@ -6,6 +6,7 @@ from fastapi import FastAPI
 
 from meyar.api.body_limit import DocumentUploadBodyLimitMiddleware
 from meyar.api.docs import mount_docs_assets
+from meyar.api.openapi import install_openapi_security
 from meyar.api.response_policy import APIResponsePolicyMiddleware
 from meyar.api.v1.router import api_router
 from meyar.config import Settings, get_settings
@@ -56,7 +57,29 @@ OPENAPI_TAGS = [
     },
     {
         "name": "evaluations",
-        "description": "Deterministic single-candidate JD scoring and batch ranking.",
+        "description": (
+            "Deterministic single-candidate JD scoring, batch ranking and persisted "
+            "evaluations."
+        ),
+    },
+    {
+        "name": "human-conversations",
+        "description": (
+            "Accountable-human JSON: session, conversations, turns and JD draft review / "
+            "confirmation. Session cookie + X-CSRF-Token; API keys are never accepted."
+        ),
+    },
+    {
+        "name": "human-candidates",
+        "description": "Candidate library, detail, original CV and retry (human session).",
+    },
+    {
+        "name": "human-jobs",
+        "description": "Job lifecycle and criteria provenance (human session).",
+    },
+    {
+        "name": "human-evaluations",
+        "description": "Scoring, ranking and evaluations (human session).",
     },
 ]
 
@@ -68,7 +91,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         title="MEYAR",
         description=(
             "Internal AI Candidate Intelligence & CV Search Platform — internal HR REST "
-            "API for an approved internal bank-controlled system."
+            "API for an approved internal bank-controlled system.\n\n"
+            "Two authentication models, never mixed: machine clients use an API key "
+            "(`ApiKeyBearer`, `/api/v1`); accountable humans use the interactive-login "
+            "BrowserSession cookie (`HumanSessionCookie`) plus an `X-CSRF-Token` header on "
+            "every state-changing request (`HumanCsrfToken`, `/ui/api/v1`). Only the human "
+            "surface can own conversations or confirm a job draft. Errors use the "
+            "`ErrorEnvelope` contract on all issue-#45 routes."
         ),
         version="1.0.0",
         openapi_tags=OPENAPI_TAGS,
@@ -84,6 +113,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Response policies do not consume the request body.
     application.add_middleware(DocumentUploadBodyLimitMiddleware)
     install_ui(application)
+    install_openapi_security(application)
     # Covers early body-limit refusals as well as normal and safe-error responses.
     application.add_middleware(APIResponsePolicyMiddleware)
     return application

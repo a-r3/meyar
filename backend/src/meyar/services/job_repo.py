@@ -60,3 +60,14 @@ async def archive_job(db: AsyncSession, *, tenant_id: uuid.UUID, job_id: uuid.UU
     job.archived_at = datetime.now(UTC)
     await db.flush()
     return job
+
+
+async def count_jobs_by_status(db: AsyncSession, *, tenant_id: uuid.UUID, status: str) -> int:
+    from sqlalchemy import func
+
+    count = await db.scalar(
+        select(func.count())
+        .select_from(Job)
+        .where(Job.tenant_id == tenant_id, Job.status == status)
+    )
+    return int(count or 0)

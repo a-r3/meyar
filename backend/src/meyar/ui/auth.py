@@ -1,6 +1,5 @@
 import hashlib
 import hmac
-import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -8,6 +7,7 @@ from fastapi import Depends, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meyar.application.principal import HumanPrincipal
 from meyar.core.roles import permissions_for_role
 from meyar.db import get_db
 from meyar.models.browser_session import BrowserSession
@@ -27,19 +27,13 @@ class UIAccessError(Exception):
 
 
 @dataclass(frozen=True)
-class UIContext:
+class UIContext(HumanPrincipal):
     """The accountable human principal for one authenticated UI request.
     Every field below is re-derived live from the User + Tenant + TenantMembership
     rows on every request (see get_ui_context) — a disabled user or a
     deactivated/revoked membership takes effect immediately, without
     waiting for the session to expire or for re-login."""
 
-    session_id: uuid.UUID
-    user_id: uuid.UUID
-    tenant_id: uuid.UUID
-    membership_id: uuid.UUID
-    role: str
-    scopes: frozenset[str]
     csrf_token: str
 
 
